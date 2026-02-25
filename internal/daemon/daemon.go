@@ -100,6 +100,7 @@ func (d *Daemon) restoreSessions() {
 			ChatID:          sess.ChatID,
 			ClaudeSessionID: sess.ClaudeSessionID,
 			Status:          process.StatusActive,
+			HasHistory:      true,
 			CreatedAt:       sess.CreatedAt,
 			UpdatedAt:       sess.UpdatedAt,
 		}

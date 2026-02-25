@@ -32,13 +32,28 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string
 		slog.Warn("failed to log user message", "error", err)
 	}
 
+	// Check if this session has history (needs --continue) or is fresh
+	procSess, _ := b.proc.Get(chatID)
+	continueSession := procSess != nil && procSess.HasHistory
+
 	// Send to Claude
-	response, err := b.proc.Send(ctx, chatID, sess.ClaudeSessionID, userMsg)
+	result, err := b.proc.Send(ctx, chatID, userMsg, continueSession)
 	if err != nil {
 		return "", fmt.Errorf("claude: %w", err)
 	}
 
-	response = strings.TrimSpace(response)
+	// Track session ID and mark as having history
+	if procSess != nil {
+		if result.SessionID != "" {
+			procSess.ClaudeSessionID = result.SessionID
+			if err := b.store.SaveSession(chatID, result.SessionID); err != nil {
+				slog.Warn("failed to update session ID in store", "error", err)
+			}
+		}
+		procSess.HasHistory = true
+	}
+
+	response := strings.TrimSpace(result.Text)
 
 	// Log assistant response
 	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
@@ -146,6 +161,7 @@ func (b *Bridge) ensureSession(ctx context.Context, chatID int64) (*store.Sessio
 				ChatID:          chatID,
 				ClaudeSessionID: sess.ClaudeSessionID,
 				Status:          process.StatusActive,
+				HasHistory:      true, // restored from DB = already has history
 				CreatedAt:       sess.CreatedAt,
 				UpdatedAt:       sess.UpdatedAt,
 			}

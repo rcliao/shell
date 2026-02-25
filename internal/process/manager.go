@@ -3,12 +3,27 @@ package process
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
+
+// claudeResult is the JSON structure returned by claude --output-format json.
+type claudeResult struct {
+	Result    string `json:"result"`
+	SessionID string `json:"session_id"`
+}
+
+// SendResult contains the response text and the Claude session ID.
+type SendResult struct {
+	Text      string
+	SessionID string
+}
 
 type Manager struct {
 	sessions map[int64]*Session
@@ -53,14 +68,15 @@ func NewManager(cfg ManagerConfig) *Manager {
 }
 
 // Send sends a message to Claude via the CLI and returns the response.
-// It spawns a one-shot process with --session-id for continuity.
-func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, message string) (string, error) {
+// If continueSession is true, uses --continue to pick up the most recent session.
+// Otherwise starts a fresh session. Returns SendResult with text and session ID.
+func (m *Manager) Send(ctx context.Context, chatID int64, message string, continueSession bool) (SendResult, error) {
 	m.mu.RLock()
 	sess, exists := m.sessions[chatID]
 	m.mu.RUnlock()
 
 	if exists && sess.Status == StatusBusy {
-		return "", fmt.Errorf("session for chat %d is busy", chatID)
+		return SendResult{}, fmt.Errorf("session for chat %d is busy", chatID)
 	}
 
 	// Check concurrency limit
@@ -73,7 +89,7 @@ func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, messa
 	}
 	m.mu.RUnlock()
 	if busy >= m.maxSessions {
-		return "", fmt.Errorf("max concurrent sessions (%d) reached", m.maxSessions)
+		return SendResult{}, fmt.Errorf("max concurrent sessions (%d) reached", m.maxSessions)
 	}
 
 	// Mark session as busy
@@ -93,23 +109,36 @@ func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, messa
 		}
 	}()
 
+	result, err := m.runClaude(ctx, message, continueSession)
+	if err != nil && continueSession {
+		// If --continue failed, retry as fresh session
+		slog.Warn("continue failed, retrying as fresh session", "chat_id", chatID, "error", err)
+		result, err = m.runClaude(ctx, message, false)
+	}
+	return result, err
+}
+
+func (m *Manager) runClaude(ctx context.Context, message string, continueSession bool) (SendResult, error) {
 	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 
 	args := []string{
 		"-p", message,
-		"--continue",
-		"--session-id", claudeSessionID,
-		"--output-format", "text",
+		"--output-format", "json",
+	}
+	if continueSession {
+		args = append(args, "--continue")
 	}
 	if m.model != "" {
 		args = append(args, "--model", m.model)
 	}
 	args = append(args, m.extraArgs...)
 
-	slog.Debug("spawning claude", "chat_id", chatID, "session_id", claudeSessionID, "binary", m.binary)
+	slog.Debug("spawning claude", "continue", continueSession, "binary", m.binary)
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
+	// Clear CLAUDECODE env var so claude doesn't think it's nested inside another session
+	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
 	if m.workDir != "" {
 		cmd.Dir = m.workDir
 	}
@@ -120,16 +149,25 @@ func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, messa
 
 	if err := cmd.Run(); err != nil {
 		if procCtx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("claude process timed out after %s", m.timeout)
+			return SendResult{}, fmt.Errorf("claude process timed out after %s", m.timeout)
 		}
 		stderrStr := stderr.String()
 		if stderrStr != "" {
-			return "", fmt.Errorf("claude process failed: %w\nstderr: %s", err, stderrStr)
+			return SendResult{}, fmt.Errorf("claude process failed: %w\nstderr: %s", err, stderrStr)
 		}
-		return "", fmt.Errorf("claude process failed: %w", err)
+		return SendResult{}, fmt.Errorf("claude process failed: %w", err)
 	}
 
-	return stdout.String(), nil
+	var result claudeResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		// Fallback: treat as plain text
+		return SendResult{Text: stdout.String()}, nil
+	}
+
+	return SendResult{
+		Text:      result.Result,
+		SessionID: result.SessionID,
+	}, nil
 }
 
 // Register adds or updates a session in the manager.
@@ -190,4 +228,16 @@ func (m *Manager) ListSessions() []Session {
 		sessions = append(sessions, *s)
 	}
 	return sessions
+}
+
+// filterEnv returns env with the named variable removed.
+func filterEnv(env []string, name string) []string {
+	prefix := name + "="
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }

@@ -20,6 +20,7 @@ type Session struct {
 	ChatID           int64
 	ClaudeSessionID  string
 	Status           SessionStatus
+	HasHistory       bool // true after first successful exchange
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
