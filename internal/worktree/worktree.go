@@ -9,8 +9,74 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// ResolveRepoDir determines which git repository to use for worktree creation.
+// If workDir itself is a git repo, it is returned directly. Otherwise, subdirectories
+// (up to 3 levels deep) are scanned for git repos. When multiple repos are found,
+// the intent text is matched against directory names to pick the right one.
+func ResolveRepoDir(workDir, intent string) (string, error) {
+	if isGitRepo(workDir) {
+		return workDir, nil
+	}
+
+	repos := findGitRepos(workDir, 3)
+	if len(repos) == 0 {
+		return "", fmt.Errorf("no git repository found under %s", workDir)
+	}
+	if len(repos) == 1 {
+		return repos[0], nil
+	}
+
+	// Try to match intent against repo directory names
+	intentLower := strings.ToLower(intent)
+	for _, repo := range repos {
+		name := strings.ToLower(filepath.Base(repo))
+		if strings.Contains(intentLower, name) {
+			return repo, nil
+		}
+	}
+
+	// List repo names for the error message
+	names := make([]string, len(repos))
+	for i, r := range repos {
+		names[i] = filepath.Base(r)
+	}
+	return "", fmt.Errorf("multiple git repositories found (%s), could not determine target from intent", strings.Join(names, ", "))
+}
+
+func isGitRepo(dir string) bool {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
+
+// findGitRepos walks dir up to maxDepth levels looking for directories containing .git.
+func findGitRepos(dir string, maxDepth int) []string {
+	if maxDepth <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var repos []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		child := filepath.Join(dir, e.Name())
+		if isGitRepo(child) {
+			repos = append(repos, child)
+		} else {
+			repos = append(repos, findGitRepos(child, maxDepth-1)...)
+		}
+	}
+	return repos
+}
 
 // Create creates a new git worktree branched from HEAD.
 // baseDir is the directory under which worktrees are stored.

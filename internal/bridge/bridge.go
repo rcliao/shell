@@ -48,9 +48,10 @@ type planRun struct {
 	failedTaskIdx int
 
 	// Worktree isolation
-	worktreePath   string           // filesystem path to the worktree checkout
-	worktreeBranch string           // git branch name for the worktree
-	execPlanner    *planner.Planner // planner configured with worktree WorkDir (nil = use bridge default)
+	worktreeRepoDir string           // resolved git repo directory (source of the worktree)
+	worktreePath    string           // filesystem path to the worktree checkout
+	worktreeBranch  string           // git branch name for the worktree
+	execPlanner     *planner.Planner // planner configured with worktree WorkDir (nil = use bridge default)
 }
 
 type Bridge struct {
@@ -406,7 +407,7 @@ func (b *Bridge) Plan(ctx context.Context, chatID int64, input string) (string, 
 
 	// If the input already contains checklist tasks, execute directly (backwards compat).
 	if tasks := planner.ParsePlan(input); len(tasks) > 0 {
-		return b.startExecution(ctx, chatID, input)
+		return b.startExecution(ctx, chatID, input, input)
 	}
 
 	// Otherwise, draft a plan from the intent.
@@ -437,7 +438,7 @@ func (b *Bridge) handlePlanDraft(ctx context.Context, chatID int64, userMsg stri
 
 	switch normalized {
 	case "go":
-		return b.startExecution(ctx, chatID, run.draftPlan)
+		return b.startExecution(ctx, chatID, run.draftPlan, run.intent)
 	case "stop":
 		b.planMu.Lock()
 		delete(b.planRuns, chatID)
@@ -562,7 +563,9 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 }
 
 // startExecution transitions to executing and runs the plan in a background goroutine.
-func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText string) (string, error) {
+// intent is used to resolve which git repo to create a worktree from when the
+// workspace contains multiple repositories.
+func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, intent string) (string, error) {
 	tasks := planner.ParsePlan(planText)
 	if len(tasks) == 0 {
 		return "No tasks found in plan.", nil
@@ -573,22 +576,29 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText stri
 		cancel:    cancel,
 		state:     planStateExecuting,
 		draftPlan: planText,
+		intent:    intent,
 		startedAt: time.Now(),
 	}
 
 	// Create worktree for isolation if enabled
 	execPlan := b.plan
 	if b.useWorktree && b.repoDir != "" {
-		wtPath, branch, err := worktree.Create(b.repoDir, b.worktreeDir, chatID)
+		repoDir, err := worktree.ResolveRepoDir(b.repoDir, intent)
 		if err != nil {
-			cancel()
-			return "", fmt.Errorf("failed to create worktree: %w", err)
-		}
-		run.worktreePath = wtPath
-		run.worktreeBranch = branch
-		execPlan = b.plan.CloneWithWorkDir(wtPath)
+			slog.Warn("worktree: could not resolve repo, running without isolation", "error", err)
+		} else {
+			wtPath, branch, err := worktree.Create(repoDir, b.worktreeDir, chatID)
+			if err != nil {
+				cancel()
+				return "", fmt.Errorf("failed to create worktree: %w", err)
+			}
+			run.worktreeRepoDir = repoDir
+			run.worktreePath = wtPath
+			run.worktreeBranch = branch
+			execPlan = b.plan.CloneWithWorkDir(wtPath)
 
-		slog.Info("plan execution using worktree", "chat_id", chatID, "branch", branch, "path", wtPath)
+			slog.Info("plan execution using worktree", "chat_id", chatID, "repo", repoDir, "branch", branch, "path", wtPath)
+		}
 	}
 	run.execPlanner = execPlan
 
@@ -648,7 +658,7 @@ func (b *Bridge) cleanupWorktree(run *planRun) {
 
 	if run.state == planStateDone && run.done {
 		// All tasks completed — merge and clean up
-		if err := worktree.MergeAndCleanup(b.repoDir, run.worktreePath, run.worktreeBranch); err != nil {
+		if err := worktree.MergeAndCleanup(run.worktreeRepoDir, run.worktreePath, run.worktreeBranch); err != nil {
 			slog.Warn("worktree merge failed", "branch", run.worktreeBranch, "error", err)
 			if b.notify != nil {
 				// Find chatID from the run — notify via progress
@@ -748,7 +758,7 @@ func (b *Bridge) PlanStop(chatID int64) (string, error) {
 	// Clean up worktree if one was created
 	wtBranch := run.worktreeBranch
 	if run.worktreePath != "" {
-		worktree.Cleanup(b.repoDir, run.worktreePath, run.worktreeBranch)
+		worktree.Cleanup(run.worktreeRepoDir, run.worktreePath, run.worktreeBranch)
 	}
 
 	delete(b.planRuns, chatID)
