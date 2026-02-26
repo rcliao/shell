@@ -54,6 +54,7 @@ type PlannerConfig struct {
 	MaxRetries           int           `json:"max_retries"`           // retries per task on needs_revision
 	AutoApproveThreshold int           `json:"auto_approve_threshold"` // max diff lines to auto-approve (0 = always review)
 	Timeout              time.Duration `json:"timeout"`               // per-claude-invocation timeout (default 30m)
+	Worktree             bool          `json:"worktree"`              // isolate plan execution in a git worktree
 }
 
 func DefaultConfigDir() string {
@@ -91,7 +92,7 @@ func Default() Config {
 		},
 		Planner: PlannerConfig{
 			Enabled:              false,
-			TestCmd:              "go test ./...",
+			TestCmd:              "",
 			MaxRetries:           2,
 			AutoApproveThreshold: 80,
 		},

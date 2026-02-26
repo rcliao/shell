@@ -74,7 +74,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	// Create bridge
-	br := bridge.New(proc, st, mem, pl)
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir)
 
 	// Create auth
 	auth := telegram.NewAuth(cfg.Telegram.AllowedUsers)

@@ -60,12 +60,21 @@ func New(cfg Config) *Planner {
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 2
 	}
-	if cfg.TestCmd == "" {
-		cfg.TestCmd = "go test ./..."
-	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Minute
 	}
+	return &Planner{cfg: cfg}
+}
+
+// WorkDir returns the planner's configured working directory.
+func (p *Planner) WorkDir() string {
+	return p.cfg.WorkDir
+}
+
+// CloneWithWorkDir returns a new Planner with the same config but a different WorkDir.
+func (p *Planner) CloneWithWorkDir(workDir string) *Planner {
+	cfg := p.cfg
+	cfg.WorkDir = workDir
 	return &Planner{cfg: cfg}
 }
 
@@ -313,6 +322,11 @@ A reviewer found issues with your previous attempt. You MUST address this:
 %s`, completedContext)
 	}
 
+	testRule := "- Determine the appropriate test command for this project and run it before finishing to make sure nothing is broken"
+	if p.cfg.TestCmd != "" {
+		testRule = fmt.Sprintf("- Run '%s' before finishing to make sure nothing is broken", p.cfg.TestCmd)
+	}
+
 	prompt := fmt.Sprintf(`You are an autonomous coding agent. Complete this task fully in this session.
 
 ## Your Task
@@ -320,9 +334,9 @@ A reviewer found issues with your previous attempt. You MUST address this:
 %s%s%s
 ## Rules
 - Complete the ENTIRE task in this session
-- Run '%s' before finishing to make sure nothing is broken
+%s
 - Keep changes minimal and focused on the task
-- If the task is ambiguous or would require violating a convention, explain what you need clarified instead of guessing`, task, feedbackBlock, conventionsBlock, contextBlock, p.cfg.TestCmd)
+- If the task is ambiguous or would require violating a convention, explain what you need clarified instead of guessing`, task, feedbackBlock, conventionsBlock, contextBlock, testRule)
 
 	return p.runClaude(ctx, prompt)
 }
@@ -392,8 +406,18 @@ Rules for choosing:
 	return Verdict(match[1]), output
 }
 
-// runTests executes the test command and returns output + success.
+// runTests executes tests and returns output + success.
+// If TestCmd is configured, it runs that command directly.
+// Otherwise, it asks Claude to determine and run the appropriate tests.
 func (p *Planner) runTests(ctx context.Context) (string, bool) {
+	if p.cfg.TestCmd != "" {
+		return p.runStaticTests(ctx)
+	}
+	return p.runAgentTests(ctx)
+}
+
+// runStaticTests executes a fixed test command.
+func (p *Planner) runStaticTests(ctx context.Context) (string, bool) {
 	testCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -404,6 +428,31 @@ func (p *Planner) runTests(ctx context.Context) (string, bool) {
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err == nil
+}
+
+// runAgentTests asks Claude to determine and run the appropriate tests.
+func (p *Planner) runAgentTests(ctx context.Context) (string, bool) {
+	prompt := `You are a test runner. Examine this project and run the appropriate tests.
+
+## Instructions
+1. Look at the project structure to determine the language/framework (check for package.json, go.mod, Cargo.toml, pyproject.toml, Makefile, etc.)
+2. Run the standard test command for that project
+3. If there are multiple test suites or commands, run the most relevant ones
+
+## Output
+After running the tests, you MUST end your response with EXACTLY one of these lines:
+TEST_RESULT: pass
+TEST_RESULT: fail
+
+Include the full test output before this line.`
+
+	output, err := p.runClaude(ctx, prompt)
+	if err != nil {
+		return fmt.Sprintf("Agent test runner failed: %v", err), false
+	}
+
+	passed := strings.Contains(output, "TEST_RESULT: pass")
+	return output, passed
 }
 
 // getDiff returns the current git diff including untracked files.

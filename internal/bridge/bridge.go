@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rcliao/teeny-relay/internal/config"
 	"github.com/rcliao/teeny-relay/internal/memory"
 	"github.com/rcliao/teeny-relay/internal/planner"
 	"github.com/rcliao/teeny-relay/internal/process"
 	"github.com/rcliao/teeny-relay/internal/store"
+	"github.com/rcliao/teeny-relay/internal/worktree"
 )
 
 // NotifyFunc sends a message to a chat. Used for async plan progress reporting.
@@ -43,6 +46,11 @@ type planRun struct {
 
 	// Blocked state: index of the task that needs human guidance
 	failedTaskIdx int
+
+	// Worktree isolation
+	worktreePath   string           // filesystem path to the worktree checkout
+	worktreeBranch string           // git branch name for the worktree
+	execPlanner    *planner.Planner // planner configured with worktree WorkDir (nil = use bridge default)
 }
 
 type Bridge struct {
@@ -52,17 +60,29 @@ type Bridge struct {
 	plan    *planner.Planner // nil if not configured
 	notify  NotifyFunc       // optional: push progress to user
 
+	// Worktree isolation for plan execution
+	useWorktree  bool   // whether to create worktrees for plans
+	repoDir      string // main repository working directory
+	worktreeDir  string // base directory for worktree checkouts
+
 	planMu   sync.Mutex
 	planRuns map[int64]*planRun
 }
 
-func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner) *Bridge {
+func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string) *Bridge {
+	wtDir := ""
+	if useWorktree {
+		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
+	}
 	return &Bridge{
-		proc:     proc,
-		store:    store,
-		memory:   mem,
-		plan:     pl,
-		planRuns: make(map[int64]*planRun),
+		proc:        proc,
+		store:       store,
+		memory:      mem,
+		plan:        pl,
+		useWorktree: useWorktree,
+		repoDir:     repoDir,
+		worktreeDir: wtDir,
+		planRuns:    make(map[int64]*planRun),
 	}
 }
 
@@ -462,6 +482,10 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 	run.cancel = cancel
 	run.state = planStateExecuting
 	completedCtx := buildCompletedContext(tasks, run.results, failedIdx)
+	execPlan := run.execPlanner
+	if execPlan == nil {
+		execPlan = b.plan
+	}
 	b.planMu.Unlock()
 
 	progress := func(msg string) {
@@ -477,7 +501,7 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 		defer cancel()
 		progress(fmt.Sprintf("Retrying task %d/%d with guidance: %s", failedIdx+1, len(tasks), failedTask))
 
-		result := b.plan.RunTaskWithGuidance(planCtx, failedTask, userMsg, completedCtx, progress)
+		result := execPlan.RunTaskWithGuidance(planCtx, failedTask, userMsg, completedCtx, progress)
 
 		b.planMu.Lock()
 		// Replace the failed result with the new one.
@@ -496,14 +520,14 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 		}
 
 		// Git checkpoint after guided retry succeeds.
-		b.plan.GitCheckpoint(planCtx, failedTask)
+		execPlan.GitCheckpoint(planCtx, failedTask)
 
 		// Update completed context for remaining tasks.
 		updatedCtx := completedCtx + fmt.Sprintf("- %s: %s\n", failedTask, result.Summary)
 
 		// Task passed — continue with remaining tasks.
 		if failedIdx+1 < len(tasks) {
-			remaining := b.plan.RunPlanFrom(planCtx, planText, failedIdx+1, updatedCtx, progress)
+			remaining := execPlan.RunPlanFrom(planCtx, planText, failedIdx+1, updatedCtx, progress)
 
 			b.planMu.Lock()
 			run.results = append(run.results, remaining...)
@@ -525,6 +549,9 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 			run.done = true
 			b.planMu.Unlock()
 		}
+
+		// Handle worktree cleanup on completion
+		b.cleanupWorktree(run)
 
 		if b.notify != nil {
 			b.notify(chatID, b.formatPlanSummary(run))
@@ -549,6 +576,22 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText stri
 		startedAt: time.Now(),
 	}
 
+	// Create worktree for isolation if enabled
+	execPlan := b.plan
+	if b.useWorktree && b.repoDir != "" {
+		wtPath, branch, err := worktree.Create(b.repoDir, b.worktreeDir, chatID)
+		if err != nil {
+			cancel()
+			return "", fmt.Errorf("failed to create worktree: %w", err)
+		}
+		run.worktreePath = wtPath
+		run.worktreeBranch = branch
+		execPlan = b.plan.CloneWithWorkDir(wtPath)
+
+		slog.Info("plan execution using worktree", "chat_id", chatID, "branch", branch, "path", wtPath)
+	}
+	run.execPlanner = execPlan
+
 	b.planMu.Lock()
 	b.planRuns[chatID] = run
 	b.planMu.Unlock()
@@ -565,7 +608,7 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText stri
 
 	go func() {
 		defer cancel()
-		results := b.plan.RunPlan(planCtx, planText, progress)
+		results := run.execPlanner.RunPlan(planCtx, planText, progress)
 
 		b.planMu.Lock()
 		run.results = results
@@ -580,12 +623,42 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText stri
 		}
 		b.planMu.Unlock()
 
+		// Handle worktree cleanup
+		b.cleanupWorktree(run)
+
 		if b.notify != nil {
 			b.notify(chatID, b.formatPlanSummary(run))
 		}
 	}()
 
-	return fmt.Sprintf("Plan started with %d tasks. Progress will be reported as tasks complete.\nUse /planstatus to check, /planstop to cancel.", len(tasks)), nil
+	extra := ""
+	if run.worktreeBranch != "" {
+		extra = fmt.Sprintf("\nWorktree branch: %s", run.worktreeBranch)
+	}
+	return fmt.Sprintf("Plan started with %d tasks. Progress will be reported as tasks complete.\nUse /planstatus to check, /planstop to cancel.%s", len(tasks), extra), nil
+}
+
+// cleanupWorktree handles worktree lifecycle at the end of a plan.
+// On success (all done): merge branch into main repo and remove worktree.
+// On blocked/failure: remove worktree but keep the branch for inspection.
+func (b *Bridge) cleanupWorktree(run *planRun) {
+	if run.worktreePath == "" {
+		return
+	}
+
+	if run.state == planStateDone && run.done {
+		// All tasks completed — merge and clean up
+		if err := worktree.MergeAndCleanup(b.repoDir, run.worktreePath, run.worktreeBranch); err != nil {
+			slog.Warn("worktree merge failed", "branch", run.worktreeBranch, "error", err)
+			if b.notify != nil {
+				// Find chatID from the run — notify via progress
+				run.progress = append(run.progress, fmt.Sprintf("Worktree merge failed: %v\nBranch %s is still available for manual merge.", err, run.worktreeBranch))
+			}
+			return
+		}
+		slog.Info("worktree merged and cleaned up", "branch", run.worktreeBranch)
+	}
+	// For blocked/stopped state, worktree is cleaned up by PlanStop
 }
 
 func formatDraftResponse(draft string) string {
@@ -606,6 +679,7 @@ func (b *Bridge) PlanStatus(chatID int64) (string, error) {
 	elapsed := time.Since(run.startedAt).Truncate(time.Second)
 	progressCount := len(run.progress)
 	draft := run.draftPlan
+	wtBranch := run.worktreeBranch
 	b.planMu.Unlock()
 
 	switch state {
@@ -616,6 +690,9 @@ func (b *Bridge) PlanStatus(chatID int64) (string, error) {
 		var sb strings.Builder
 		sb.WriteString("Plan: RUNNING\n")
 		sb.WriteString(fmt.Sprintf("Elapsed: %s\n", elapsed))
+		if wtBranch != "" {
+			sb.WriteString(fmt.Sprintf("Worktree branch: %s\n", wtBranch))
+		}
 		sb.WriteString(fmt.Sprintf("Progress messages: %d\n\n", progressCount))
 
 		if len(results) > 0 {
@@ -667,18 +744,30 @@ func (b *Bridge) PlanStop(chatID int64) (string, error) {
 	if run.cancel != nil {
 		run.cancel()
 	}
+
+	// Clean up worktree if one was created
+	wtBranch := run.worktreeBranch
+	if run.worktreePath != "" {
+		worktree.Cleanup(b.repoDir, run.worktreePath, run.worktreeBranch)
+	}
+
 	delete(b.planRuns, chatID)
 	b.planMu.Unlock()
 
+	suffix := ""
+	if wtBranch != "" {
+		suffix = fmt.Sprintf("\nWorktree removed. Branch %s kept for inspection.", wtBranch)
+	}
+
 	switch state {
 	case planStateDrafting:
-		return "Draft cancelled.", nil
+		return "Draft cancelled." + suffix, nil
 	case planStateBlocked:
-		return "Blocked plan cancelled.", nil
+		return "Blocked plan cancelled." + suffix, nil
 	case planStateExecuting:
-		return "Plan execution cancelled.", nil
+		return "Plan execution cancelled." + suffix, nil
 	default:
-		return "Plan cleared.", nil
+		return "Plan cleared." + suffix, nil
 	}
 }
 
@@ -816,6 +905,7 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 		run.state = planStateDone
 		run.done = true
 		b.planMu.Unlock()
+		b.cleanupWorktree(run)
 		return "Skipped last task. Plan complete.", nil
 	}
 
@@ -823,6 +913,10 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 	run.cancel = cancel
 	run.state = planStateExecuting
 	completedCtx := buildCompletedContext(tasks, run.results, failedIdx)
+	execPlan := run.execPlanner
+	if execPlan == nil {
+		execPlan = b.plan
+	}
 	b.planMu.Unlock()
 
 	progress := func(msg string) {
@@ -838,7 +932,7 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 		defer cancel()
 		progress(fmt.Sprintf("Skipped task %d, continuing from task %d.", failedIdx+1, failedIdx+2))
 
-		remaining := b.plan.RunPlanFrom(planCtx, planText, failedIdx+1, completedCtx, progress)
+		remaining := execPlan.RunPlanFrom(planCtx, planText, failedIdx+1, completedCtx, progress)
 
 		b.planMu.Lock()
 		run.results = append(run.results, remaining...)
@@ -852,6 +946,9 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 			run.done = true
 		}
 		b.planMu.Unlock()
+
+		// Handle worktree cleanup on completion
+		b.cleanupWorktree(run)
 
 		if b.notify != nil {
 			b.notify(chatID, b.formatPlanSummary(run))
