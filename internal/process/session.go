@@ -1,10 +1,9 @@
 package process
 
 import (
-	"crypto/rand"
-	"fmt"
-	"io"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type SessionStatus string
@@ -37,7 +36,5 @@ func NewSession(chatID int64) *Session {
 }
 
 func generateID() string {
-	b := make([]byte, 16)
-	io.ReadFull(rand.Reader, b)
-	return fmt.Sprintf("%x", b)
+	return uuid.New().String()
 }

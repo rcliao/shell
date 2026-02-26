@@ -42,6 +42,14 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/new", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/status", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/remember", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/forget", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/memories", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/plan", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planstatus", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planstop", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planskip", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planretry", bot.MatchTypePrefix, b.commandHandler)
 
 	b.bot = tgBot
 	return b, nil
@@ -51,6 +59,24 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 func (b *Bot) Start(ctx context.Context) {
 	slog.Info("telegram bot starting long poll")
 	b.bot.Start(ctx)
+}
+
+// SendText sends a message to a chat, splitting at paragraph boundaries if needed.
+// Used for async notifications like plan progress.
+func (b *Bot) SendText(chatID int64, text string) {
+	ctx := context.Background()
+	chunks := splitMessage(text, maxMessageLength)
+	for _, chunk := range chunks {
+		_, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      formatForMarkdownV2(chunk),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		if err != nil {
+			slog.Error("failed to send notification", "error", err, "chat_id", chatID)
+			return
+		}
+	}
 }
 
 func (b *Bot) defaultHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
