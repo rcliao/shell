@@ -5,23 +5,85 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/rcliao/teeny-relay/internal/memory"
+	"github.com/rcliao/teeny-relay/internal/planner"
 	"github.com/rcliao/teeny-relay/internal/process"
 	"github.com/rcliao/teeny-relay/internal/store"
 )
 
-type Bridge struct {
-	proc  *process.Manager
-	store *store.Store
+// NotifyFunc sends a message to a chat. Used for async plan progress reporting.
+type NotifyFunc func(chatID int64, msg string)
+
+// planState represents where a plan is in its lifecycle.
+type planState string
+
+const (
+	planStateIdle      planState = "idle"
+	planStateDrafting  planState = "drafting"
+	planStateExecuting planState = "executing"
+	planStateBlocked   planState = "blocked"
+	planStateDone      planState = "done"
+)
+
+// planRun tracks the state of an active or completed plan execution.
+type planRun struct {
+	cancel    context.CancelFunc
+	results   []planner.TaskResult
+	progress  []string
+	done      bool
+	startedAt time.Time
+
+	// Drafting state
+	state     planState
+	draftPlan string
+	intent    string
+
+	// Blocked state: index of the task that needs human guidance
+	failedTaskIdx int
 }
 
-func New(proc *process.Manager, store *store.Store) *Bridge {
-	return &Bridge{proc: proc, store: store}
+type Bridge struct {
+	proc    *process.Manager
+	store   *store.Store
+	memory  *memory.Memory   // nil if disabled
+	plan    *planner.Planner // nil if not configured
+	notify  NotifyFunc       // optional: push progress to user
+
+	planMu   sync.Mutex
+	planRuns map[int64]*planRun
+}
+
+func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner) *Bridge {
+	return &Bridge{
+		proc:     proc,
+		store:    store,
+		memory:   mem,
+		plan:     pl,
+		planRuns: make(map[int64]*planRun),
+	}
+}
+
+// SetNotifier sets the function used to push async messages (plan progress) to users.
+func (b *Bridge) SetNotifier(fn NotifyFunc) {
+	b.notify = fn
 }
 
 // HandleMessage processes an incoming user message and returns Claude's response.
 func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string) (string, error) {
+	// Check for active plan draft — intercept the message.
+	b.planMu.Lock()
+	run, hasPlan := b.planRuns[chatID]
+	b.planMu.Unlock()
+	if hasPlan && run.state == planStateDrafting {
+		return b.handlePlanDraft(ctx, chatID, userMsg)
+	}
+	if hasPlan && run.state == planStateBlocked {
+		return b.handlePlanBlocked(ctx, chatID, userMsg)
+	}
+
 	sess, err := b.ensureSession(ctx, chatID)
 	if err != nil {
 		return "", fmt.Errorf("ensure session: %w", err)
@@ -32,12 +94,21 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string
 		slog.Warn("failed to log user message", "error", err)
 	}
 
-	// Check if this session has history (needs --continue) or is fresh
+	// Inject memory context if available
+	augmentedMsg := userMsg
+	if b.memory != nil {
+		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
+	}
+
+	// Determine claude session ID for --resume
 	procSess, _ := b.proc.Get(chatID)
-	continueSession := procSess != nil && procSess.HasHistory
+	claudeSessionID := ""
+	if procSess != nil && procSess.HasHistory {
+		claudeSessionID = procSess.ClaudeSessionID
+	}
 
 	// Send to Claude
-	result, err := b.proc.Send(ctx, chatID, userMsg, continueSession)
+	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg)
 	if err != nil {
 		return "", fmt.Errorf("claude: %w", err)
 	}
@@ -60,6 +131,84 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string
 		slog.Warn("failed to log assistant message", "error", err)
 	}
 
+	// Log exchange to memory
+	if b.memory != nil {
+		b.memory.LogExchange(ctx, chatID, userMsg, response)
+	}
+
+	// Update session timestamp
+	if err := b.store.UpdateSessionStatus(chatID, "active"); err != nil {
+		slog.Warn("failed to update session", "error", err)
+	}
+
+	return response, nil
+}
+
+// HandleMessageStreaming is like HandleMessage but calls onUpdate with partial text as Claude generates it.
+func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg string, onUpdate process.StreamFunc) (string, error) {
+	// Check for active plan draft — intercept the message (no streaming needed).
+	b.planMu.Lock()
+	run, hasPlan := b.planRuns[chatID]
+	b.planMu.Unlock()
+	if hasPlan && run.state == planStateDrafting {
+		return b.handlePlanDraft(ctx, chatID, userMsg)
+	}
+	if hasPlan && run.state == planStateBlocked {
+		return b.handlePlanBlocked(ctx, chatID, userMsg)
+	}
+
+	sess, err := b.ensureSession(ctx, chatID)
+	if err != nil {
+		return "", fmt.Errorf("ensure session: %w", err)
+	}
+
+	// Log user message
+	if err := b.store.LogMessage(sess.ID, "user", userMsg); err != nil {
+		slog.Warn("failed to log user message", "error", err)
+	}
+
+	// Inject memory context if available
+	augmentedMsg := userMsg
+	if b.memory != nil {
+		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
+	}
+
+	// Determine claude session ID for --resume
+	procSess, _ := b.proc.Get(chatID)
+	claudeSessionID := ""
+	if procSess != nil && procSess.HasHistory {
+		claudeSessionID = procSess.ClaudeSessionID
+	}
+
+	// Send to Claude with streaming
+	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, onUpdate)
+	if err != nil {
+		return "", fmt.Errorf("claude: %w", err)
+	}
+
+	// Track session ID and mark as having history
+	if procSess != nil {
+		if result.SessionID != "" {
+			procSess.ClaudeSessionID = result.SessionID
+			if err := b.store.SaveSession(chatID, result.SessionID); err != nil {
+				slog.Warn("failed to update session ID in store", "error", err)
+			}
+		}
+		procSess.HasHistory = true
+	}
+
+	response := strings.TrimSpace(result.Text)
+
+	// Log assistant response
+	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
+		slog.Warn("failed to log assistant message", "error", err)
+	}
+
+	// Log exchange to memory
+	if b.memory != nil {
+		b.memory.LogExchange(ctx, chatID, userMsg, response)
+	}
+
 	// Update session timestamp
 	if err := b.store.UpdateSessionStatus(chatID, "active"); err != nil {
 		slog.Warn("failed to update session", "error", err)
@@ -79,6 +228,22 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.Help(), nil
 	case "start":
 		return b.Start(ctx, chatID)
+	case "remember":
+		return b.Remember(ctx, chatID, args)
+	case "forget":
+		return b.Forget(ctx, chatID, args)
+	case "memories":
+		return b.ListMemories(ctx, chatID)
+	case "plan":
+		return b.Plan(ctx, chatID, args)
+	case "planstatus":
+		return b.PlanStatus(chatID)
+	case "planstop":
+		return b.PlanStop(chatID)
+	case "planskip":
+		return b.PlanSkip(chatID)
+	case "planretry":
+		return b.PlanRetry(ctx, chatID)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -90,7 +255,7 @@ func (b *Bridge) Start(ctx context.Context, chatID int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "Welcome to teeny-relay! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/help — Show help", nil
+	return "Welcome to teeny-relay! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/help — Show help", nil
 }
 
 // Reset kills the current session and creates a fresh one.
@@ -139,12 +304,578 @@ func (b *Bridge) Status(chatID int64) (string, error) {
 }
 
 func (b *Bridge) Help() string {
-	return "teeny-relay — Telegram ↔ Claude Code bridge\n\n" +
+	help := "teeny-relay — Telegram ↔ Claude Code bridge\n\n" +
 		"Send any message to chat with Claude Code.\n\n" +
 		"Commands:\n" +
 		"/new — Start a fresh conversation\n" +
 		"/status — Show current session info\n" +
-		"/help — Show this help message"
+		"/remember <text> — Save a memory for future conversations\n" +
+		"/forget <key> — Remove a stored memory\n" +
+		"/memories — List all stored memories\n"
+
+	if b.plan != nil {
+		help += "\nPlan execution:\n" +
+			"/plan <goal> — Draft and run an autonomous plan\n" +
+			"/planstatus — Check plan progress\n" +
+			"/planstop — Cancel running plan\n" +
+			"/planskip — Skip blocked task, continue with next\n" +
+			"/planretry — Retry blocked task automatically\n"
+	}
+
+	help += "\n/help — Show this help message"
+	return help
+}
+
+// Remember handles the /remember command.
+func (b *Bridge) Remember(ctx context.Context, chatID int64, content string) (string, error) {
+	if b.memory == nil {
+		return "Memory is not enabled.", nil
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "Usage: /remember <text to remember>", nil
+	}
+	if err := b.memory.Remember(ctx, chatID, content); err != nil {
+		return "", fmt.Errorf("remember: %w", err)
+	}
+	return fmt.Sprintf("Remembered: %s", content), nil
+}
+
+// Forget handles the /forget command.
+func (b *Bridge) Forget(ctx context.Context, chatID int64, key string) (string, error) {
+	if b.memory == nil {
+		return "Memory is not enabled.", nil
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "Usage: /forget <memory key>\nUse /memories to see keys.", nil
+	}
+	if err := b.memory.Forget(ctx, chatID, key); err != nil {
+		return "", fmt.Errorf("forget: %w", err)
+	}
+	return fmt.Sprintf("Forgot memory: %s", key), nil
+}
+
+// ListMemories handles the /memories command.
+func (b *Bridge) ListMemories(ctx context.Context, chatID int64) (string, error) {
+	if b.memory == nil {
+		return "Memory is not enabled.", nil
+	}
+	return b.memory.ListMemories(ctx, chatID)
+}
+
+// Plan starts plan drafting. If the input contains checklist tasks, it skips
+// drafting and executes directly (backwards compatible). Otherwise it asks Claude
+// to generate a plan from the intent, entering drafting state.
+func (b *Bridge) Plan(ctx context.Context, chatID int64, input string) (string, error) {
+	if b.plan == nil {
+		return "Planner is not configured. Set planner.enabled=true in config.", nil
+	}
+
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "Usage: /plan <what you want to do>\n\nDescribe your goal and I'll draft a plan.", nil
+	}
+
+	b.planMu.Lock()
+	if existing, ok := b.planRuns[chatID]; ok && !existing.done && existing.state != planStateDone {
+		b.planMu.Unlock()
+		return "A plan is already active. Use /planstop to cancel it first.", nil
+	}
+	b.planMu.Unlock()
+
+	// If the input already contains checklist tasks, execute directly (backwards compat).
+	if tasks := planner.ParsePlan(input); len(tasks) > 0 {
+		return b.startExecution(ctx, chatID, input)
+	}
+
+	// Otherwise, draft a plan from the intent.
+	draft, err := b.plan.DraftPlan(ctx, input, "", "")
+	if err != nil {
+		return "", fmt.Errorf("failed to generate plan: %w", err)
+	}
+
+	b.planMu.Lock()
+	b.planRuns[chatID] = &planRun{
+		state:     planStateDrafting,
+		draftPlan: draft,
+		intent:    input,
+		startedAt: time.Now(),
+	}
+	b.planMu.Unlock()
+
+	return formatDraftResponse(draft), nil
+}
+
+// handlePlanDraft processes user messages while in drafting state.
+func (b *Bridge) handlePlanDraft(ctx context.Context, chatID int64, userMsg string) (string, error) {
+	b.planMu.Lock()
+	run := b.planRuns[chatID]
+	b.planMu.Unlock()
+
+	normalized := strings.TrimSpace(strings.ToLower(userMsg))
+
+	switch normalized {
+	case "go":
+		return b.startExecution(ctx, chatID, run.draftPlan)
+	case "stop":
+		b.planMu.Lock()
+		delete(b.planRuns, chatID)
+		b.planMu.Unlock()
+		return "Plan cancelled.", nil
+	default:
+		// Treat as revision feedback.
+		revised, err := b.plan.DraftPlan(ctx, run.intent, run.draftPlan, userMsg)
+		if err != nil {
+			return "", fmt.Errorf("failed to revise plan: %w", err)
+		}
+		b.planMu.Lock()
+		run.draftPlan = revised
+		b.planMu.Unlock()
+		return formatDraftResponse(revised), nil
+	}
+}
+
+// handlePlanBlocked processes user messages while in blocked state.
+// "stop" cancels the plan; anything else is treated as guidance to retry the failed task.
+func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg string) (string, error) {
+	b.planMu.Lock()
+	run := b.planRuns[chatID]
+	failedIdx := run.failedTaskIdx
+	planText := run.draftPlan
+	tasks := planner.ParsePlan(planText)
+	b.planMu.Unlock()
+
+	normalized := strings.TrimSpace(strings.ToLower(userMsg))
+	if normalized == "stop" {
+		b.planMu.Lock()
+		delete(b.planRuns, chatID)
+		b.planMu.Unlock()
+		return "Plan cancelled.", nil
+	}
+
+	// Re-run the failed task with user guidance.
+	failedTask := tasks[failedIdx]
+	planCtx, cancel := context.WithCancel(context.Background())
+
+	b.planMu.Lock()
+	run.cancel = cancel
+	run.state = planStateExecuting
+	completedCtx := buildCompletedContext(tasks, run.results, failedIdx)
+	b.planMu.Unlock()
+
+	progress := func(msg string) {
+		b.planMu.Lock()
+		run.progress = append(run.progress, msg)
+		b.planMu.Unlock()
+		if b.notify != nil {
+			b.notify(chatID, msg)
+		}
+	}
+
+	go func() {
+		defer cancel()
+		progress(fmt.Sprintf("Retrying task %d/%d with guidance: %s", failedIdx+1, len(tasks), failedTask))
+
+		result := b.plan.RunTaskWithGuidance(planCtx, failedTask, userMsg, completedCtx, progress)
+
+		b.planMu.Lock()
+		// Replace the failed result with the new one.
+		run.results[failedIdx] = result
+		b.planMu.Unlock()
+
+		if result.Verdict != planner.VerdictDone {
+			// Still blocked on this task.
+			b.planMu.Lock()
+			run.state = planStateBlocked
+			b.planMu.Unlock()
+			if b.notify != nil {
+				b.notify(chatID, b.formatPlanSummary(run))
+			}
+			return
+		}
+
+		// Git checkpoint after guided retry succeeds.
+		b.plan.GitCheckpoint(planCtx, failedTask)
+
+		// Update completed context for remaining tasks.
+		updatedCtx := completedCtx + fmt.Sprintf("- %s: %s\n", failedTask, result.Summary)
+
+		// Task passed — continue with remaining tasks.
+		if failedIdx+1 < len(tasks) {
+			remaining := b.plan.RunPlanFrom(planCtx, planText, failedIdx+1, updatedCtx, progress)
+
+			b.planMu.Lock()
+			run.results = append(run.results, remaining...)
+
+			lastIdx := len(remaining) - 1
+			if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
+				// Another task blocked — calculate its absolute index.
+				run.state = planStateBlocked
+				run.failedTaskIdx = failedIdx + 1 + lastIdx
+				run.done = false
+			} else {
+				run.state = planStateDone
+				run.done = true
+			}
+			b.planMu.Unlock()
+		} else {
+			b.planMu.Lock()
+			run.state = planStateDone
+			run.done = true
+			b.planMu.Unlock()
+		}
+
+		if b.notify != nil {
+			b.notify(chatID, b.formatPlanSummary(run))
+		}
+	}()
+
+	return fmt.Sprintf("Retrying task %d with your guidance. Use /planstatus to check progress.", failedIdx+1), nil
+}
+
+// startExecution transitions to executing and runs the plan in a background goroutine.
+func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText string) (string, error) {
+	tasks := planner.ParsePlan(planText)
+	if len(tasks) == 0 {
+		return "No tasks found in plan.", nil
+	}
+
+	planCtx, cancel := context.WithCancel(context.Background())
+	run := &planRun{
+		cancel:    cancel,
+		state:     planStateExecuting,
+		draftPlan: planText,
+		startedAt: time.Now(),
+	}
+
+	b.planMu.Lock()
+	b.planRuns[chatID] = run
+	b.planMu.Unlock()
+
+	progress := func(msg string) {
+		b.planMu.Lock()
+		run.progress = append(run.progress, msg)
+		b.planMu.Unlock()
+
+		if b.notify != nil {
+			b.notify(chatID, msg)
+		}
+	}
+
+	go func() {
+		defer cancel()
+		results := b.plan.RunPlan(planCtx, planText, progress)
+
+		b.planMu.Lock()
+		run.results = results
+		lastIdx := len(results) - 1
+		if lastIdx >= 0 && results[lastIdx].Verdict == planner.VerdictNeedsHuman {
+			run.state = planStateBlocked
+			run.failedTaskIdx = lastIdx
+			run.done = false
+		} else {
+			run.state = planStateDone
+			run.done = true
+		}
+		b.planMu.Unlock()
+
+		if b.notify != nil {
+			b.notify(chatID, b.formatPlanSummary(run))
+		}
+	}()
+
+	return fmt.Sprintf("Plan started with %d tasks. Progress will be reported as tasks complete.\nUse /planstatus to check, /planstop to cancel.", len(tasks)), nil
+}
+
+func formatDraftResponse(draft string) string {
+	return fmt.Sprintf("Here's the proposed plan:\n\n%s\n\nReply 'go' to execute, send edits to revise, or 'stop' to cancel.", draft)
+}
+
+// PlanStatus returns the current state of a running or completed plan.
+func (b *Bridge) PlanStatus(chatID int64) (string, error) {
+	b.planMu.Lock()
+	run, ok := b.planRuns[chatID]
+	if !ok {
+		b.planMu.Unlock()
+		return "No plan has been run. Use /plan to start one.", nil
+	}
+
+	state := run.state
+	results := run.results
+	elapsed := time.Since(run.startedAt).Truncate(time.Second)
+	progressCount := len(run.progress)
+	draft := run.draftPlan
+	b.planMu.Unlock()
+
+	switch state {
+	case planStateDrafting:
+		return fmt.Sprintf("Plan: DRAFTING\n\n%s\n\nReply 'go' to execute, send edits to revise, or 'stop' to cancel.", draft), nil
+
+	case planStateExecuting:
+		var sb strings.Builder
+		sb.WriteString("Plan: RUNNING\n")
+		sb.WriteString(fmt.Sprintf("Elapsed: %s\n", elapsed))
+		sb.WriteString(fmt.Sprintf("Progress messages: %d\n\n", progressCount))
+
+		if len(results) > 0 {
+			sb.WriteString("Results:\n")
+			for i, r := range results {
+				icon := verdictIcon(r.Verdict)
+				sb.WriteString(fmt.Sprintf("%d. [%s] %s (%d attempts)\n", i+1, icon, r.Task, r.Attempts))
+			}
+		}
+		return sb.String(), nil
+
+	case planStateBlocked:
+		return b.formatBlockedSummary(run), nil
+
+	case planStateDone:
+		var sb strings.Builder
+		sb.WriteString("Plan: COMPLETED\n")
+		sb.WriteString(fmt.Sprintf("Elapsed: %s\n\n", elapsed))
+
+		if len(results) > 0 {
+			sb.WriteString("Results:\n")
+			for i, r := range results {
+				icon := verdictIcon(r.Verdict)
+				sb.WriteString(fmt.Sprintf("%d. [%s] %s (%d attempts)\n", i+1, icon, r.Task, r.Attempts))
+			}
+		}
+		return sb.String(), nil
+
+	default:
+		return "No plan has been run. Use /plan to start one.", nil
+	}
+}
+
+// PlanStop cancels a plan from either drafting or executing state.
+func (b *Bridge) PlanStop(chatID int64) (string, error) {
+	b.planMu.Lock()
+	run, ok := b.planRuns[chatID]
+	if !ok {
+		b.planMu.Unlock()
+		return "No plan is currently active.", nil
+	}
+
+	state := run.state
+	if state == planStateDone {
+		b.planMu.Unlock()
+		return "Plan already completed. Nothing to stop.", nil
+	}
+
+	if run.cancel != nil {
+		run.cancel()
+	}
+	delete(b.planRuns, chatID)
+	b.planMu.Unlock()
+
+	switch state {
+	case planStateDrafting:
+		return "Draft cancelled.", nil
+	case planStateBlocked:
+		return "Blocked plan cancelled.", nil
+	case planStateExecuting:
+		return "Plan execution cancelled.", nil
+	default:
+		return "Plan cleared.", nil
+	}
+}
+
+func verdictIcon(v planner.Verdict) string {
+	switch v {
+	case planner.VerdictDone:
+		return "ok"
+	case planner.VerdictNeedsHuman:
+		return "BLOCKED"
+	case planner.VerdictNeedsRevision:
+		return "retry"
+	default:
+		return "?"
+	}
+}
+
+// formatPlanSummary creates a human-readable summary of plan results.
+func (b *Bridge) formatPlanSummary(run *planRun) string {
+	results := run.results
+	if len(results) == 0 {
+		return "Plan finished with no results."
+	}
+
+	// Blocked state: show actionable diagnostic info.
+	if run.state == planStateBlocked {
+		return b.formatBlockedSummary(run)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("--- Plan Complete ---\n\n")
+
+	done := 0
+	for _, r := range results {
+		if r.Verdict == planner.VerdictDone {
+			done++
+		}
+	}
+	sb.WriteString(fmt.Sprintf("Tasks: %d/%d completed\n\n", done, len(results)))
+
+	for i, r := range results {
+		icon := verdictIcon(r.Verdict)
+		sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, icon, r.Task))
+		if r.Verdict == planner.VerdictNeedsHuman {
+			summary := r.Summary
+			if len(summary) > 500 {
+				summary = summary[:500] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("   Reason: %s\n", summary))
+		}
+	}
+
+	return sb.String()
+}
+
+// formatBlockedSummary creates an actionable summary when a plan is blocked.
+func (b *Bridge) formatBlockedSummary(run *planRun) string {
+	results := run.results
+	totalTasks := len(planner.ParsePlan(run.draftPlan))
+	blocked := results[run.failedTaskIdx]
+
+	var sb strings.Builder
+	sb.WriteString("--- Plan Blocked ---\n\n")
+
+	// Show completed tasks first
+	for i, r := range results {
+		icon := verdictIcon(r.Verdict)
+		sb.WriteString(fmt.Sprintf("Task %d/%d: [%s] %s\n", i+1, totalTasks, icon, r.Task))
+	}
+
+	sb.WriteString(fmt.Sprintf("\nAttempts: %d\n", blocked.Attempts))
+
+	if blocked.Diff != "" {
+		diff := blocked.Diff
+		if len(diff) > 1000 {
+			diff = diff[:1000] + "\n... (truncated)"
+		}
+		sb.WriteString(fmt.Sprintf("\nChanges on disk:\n%s\n", diff))
+	}
+
+	if blocked.TestOutput != "" {
+		testOut := blocked.TestOutput
+		if len(testOut) > 500 {
+			testOut = testOut[:500] + "\n... (truncated)"
+		}
+		sb.WriteString(fmt.Sprintf("\nTest output:\n%s\n", testOut))
+	}
+
+	if blocked.Summary != "" {
+		summary := blocked.Summary
+		if len(summary) > 500 {
+			summary = summary[:500] + "\n... (truncated)"
+		}
+		sb.WriteString(fmt.Sprintf("\nReviewer feedback:\n%s\n", summary))
+	}
+
+	sb.WriteString("\nReply with guidance to retry, or use:\n/planskip — skip this task\n/planretry — retry automatically\n/planstop — cancel the plan")
+	return sb.String()
+}
+
+// buildCompletedContext creates a summary string from completed task results.
+func buildCompletedContext(tasks []string, results []planner.TaskResult, upToIdx int) string {
+	var sb strings.Builder
+	for i := 0; i < upToIdx && i < len(results); i++ {
+		if results[i].Verdict == planner.VerdictDone {
+			task := ""
+			if i < len(tasks) {
+				task = tasks[i]
+			} else {
+				task = results[i].Task
+			}
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", task, results[i].Summary))
+		}
+	}
+	return sb.String()
+}
+
+// PlanSkip skips the currently blocked task and continues with the next one.
+func (b *Bridge) PlanSkip(chatID int64) (string, error) {
+	if b.plan == nil {
+		return "Planner is not configured.", nil
+	}
+
+	b.planMu.Lock()
+	run, ok := b.planRuns[chatID]
+	if !ok || run.state != planStateBlocked {
+		b.planMu.Unlock()
+		return "No plan is currently blocked. Nothing to skip.", nil
+	}
+
+	failedIdx := run.failedTaskIdx
+	planText := run.draftPlan
+	tasks := planner.ParsePlan(planText)
+
+	if failedIdx+1 >= len(tasks) {
+		run.state = planStateDone
+		run.done = true
+		b.planMu.Unlock()
+		return "Skipped last task. Plan complete.", nil
+	}
+
+	planCtx, cancel := context.WithCancel(context.Background())
+	run.cancel = cancel
+	run.state = planStateExecuting
+	completedCtx := buildCompletedContext(tasks, run.results, failedIdx)
+	b.planMu.Unlock()
+
+	progress := func(msg string) {
+		b.planMu.Lock()
+		run.progress = append(run.progress, msg)
+		b.planMu.Unlock()
+		if b.notify != nil {
+			b.notify(chatID, msg)
+		}
+	}
+
+	go func() {
+		defer cancel()
+		progress(fmt.Sprintf("Skipped task %d, continuing from task %d.", failedIdx+1, failedIdx+2))
+
+		remaining := b.plan.RunPlanFrom(planCtx, planText, failedIdx+1, completedCtx, progress)
+
+		b.planMu.Lock()
+		run.results = append(run.results, remaining...)
+		lastIdx := len(remaining) - 1
+		if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
+			run.state = planStateBlocked
+			run.failedTaskIdx = failedIdx + 1 + lastIdx
+			run.done = false
+		} else {
+			run.state = planStateDone
+			run.done = true
+		}
+		b.planMu.Unlock()
+
+		if b.notify != nil {
+			b.notify(chatID, b.formatPlanSummary(run))
+		}
+	}()
+
+	return fmt.Sprintf("Skipping task %d, continuing from task %d. Use /planstatus to check progress.", failedIdx+1, failedIdx+2), nil
+}
+
+// PlanRetry retries the blocked task with generic guidance.
+func (b *Bridge) PlanRetry(ctx context.Context, chatID int64) (string, error) {
+	if b.plan == nil {
+		return "Planner is not configured.", nil
+	}
+
+	b.planMu.Lock()
+	run, ok := b.planRuns[chatID]
+	if !ok || run.state != planStateBlocked {
+		b.planMu.Unlock()
+		return "No plan is currently blocked. Nothing to retry.", nil
+	}
+	b.planMu.Unlock()
+
+	return b.handlePlanBlocked(ctx, chatID, "Try again, addressing any issues from the previous attempt.")
 }
 
 // ensureSession returns the existing session for a chat or creates a new one.

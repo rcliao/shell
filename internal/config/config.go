@@ -13,6 +13,8 @@ type Config struct {
 	Claude   ClaudeConfig   `json:"claude"`
 	Store    StoreConfig    `json:"store"`
 	Daemon   DaemonConfig   `json:"daemon"`
+	Memory   MemoryConfig   `json:"memory"`
+	Planner  PlannerConfig  `json:"planner"`
 }
 
 type TelegramConfig struct {
@@ -37,6 +39,23 @@ type DaemonConfig struct {
 	PIDFile string `json:"pid_file"`
 }
 
+type MemoryConfig struct {
+	DBPath           string   `json:"db_path"`
+	Enabled          bool     `json:"enabled"`
+	Budget           int      `json:"budget"`            // token budget for context injection
+	GlobalNamespaces []string `json:"global_namespaces"` // namespace patterns for background context
+	GlobalBudget     int      `json:"global_budget"`     // token budget for global context (default 500)
+}
+
+type PlannerConfig struct {
+	Enabled              bool          `json:"enabled"`
+	TestCmd              string        `json:"test_cmd"`              // test command (e.g. "go test ./...")
+	Conventions          string        `json:"conventions"`           // inline conventions text for the reviewer
+	MaxRetries           int           `json:"max_retries"`           // retries per task on needs_revision
+	AutoApproveThreshold int           `json:"auto_approve_threshold"` // max diff lines to auto-approve (0 = always review)
+	Timeout              time.Duration `json:"timeout"`               // per-claude-invocation timeout (default 30m)
+}
+
 func DefaultConfigDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".teeny-relay")
@@ -52,7 +71,7 @@ func Default() Config {
 		Claude: ClaudeConfig{
 			Binary:      "claude",
 			Model:       "",
-			Timeout:     5 * time.Minute,
+			Timeout:     30 * time.Minute,
 			MaxSessions: 4,
 			WorkDir:     "",
 			ExtraArgs:   []string{},
@@ -62,6 +81,19 @@ func Default() Config {
 		},
 		Daemon: DaemonConfig{
 			PIDFile: filepath.Join(configDir, "relay.pid"),
+		},
+		Memory: MemoryConfig{
+			DBPath:           filepath.Join(configDir, "memory.db"),
+			Enabled:          true,
+			Budget:           2000,
+			GlobalNamespaces: []string{},
+			GlobalBudget:     500,
+		},
+		Planner: PlannerConfig{
+			Enabled:              false,
+			TestCmd:              "go test ./...",
+			MaxRetries:           2,
+			AutoApproveThreshold: 80,
 		},
 	}
 }
@@ -124,6 +156,40 @@ func (c *ClaudeConfig) UnmarshalJSON(data []byte) error {
 		d, err := time.ParseDuration(aux.Timeout)
 		if err != nil {
 			return fmt.Errorf("parsing timeout: %w", err)
+		}
+		c.Timeout = d
+	}
+	return nil
+}
+
+// MarshalJSON implements custom JSON marshaling for PlannerConfig duration fields.
+func (c PlannerConfig) MarshalJSON() ([]byte, error) {
+	type Alias PlannerConfig
+	return json.Marshal(&struct {
+		Timeout string `json:"timeout,omitempty"`
+		*Alias
+	}{
+		Timeout: c.Timeout.String(),
+		Alias:   (*Alias)(&c),
+	})
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for PlannerConfig duration fields.
+func (c *PlannerConfig) UnmarshalJSON(data []byte) error {
+	type Alias PlannerConfig
+	aux := &struct {
+		Timeout string `json:"timeout"`
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if aux.Timeout != "" {
+		d, err := time.ParseDuration(aux.Timeout)
+		if err != nil {
+			return fmt.Errorf("parsing planner timeout: %w", err)
 		}
 		c.Timeout = d
 	}

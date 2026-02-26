@@ -17,8 +17,8 @@ func TestDefault(t *testing.T) {
 	if cfg.Claude.Binary != "claude" {
 		t.Errorf("expected binary claude, got %s", cfg.Claude.Binary)
 	}
-	if cfg.Claude.Timeout != 5*time.Minute {
-		t.Errorf("expected timeout 5m, got %s", cfg.Claude.Timeout)
+	if cfg.Claude.Timeout != 30*time.Minute {
+		t.Errorf("expected timeout 30m, got %s", cfg.Claude.Timeout)
 	}
 	if cfg.Claude.MaxSessions != 4 {
 		t.Errorf("expected max_sessions 4, got %d", cfg.Claude.MaxSessions)
