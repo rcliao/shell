@@ -34,3 +34,21 @@ make vet      # Run go vet
 - Sessions persist across restarts via SQLite
 - Allowlist-based auth by Telegram user ID
 - Configurable timeout (default 5m) and max concurrent sessions (default 4)
+
+## Available CLI Tools
+
+See `TOOLS.md` for the full reference of CLI tools available via Bash. Read it when users request:
+- Web research or summarization
+- Creating or editing Google Docs, Sheets, Slides, or Forms
+- Google Drive file management, sharing, or uploads
+- Sending emails or managing calendar events
+- Browser screenshots or web page interaction
+- Downloading or converting media (video, audio, images)
+- Document conversion (Markdown, PDF, DOCX, HTML)
+- Data processing (CSV, JSON, spreadsheets)
+- Translation
+- QR code generation
+- Any task that involves external services or file processing
+
+Always use `--json --no-input --force` flags with `gog` for non-interactive scripting.
+When creating Google artifacts, always return the shareable URL to the user.
