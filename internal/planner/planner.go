@@ -368,24 +368,34 @@ func (p *Planner) review(ctx context.Context, task, diffOutput, testOutput strin
 %s`, p.cfg.Conventions)
 	}
 
+	changedFiles := extractChangedFiles(diffOutput)
+	fileList := strings.Join(changedFiles, "\n")
+
 	prompt := fmt.Sprintf(`You are a strict code reviewer evaluating whether an automated agent completed a task correctly.
 You are the last line of defense before code is accepted. Be critical.
 
 ## Task That Was Assigned
 %s
 %s
-## Git Diff (what the agent changed)
+## Changed Files
+%s
+
+## Git Diff (summary of changes)
 %s
 
 ## Test Results
 %s
 
 ## Your Job
-Evaluate the changes against BOTH the task description AND the project conventions.
+You MUST read the actual source files listed above using the Read tool before making your verdict.
+Do NOT evaluate the diff text alone — you need to see the full file context to judge correctness.
+
+Step 1: Read each changed file to understand the full context of the changes.
+Step 2: Evaluate the changes against BOTH the task description AND the project conventions.
 
 Check for correctness:
 - Does the diff actually implement what the task asked for?
-- Is the implementation correct and idiomatic?
+- Is the implementation correct and idiomatic in context of the surrounding code?
 - Are there bugs, edge cases, or missing error handling?
 
 Check for convention violations (MUST flag as needs_human):
@@ -407,9 +417,9 @@ VERDICT: needs_human
 Rules for choosing:
 - done: Implementation matches the task, follows conventions, no scope creep. If tests pass and the diff matches the task intent, use done.
 - needs_revision: Has bugs or incomplete work the agent can fix (give specific feedback)
-- needs_human: Use ONLY for clear convention violations or fundamentally wrong approaches. Do NOT use needs_human just because the agent made minor judgement calls.`, task, conventionsBlock, diffOutput, testOutput)
+- needs_human: Use ONLY for clear convention violations or fundamentally wrong approaches. Do NOT use needs_human just because the agent made minor judgement calls.`, task, conventionsBlock, fileList, diffOutput, testOutput)
 
-	output, err := p.runClaude(ctx, prompt)
+	output, err := p.runClaudeReadOnly(ctx, prompt)
 	if err != nil {
 		return VerdictNeedsHuman, fmt.Sprintf("Review failed: %v", err)
 	}
@@ -422,6 +432,34 @@ Rules for choosing:
 	}
 
 	return Verdict(match[1]), output
+}
+
+// extractChangedFiles parses a git diff to extract the list of changed file paths.
+func extractChangedFiles(diff string) []string {
+	var files []string
+	seen := make(map[string]bool)
+
+	// Match standard diff headers: +++ b/path/to/file
+	re := regexp.MustCompile(`(?m)^\+\+\+ b/(.+)$`)
+	for _, m := range re.FindAllStringSubmatch(diff, -1) {
+		f := m[1]
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+
+	// Match new untracked files: --- new file: path/to/file ---
+	reNew := regexp.MustCompile(`(?m)^--- new file: (.+) ---$`)
+	for _, m := range reNew.FindAllStringSubmatch(diff, -1) {
+		f := m[1]
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+
+	return files
 }
 
 // runTests executes tests and returns output + success.
@@ -577,11 +615,20 @@ func (p *Planner) runClaudeTextOnly(ctx context.Context, prompt string) (string,
 }
 
 // runClaude spawns a Claude CLI subprocess with full tool access and
-// permissions bypassed. Used for task execution and review where the planner's
+// permissions bypassed. Used for task execution where the planner's
 // own test+review gates provide safety.
 func (p *Planner) runClaude(ctx context.Context, prompt string) (string, error) {
 	return p.runClaudeWithArgs(ctx, prompt, []string{
 		"--allowedTools", "Bash,Write,Edit,Read",
+		"--permission-mode", "bypassPermissions",
+	})
+}
+
+// runClaudeReadOnly spawns a Claude CLI subprocess with read-only tool access.
+// Used for reviews where the agent should inspect files but never modify them.
+func (p *Planner) runClaudeReadOnly(ctx context.Context, prompt string) (string, error) {
+	return p.runClaudeWithArgs(ctx, prompt, []string{
+		"--allowedTools", "Bash,Read,Glob,Grep",
 		"--permission-mode", "bypassPermissions",
 	})
 }

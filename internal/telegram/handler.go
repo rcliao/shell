@@ -315,6 +315,192 @@ func formatForMarkdownV2(text string) string {
 	return result.String()
 }
 
+// closeOpenMarkdown detects unclosed Markdown formatting in text (as occurs
+// mid-stream) and appends closing markers so that formatForMarkdownV2 can
+// produce valid, nicely formatted MarkdownV2 instead of escaping unclosed
+// markers as literal characters.
+func closeOpenMarkdown(text string) string {
+	n := len(text)
+	if n == 0 {
+		return text
+	}
+
+	i := 0
+	inFencedCode := false
+	inInlineCode := false
+
+	type marker struct {
+		token string
+		pos   int
+	}
+	var open []marker
+
+	for i < n {
+		// Fenced code blocks: ```
+		if !inInlineCode && i+2 < n && text[i] == '`' && text[i+1] == '`' && text[i+2] == '`' {
+			if inFencedCode {
+				inFencedCode = false
+				i += 3
+				continue
+			}
+			inFencedCode = true
+			i += 3
+			// Skip past language tag / rest of opening line
+			for i < n && text[i] != '\n' {
+				i++
+			}
+			continue
+		}
+
+		// Inside fenced code block, just advance
+		if inFencedCode {
+			i++
+			continue
+		}
+
+		// Inline code: `
+		if text[i] == '`' {
+			// Check for a closing backtick on the same line
+			if i+1 < n {
+				end := strings.Index(text[i+1:], "`")
+				if end != -1 && !strings.Contains(text[i+1:i+1+end], "\n") {
+					// Complete inline code, skip past it
+					i = i + 1 + end + 1
+					continue
+				}
+			}
+			// Unclosed inline code
+			inInlineCode = true
+			i++
+			continue
+		}
+
+		// Inside inline code, just advance
+		if inInlineCode {
+			i++
+			continue
+		}
+
+		// Bold+Italic: ***
+		if i+2 < n && text[i] == '*' && text[i+1] == '*' && text[i+2] == '*' {
+			end := strings.Index(text[i+3:], "***")
+			if end != -1 && end > 0 {
+				i = i + 3 + end + 3
+				continue
+			}
+			open = append(open, marker{"***", i})
+			i += 3
+			continue
+		}
+
+		// Bold: **
+		if i+1 < n && text[i] == '*' && text[i+1] == '*' {
+			end := strings.Index(text[i+2:], "**")
+			if end != -1 && end > 0 {
+				i = i + 2 + end + 2
+				continue
+			}
+			open = append(open, marker{"**", i})
+			i += 2
+			continue
+		}
+
+		// Italic: * (single, not adjacent to another *)
+		if text[i] == '*' && (i == 0 || text[i-1] != '*') && (i+1 >= n || text[i+1] != '*') {
+			end := strings.Index(text[i+1:], "*")
+			if end != -1 && end > 0 {
+				closePos := i + 1 + end
+				if closePos+1 >= n || text[closePos+1] != '*' {
+					i = closePos + 1
+					continue
+				}
+			}
+			open = append(open, marker{"*", i})
+			i++
+			continue
+		}
+
+		// Strikethrough: ~~
+		if i+1 < n && text[i] == '~' && text[i+1] == '~' {
+			end := strings.Index(text[i+2:], "~~")
+			if end != -1 && end > 0 {
+				i = i + 2 + end + 2
+				continue
+			}
+			open = append(open, marker{"~~", i})
+			i += 2
+			continue
+		}
+
+		i++
+	}
+
+	// Nothing to close
+	if !inFencedCode && !inInlineCode && len(open) == 0 {
+		return text
+	}
+
+	var suffix strings.Builder
+
+	if inFencedCode {
+		suffix.WriteString("\n```")
+	} else {
+		if inInlineCode {
+			suffix.WriteByte('`')
+		}
+		// Close formatting markers in reverse order (innermost first).
+		// Only close if there is actual content after the opening marker;
+		// a bare marker with nothing after it (e.g. trailing "**") is left
+		// for the formatter to escape normally.
+		for j := len(open) - 1; j >= 0; j-- {
+			m := open[j]
+			if strings.TrimSpace(text[m.pos+len(m.token):]) != "" {
+				suffix.WriteString(m.token)
+			}
+		}
+	}
+
+	if suffix.Len() == 0 {
+		return text
+	}
+
+	return text + suffix.String()
+}
+
+// formatForTelegram converts Markdown text to Telegram MarkdownV2 format,
+// ensuring the result fits within maxLen bytes. It closes any unclosed
+// Markdown formatting before conversion (important for streaming content).
+// If the formatted text exceeds maxLen, it retries with progressively
+// shorter raw text (showing the tail). Returns the formatted string and
+// true if MarkdownV2 was applied, or the truncated raw text and false
+// as a fallback.
+func formatForTelegram(text string, maxLen int) (string, bool) {
+	formatted := formatForMarkdownV2(closeOpenMarkdown(text))
+	if len(formatted) <= maxLen {
+		return formatted, true
+	}
+
+	// Formatted text exceeds the limit — retry with shorter raw text.
+	// MarkdownV2 escaping adds at most one backslash per character (≤2×),
+	// so halving the raw text guarantees the formatted result fits.
+	for _, limit := range []int{maxLen * 2 / 3, maxLen / 2, maxLen / 3} {
+		if limit >= len(text) {
+			continue
+		}
+		truncated := "..." + text[len(text)-limit:]
+		formatted = formatForMarkdownV2(closeOpenMarkdown(truncated))
+		if len(formatted) <= maxLen {
+			return formatted, true
+		}
+	}
+
+	// Could not fit even at half length. Return truncated raw text.
+	if len(text) > maxLen-3 {
+		return "..." + text[len(text)-maxLen+3:], false
+	}
+	return text, false
+}
+
 type Handler struct {
 	auth   *Auth
 	bridge *bridge.Bridge
@@ -401,6 +587,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	var mu sync.Mutex
 	var accumulated strings.Builder
 	lastEdit := time.Time{}
+	markdownFailed := false   // set when MarkdownV2 is rejected during streaming
+	lastSentContent := ""     // raw text of last successful streaming edit
+	lastUsedMarkdown := false // whether last streaming edit used MarkdownV2
 
 	onUpdate := func(chunk string) {
 		mu.Lock()
@@ -411,25 +600,55 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		if shouldEdit {
 			lastEdit = now
 		}
+		failed := markdownFailed
 		mu.Unlock()
 
 		if !shouldEdit {
 			return
 		}
 
-		// Truncate for Telegram's 4096 limit, showing the tail if too long.
-		display := current
-		if len(display) > maxMessageLength-10 {
-			display = "..." + display[len(display)-maxMessageLength+10:]
+		if !failed {
+			// Format for MarkdownV2, truncating from the front if the
+			// formatted result would exceed Telegram's message-length limit.
+			formatted, ok := formatForTelegram(current, maxMessageLength)
+			if ok {
+				_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					ChatID:    msg.Chat.ID,
+					MessageID: msgID,
+					Text:      formatted,
+					ParseMode: models.ParseModeMarkdown,
+				})
+				if editErr == nil {
+					mu.Lock()
+					lastSentContent = current
+					lastUsedMarkdown = true
+					mu.Unlock()
+					return
+				}
+				slog.Debug("streaming markdown edit failed, disabling for remaining edits", "error", editErr)
+				mu.Lock()
+				markdownFailed = true
+				mu.Unlock()
+			}
 		}
 
+		// Fallback: send without formatting if MarkdownV2 was rejected or unavailable.
+		plain := current
+		if len(plain) > maxMessageLength-3 {
+			plain = "..." + plain[len(plain)-maxMessageLength+3:]
+		}
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
-			Text:      display,
+			Text:      plain,
 		})
 		if editErr != nil {
 			slog.Debug("failed to edit streaming message", "error", editErr)
+		} else {
+			mu.Lock()
+			lastSentContent = current
+			lastUsedMarkdown = false
+			mu.Unlock()
 		}
 	}
 
@@ -451,12 +670,22 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		response = "(empty response)"
 	}
 
-	// Final response: edit in place if it fits, otherwise delete and send chunked.
-	if len(response) <= maxMessageLength {
+	// Final response: skip if the last streaming edit already displayed
+	// this content with MarkdownV2 formatting. Otherwise edit in place
+	// if it fits, or delete and send chunked.
+	formatted := formatForMarkdownV2(response)
+
+	mu.Lock()
+	alreadySent := lastUsedMarkdown && lastSentContent == response
+	mu.Unlock()
+
+	if alreadySent && len(formatted) <= maxMessageLength {
+		// Streaming already displayed the final formatted content.
+	} else if len(formatted) <= maxMessageLength {
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
-			Text:      formatForMarkdownV2(response),
+			Text:      formatted,
 			ParseMode: models.ParseModeMarkdown,
 		})
 		if editErr != nil {
@@ -468,6 +697,13 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 				Text:      response,
 			})
 		}
+	} else if len(response) <= maxMessageLength {
+		// Formatted text exceeds the limit but raw text fits — send unformatted.
+		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    msg.Chat.ID,
+			MessageID: msgID,
+			Text:      response,
+		})
 	} else {
 		// Delete placeholder and send chunked formatted response.
 		b.DeleteMessage(ctx, &bot.DeleteMessageParams{

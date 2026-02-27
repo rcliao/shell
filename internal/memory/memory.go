@@ -18,10 +18,12 @@ type Memory struct {
 	budget           int
 	globalNamespaces []string
 	globalBudget     int
+	systemNamespaces []string
+	systemBudget     int
 }
 
 // New opens or creates a memory store at the given path.
-func New(dbPath string, budget int, globalNamespaces []string, globalBudget int) (*Memory, error) {
+func New(dbPath string, budget int, globalNamespaces []string, globalBudget int, systemNamespaces []string, systemBudget int) (*Memory, error) {
 	s, err := agentmemory.NewSQLiteStore(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open memory store: %w", err)
@@ -32,12 +34,65 @@ func New(dbPath string, budget int, globalNamespaces []string, globalBudget int)
 	if globalBudget <= 0 {
 		globalBudget = 500
 	}
+	if systemBudget <= 0 {
+		systemBudget = 3000
+	}
 	return &Memory{
 		store:            s,
 		budget:           budget,
 		globalNamespaces: globalNamespaces,
 		globalBudget:     globalBudget,
+		systemNamespaces: systemNamespaces,
+		systemBudget:     systemBudget,
 	}, nil
+}
+
+// SystemPrompt returns always-on context loaded via List() (no search).
+// Returns empty string if no system namespaces are configured or no memories found.
+func (m *Memory) SystemPrompt(ctx context.Context) string {
+	if len(m.systemNamespaces) == 0 {
+		return ""
+	}
+
+	charBudget := m.systemBudget * 4
+	var sb strings.Builder
+	used := 0
+
+	for _, ns := range m.systemNamespaces {
+		// Derive a section heading from the last segment of the namespace.
+		// e.g. "openclaw:identity" → "Identity"
+		heading := ns
+		if idx := strings.LastIndex(ns, ":"); idx >= 0 && idx+1 < len(ns) {
+			heading = ns[idx+1:]
+		}
+		heading = strings.ToUpper(heading[:1]) + heading[1:]
+
+		memories, err := m.store.List(ctx, agentmemory.ListParams{
+			NS:    ns,
+			Limit: 100,
+		})
+		if err != nil {
+			slog.Warn("system prompt list failed", "ns", ns, "error", err)
+			continue
+		}
+		if len(memories) == 0 {
+			continue
+		}
+
+		section := fmt.Sprintf("## %s\n", heading)
+		for _, mem := range memories {
+			section += fmt.Sprintf("- %s\n", mem.Content)
+		}
+		section += "\n"
+
+		if used+len(section) > charBudget {
+			break
+		}
+		sb.WriteString(section)
+		used += len(section)
+	}
+
+	return strings.TrimSpace(sb.String())
 }
 
 // namespace returns the per-chat namespace.

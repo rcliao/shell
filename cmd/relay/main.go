@@ -57,6 +57,7 @@ func main() {
 	}
 
 	// daemon command
+	var watch bool
 	daemonCmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Start the Telegram bot daemon",
@@ -66,6 +67,10 @@ func main() {
 			}
 
 			cfg := loadConfig()
+
+			if watch {
+				cfg.Reload.Enabled = true
+			}
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
@@ -84,6 +89,7 @@ func main() {
 			return d.Run(ctx)
 		},
 	}
+	daemonCmd.Flags().BoolVarP(&watch, "watch", "w", false, "Enable live reload on source changes")
 
 	// send command — one-shot test without Telegram
 	sendCmd := &cobra.Command{

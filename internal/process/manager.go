@@ -109,7 +109,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 // Send sends a message to Claude via the CLI and returns the response.
 // If claudeSessionID is non-empty, uses --resume <id> to resume a specific session.
 // Otherwise starts a fresh session. Returns SendResult with text and session ID.
-func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, message string) (SendResult, error) {
+// If systemPrompt is non-empty, it is passed via --append-system-prompt.
+func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, message, systemPrompt string) (SendResult, error) {
 	m.mu.RLock()
 	sess, exists := m.sessions[chatID]
 	m.mu.RUnlock()
@@ -148,16 +149,16 @@ func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, messa
 		}
 	}()
 
-	result, err := m.runClaude(ctx, message, claudeSessionID)
+	result, err := m.runClaude(ctx, message, claudeSessionID, systemPrompt)
 	if err != nil && claudeSessionID != "" {
 		// If --resume failed, retry as fresh session
 		slog.Warn("resume failed, retrying as fresh session", "chat_id", chatID, "error", err)
-		result, err = m.runClaude(ctx, message, "")
+		result, err = m.runClaude(ctx, message, "", systemPrompt)
 	}
 	return result, err
 }
 
-func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID string) (SendResult, error) {
+func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID, systemPrompt string) (SendResult, error) {
 	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 
@@ -170,6 +171,9 @@ func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID string
 	}
 	if m.model != "" {
 		args = append(args, "--model", m.model)
+	}
+	if systemPrompt != "" {
+		args = append(args, "--append-system-prompt", systemPrompt)
 	}
 	args = append(args, m.extraArgs...)
 
@@ -211,7 +215,8 @@ func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID string
 
 // SendStreaming sends a message to Claude and calls onUpdate with accumulated text as it streams.
 // Returns the final SendResult when complete.
-func (m *Manager) SendStreaming(ctx context.Context, chatID int64, claudeSessionID, message string, onUpdate StreamFunc) (SendResult, error) {
+// If systemPrompt is non-empty, it is passed via --append-system-prompt.
+func (m *Manager) SendStreaming(ctx context.Context, chatID int64, claudeSessionID, message, systemPrompt string, onUpdate StreamFunc) (SendResult, error) {
 	m.mu.RLock()
 	sess, exists := m.sessions[chatID]
 	m.mu.RUnlock()
@@ -250,16 +255,16 @@ func (m *Manager) SendStreaming(ctx context.Context, chatID int64, claudeSession
 		}
 	}()
 
-	result, err := m.runClaudeStreaming(ctx, message, claudeSessionID, onUpdate)
+	result, err := m.runClaudeStreaming(ctx, message, claudeSessionID, systemPrompt, onUpdate)
 	if err != nil && claudeSessionID != "" {
 		// If --resume failed, retry as fresh session
 		slog.Warn("resume failed, retrying as fresh session (streaming)", "chat_id", chatID, "error", err)
-		result, err = m.runClaudeStreaming(ctx, message, "", onUpdate)
+		result, err = m.runClaudeStreaming(ctx, message, "", systemPrompt, onUpdate)
 	}
 	return result, err
 }
 
-func (m *Manager) runClaudeStreaming(ctx context.Context, message, claudeSessionID string, onUpdate StreamFunc) (SendResult, error) {
+func (m *Manager) runClaudeStreaming(ctx context.Context, message, claudeSessionID, systemPrompt string, onUpdate StreamFunc) (SendResult, error) {
 	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 
@@ -274,6 +279,9 @@ func (m *Manager) runClaudeStreaming(ctx context.Context, message, claudeSession
 	}
 	if m.model != "" {
 		args = append(args, "--model", m.model)
+	}
+	if systemPrompt != "" {
+		args = append(args, "--append-system-prompt", systemPrompt)
 	}
 	args = append(args, m.extraArgs...)
 

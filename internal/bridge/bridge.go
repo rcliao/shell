@@ -129,7 +129,13 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string
 	}
 
 	// Send to Claude
-	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg)
+	// Build system prompt from memory if available.
+	systemPrompt := ""
+	if b.memory != nil {
+		systemPrompt = b.memory.SystemPrompt(ctx)
+	}
+
+	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt)
 	if err != nil {
 		return "", fmt.Errorf("claude: %w", err)
 	}
@@ -201,8 +207,14 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		claudeSessionID = procSess.ClaudeSessionID
 	}
 
+	// Build system prompt from memory if available.
+	systemPrompt := ""
+	if b.memory != nil {
+		systemPrompt = b.memory.SystemPrompt(ctx)
+	}
+
 	// Send to Claude with streaming
-	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, onUpdate)
+	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt, onUpdate)
 	if err != nil {
 		return "", fmt.Errorf("claude: %w", err)
 	}

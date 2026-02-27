@@ -15,6 +15,7 @@ type Config struct {
 	Daemon   DaemonConfig   `json:"daemon"`
 	Memory   MemoryConfig   `json:"memory"`
 	Planner  PlannerConfig  `json:"planner"`
+	Reload   ReloadConfig   `json:"reload"`
 }
 
 type TelegramConfig struct {
@@ -45,6 +46,14 @@ type MemoryConfig struct {
 	Budget           int      `json:"budget"`            // token budget for context injection
 	GlobalNamespaces []string `json:"global_namespaces"` // namespace patterns for background context
 	GlobalBudget     int      `json:"global_budget"`     // token budget for global context (default 500)
+	SystemNamespaces []string `json:"system_namespaces"` // always-on via --append-system-prompt (no search)
+	SystemBudget     int      `json:"system_budget"`     // token cap for system prompt (default 3000)
+}
+
+type ReloadConfig struct {
+	Enabled   bool   `json:"enabled"`
+	SourceDir string `json:"source_dir"` // auto-detected from go.mod if empty
+	Debounce  string `json:"debounce"`   // duration string, default "500ms"
 }
 
 type PlannerConfig struct {
@@ -89,12 +98,19 @@ func Default() Config {
 			Budget:           2000,
 			GlobalNamespaces: []string{},
 			GlobalBudget:     500,
+			SystemNamespaces: []string{},
+			SystemBudget:     3000,
 		},
 		Planner: PlannerConfig{
 			Enabled:              false,
 			TestCmd:              "",
 			MaxRetries:           2,
 			AutoApproveThreshold: 80,
+		},
+		Reload: ReloadConfig{
+			Enabled:   false,
+			SourceDir: "",
+			Debounce:  "500ms",
 		},
 	}
 }

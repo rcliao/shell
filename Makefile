@@ -1,4 +1,4 @@
-.PHONY: build run test vet clean
+.PHONY: build run test vet clean watch
 
 BINARY := relay
 PKG := ./cmd/relay
@@ -17,6 +17,9 @@ vet:
 
 clean:
 	rm -f $(BINARY)
+
+watch: build
+	./$(BINARY) daemon --watch
 
 init: build
 	./$(BINARY) init

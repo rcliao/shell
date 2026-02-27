@@ -443,3 +443,242 @@ func TestSplitMessage_Long(t *testing.T) {
 		t.Error("reassembled message doesn't match original")
 	}
 }
+
+func TestCloseOpenMarkdown(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// Already-complete formatting should pass through unchanged.
+		{
+			name:  "complete bold",
+			input: "this is **bold** text",
+			want:  "this is **bold** text",
+		},
+		{
+			name:  "complete italic",
+			input: "this is *italic* text",
+			want:  "this is *italic* text",
+		},
+		{
+			name:  "complete code block",
+			input: "```go\nfmt.Println()\n```",
+			want:  "```go\nfmt.Println()\n```",
+		},
+		{
+			name:  "complete inline code",
+			input: "use `fmt.Println` here",
+			want:  "use `fmt.Println` here",
+		},
+		{
+			name:  "complete strikethrough",
+			input: "this is ~~deleted~~ text",
+			want:  "this is ~~deleted~~ text",
+		},
+		{
+			name:  "no formatting",
+			input: "plain text",
+			want:  "plain text",
+		},
+		{
+			name:  "empty string",
+			input: "",
+			want:  "",
+		},
+
+		// Unclosed formatting should be auto-closed.
+		{
+			name:  "unclosed bold",
+			input: "this is **bold text",
+			want:  "this is **bold text**",
+		},
+		{
+			name:  "unclosed italic",
+			input: "this is *italic text",
+			want:  "this is *italic text*",
+		},
+		{
+			name:  "unclosed bold italic",
+			input: "this is ***bold italic text",
+			want:  "this is ***bold italic text***",
+		},
+		{
+			name:  "unclosed strikethrough",
+			input: "this is ~~deleted text",
+			want:  "this is ~~deleted text~~",
+		},
+		{
+			name:  "unclosed fenced code block",
+			input: "```go\nfmt.Println()",
+			want:  "```go\nfmt.Println()\n```",
+		},
+		{
+			name:  "unclosed inline code",
+			input: "use `fmt.Println here",
+			want:  "use `fmt.Println here`",
+		},
+
+		// Bare markers with no content should NOT be closed.
+		{
+			name:  "bare bold marker",
+			input: "text **",
+			want:  "text **",
+		},
+		{
+			name:  "bare italic marker",
+			input: "text *",
+			want:  "text *",
+		},
+		{
+			name:  "bare strikethrough marker",
+			input: "text ~~",
+			want:  "text ~~",
+		},
+
+		// Mixed / nested unclosed formatting.
+		{
+			name:  "unclosed bold with complete italic inside",
+			input: "**bold and *italic* continues",
+			want:  "**bold and *italic* continues**",
+		},
+		{
+			name:  "complete bold with unclosed code block",
+			input: "**bold** then\n```python\nprint('hi')",
+			want:  "**bold** then\n```python\nprint('hi')\n```",
+		},
+
+		// Streaming-realistic scenarios.
+		{
+			name:  "mid-sentence bold",
+			input: "Here is the **important part of the resp",
+			want:  "Here is the **important part of the resp**",
+		},
+		{
+			name:  "code block with language tag",
+			input: "Here's the code:\n```python\ndef hello():\n    print('world')",
+			want:  "Here's the code:\n```python\ndef hello():\n    print('world')\n```",
+		},
+		{
+			name:  "inline code mid-stream",
+			input: "Use the `handleMessage function to",
+			want:  "Use the `handleMessage function to`",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := closeOpenMarkdown(tt.input)
+			if got != tt.want {
+				t.Errorf("closeOpenMarkdown(%q)\n  got:  %q\n  want: %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatForTelegram(t *testing.T) {
+	t.Run("short text fits without truncation", func(t *testing.T) {
+		text := "Hello **world**!"
+		result, ok := formatForTelegram(text, 4096)
+		if !ok {
+			t.Fatal("expected ok=true for short text")
+		}
+		want := formatForMarkdownV2(text)
+		if result != want {
+			t.Errorf("got %q, want %q", result, want)
+		}
+	})
+
+	t.Run("formatted expansion handled by truncation", func(t *testing.T) {
+		// Create text full of special chars that double in size when escaped.
+		// Each '!' becomes '\!' (2 bytes), so 100 chars → 200 escaped bytes.
+		text := strings.Repeat("!", 100)
+		result, ok := formatForTelegram(text, 120)
+		if !ok {
+			t.Fatal("expected ok=true after truncation retries")
+		}
+		if len(result) > 120 {
+			t.Errorf("formatted result exceeds maxLen: %d > 120", len(result))
+		}
+	})
+
+	t.Run("result always within limit", func(t *testing.T) {
+		// Worst-case text: every character needs escaping.
+		text := strings.Repeat("!.()", 500) // 2000 chars → ~4000 escaped
+		result, ok := formatForTelegram(text, 4096)
+		if len(result) > 4096 {
+			t.Errorf("result exceeds limit: %d > 4096 (ok=%v)", len(result), ok)
+		}
+	})
+
+	t.Run("fallback returns raw truncated text", func(t *testing.T) {
+		// Extremely dense special chars: even half length doubles beyond limit.
+		// Use a tiny maxLen so the loop cannot satisfy it.
+		text := strings.Repeat("!", 200)
+		result, ok := formatForTelegram(text, 10)
+		if ok {
+			t.Fatal("expected ok=false for impossibly small limit")
+		}
+		if len(result) > 10 {
+			t.Errorf("raw fallback exceeds limit: %d > 10", len(result))
+		}
+	})
+
+	t.Run("closes open markdown during streaming", func(t *testing.T) {
+		text := "Here is **bold text that is still stream"
+		result, ok := formatForTelegram(text, 4096)
+		if !ok {
+			t.Fatal("expected ok=true")
+		}
+		// Should contain MarkdownV2 bold markers (single *) from the
+		// closeOpenMarkdown + formatForMarkdownV2 pipeline.
+		if !strings.Contains(result, "*") {
+			t.Errorf("expected bold formatting in result: %q", result)
+		}
+	})
+
+	t.Run("unclosed code block closed before formatting", func(t *testing.T) {
+		text := "```go\nfmt.Println(\"hello\")"
+		result, ok := formatForTelegram(text, 4096)
+		if !ok {
+			t.Fatal("expected ok=true")
+		}
+		// Should have closing ``` from closeOpenMarkdown.
+		if !strings.Contains(result, "```") {
+			t.Errorf("expected code block formatting in result: %q", result)
+		}
+	})
+}
+
+func TestCloseOpenMarkdown_ThenFormat(t *testing.T) {
+	// Verify that closeOpenMarkdown + formatForMarkdownV2 produces valid
+	// MarkdownV2 for streaming scenarios (no unescaped special chars in
+	// plain-text positions).
+	inputs := []struct {
+		name  string
+		input string
+	}{
+		{"unclosed bold", "Here is **bold content streaming"},
+		{"unclosed code block", "```go\nfmt.Println(\"hello\")"},
+		{"unclosed inline code", "use `some.Function and more"},
+		{"unclosed italic", "this is *italic streaming"},
+		{"unclosed strikethrough", "this is ~~struck streaming"},
+		{"mixed", "**bold then `code and more"},
+	}
+
+	for _, tt := range inputs {
+		t.Run(tt.name, func(t *testing.T) {
+			closed := closeOpenMarkdown(tt.input)
+			result := formatForMarkdownV2(closed)
+			if result == "" {
+				t.Error("expected non-empty formatted result")
+			}
+			// Sanity: result should not be identical to just escaping everything
+			// (which would mean our closing had no effect).
+			allEscaped := escapeMarkdownV2Text(tt.input)
+			if result == allEscaped {
+				t.Errorf("closing had no effect: result equals fully-escaped input\n  input:  %q\n  result: %q", tt.input, result)
+			}
+		})
+	}
+}

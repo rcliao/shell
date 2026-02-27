@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/rcliao/teeny-relay/internal/bridge"
@@ -11,17 +13,19 @@ import (
 	"github.com/rcliao/teeny-relay/internal/memory"
 	"github.com/rcliao/teeny-relay/internal/planner"
 	"github.com/rcliao/teeny-relay/internal/process"
+	"github.com/rcliao/teeny-relay/internal/reload"
 	"github.com/rcliao/teeny-relay/internal/store"
 	"github.com/rcliao/teeny-relay/internal/telegram"
 )
 
 type Daemon struct {
-	cfg    config.Config
-	bot    *telegram.Bot
-	bridge *bridge.Bridge
-	proc   *process.Manager
-	store  *store.Store
-	memory *memory.Memory // nil if disabled
+	cfg      config.Config
+	bot      *telegram.Bot
+	bridge   *bridge.Bridge
+	proc     *process.Manager
+	store    *store.Store
+	memory   *memory.Memory       // nil if disabled
+	reloader *reload.Watcher      // nil if disabled
 }
 
 func New(cfg config.Config) (*Daemon, error) {
@@ -44,7 +48,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Initialize memory store if enabled
 	var mem *memory.Memory
 	if cfg.Memory.Enabled {
-		mem, err = memory.New(cfg.Memory.DBPath, cfg.Memory.Budget, cfg.Memory.GlobalNamespaces, cfg.Memory.GlobalBudget)
+		mem, err = memory.New(cfg.Memory.DBPath, cfg.Memory.Budget, cfg.Memory.GlobalNamespaces, cfg.Memory.GlobalBudget, cfg.Memory.SystemNamespaces, cfg.Memory.SystemBudget)
 		if err != nil {
 			st.Close()
 			return nil, fmt.Errorf("init memory store: %w", err)
@@ -54,6 +58,8 @@ func New(cfg config.Config) (*Daemon, error) {
 			"budget", cfg.Memory.Budget,
 			"global_namespaces", cfg.Memory.GlobalNamespaces,
 			"global_budget", cfg.Memory.GlobalBudget,
+			"system_namespaces", cfg.Memory.SystemNamespaces,
+			"system_budget", cfg.Memory.SystemBudget,
 		)
 	}
 
@@ -95,18 +101,62 @@ func New(cfg config.Config) (*Daemon, error) {
 		bot.SendText(chatID, msg)
 	})
 
-	return &Daemon{
+	d := &Daemon{
 		cfg:    cfg,
 		bot:    bot,
 		bridge: br,
 		proc:   proc,
 		store:  st,
 		memory: mem,
-	}, nil
+	}
+
+	// Initialize live reloader if enabled.
+	if cfg.Reload.Enabled {
+		sourceDir := cfg.Reload.SourceDir
+		if sourceDir == "" {
+			exe, err := os.Executable()
+			if err == nil {
+				sourceDir, err = reload.FindSourceDir(filepath.Dir(exe))
+			}
+			if err != nil {
+				slog.Warn("reload: could not auto-detect source dir, disabling", "error", err)
+			}
+		}
+		if sourceDir != "" {
+			debounce := 500 * time.Millisecond
+			if cfg.Reload.Debounce != "" {
+				if parsed, err := time.ParseDuration(cfg.Reload.Debounce); err == nil {
+					debounce = parsed
+				}
+			}
+			rw, err := reload.New(reload.Config{
+				SourceDir:  sourceDir,
+				Debounce:   debounce,
+				OnShutdown: d.Shutdown,
+			})
+			if err != nil {
+				slog.Warn("reload: failed to create watcher", "error", err)
+			} else {
+				d.reloader = rw
+				slog.Info("reload: live reload enabled", "source_dir", sourceDir, "debounce", debounce)
+			}
+		}
+	}
+
+	return d, nil
 }
 
 // Run starts the daemon and blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
+	// Start live reloader if enabled.
+	if d.reloader != nil {
+		go func() {
+			if err := d.reloader.Run(ctx.Done()); err != nil {
+				slog.Error("reload: watcher stopped", "error", err)
+			}
+		}()
+	}
+
 	// Start stale session cleanup ticker
 	go d.cleanupLoop(ctx)
 
