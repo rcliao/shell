@@ -30,6 +30,10 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(b.defaultHandler),
+		bot.WithAllowedUpdates(bot.AllowedUpdates{
+			models.AllowedUpdateMessage,
+			models.AllowedUpdateMessageReaction,
+		}),
 	}
 
 	tgBot, err := bot.New(token, opts...)
@@ -50,6 +54,12 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planstop", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planskip", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planretry", bot.MatchTypePrefix, b.commandHandler)
+
+	// Register handler for incoming emoji reactions.
+	tgBot.RegisterHandlerMatchFunc(
+		func(update *models.Update) bool { return update.MessageReaction != nil },
+		b.reactionHandler,
+	)
 
 	b.bot = tgBot
 	return b, nil
@@ -91,4 +101,11 @@ func (b *Bot) commandHandler(ctx context.Context, tgBot *bot.Bot, update *models
 		return
 	}
 	b.handler.HandleCommand(ctx, tgBot, update.Message)
+}
+
+func (b *Bot) reactionHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
+	if update.MessageReaction == nil {
+		return
+	}
+	b.handler.HandleReaction(ctx, tgBot, update.MessageReaction)
 }

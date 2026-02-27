@@ -52,7 +52,8 @@ type Config struct {
 
 // Planner orchestrates plan execution.
 type Planner struct {
-	cfg Config
+	cfg      Config
+	taskBase string // HEAD SHA before the current task started; reset per task
 }
 
 // New creates a planner with the given config.
@@ -78,6 +79,21 @@ func (p *Planner) CloneWithWorkDir(workDir string) *Planner {
 	return &Planner{cfg: cfg}
 }
 
+// snapshotBase records the current HEAD SHA so getDiff can later show all
+// changes made during a task, even if the execute agent stages or commits.
+func (p *Planner) snapshotBase(ctx context.Context) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	if p.cfg.WorkDir != "" {
+		cmd.Dir = p.cfg.WorkDir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		p.taskBase = ""
+		return
+	}
+	p.taskBase = strings.TrimSpace(string(out))
+}
+
 // ParsePlan extracts unchecked tasks from plan text.
 // Each task is a line matching "- [ ] <description>".
 func ParsePlan(planText string) []string {
@@ -93,6 +109,7 @@ func ParsePlan(planText string) []string {
 // execute → test → review → decide. Returns the result.
 // completedContext summarises previously completed tasks for continuity.
 func (p *Planner) RunTask(ctx context.Context, task, completedContext string, progress ProgressFunc) TaskResult {
+	p.snapshotBase(ctx)
 	feedback := ""
 
 	for attempt := 0; attempt <= p.cfg.MaxRetries; attempt++ {
@@ -197,6 +214,7 @@ func (p *Planner) RunPlan(ctx context.Context, planText string, progress Progres
 // RunTaskWithGuidance runs a task with user guidance seeded as initial feedback,
 // plus the current git diff for context. Used when resuming from a blocked state.
 func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, completedContext string, progress ProgressFunc) TaskResult {
+	p.snapshotBase(ctx)
 	diff := p.getDiff(ctx)
 	initialFeedback := fmt.Sprintf("Human guidance: %s\n\nYour current changes on disk:\n%s", guidance, diff)
 
@@ -322,7 +340,7 @@ A reviewer found issues with your previous attempt. You MUST address this:
 %s`, completedContext)
 	}
 
-	testRule := "- Determine the appropriate test command for this project and run it before finishing to make sure nothing is broken"
+	testRule := "- Before finishing, find the project that your changes belong to (look for go.mod, package.json, Cargo.toml, Makefile, etc. in the directory of your changed files), cd into that project directory, and run its tests to make sure nothing is broken"
 	if p.cfg.TestCmd != "" {
 		testRule = fmt.Sprintf("- Run '%s' before finishing to make sure nothing is broken", p.cfg.TestCmd)
 	}
@@ -432,19 +450,25 @@ func (p *Planner) runStaticTests(ctx context.Context) (string, bool) {
 
 // runAgentTests asks Claude to determine and run the appropriate tests.
 func (p *Planner) runAgentTests(ctx context.Context) (string, bool) {
-	prompt := `You are a test runner. Examine this project and run the appropriate tests.
+	diff := p.getDiff(ctx)
+
+	prompt := fmt.Sprintf(`You are a test runner. Your job is to run the appropriate tests for the changes shown below.
+
+## Changes
+%s
 
 ## Instructions
-1. Look at the project structure to determine the language/framework (check for package.json, go.mod, Cargo.toml, pyproject.toml, Makefile, etc.)
-2. Run the standard test command for that project
-3. If there are multiple test suites or commands, run the most relevant ones
+1. Look at the file paths in the diff to identify which project or subdirectory was modified
+2. Navigate to that project's root directory (where you find go.mod, package.json, Cargo.toml, pyproject.toml, Makefile, etc.)
+3. Run the standard test command for that project from within its directory
+4. Do NOT run tests from the workspace root if it is not itself a project
 
 ## Output
 After running the tests, you MUST end your response with EXACTLY one of these lines:
 TEST_RESULT: pass
 TEST_RESULT: fail
 
-Include the full test output before this line.`
+Include the full test output before this line.`, diff)
 
 	output, err := p.runClaude(ctx, prompt)
 	if err != nil {
@@ -455,7 +479,9 @@ Include the full test output before this line.`
 	return output, passed
 }
 
-// getDiff returns the current git diff including untracked files.
+// getDiff returns all changes in the working directory relative to the task
+// starting point. It captures staged changes, unstaged changes, committed
+// changes (if the execute agent committed), and new untracked files.
 func (p *Planner) getDiff(ctx context.Context) string {
 	run := func(args ...string) string {
 		cmd := exec.CommandContext(ctx, "git", args...)
@@ -466,7 +492,16 @@ func (p *Planner) getDiff(ctx context.Context) string {
 		return string(out)
 	}
 
-	diff := run("diff")
+	// Use the task base commit stored before execution started.
+	// Falls back to HEAD for staged+unstaged changes.
+	base := p.taskBase
+	if base == "" {
+		base = "HEAD"
+	}
+
+	// git diff <base> shows all changes (staged + unstaged) vs the base.
+	// If the execute agent also committed, this captures those commits too.
+	diff := run("diff", base)
 
 	// Include new untracked files
 	untracked := strings.TrimSpace(run("ls-files", "--others", "--exclude-standard"))

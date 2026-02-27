@@ -17,6 +17,8 @@ const streamEditInterval = time.Second // minimum interval between Telegram mess
 
 const maxMessageLength = 4096
 
+const longRunningThreshold = 15 * time.Second // time before switching reaction from 👀 to ⏳
+
 // escapeMarkdownV2Text escapes special characters for Telegram MarkdownV2
 // in plain text that should not be interpreted as formatting.
 func escapeMarkdownV2Text(text string) string {
@@ -260,7 +262,32 @@ func formatForMarkdownV2(text string) string {
 			}
 		}
 
-		// 9. Strikethrough: ~~text~~ → ~text~ (Telegram MarkdownV2)
+		// 9. Blockquote: "> text" at start of a line
+		if text[i] == '>' && isLineStart(text, i) {
+			// Skip optional space after >
+			j := i + 1
+			if j < n && text[j] == ' ' {
+				j++
+			}
+			lineEnd := strings.Index(text[j:], "\n")
+			var content string
+			if lineEnd == -1 {
+				content = text[j:]
+				lineEnd = n - j
+			} else {
+				content = text[j : j+lineEnd]
+			}
+			result.WriteString(">")
+			result.WriteString(formatForMarkdownV2(content))
+			i = j + lineEnd
+			if i < n && text[i] == '\n' {
+				result.WriteByte('\n')
+				i++
+			}
+			continue
+		}
+
+		// 10. Strikethrough: ~~text~~ → ~text~ (Telegram MarkdownV2)
 		if i+1 < n && text[i] == '~' && text[i+1] == '~' {
 			end := strings.Index(text[i+2:], "~~")
 			if end != -1 && end > 0 {
@@ -314,6 +341,22 @@ func setReaction(ctx context.Context, b *bot.Bot, chatID any, messageID int, emo
 	}
 }
 
+// looksLikeClarification checks if a response appears to be asking the user
+// for clarification (i.e. it ends with a question mark).
+func looksLikeClarification(response string) bool {
+	trimmed := strings.TrimSpace(response)
+	return strings.HasSuffix(trimmed, "?")
+}
+
+func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *models.MessageReactionUpdated) {
+	slog.Info("received message reaction",
+		"chat_id", reaction.Chat.ID,
+		"message_id", reaction.MessageID,
+		"new_reaction", reaction.NewReaction,
+		"old_reaction", reaction.OldReaction,
+	)
+}
+
 func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
 	if msg.From == nil {
 		return
@@ -335,6 +378,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 
 	// React with 👀 to acknowledge receipt.
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, "👀")
+
+	// Switch to ⏳ if processing takes a while.
+	longRunning := time.AfterFunc(longRunningThreshold, func() {
+		setReaction(ctx, b, msg.Chat.ID, msg.ID, "⏳")
+	})
+	defer longRunning.Stop()
 
 	// Send an initial placeholder message that we'll edit with streaming updates.
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
@@ -412,6 +461,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		})
 		if editErr != nil {
 			// Fallback: try without markdown formatting
+			setReaction(ctx, b, msg.Chat.ID, msg.ID, "🔄")
 			b.EditMessageText(ctx, &bot.EditMessageTextParams{
 				ChatID:    msg.Chat.ID,
 				MessageID: msgID,
@@ -427,7 +477,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		h.sendChunked(ctx, b, msg.Chat.ID, response)
 	}
 
-	setReaction(ctx, b, msg.Chat.ID, msg.ID, "✅")
+	// Pick a finishing reaction: 🤔 when Claude is asking for clarification, ✅ otherwise.
+	finalEmoji := "✅"
+	if looksLikeClarification(response) {
+		finalEmoji = "🤔"
+	}
+	setReaction(ctx, b, msg.Chat.ID, msg.ID, finalEmoji)
 }
 
 func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Message) {

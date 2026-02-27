@@ -47,10 +47,30 @@ func ResolveRepoDir(workDir, intent string) (string, error) {
 	return "", fmt.Errorf("multiple git repositories found (%s), could not determine target from intent", strings.Join(names, ", "))
 }
 
+// isGitRepo checks that dir is the root of a git repository with at least
+// one commit. Just having a .git directory is not enough — HEAD must resolve
+// to a valid object, otherwise git worktree add will fail.
 func isGitRepo(dir string) bool {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Dir = dir
-	return cmd.Run() == nil
+	// Check this directory is the toplevel of a repo (not merely inside one)
+	toplevelCmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	toplevelCmd.Dir = dir
+	out, err := toplevelCmd.Output()
+	if err != nil {
+		return false
+	}
+	toplevel := strings.TrimSpace(string(out))
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	if filepath.Clean(toplevel) != filepath.Clean(absDir) {
+		return false
+	}
+
+	// Verify HEAD points to a valid commit
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = dir
+	return headCmd.Run() == nil
 }
 
 // findGitRepos walks dir up to maxDepth levels looking for directories containing .git.

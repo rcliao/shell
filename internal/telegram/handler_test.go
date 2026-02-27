@@ -224,6 +224,88 @@ func TestFormatForMarkdownV2(t *testing.T) {
 			want:  "\\- bullet\n1\\. numbered",
 		},
 
+		// Blockquotes
+		{
+			name:  "blockquote single line",
+			input: "> quoted text",
+			want:  `>quoted text`,
+		},
+		{
+			name:  "blockquote multiple lines",
+			input: "> first\n> second\n> third",
+			want:  ">first\n>second\n>third",
+		},
+		{
+			name:  "blockquote with special chars",
+			input: "> Hello! (world)",
+			want:  `>Hello\! \(world\)`,
+		},
+		{
+			name:  "blockquote after paragraph",
+			input: "intro\n> quoted",
+			want:  "intro\n>quoted",
+		},
+		{
+			name:  "blockquote without space after marker",
+			input: ">no space",
+			want:  ">no space",
+		},
+		{
+			name:  "greater than not at line start",
+			input: "a > b",
+			want:  `a \> b`,
+		},
+		{
+			name:  "blockquote with bold content",
+			input: "> **important** point",
+			want:  ">*important* point",
+		},
+		{
+			name:  "blockquote with inline code",
+			input: "> use `fmt.Println` here",
+			want:  ">use `fmt.Println` here",
+		},
+		{
+			name:  "empty blockquote marker",
+			input: ">\n> text",
+			want:  ">\n>text",
+		},
+		{
+			name:  "blockquote mixed with heading",
+			input: "# Title\n> quoted line\nnormal text",
+			want:  "*Title*\n>quoted line\nnormal text",
+		},
+		{
+			name:  "blockquote mixed with bullet list",
+			input: "> quote\n- bullet",
+			want:  ">quote\n\\- bullet",
+		},
+		{
+			name:  "blockquote with italic content",
+			input: "> *emphasis* here",
+			want:  ">_emphasis_ here",
+		},
+		{
+			name:  "blockquote with link",
+			input: "> see [Google](https://google.com)",
+			want:  ">see [Google](https://google.com)",
+		},
+		{
+			name:  "blockquote with strikethrough",
+			input: "> ~~removed~~ text",
+			want:  ">~removed~ text",
+		},
+		{
+			name:  "blockquote with bold italic",
+			input: "> ***bold italic*** text",
+			want:  ">*_bold italic_* text",
+		},
+		{
+			name:  "multiline blockquote with formatting",
+			input: "> **bold** line\n> *italic* line",
+			want:  ">*bold* line\n>_italic_ line",
+		},
+
 		// Strikethrough
 		{
 			name:  "strikethrough",
