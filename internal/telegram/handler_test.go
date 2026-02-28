@@ -127,22 +127,22 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "h1 heading",
 			input: "# Hello World",
-			want:  "📌 *__Hello World__*",
+			want:  "*__Hello World__*",
 		},
 		{
 			name:  "h2 heading",
 			input: "## Sub Heading",
-			want:  "🔹 *__Sub Heading__*",
+			want:  "*Sub Heading*",
 		},
 		{
 			name:  "h3 heading",
 			input: "### Details",
-			want:  "▸ *Details*",
+			want:  "_Details_",
 		},
 		{
 			name:  "heading with special chars",
 			input: "# Version 1.0!",
-			want:  "📌 *__Version 1\\.0\\!__*",
+			want:  "*__Version 1\\.0\\!__*",
 		},
 		{
 			name:  "hash not at line start",
@@ -152,7 +152,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "heading mid-text",
 			input: "intro\n# Title\nbody",
-			want:  "intro\n📌 *__Title__*\nbody",
+			want:  "intro\n*__Title__*\nbody",
 		},
 
 		// Bullet lists
@@ -278,7 +278,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "blockquote mixed with heading",
 			input: "# Title\n> quoted line\nnormal text",
-			want:  "📌 *__Title__*\n>quoted line\nnormal text",
+			want:  "*__Title__*\n>quoted line\nnormal text",
 		},
 		{
 			name:  "blockquote mixed with bullet list",
@@ -683,6 +683,94 @@ func TestCloseOpenMarkdown_ThenFormat(t *testing.T) {
 			allEscaped := escapeMarkdownV2Text(tt.input)
 			if result == allEscaped {
 				t.Errorf("closing had no effect: result equals fully-escaped input\n  input:  %q\n  result: %q", tt.input, result)
+			}
+		})
+	}
+}
+
+func TestFormatForMarkdownV2_HeadingPrefixes(t *testing.T) {
+	// Save original prefixes and restore after test.
+	orig := HeadingPrefixes
+	t.Cleanup(func() { HeadingPrefixes = orig })
+
+	HeadingPrefixes = [3]string{"■ ", "▸ ", "· "}
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "h1 with prefix",
+			input: "# Hello",
+			want:  `*__■ Hello__*`,
+		},
+		{
+			name:  "h2 with prefix",
+			input: "## Section",
+			want:  `*▸ Section*`,
+		},
+		{
+			name:  "h3 with prefix",
+			input: "### Detail",
+			want:  `_· Detail_`,
+		},
+		{
+			name:  "h4 uses h3+ prefix",
+			input: "#### Deep",
+			want:  `_· Deep_`,
+		},
+		{
+			name:  "prefix with special chars in heading",
+			input: "# Version 1.0!",
+			want:  `*__■ Version 1\.0\!__*`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatForMarkdownV2(tt.input)
+			if got != tt.want {
+				t.Errorf("formatForMarkdownV2(%q)\n  got:  %q\n  want: %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatForMarkdownV2_EmptyPrefixes(t *testing.T) {
+	// Verify default empty prefixes don't change behavior.
+	orig := HeadingPrefixes
+	t.Cleanup(func() { HeadingPrefixes = orig })
+
+	HeadingPrefixes = [3]string{"", "", ""}
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "h1 no prefix",
+			input: "# Hello",
+			want:  "*__Hello__*",
+		},
+		{
+			name:  "h2 no prefix",
+			input: "## Section",
+			want:  "*Section*",
+		},
+		{
+			name:  "h3 no prefix",
+			input: "### Detail",
+			want:  "_Detail_",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatForMarkdownV2(tt.input)
+			if got != tt.want {
+				t.Errorf("formatForMarkdownV2(%q)\n  got:  %q\n  want: %q", tt.input, got, tt.want)
 			}
 		})
 	}

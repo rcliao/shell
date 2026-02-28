@@ -17,6 +17,12 @@ const streamEditInterval = time.Second // minimum interval between Telegram mess
 
 const maxMessageLength = 4096
 
+// HeadingPrefixes controls optional text prefixes prepended to each heading
+// level when rendered in Telegram MarkdownV2. Index 0 = H1, 1 = H2, 2 = H3+.
+// Empty strings (the default) mean no prefix — headings are distinguished by
+// formatting alone (bold+underline, bold, italic).
+var HeadingPrefixes = [3]string{"", "", ""}
+
 const longRunningThreshold = 15 * time.Second // time before switching reaction from 👀 to ⏳
 
 // escapeMarkdownV2Text escapes special characters for Telegram MarkdownV2
@@ -184,7 +190,7 @@ func formatForMarkdownV2(text string) string {
 			}
 		}
 
-		// 6. Headings: # at start of line → emoji marker + bold/underline based on level
+		// 6. Headings: # at start of line → formatting-based visual hierarchy
 		if text[i] == '#' && (i == 0 || text[i-1] == '\n') {
 			// Count heading level and skip # characters
 			j := i
@@ -207,22 +213,34 @@ func formatForMarkdownV2(text string) string {
 				heading = text[j : j+lineEnd]
 			}
 			escaped := escapeMarkdownV2Text(heading)
+			// Determine prefix index: 0=H1, 1=H2, 2=H3+.
+			pi := level - 1
+			if pi > 2 {
+				pi = 2
+			}
+			prefix := ""
+			if HeadingPrefixes[pi] != "" {
+				prefix = escapeMarkdownV2Text(HeadingPrefixes[pi])
+			}
 			switch {
 			case level == 1:
-				// H1: pin emoji + bold + underline
-				result.WriteString("📌 *__")
+				// H1: bold + underline (strongest emphasis)
+				result.WriteString("*__")
+				result.WriteString(prefix)
 				result.WriteString(escaped)
 				result.WriteString("__*")
 			case level == 2:
-				// H2: diamond emoji + bold + underline
-				result.WriteString("🔹 *__")
-				result.WriteString(escaped)
-				result.WriteString("__*")
-			default:
-				// H3+: arrow emoji + bold (no underline for visual hierarchy)
-				result.WriteString("▸ *")
+				// H2: bold
+				result.WriteString("*")
+				result.WriteString(prefix)
 				result.WriteString(escaped)
 				result.WriteString("*")
+			default:
+				// H3+: italic
+				result.WriteString("_")
+				result.WriteString(prefix)
+				result.WriteString(escaped)
+				result.WriteString("_")
 			}
 			i = j + lineEnd
 			if i < n && text[i] == '\n' {
