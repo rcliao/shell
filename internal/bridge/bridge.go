@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,51 @@ import (
 	"github.com/rcliao/teeny-relay/internal/store"
 	"github.com/rcliao/teeny-relay/internal/worktree"
 )
+
+// relayDirective represents a message to send to another chat.
+type relayDirective struct {
+	ChatID  int64
+	Message string
+}
+
+// relayRe matches [relay to=CHAT_ID]message[/relay] blocks in Claude's response.
+var relayRe = regexp.MustCompile(`(?s)\[relay to=(\d+)\]\s*(.*?)\s*\[/relay\]`)
+
+// parseRelayDirectives extracts relay blocks from response text.
+// Returns the cleaned response (relays stripped) and the list of relay messages.
+func parseRelayDirectives(response string) (string, []relayDirective) {
+	matches := relayRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response, nil
+	}
+
+	var relays []relayDirective
+	clean := response
+	// Process in reverse so indices stay valid
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		chatIDStr := response[m[2]:m[3]]
+		msg := strings.TrimSpace(response[m[4]:m[5]])
+		chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		relays = append(relays, relayDirective{ChatID: chatID, Message: msg})
+		clean = clean[:m[0]] + clean[m[1]:]
+	}
+	return strings.TrimSpace(clean), relays
+}
+
+// sendRelays dispatches relay messages via the notify function.
+func (b *Bridge) sendRelays(relays []relayDirective) {
+	if b.notify == nil {
+		return
+	}
+	for _, r := range relays {
+		slog.Info("relaying message", "to_chat_id", r.ChatID, "len", len(r.Message))
+		b.notify(r.ChatID, r.Message)
+	}
+}
 
 // NotifyFunc sends a message to a chat. Used for async plan progress reporting.
 type NotifyFunc func(chatID int64, msg string)
@@ -191,6 +238,10 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 
 	response := strings.TrimSpace(result.Text)
 
+	// Extract and send relay directives (messages to other chats)
+	response, relays := parseRelayDirectives(response)
+	b.sendRelays(relays)
+
 	// Log assistant response
 	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
 		slog.Warn("failed to log assistant message", "error", err)
@@ -275,6 +326,10 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	}
 
 	response := strings.TrimSpace(result.Text)
+
+	// Extract and send relay directives (messages to other chats)
+	response, relays := parseRelayDirectives(response)
+	b.sendRelays(relays)
 
 	// Log assistant response
 	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
