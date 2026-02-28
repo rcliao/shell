@@ -855,22 +855,45 @@ func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID int64, tex
 	}
 }
 
-// splitMessage splits text into chunks of at most maxLen characters,
-// preferring to split at paragraph boundaries (\n\n), then line boundaries (\n).
+// splitMessage splits text into chunks such that each chunk, after being
+// formatted with formatForMarkdownV2, fits within maxLen bytes. It prefers
+// to split at paragraph boundaries (\n\n), then line boundaries (\n).
 func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
+	if len(formatForMarkdownV2(text)) <= maxLen {
 		return []string{text}
 	}
 
 	var chunks []string
 	for len(text) > 0 {
-		if len(text) <= maxLen {
+		if len(formatForMarkdownV2(text)) <= maxLen {
 			chunks = append(chunks, text)
 			break
 		}
 
-		// Try to split at paragraph boundary
-		chunk := text[:maxLen]
+		// Find the largest raw prefix whose formatted length fits in maxLen.
+		// Start optimistically at maxLen raw chars, then shrink proportionally.
+		end := maxLen
+		if end > len(text) {
+			end = len(text)
+		}
+		for end > 1 {
+			fmtLen := len(formatForMarkdownV2(text[:end]))
+			if fmtLen <= maxLen {
+				break
+			}
+			// Shrink proportionally with guaranteed progress.
+			newEnd := end * maxLen / fmtLen
+			if newEnd >= end {
+				newEnd = end - 1
+			}
+			if newEnd < 1 {
+				newEnd = 1
+			}
+			end = newEnd
+		}
+
+		// Try to split at a nice boundary within [0, end].
+		chunk := text[:end]
 		splitIdx := strings.LastIndex(chunk, "\n\n")
 		if splitIdx == -1 {
 			// Try line boundary
@@ -882,7 +905,7 @@ func splitMessage(text string, maxLen int) []string {
 		}
 		if splitIdx == -1 {
 			// Hard split
-			splitIdx = maxLen - 1
+			splitIdx = end - 1
 		}
 
 		chunks = append(chunks, text[:splitIdx+1])

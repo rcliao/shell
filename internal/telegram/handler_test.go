@@ -432,10 +432,36 @@ func TestSplitMessage_Long(t *testing.T) {
 		t.Errorf("expected multiple chunks, got %d", len(chunks))
 	}
 
-	// Verify no chunk exceeds limit
+	// Verify no chunk exceeds limit after formatting
 	for i, chunk := range chunks {
-		if len(chunk) > 200 {
-			t.Errorf("chunk %d exceeds limit: %d chars", i, len(chunk))
+		fmtLen := len(formatForMarkdownV2(chunk))
+		if fmtLen > 200 {
+			t.Errorf("chunk %d formatted length exceeds limit: %d chars", i, fmtLen)
+		}
+	}
+
+	// Verify all content is preserved
+	reassembled := ""
+	for _, chunk := range chunks {
+		reassembled += chunk
+	}
+	if reassembled != msg {
+		t.Error("reassembled message doesn't match original")
+	}
+}
+
+func TestSplitMessage_FormattedLengthRespected(t *testing.T) {
+	// Text dense with special chars: each '!' becomes '\!' (2x expansion).
+	// With maxLen=100 and 200 '!' chars, raw text fits in two 100-char chunks
+	// but each formatted chunk would be 200 chars — exceeding the limit.
+	// splitMessage must account for the formatted length.
+	msg := strings.Repeat("!", 200)
+	chunks := splitMessage(msg, 100)
+
+	for i, chunk := range chunks {
+		fmtLen := len(formatForMarkdownV2(chunk))
+		if fmtLen > 100 {
+			t.Errorf("chunk %d formatted length exceeds limit: %d > 100", i, fmtLen)
 		}
 	}
 
