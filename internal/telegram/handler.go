@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -17,13 +18,23 @@ const streamEditInterval = time.Second // minimum interval between Telegram mess
 
 const maxMessageLength = 4096
 
-// HeadingPrefixes controls optional text prefixes prepended to each heading
-// level when rendered in Telegram MarkdownV2. Index 0 = H1, 1 = H2, 2 = H3+.
-// Empty strings (the default) mean no prefix — headings are distinguished by
-// formatting alone (bold+underline, bold, italic).
-var HeadingPrefixes = [3]string{"", "", ""}
+// HeadingPrefixes controls text prefixes prepended to each heading level when
+// rendered in Telegram MarkdownV2. Index 0 = H1, 1 = H2, 2 = H3+.
+// Defaults provide visual hierarchy: 📌 for H1, ▸ for H2, · for H3+.
+var HeadingPrefixes = [3]string{"📌 ", "▸ ", "· "}
 
 const longRunningThreshold = 15 * time.Second // time before switching reaction from 👀 to ⏳
+
+// formatErrorForMarkdownV2 formats an error message with a distinct visual
+// style: a blockquote with ⚠️ prefix and bold "Error" label.
+func formatErrorForMarkdownV2(msg string) string {
+	escaped := escapeMarkdownV2Text(msg)
+	lines := strings.Split(escaped, "\n")
+	var b strings.Builder
+	b.WriteString(">⚠️ *Error*\n>\n>")
+	b.WriteString(strings.Join(lines, "\n>"))
+	return b.String()
+}
 
 // escapeMarkdownV2Text escapes special characters for Telegram MarkdownV2
 // in plain text that should not be interpreted as formatting.
@@ -93,9 +104,135 @@ func isLineStart(text string, i int) bool {
 // mdLinkRe matches standard Markdown links: [text](url)
 var mdLinkRe = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 
+// formatTableBlock parses markdown table lines and returns a monospace code
+// block with aligned columns using Unicode box-drawing characters.
+func formatTableBlock(lines []string) string {
+	type tableRow struct {
+		cells []string
+		isSep bool
+	}
+	var rows []tableRow
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Remove leading/trailing pipes.
+		inner := trimmed
+		if strings.HasPrefix(inner, "|") {
+			inner = inner[1:]
+		}
+		if strings.HasSuffix(inner, "|") {
+			inner = inner[:len(inner)-1]
+		}
+
+		parts := strings.Split(inner, "|")
+		cells := make([]string, len(parts))
+		isSep := len(parts) > 0
+		for j, p := range parts {
+			cells[j] = strings.TrimSpace(p)
+			if isSep {
+				stripped := strings.Trim(cells[j], "-: ")
+				if stripped != "" || !strings.Contains(cells[j], "-") {
+					isSep = false
+				}
+			}
+		}
+		rows = append(rows, tableRow{cells: cells, isSep: isSep})
+	}
+
+	// Separate data rows from separator rows.
+	var dataRows [][]string
+	hasSep := false
+	for _, r := range rows {
+		if r.isSep {
+			hasSep = true
+			continue
+		}
+		dataRows = append(dataRows, r.cells)
+	}
+
+	if len(dataRows) == 0 {
+		var b strings.Builder
+		for i, line := range lines {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(escapeMarkdownV2Text(line))
+		}
+		return b.String()
+	}
+
+	// Escape cell contents for code blocks and calculate column widths.
+	maxCols := 0
+	for _, r := range dataRows {
+		if len(r) > maxCols {
+			maxCols = len(r)
+		}
+	}
+	escaped := make([][]string, len(dataRows))
+	for i, r := range dataRows {
+		escaped[i] = make([]string, len(r))
+		for j, cell := range r {
+			escaped[i][j] = escapeCodeContent(cell)
+		}
+	}
+	colWidths := make([]int, maxCols)
+	for _, r := range escaped {
+		for j, cell := range r {
+			if len(cell) > colWidths[j] {
+				colWidths[j] = len(cell)
+			}
+		}
+	}
+	for j := range colWidths {
+		if colWidths[j] < 1 {
+			colWidths[j] = 1
+		}
+	}
+
+	// Build aligned monospace table inside a code block.
+	var content strings.Builder
+	content.WriteByte('\n')
+	for ri, r := range escaped {
+		for j := 0; j < maxCols; j++ {
+			if j > 0 {
+				content.WriteString(" │ ")
+			}
+			cell := ""
+			if j < len(r) {
+				cell = r[j]
+			}
+			content.WriteString(cell)
+			if j < maxCols-1 {
+				for k := len(cell); k < colWidths[j]; k++ {
+					content.WriteByte(' ')
+				}
+			}
+		}
+		content.WriteByte('\n')
+		// Draw separator after first row when the markdown had a separator.
+		if ri == 0 && hasSep {
+			for j := 0; j < maxCols; j++ {
+				if j > 0 {
+					content.WriteString("─┼─")
+				}
+				content.WriteString(strings.Repeat("─", colWidths[j]))
+			}
+			content.WriteByte('\n')
+		}
+	}
+
+	var result strings.Builder
+	result.WriteString("```")
+	result.WriteString(content.String())
+	result.WriteString("```")
+	return result.String()
+}
+
 // formatForMarkdownV2 converts standard Markdown (as output by Claude) to
 // Telegram MarkdownV2 format with selective escaping. It preserves bold,
-// italic, code blocks, inline code, and links.
+// italic, code blocks, inline code, links, and nested lists. Nested lists
+// (indented with spaces/tabs) are supported via isLineStart: leading
+// whitespace passes through as plain text, and the list marker (-, *, +,
+// or N.) at an indented position is recognized as a list item.
 func formatForMarkdownV2(text string) string {
 	var result strings.Builder
 	i := 0
@@ -126,6 +263,31 @@ func formatForMarkdownV2(text string) string {
 				i = i + 1 + end + 1
 				continue
 			}
+		}
+
+		// 3. Bullet list item with * marker: "* text" at start of a line.
+		// Must come before bold/italic checks — in CommonMark, "* " at line
+		// start is always a bullet, never italic (space after * prevents
+		// left-flanking delimiter). Only single *, not ** or ***.
+		if text[i] == '*' && i+1 < n && text[i+1] == ' ' &&
+			(i+2 >= n || text[i+2] != '*') && // not "* *..." (unlikely but safe)
+			isLineStart(text, i) {
+			lineEnd := strings.Index(text[i+2:], "\n")
+			var content string
+			if lineEnd == -1 {
+				content = text[i+2:]
+				lineEnd = n - (i + 2)
+			} else {
+				content = text[i+2 : i+2+lineEnd]
+			}
+			result.WriteString("\\* ")
+			result.WriteString(formatForMarkdownV2(content))
+			i = i + 2 + lineEnd
+			if i < n && text[i] == '\n' {
+				result.WriteByte('\n')
+				i++
+			}
+			continue
 		}
 
 		// 3a. Bold+Italic: ***text*** → *_text_* (Telegram MarkdownV2)
@@ -250,7 +412,32 @@ func formatForMarkdownV2(text string) string {
 			continue
 		}
 
-		// 7. Bullet list item: "- text" at start of a line (with optional leading whitespace)
+		// 7. Horizontal rule: 3+ dashes on a line by itself → visual separator
+		if text[i] == '-' && isLineStart(text, i) {
+			j := i
+			for j < n && text[j] == '-' {
+				j++
+			}
+			if j-i >= 3 {
+				// Rest of line must be only whitespace
+				k := j
+				for k < n && text[k] != '\n' && (text[k] == ' ' || text[k] == '\t') {
+					k++
+				}
+				if k == n || text[k] == '\n' {
+					result.WriteString("———")
+					i = k
+					if i < n && text[i] == '\n' {
+						result.WriteByte('\n')
+						i++
+					}
+					continue
+				}
+			}
+		}
+
+		// 8a. Bullet list item: "- text" at start of a line (with optional leading
+		// whitespace for nested lists — indentation is preserved in the output)
 		if text[i] == '-' && i+1 < n && text[i+1] == ' ' && isLineStart(text, i) {
 			lineEnd := strings.Index(text[i+2:], "\n")
 			var content string
@@ -261,7 +448,7 @@ func formatForMarkdownV2(text string) string {
 				content = text[i+2 : i+2+lineEnd]
 			}
 			result.WriteString("\\- ")
-			result.WriteString(escapeMarkdownV2Text(content))
+			result.WriteString(formatForMarkdownV2(content))
 			i = i + 2 + lineEnd
 			if i < n && text[i] == '\n' {
 				result.WriteByte('\n')
@@ -270,7 +457,27 @@ func formatForMarkdownV2(text string) string {
 			continue
 		}
 
-		// 8. Numbered list item: "1. text" at start of a line (with optional leading whitespace)
+		// 8b. Bullet list item with + marker: "+ text" at start of a line
+		if text[i] == '+' && i+1 < n && text[i+1] == ' ' && isLineStart(text, i) {
+			lineEnd := strings.Index(text[i+2:], "\n")
+			var content string
+			if lineEnd == -1 {
+				content = text[i+2:]
+				lineEnd = n - (i + 2)
+			} else {
+				content = text[i+2 : i+2+lineEnd]
+			}
+			result.WriteString("\\+ ")
+			result.WriteString(formatForMarkdownV2(content))
+			i = i + 2 + lineEnd
+			if i < n && text[i] == '\n' {
+				result.WriteByte('\n')
+				i++
+			}
+			continue
+		}
+
+		// 9. Numbered list item: "1. text" at start of a line (with optional leading whitespace)
 		if text[i] >= '0' && text[i] <= '9' && isLineStart(text, i) {
 			j := i + 1
 			for j < n && text[j] >= '0' && text[j] <= '9' {
@@ -287,7 +494,7 @@ func formatForMarkdownV2(text string) string {
 				}
 				result.WriteString(text[i:j])
 				result.WriteString("\\. ")
-				result.WriteString(escapeMarkdownV2Text(content))
+				result.WriteString(formatForMarkdownV2(content))
 				i = j + 2 + lineEnd
 				if i < n && text[i] == '\n' {
 					result.WriteByte('\n')
@@ -297,32 +504,87 @@ func formatForMarkdownV2(text string) string {
 			}
 		}
 
-		// 9. Blockquote: "> text" at start of a line
+		// 10. Blockquote: consecutive "> text" lines merged into one blockquote block
 		if text[i] == '>' && isLineStart(text, i) {
-			// Skip optional space after >
-			j := i + 1
-			if j < n && text[j] == ' ' {
-				j++
+			var lines []string
+			j := i
+			consumedTrailingNewline := false
+			for j < n {
+				if text[j] != '>' || !isLineStart(text, j) {
+					break
+				}
+				// Skip '>' and optional space
+				k := j + 1
+				if k < n && text[k] == ' ' {
+					k++
+				}
+				lineEnd := strings.Index(text[k:], "\n")
+				if lineEnd == -1 {
+					lines = append(lines, text[k:])
+					j = n
+					consumedTrailingNewline = false
+				} else {
+					lines = append(lines, text[k:k+lineEnd])
+					j = k + lineEnd + 1
+					consumedTrailingNewline = true
+				}
 			}
-			lineEnd := strings.Index(text[j:], "\n")
-			var content string
-			if lineEnd == -1 {
-				content = text[j:]
-				lineEnd = n - j
-			} else {
-				content = text[j : j+lineEnd]
+			for idx, line := range lines {
+				result.WriteString(">")
+				result.WriteString(formatForMarkdownV2(line))
+				if idx < len(lines)-1 || consumedTrailingNewline {
+					result.WriteByte('\n')
+				}
 			}
-			result.WriteString(">")
-			result.WriteString(formatForMarkdownV2(content))
-			i = j + lineEnd
-			if i < n && text[i] == '\n' {
-				result.WriteByte('\n')
-				i++
-			}
+			i = j
 			continue
 		}
 
-		// 10. Strikethrough: ~~text~~ → ~text~ (Telegram MarkdownV2)
+		// 11. Table: consecutive lines starting with | (not ||) → monospace code block
+		if text[i] == '|' && (i+1 < n && text[i+1] != '|') && isLineStart(text, i) {
+			lineEnd := strings.Index(text[i:], "\n")
+			lineLen := lineEnd
+			if lineEnd == -1 {
+				lineLen = n - i
+			}
+			firstLine := text[i : i+lineLen]
+			if strings.Count(firstLine, "|") >= 2 {
+				var tableLines []string
+				j := i
+				consumedTrailingNewline := false
+				for j < n {
+					le := strings.Index(text[j:], "\n")
+					var line string
+					if le == -1 {
+						line = text[j:]
+						le = n - j
+					} else {
+						line = text[j : j+le]
+					}
+					trimmed := strings.TrimSpace(line)
+					if len(trimmed) == 0 || trimmed[0] != '|' || strings.Count(trimmed, "|") < 2 {
+						break
+					}
+					tableLines = append(tableLines, line)
+					j = j + le
+					consumedTrailingNewline = false
+					if j < n && text[j] == '\n' {
+						j++
+						consumedTrailingNewline = true
+					}
+				}
+				if len(tableLines) >= 2 {
+					result.WriteString(formatTableBlock(tableLines))
+					if consumedTrailingNewline && j < n {
+						result.WriteByte('\n')
+					}
+					i = j
+					continue
+				}
+			}
+		}
+
+		// 12. Strikethrough: ~~text~~ → ~text~ (Telegram MarkdownV2)
 		if i+1 < n && text[i] == '~' && text[i+1] == '~' {
 			end := strings.Index(text[i+2:], "~~")
 			if end != -1 && end > 0 {
@@ -330,6 +592,19 @@ func formatForMarkdownV2(text string) string {
 				result.WriteString("~")
 				result.WriteString(escapeMarkdownV2Text(inner))
 				result.WriteString("~")
+				i = i + 2 + end + 2
+				continue
+			}
+		}
+
+		// 13. Spoiler: ||text|| → ||text|| (Telegram MarkdownV2 expandable spoiler)
+		if i+1 < n && text[i] == '|' && text[i+1] == '|' {
+			end := strings.Index(text[i+2:], "||")
+			if end != -1 && end > 0 {
+				inner := text[i+2 : i+2+end]
+				result.WriteString("||")
+				result.WriteString(escapeMarkdownV2Text(inner))
+				result.WriteString("||")
 				i = i + 2 + end + 2
 				continue
 			}
@@ -463,6 +738,18 @@ func closeOpenMarkdown(text string) string {
 				continue
 			}
 			open = append(open, marker{"~~", i})
+			i += 2
+			continue
+		}
+
+		// Spoiler: ||
+		if i+1 < n && text[i] == '|' && text[i+1] == '|' {
+			end := strings.Index(text[i+2:], "||")
+			if end != -1 && end > 0 {
+				i = i + 2 + end + 2
+				continue
+			}
+			open = append(open, marker{"||", i})
 			i += 2
 			continue
 		}
@@ -619,7 +906,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		slog.Warn("unauthorized user", "user_id", msg.From.ID, "username", msg.From.Username)
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    msg.Chat.ID,
-			Text:      escapeMarkdownV2Text("Unauthorized. Your user ID is not in the allowlist."),
+			Text:      formatErrorForMarkdownV2("Unauthorized. Your user ID is not in the allowlist."),
 			ParseMode: models.ParseModeMarkdown,
 		})
 		return
@@ -657,6 +944,32 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	}
 	msgID := placeholder.ID
 
+	// Update the placeholder with elapsed time until the first chunk arrives.
+	thinkingStart := time.Now()
+	firstChunk := make(chan struct{})
+	var firstChunkOnce sync.Once
+	stopThinking := func() { firstChunkOnce.Do(func() { close(firstChunk) }) }
+	defer stopThinking()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-firstChunk:
+				return
+			case t := <-ticker.C:
+				elapsed := int(t.Sub(thinkingStart).Seconds())
+				text := fmt.Sprintf("Thinking\\.\\.\\. \\(%ds\\)", elapsed)
+				b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					ChatID:    msg.Chat.ID,
+					MessageID: msgID,
+					Text:      text,
+					ParseMode: models.ParseModeMarkdown,
+				})
+			}
+		}
+	}()
+
 	// Set up streaming state: accumulate text and throttle edits.
 	var mu sync.Mutex
 	var accumulated strings.Builder
@@ -666,6 +979,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	lastUsedMarkdown := false // whether last streaming edit used MarkdownV2
 
 	onUpdate := func(chunk string) {
+		stopThinking()
 		mu.Lock()
 		accumulated.WriteString(chunk)
 		current := accumulated.String()
@@ -734,7 +1048,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
-			Text:      escapeMarkdownV2Text("Error: " + err.Error()),
+			Text:      formatErrorForMarkdownV2(err.Error()),
 			ParseMode: models.ParseModeMarkdown,
 		})
 		return
@@ -803,7 +1117,7 @@ func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Mes
 		slog.Warn("unauthorized user command", "user_id", msg.From.ID)
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    msg.Chat.ID,
-			Text:      escapeMarkdownV2Text("Unauthorized."),
+			Text:      formatErrorForMarkdownV2("Unauthorized."),
 			ParseMode: models.ParseModeMarkdown,
 		})
 		return
@@ -826,7 +1140,7 @@ func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Mes
 		slog.Error("bridge handle command failed", "error", err, "cmd", cmd)
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    msg.Chat.ID,
-			Text:      escapeMarkdownV2Text("Error: " + err.Error()),
+			Text:      formatErrorForMarkdownV2(err.Error()),
 			ParseMode: models.ParseModeMarkdown,
 		})
 		return
@@ -849,9 +1163,38 @@ func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID int64, tex
 			ParseMode: models.ParseModeMarkdown,
 		})
 		if err != nil {
-			slog.Error("failed to send message", "error", err, "chat_id", chatID)
-			return
+			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID)
+			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   chunk,
+			})
+			if err != nil {
+				slog.Error("failed to send message", "error", err, "chat_id", chatID)
+			}
 		}
+	}
+}
+
+// codeBlockStart returns the start index of the fenced code block (```)
+// containing pos, or -1 if pos is not inside a fenced code block.
+func codeBlockStart(text string, pos int) int {
+	i := 0
+	for {
+		idx := strings.Index(text[i:], "```")
+		if idx == -1 || i+idx > pos {
+			return -1
+		}
+		start := i + idx
+		closeIdx := strings.Index(text[start+3:], "```")
+		if closeIdx == -1 {
+			// Unclosed code block extends to end of text.
+			return start
+		}
+		end := start + 3 + closeIdx + 3
+		if pos < end {
+			return start
+		}
+		i = end
 	}
 }
 
@@ -906,6 +1249,23 @@ func splitMessage(text string, maxLen int) []string {
 		if splitIdx == -1 {
 			// Hard split
 			splitIdx = end - 1
+		}
+
+		// Avoid splitting inside a fenced code block.
+		if cbStart := codeBlockStart(text, splitIdx); cbStart >= 0 {
+			if cbStart > 0 {
+				splitIdx = cbStart - 1
+			} else {
+				// Code block starts at position 0. Include the entire
+				// block if it fits within the limit.
+				closeIdx := strings.Index(text[3:], "```")
+				if closeIdx != -1 {
+					cbEnd := 3 + closeIdx + 2
+					if len(formatForMarkdownV2(text[:cbEnd+1])) <= maxLen {
+						splitIdx = cbEnd
+					}
+				}
+			}
 		}
 
 		chunks = append(chunks, text[:splitIdx+1])

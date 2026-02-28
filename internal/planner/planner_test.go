@@ -73,6 +73,43 @@ func TestExtractChangedFiles_Empty(t *testing.T) {
 	}
 }
 
+func TestExtractChangedFiles_DeletedFile(t *testing.T) {
+	diff := `diff --git a/old.go b/old.go
+deleted file mode 100644
+index abc..000 100644
+--- a/old.go
++++ /dev/null
+@@ -1,3 +0,0 @@
+-package main
+-func Old() {}
+`
+	files := extractChangedFiles(diff)
+	found := false
+	for _, f := range files {
+		if f == "old.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected deleted file old.go in list, got: %v", files)
+	}
+}
+
+func TestExtractChangedFiles_Fallback(t *testing.T) {
+	// Diff with only "diff --git" headers, no +++ b/ or --- a/ lines
+	// (simulates unusual diff format)
+	diff := `diff --git a/weird.go b/weird.go
+Binary files differ
+`
+	files := extractChangedFiles(diff)
+	if len(files) == 0 {
+		t.Fatal("expected fallback to parse diff --git header, got 0 files")
+	}
+	if files[0] != "weird.go" {
+		t.Errorf("expected weird.go, got %s", files[0])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests: full RunTask flow
 // ---------------------------------------------------------------------------
@@ -154,7 +191,7 @@ done
 printf '%%s' "$PROMPT" > "$CAPTURE_DIR/call_${CALL_NUM}_prompt.txt"
 
 # Respond based on prompt content.
-if printf '%%s' "$PROMPT" | grep -q "does this implement the task"; then
+if printf '%%s' "$PROMPT" | grep -q "DEFAULT verdict is DONE"; then
   # Track review call count.
   REVIEW_COUNT_FILE="$CAPTURE_DIR/review_count"
   COUNT=0
@@ -178,10 +215,10 @@ fi
 	return mockPath
 }
 
-// TestRunTask_ReviewUsesReadOnlyTools verifies the happy-path end-to-end:
-// execute → test → review, and that the review invocation uses read-only
-// tools and instructs the reviewer to read the actual source files.
-func TestRunTask_ReviewUsesReadOnlyTools(t *testing.T) {
+// TestRunTask_ReviewUsesVerificationTools verifies the happy-path end-to-end:
+// execute → test → review, and that the review invocation uses Bash+Read tools
+// with bypassPermissions for active verification.
+func TestRunTask_ReviewUsesVerificationTools(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -222,16 +259,30 @@ func TestRunTask_ReviewUsesReadOnlyTools(t *testing.T) {
 		t.Errorf("execute call should have full tools.\nGot --allowedTools: %s", execTools)
 	}
 
-	// Review call should be text-only via --disallowedTools.
-	reviewDisallowed := disallowedToolsFromArgs(t, reviewArgs)
-	if reviewDisallowed != "Bash,Write,Edit" {
-		t.Errorf("review call should disallow Bash,Write,Edit.\nGot --disallowedTools: %s", reviewDisallowed)
+	// Review call should use Bash,Read via --allowedTools.
+	reviewTools := allowedToolsFromArgs(t, reviewArgs)
+	if reviewTools != "Bash,Read" {
+		t.Errorf("review call should allow Bash,Read.\nGot --allowedTools: %s", reviewTools)
 	}
 
-	// Review prompt should contain the diff with the task context.
-	if !strings.Contains(reviewPrompt, "does this implement the task") {
-		t.Error("review prompt should ask whether diff implements the task")
+	// Review call should use bypassPermissions.
+	reviewPerm := permissionModeFromArgs(t, reviewArgs)
+	if reviewPerm != "bypassPermissions" {
+		t.Errorf("review call should use bypassPermissions.\nGot --permission-mode: %s", reviewPerm)
 	}
+
+	// Review call should have --max-turns to prevent runaway sessions.
+	reviewMaxTurns := maxTurnsFromArgs(t, reviewArgs)
+	if reviewMaxTurns == "" {
+		t.Error("review call should have --max-turns set")
+	}
+
+	// Review prompt should set acceptance as default.
+	if !strings.Contains(reviewPrompt, "DEFAULT verdict is DONE") {
+		t.Error("review prompt should frame DONE as the default verdict")
+	}
+
+	// Review prompt should contain the diff showing changed code.
 	if !strings.Contains(reviewPrompt, "main.go") || !strings.Contains(reviewPrompt, "fmt.Println") {
 		t.Error("review prompt should contain the diff showing changed code")
 	}
@@ -244,14 +295,25 @@ func TestRunTask_ReviewUsesReadOnlyTools(t *testing.T) {
 		t.Error("review prompt should contain the execute agent's output")
 	}
 
-	// Review prompt should contain file count in diff header.
-	if !strings.Contains(reviewPrompt, "files changed)") {
-		t.Error("review prompt should contain file count in diff header")
+	// Review prompt should contain file list in diff header.
+	if !strings.Contains(reviewPrompt, "files changed:") {
+		t.Error("review prompt should contain file list in diff header")
 	}
 
-	// Review prompt should contain condensed test summary, not raw output.
-	if !strings.Contains(reviewPrompt, "All tests passed.") {
-		t.Error("review prompt should contain condensed test summary")
+	// Review prompt should contain the Verification Checklist.
+	if !strings.Contains(reviewPrompt, "Verification Checklist") {
+		t.Error("review prompt should contain 'Verification Checklist'")
+	}
+	if !strings.Contains(reviewPrompt, "Scope Check") {
+		t.Error("review prompt should contain 'Scope Check'")
+	}
+	if !strings.Contains(reviewPrompt, "E2E Verification") {
+		t.Error("review prompt should contain 'E2E Verification'")
+	}
+
+	// Review prompt should support [remember] learning blocks.
+	if !strings.Contains(reviewPrompt, "[remember]") {
+		t.Error("review prompt should contain '[remember]' learning instruction")
 	}
 }
 
@@ -289,17 +351,21 @@ func TestRunTask_NeedsRevisionRetry(t *testing.T) {
 		t.Fatalf("expected at least 2 attempts, got %d", result.Attempts)
 	}
 
-	// Verify all review calls are text-only.
+	// Verify all review calls use Bash,Read with bypassPermissions.
 	calls := countCaptures(t, captureDir)
 	for i := 0; i < calls; i++ {
 		prompt := readCapture(t, captureDir, i, "prompt")
-		if !strings.Contains(prompt, "does this implement the task") {
+		if !strings.Contains(prompt, "DEFAULT verdict is DONE") {
 			continue // not a review call
 		}
 		args := readCapture(t, captureDir, i, "args")
-		disallowed := disallowedToolsFromArgs(t, args)
-		if disallowed != "Bash,Write,Edit" {
-			t.Errorf("review call %d should disallow Bash,Write,Edit.\nGot --disallowedTools: %s", i, disallowed)
+		tools := allowedToolsFromArgs(t, args)
+		if tools != "Bash,Read" {
+			t.Errorf("review call %d should allow Bash,Read.\nGot --allowedTools: %s", i, tools)
+		}
+		perm := permissionModeFromArgs(t, args)
+		if perm != "bypassPermissions" {
+			t.Errorf("review call %d should use bypassPermissions.\nGot --permission-mode: %s", i, perm)
 		}
 	}
 
@@ -408,16 +474,29 @@ func allowedToolsFromArgs(t *testing.T, args string) string {
 	return ""
 }
 
-// disallowedToolsFromArgs extracts the --disallowedTools value from captured args.
-func disallowedToolsFromArgs(t *testing.T, args string) string {
+// permissionModeFromArgs extracts the --permission-mode value from captured args.
+func permissionModeFromArgs(t *testing.T, args string) string {
 	t.Helper()
 	lines := strings.Split(args, "\n")
 	for i, line := range lines {
-		if line == "--disallowedTools" && i+1 < len(lines) {
+		if line == "--permission-mode" && i+1 < len(lines) {
 			return lines[i+1]
 		}
 	}
-	t.Fatal("--disallowedTools not found in captured args")
+	t.Fatal("--permission-mode not found in captured args")
+	return ""
+}
+
+// maxTurnsFromArgs extracts the --max-turns value from captured args.
+func maxTurnsFromArgs(t *testing.T, args string) string {
+	t.Helper()
+	lines := strings.Split(args, "\n")
+	for i, line := range lines {
+		if line == "--max-turns" && i+1 < len(lines) {
+			return lines[i+1]
+		}
+	}
+	t.Fatal("--max-turns not found in captured args")
 	return ""
 }
 
@@ -496,5 +575,80 @@ func TestTruncate(t *testing.T) {
 	}
 	if !strings.Contains(result, "... (truncated)") {
 		t.Error("truncated result should contain truncation marker")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests: extractLearnings
+// ---------------------------------------------------------------------------
+
+func TestExtractLearnings(t *testing.T) {
+	input := `VERDICT: done
+Everything looks good.
+[remember]The auth module uses JWT tokens with 24h expiry[/remember]
+Some more text.
+[remember]API endpoints are in internal/api/routes.go[/remember]`
+
+	cleaned, learnings := extractLearnings(input)
+
+	if len(learnings) != 2 {
+		t.Fatalf("expected 2 learnings, got %d: %v", len(learnings), learnings)
+	}
+	if learnings[0] != "The auth module uses JWT tokens with 24h expiry" {
+		t.Errorf("learning[0] = %q, want JWT token info", learnings[0])
+	}
+	if learnings[1] != "API endpoints are in internal/api/routes.go" {
+		t.Errorf("learning[1] = %q, want API routes info", learnings[1])
+	}
+	if strings.Contains(cleaned, "[remember]") {
+		t.Error("cleaned text should not contain [remember] tags")
+	}
+	if !strings.Contains(cleaned, "VERDICT: done") {
+		t.Error("cleaned text should preserve non-learning content")
+	}
+}
+
+func TestExtractLearnings_None(t *testing.T) {
+	input := "VERDICT: done\nAll checks pass."
+	cleaned, learnings := extractLearnings(input)
+
+	if len(learnings) != 0 {
+		t.Fatalf("expected 0 learnings, got %d", len(learnings))
+	}
+	if cleaned != input {
+		t.Errorf("cleaned text should be unchanged when no learnings present")
+	}
+}
+
+// TestRunTask_ReviewerLearningsInResult verifies that [remember] blocks
+// from the reviewer are extracted and propagated to TaskResult.ReviewerLearnings.
+func TestRunTask_ReviewerLearningsInResult(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	repoDir, auxDir := setupTestRepo(t)
+	mockBin := writeMockClaude(t, auxDir, []string{
+		"VERDICT: done\\nLooks good.\\n[remember]main.go uses fmt for printing[/remember]",
+	})
+
+	p := New(Config{
+		ClaudeBinary: mockBin,
+		WorkDir:      repoDir,
+		TestCmd:      "true",
+		MaxRetries:   1,
+	})
+
+	result := p.RunTask(context.Background(), "Add hello world print", "", nopProgress)
+
+	if result.Verdict != VerdictDone {
+		t.Fatalf("expected VerdictDone, got %s: %s", result.Verdict, result.Summary)
+	}
+
+	if len(result.ReviewerLearnings) != 1 {
+		t.Fatalf("expected 1 reviewer learning, got %d: %v", len(result.ReviewerLearnings), result.ReviewerLearnings)
+	}
+	if result.ReviewerLearnings[0] != "main.go uses fmt for printing" {
+		t.Errorf("learning = %q, want 'main.go uses fmt for printing'", result.ReviewerLearnings[0])
 	}
 }

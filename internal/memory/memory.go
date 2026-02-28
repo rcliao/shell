@@ -5,12 +5,27 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	agentmemory "github.com/rcliao/agent-memory"
 )
+
+// ProfileConfig configures memory behavior for a specific agent profile.
+type ProfileConfig struct {
+	SystemNamespaces []string
+	SystemBudget     int
+	GlobalNamespaces []string
+	GlobalBudget     int
+	Budget           int
+	ExchangeTTL      string // "7d", "30d"
+	ExchangeMaxUser  int    // 0 = default 200
+	ExchangeMaxReply int    // 0 = default 300
+	MemoryDirectives bool
+	DirectiveNS      string // target NS for [remember] blocks
+}
 
 // Memory wraps an agent-memory store for relay use.
 type Memory struct {
@@ -20,10 +35,12 @@ type Memory struct {
 	globalBudget     int
 	systemNamespaces []string
 	systemBudget     int
+	profiles         map[string]ProfileConfig
+	chatProfiles     map[int64]string
 }
 
 // New opens or creates a memory store at the given path.
-func New(dbPath string, budget int, globalNamespaces []string, globalBudget int, systemNamespaces []string, systemBudget int) (*Memory, error) {
+func New(dbPath string, budget int, globalNamespaces []string, globalBudget int, systemNamespaces []string, systemBudget int, profiles map[string]ProfileConfig, chatProfiles map[int64]string) (*Memory, error) {
 	s, err := agentmemory.NewSQLiteStore(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open memory store: %w", err)
@@ -44,21 +61,44 @@ func New(dbPath string, budget int, globalNamespaces []string, globalBudget int,
 		globalBudget:     globalBudget,
 		systemNamespaces: systemNamespaces,
 		systemBudget:     systemBudget,
+		profiles:         profiles,
+		chatProfiles:     chatProfiles,
 	}, nil
 }
 
+// profileFor resolves the profile for a chat, falling back to top-level defaults.
+func (m *Memory) profileFor(chatID int64) ProfileConfig {
+	if name, ok := m.chatProfiles[chatID]; ok {
+		if p, ok := m.profiles[name]; ok {
+			return p
+		}
+	}
+	// Default profile from top-level config values
+	return ProfileConfig{
+		SystemNamespaces: m.systemNamespaces,
+		SystemBudget:     m.systemBudget,
+		GlobalNamespaces: m.globalNamespaces,
+		GlobalBudget:     m.globalBudget,
+		Budget:           m.budget,
+		ExchangeTTL:      "7d",
+		ExchangeMaxUser:  200,
+		ExchangeMaxReply: 300,
+	}
+}
+
 // SystemPrompt returns always-on context loaded via List() (no search).
-// Returns empty string if no system namespaces are configured or no memories found.
-func (m *Memory) SystemPrompt(ctx context.Context) string {
-	if len(m.systemNamespaces) == 0 {
+// Uses the profile for the given chatID to determine namespaces and budget.
+func (m *Memory) SystemPrompt(ctx context.Context, chatID int64) string {
+	prof := m.profileFor(chatID)
+	if len(prof.SystemNamespaces) == 0 {
 		return ""
 	}
 
-	charBudget := m.systemBudget * 4
+	charBudget := prof.SystemBudget * 4
 	var sb strings.Builder
 	used := 0
 
-	for _, ns := range m.systemNamespaces {
+	for _, ns := range prof.SystemNamespaces {
 		// Derive a section heading from the last segment of the namespace.
 		// e.g. "openclaw:identity" → "Identity"
 		heading := ns
@@ -103,11 +143,12 @@ func namespace(chatID int64) string {
 // InjectContext fetches relevant memories and prepends them to the user message.
 // It queries two layers: global background context and per-chat conversation memories.
 func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string) string {
+	prof := m.profileFor(chatID)
 	var sb strings.Builder
 
 	// Layer 1: global background context
-	if len(m.globalNamespaces) > 0 {
-		globalMems := m.fetchGlobalContext(ctx, userMsg)
+	if len(prof.GlobalNamespaces) > 0 && prof.GlobalBudget > 0 {
+		globalMems := m.fetchGlobalContextFor(ctx, userMsg, prof.GlobalNamespaces, prof.GlobalBudget)
 		if len(globalMems) > 0 {
 			sb.WriteString("[Background context]\n")
 			for _, mem := range globalMems {
@@ -124,7 +165,7 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 	result, err := m.store.Context(ctx, agentmemory.ContextParams{
 		NS:     ns + "*",
 		Query:  userMsg,
-		Budget: m.budget,
+		Budget: prof.Budget,
 	})
 	if err != nil {
 		slog.Warn("memory context fetch failed", "error", err)
@@ -146,13 +187,13 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 	return sb.String()
 }
 
-// fetchGlobalContext queries each global namespace pattern, merges results by score,
+// fetchGlobalContextFor queries each global namespace pattern, merges results by score,
 // and trims to the global character budget.
-func (m *Memory) fetchGlobalContext(ctx context.Context, query string) []agentmemory.ContextMemory {
-	charBudget := m.globalBudget * 4
+func (m *Memory) fetchGlobalContextFor(ctx context.Context, query string, namespaces []string, budget int) []agentmemory.ContextMemory {
+	charBudget := budget * 4
 
 	var all []agentmemory.ContextMemory
-	for _, ns := range m.globalNamespaces {
+	for _, ns := range namespaces {
 		pattern := ns
 		if !strings.HasSuffix(pattern, "*") {
 			pattern += "*"
@@ -160,7 +201,7 @@ func (m *Memory) fetchGlobalContext(ctx context.Context, query string) []agentme
 		result, err := m.store.Context(ctx, agentmemory.ContextParams{
 			NS:     pattern,
 			Query:  query,
-			Budget: m.globalBudget,
+			Budget: budget,
 		})
 		if err != nil {
 			slog.Warn("global context fetch failed", "ns", ns, "error", err)
@@ -189,16 +230,30 @@ func (m *Memory) fetchGlobalContext(ctx context.Context, query string) []agentme
 
 // LogExchange stores a summary of the user/assistant exchange as episodic memory.
 func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, response string) {
+	prof := m.profileFor(chatID)
 	ns := namespace(chatID)
 
-	// Truncate for storage — keep a reasonable summary
+	maxUser := prof.ExchangeMaxUser
+	if maxUser <= 0 {
+		maxUser = 200
+	}
+	maxReply := prof.ExchangeMaxReply
+	if maxReply <= 0 {
+		maxReply = 300
+	}
+
 	summary := userMsg
-	if len(summary) > 200 {
-		summary = summary[:200] + "..."
+	if len(summary) > maxUser {
+		summary = summary[:maxUser] + "..."
 	}
 	respSummary := response
-	if len(respSummary) > 300 {
-		respSummary = respSummary[:300] + "..."
+	if len(respSummary) > maxReply {
+		respSummary = respSummary[:maxReply] + "..."
+	}
+
+	ttl := prof.ExchangeTTL
+	if ttl == "" {
+		ttl = "7d"
 	}
 
 	content := fmt.Sprintf("User: %s\nAssistant: %s", summary, respSummary)
@@ -208,7 +263,7 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 		Key:     fmt.Sprintf("exchange-%d", time.Now().UnixMilli()),
 		Content: content,
 		Kind:    "episodic",
-		TTL:     "7d",
+		TTL:     ttl,
 	})
 	if err != nil {
 		slog.Warn("failed to log exchange to memory", "error", err)
@@ -256,12 +311,97 @@ func (m *Memory) ListMemories(ctx context.Context, chatID int64) (string, error)
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Stored memories:\n\n")
+	sb.WriteString("## Memories\n\n")
 	for i, mem := range memories {
-		sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, mem.Key, mem.Content))
+		sb.WriteString(fmt.Sprintf("%d. **%s** — %s\n", i+1, mem.Key, mem.Content))
 	}
-	sb.WriteString(fmt.Sprintf("\nTotal: %d memories", len(memories)))
+	sb.WriteString(fmt.Sprintf("\n---\n\n*%d memories stored*", len(memories)))
 	return sb.String(), nil
+}
+
+// directiveRe matches [remember kind=procedural]...[/remember] blocks.
+var directiveRe = regexp.MustCompile(`(?s)\[remember(?:\s+kind=(\w+))?\]\s*(.*?)\s*\[/remember\]`)
+
+// ParseMemoryDirectives extracts [remember]...[/remember] blocks from the response,
+// stores them to the profile's directive namespace, and returns the cleaned response.
+// Only active when the chat's profile has MemoryDirectives enabled.
+func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, response string) string {
+	prof := m.profileFor(chatID)
+	if !prof.MemoryDirectives || prof.DirectiveNS == "" {
+		return response
+	}
+
+	matches := directiveRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response
+	}
+
+	clean := response
+	for i := len(matches) - 1; i >= 0; i-- {
+		loc := matches[i]
+		kind := "semantic"
+		if loc[2] >= 0 && loc[3] >= 0 {
+			kind = response[loc[2]:loc[3]]
+		}
+		content := strings.TrimSpace(response[loc[4]:loc[5]])
+		clean = clean[:loc[0]] + clean[loc[1]:]
+
+		// Store the directive
+		_, err := m.store.Put(ctx, agentmemory.PutParams{
+			NS:      prof.DirectiveNS,
+			Key:     fmt.Sprintf("learning-%d", time.Now().UnixMilli()),
+			Content: content,
+			Kind:    kind,
+		})
+		if err != nil {
+			slog.Warn("failed to store memory directive", "ns", prof.DirectiveNS, "error", err)
+		} else {
+			slog.Info("stored memory directive", "ns", prof.DirectiveNS, "kind", kind, "len", len(content))
+		}
+	}
+
+	return strings.TrimSpace(clean)
+}
+
+// ReviewerContext queries the store for relevant reviewer learnings in the given
+// namespace and returns a formatted bullet list. Returns "" if nothing relevant is found.
+func (m *Memory) ReviewerContext(ctx context.Context, namespace, query string, budget int) string {
+	if budget <= 0 {
+		budget = 500
+	}
+	result, err := m.store.Context(ctx, agentmemory.ContextParams{
+		NS:     namespace + "*",
+		Query:  query,
+		Budget: budget,
+	})
+	if err != nil {
+		slog.Warn("reviewer context fetch failed", "ns", namespace, "error", err)
+		return ""
+	}
+	if len(result.Memories) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, mem := range result.Memories {
+		sb.WriteString("- ")
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// StoreReviewerLearning stores a reviewer learning as semantic/high-priority memory.
+// No TTL — critical flow knowledge shouldn't expire.
+func (m *Memory) StoreReviewerLearning(ctx context.Context, namespace, content string) error {
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:       namespace,
+		Key:      fmt.Sprintf("reviewer-%d", time.Now().UnixMilli()),
+		Content:  content,
+		Kind:     "semantic",
+		Priority: "high",
+	})
+	return err
 }
 
 // Close closes the underlying store.

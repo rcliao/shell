@@ -113,14 +113,19 @@ type Bridge struct {
 	repoDir      string // main repository working directory
 	worktreeDir  string // base directory for worktree checkouts
 
+	reactionMap map[string]string // emoji → action (e.g. "👍":"go")
+
 	planMu   sync.Mutex
 	planRuns map[int64]*planRun
 }
 
-func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string) *Bridge {
+func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
+	}
+	if reactionMap == nil {
+		reactionMap = config.DefaultReactionMap()
 	}
 	return &Bridge{
 		proc:        proc,
@@ -130,6 +135,7 @@ func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *plan
 		useWorktree: useWorktree,
 		repoDir:     repoDir,
 		worktreeDir: wtDir,
+		reactionMap: reactionMap,
 		planRuns:    make(map[int64]*planRun),
 	}
 }
@@ -140,20 +146,25 @@ func (b *Bridge) SetNotifier(fn NotifyFunc) {
 }
 
 // HandleReaction processes an emoji reaction as a user action.
-// 👍 confirms (equivalent to "go"), 👎 cancels (equivalent to "stop").
+// The emoji→action mapping is controlled by Config.Telegram.ReactionMap.
 // Returns a response message if the reaction triggered an action, or empty string if ignored.
 func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, emoji string) (string, error) {
-	var text string
-	switch emoji {
-	case "👍":
-		text = "go"
-	case "👎":
-		text = "stop"
-	default:
+	action, ok := b.reactionMap[emoji]
+	if !ok || action == "" {
 		return "", nil
 	}
 
-	// Only act on reactions when a plan is in an interactive state.
+	// Actions that work regardless of plan state.
+	switch action {
+	case "status":
+		return b.Status(chatID)
+	case "cancel":
+		return b.PlanStop(chatID)
+	case "retry":
+		return b.PlanRetry(ctx, chatID)
+	}
+
+	// Remaining actions ("go", "stop", or custom) require an interactive plan.
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
 	b.planMu.Unlock()
@@ -164,9 +175,9 @@ func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, emoji string)
 
 	switch run.state {
 	case planStateDrafting:
-		return b.handlePlanDraft(ctx, chatID, text)
+		return b.handlePlanDraft(ctx, chatID, action)
 	case planStateBlocked:
-		return b.handlePlanBlocked(ctx, chatID, text)
+		return b.handlePlanBlocked(ctx, chatID, action)
 	default:
 		return "", nil
 	}
@@ -217,7 +228,7 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	// Build system prompt from memory if available.
 	systemPrompt := ""
 	if b.memory != nil {
-		systemPrompt = b.memory.SystemPrompt(ctx)
+		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
 	}
 
 	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt)
@@ -241,6 +252,11 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	// Extract and send relay directives (messages to other chats)
 	response, relays := parseRelayDirectives(response)
 	b.sendRelays(relays)
+
+	// Parse memory directives ([remember]...[/remember])
+	if b.memory != nil {
+		response = b.memory.ParseMemoryDirectives(ctx, chatID, response)
+	}
 
 	// Log assistant response
 	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
@@ -305,7 +321,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	// Build system prompt from memory if available.
 	systemPrompt := ""
 	if b.memory != nil {
-		systemPrompt = b.memory.SystemPrompt(ctx)
+		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
 	}
 
 	// Send to Claude with streaming
@@ -330,6 +346,11 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	// Extract and send relay directives (messages to other chats)
 	response, relays := parseRelayDirectives(response)
 	b.sendRelays(relays)
+
+	// Parse memory directives ([remember]...[/remember])
+	if b.memory != nil {
+		response = b.memory.ParseMemoryDirectives(ctx, chatID, response)
+	}
 
 	// Log assistant response
 	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
@@ -426,7 +447,12 @@ func (b *Bridge) Status(chatID int64) (string, error) {
 	}
 
 	return fmt.Sprintf(
-		"Session: %s\nStatus: %s\nMessages: %d\nCreated: %s\nLast active: %s",
+		"## Status\n\n"+
+			"**Session:** `%s`\n"+
+			"**Status:** %s\n"+
+			"**Messages:** %d\n"+
+			"**Created:** %s\n"+
+			"**Last active:** %s",
 		sess.ClaudeSessionID[:12]+"...",
 		status,
 		len(msgs),
@@ -436,25 +462,27 @@ func (b *Bridge) Status(chatID int64) (string, error) {
 }
 
 func (b *Bridge) Help() string {
-	help := "teeny-relay — Telegram ↔ Claude Code bridge\n\n" +
+	help := "## teeny-relay\n\n" +
+		"Telegram ↔ Claude Code bridge\n\n" +
 		"Send any message to chat with Claude Code.\n\n" +
-		"Commands:\n" +
-		"/new — Start a fresh conversation\n" +
-		"/status — Show current session info\n" +
-		"/remember <text> — Save a memory for future conversations\n" +
-		"/forget <key> — Remove a stored memory\n" +
-		"/memories — List all stored memories\n"
+		"---\n\n" +
+		"### Commands\n\n" +
+		"- `/new` — Start a fresh conversation\n" +
+		"- `/status` — Show current session info\n" +
+		"- `/remember <text>` — Save a memory\n" +
+		"- `/forget <key>` — Remove a stored memory\n" +
+		"- `/memories` — List all stored memories\n"
 
 	if b.plan != nil {
-		help += "\nPlan execution:\n" +
-			"/plan <goal> — Draft and run an autonomous plan\n" +
-			"/planstatus — Check plan progress\n" +
-			"/planstop — Cancel running plan\n" +
-			"/planskip — Skip blocked task, continue with next\n" +
-			"/planretry — Retry blocked task automatically\n"
+		help += "\n### Plan execution\n\n" +
+			"- `/plan <goal>` — Draft and run an autonomous plan\n" +
+			"- `/planstatus` — Check plan progress\n" +
+			"- `/planstop` — Cancel running plan\n" +
+			"- `/planskip` — Skip blocked task, continue with next\n" +
+			"- `/planretry` — Retry blocked task automatically\n"
 	}
 
-	help += "\n/help — Show this help message"
+	help += "\n---\n\n`/help` — Show this help message"
 	return help
 }
 
@@ -662,6 +690,9 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 			b.planMu.Unlock()
 		}
 
+		// Store reviewer learnings to memory.
+		b.storeReviewerLearnings(planCtx, run)
+
 		// Handle worktree cleanup on completion
 		b.cleanupWorktree(run)
 
@@ -711,6 +742,8 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 			slog.Info("plan execution using worktree", "chat_id", chatID, "repo", repoDir, "branch", branch, "path", wtPath)
 		}
 	}
+	// Inject reviewer memory (critical flows) before execution.
+	execPlan = b.injectReviewerMemory(ctx, execPlan)
 	run.execPlanner = execPlan
 
 	b.planMu.Lock()
@@ -743,6 +776,9 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 			run.done = true
 		}
 		b.planMu.Unlock()
+
+		// Store reviewer learnings to memory.
+		b.storeReviewerLearnings(planCtx, run)
 
 		// Handle worktree cleanup
 		b.cleanupWorktree(run)
@@ -986,6 +1022,44 @@ func (b *Bridge) formatBlockedSummary(run *planRun) string {
 
 	sb.WriteString("\nReply with guidance to retry, or use:\n/planskip — skip this task\n/planretry — retry automatically\n/planstop — cancel the plan")
 	return sb.String()
+}
+
+// reviewerNamespace returns the memory namespace for reviewer learnings.
+func reviewerNamespace(workDir string) string {
+	return "reviewer:" + workDir
+}
+
+// injectReviewerMemory queries reviewer memory and returns a planner with
+// critical flows set. Returns the original planner if memory is unavailable.
+func (b *Bridge) injectReviewerMemory(ctx context.Context, pl *planner.Planner) *planner.Planner {
+	if b.memory == nil {
+		return pl
+	}
+	ns := reviewerNamespace(pl.WorkDir())
+	flows := b.memory.ReviewerContext(ctx, ns, "critical flows verification review", 500)
+	if flows == "" {
+		return pl
+	}
+	return pl.WithCriticalFlows(flows)
+}
+
+// storeReviewerLearnings persists reviewer learnings from a plan run.
+func (b *Bridge) storeReviewerLearnings(ctx context.Context, run *planRun) {
+	if b.memory == nil {
+		return
+	}
+	execPlan := run.execPlanner
+	if execPlan == nil {
+		return
+	}
+	ns := reviewerNamespace(execPlan.WorkDir())
+	for _, result := range run.results {
+		for _, learning := range result.ReviewerLearnings {
+			if err := b.memory.StoreReviewerLearning(ctx, ns, learning); err != nil {
+				slog.Warn("failed to store reviewer learning", "ns", ns, "error", err)
+			}
+		}
+	}
 }
 
 // buildCompletedContext creates a summary string from completed task results.

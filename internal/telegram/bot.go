@@ -83,8 +83,14 @@ func (b *Bot) SendText(chatID int64, text string) {
 			ParseMode: models.ParseModeMarkdown,
 		})
 		if err != nil {
-			slog.Error("failed to send notification", "error", err, "chat_id", chatID)
-			return
+			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID)
+			_, err = b.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   chunk,
+			})
+			if err != nil {
+				slog.Error("failed to send notification", "error", err, "chat_id", chatID)
+			}
 		}
 	}
 }

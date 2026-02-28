@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -19,8 +20,37 @@ type Config struct {
 }
 
 type TelegramConfig struct {
-	TokenEnv     string  `json:"token_env"`
-	AllowedUsers []int64 `json:"allowed_users"`
+	TokenEnv     string            `json:"token_env"`
+	AllowedUsers []int64           `json:"allowed_users"`
+	ReactionMap  map[string]string `json:"reaction_map"` // emoji → action (e.g. "👍":"go", "👎":"stop")
+}
+
+// UnmarshalJSON replaces (rather than merges) the ReactionMap when the user
+// provides one in JSON config, so custom maps fully override the defaults.
+func (t *TelegramConfig) UnmarshalJSON(data []byte) error {
+	type Alias TelegramConfig
+	aux := (*Alias)(t)
+	hadDefaults := len(t.ReactionMap) > 0
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	// json.Unmarshal merges maps. If the user supplied a reaction_map key we
+	// need to drop any leftover default entries. Detect this by checking
+	// whether the raw JSON contains "reaction_map".
+	if hadDefaults {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err == nil {
+			if _, provided := raw["reaction_map"]; provided {
+				// Re-decode only the user-supplied map.
+				var userMap struct {
+					ReactionMap map[string]string `json:"reaction_map"`
+				}
+				json.Unmarshal(data, &userMap)
+				t.ReactionMap = userMap.ReactionMap
+			}
+		}
+	}
+	return nil
 }
 
 type ClaudeConfig struct {
@@ -40,14 +70,42 @@ type DaemonConfig struct {
 	PIDFile string `json:"pid_file"`
 }
 
+type Profile struct {
+	SystemNamespaces []string `json:"system_namespaces"`
+	SystemBudget     int      `json:"system_budget"`
+	GlobalNamespaces []string `json:"global_namespaces"`
+	GlobalBudget     int      `json:"global_budget"`
+	Budget           int      `json:"budget"`
+	ExchangeTTL      string   `json:"exchange_ttl"`       // "7d", "30d"
+	ExchangeMaxUser  int      `json:"exchange_max_user"`  // 0 = default 200
+	ExchangeMaxReply int      `json:"exchange_max_reply"` // 0 = default 300
+	MemoryDirectives bool     `json:"memory_directives"`
+	DirectiveNS      string   `json:"directive_ns"` // target NS for [remember] blocks
+}
+
 type MemoryConfig struct {
-	DBPath           string   `json:"db_path"`
-	Enabled          bool     `json:"enabled"`
-	Budget           int      `json:"budget"`            // token budget for context injection
-	GlobalNamespaces []string `json:"global_namespaces"` // namespace patterns for background context
-	GlobalBudget     int      `json:"global_budget"`     // token budget for global context (default 500)
-	SystemNamespaces []string `json:"system_namespaces"` // always-on via --append-system-prompt (no search)
-	SystemBudget     int      `json:"system_budget"`     // token cap for system prompt (default 3000)
+	DBPath           string            `json:"db_path"`
+	Enabled          bool              `json:"enabled"`
+	Budget           int               `json:"budget"`            // token budget for context injection
+	GlobalNamespaces []string          `json:"global_namespaces"` // namespace patterns for background context
+	GlobalBudget     int               `json:"global_budget"`     // token budget for global context (default 500)
+	SystemNamespaces []string          `json:"system_namespaces"` // always-on via --append-system-prompt (no search)
+	SystemBudget     int               `json:"system_budget"`     // token cap for system prompt (default 3000)
+	Profiles         map[string]Profile `json:"profiles"`          // name → profile
+	ChatProfiles     map[string]string  `json:"chat_profiles"`     // chatID string → profile name
+}
+
+// ChatProfileMap converts string chatID keys to int64.
+func (m MemoryConfig) ChatProfileMap() map[int64]string {
+	out := make(map[int64]string, len(m.ChatProfiles))
+	for k, v := range m.ChatProfiles {
+		id, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			continue
+		}
+		out[id] = v
+	}
+	return out
 }
 
 type ReloadConfig struct {
@@ -58,12 +116,32 @@ type ReloadConfig struct {
 
 type PlannerConfig struct {
 	Enabled              bool          `json:"enabled"`
-	TestCmd              string        `json:"test_cmd"`              // test command (e.g. "go test ./...")
-	Conventions          string        `json:"conventions"`           // inline conventions text for the reviewer
-	MaxRetries           int           `json:"max_retries"`           // retries per task on needs_revision
+	TestCmd              string        `json:"test_cmd"`               // test command (e.g. "go test ./...")
+	Conventions          string        `json:"conventions"`            // inline conventions text for the reviewer
+	VerifyInstructions   string        `json:"verify_instructions"`    // E2E verification commands for reviewer
+	MaxRetries           int           `json:"max_retries"`            // retries per task on needs_revision
 	AutoApproveThreshold int           `json:"auto_approve_threshold"` // max diff lines to auto-approve (0 = always review)
-	Timeout              time.Duration `json:"timeout"`               // per-claude-invocation timeout (default 30m)
-	Worktree             bool          `json:"worktree"`              // isolate plan execution in a git worktree
+	Timeout              time.Duration `json:"timeout"`                // per-claude-invocation timeout (default 30m)
+	Worktree             bool          `json:"worktree"`               // isolate plan execution in a git worktree
+}
+
+// DefaultReactionMap returns the built-in emoji→action mapping.
+func DefaultReactionMap() map[string]string {
+	return map[string]string{
+		"👍": "go",
+		"👎": "stop",
+		"🔄": "retry",
+		"❌": "cancel",
+		"📋": "status",
+	}
+}
+
+// ReactionAction returns the action string for the given emoji, or "" if unmapped.
+func (t TelegramConfig) ReactionAction(emoji string) string {
+	if t.ReactionMap == nil {
+		return ""
+	}
+	return t.ReactionMap[emoji]
 }
 
 func DefaultConfigDir() string {
@@ -77,6 +155,7 @@ func Default() Config {
 		Telegram: TelegramConfig{
 			TokenEnv:     "TELEGRAM_BOT_TOKEN",
 			AllowedUsers: []int64{},
+			ReactionMap:  DefaultReactionMap(),
 		},
 		Claude: ClaudeConfig{
 			Binary:      "claude",

@@ -48,7 +48,25 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Initialize memory store if enabled
 	var mem *memory.Memory
 	if cfg.Memory.Enabled {
-		mem, err = memory.New(cfg.Memory.DBPath, cfg.Memory.Budget, cfg.Memory.GlobalNamespaces, cfg.Memory.GlobalBudget, cfg.Memory.SystemNamespaces, cfg.Memory.SystemBudget)
+		// Convert config profiles to memory ProfileConfig
+		profiles := make(map[string]memory.ProfileConfig, len(cfg.Memory.Profiles))
+		for name, p := range cfg.Memory.Profiles {
+			profiles[name] = memory.ProfileConfig{
+				SystemNamespaces: p.SystemNamespaces,
+				SystemBudget:     p.SystemBudget,
+				GlobalNamespaces: p.GlobalNamespaces,
+				GlobalBudget:     p.GlobalBudget,
+				Budget:           p.Budget,
+				ExchangeTTL:      p.ExchangeTTL,
+				ExchangeMaxUser:  p.ExchangeMaxUser,
+				ExchangeMaxReply: p.ExchangeMaxReply,
+				MemoryDirectives: p.MemoryDirectives,
+				DirectiveNS:      p.DirectiveNS,
+			}
+		}
+		chatProfiles := cfg.Memory.ChatProfileMap()
+
+		mem, err = memory.New(cfg.Memory.DBPath, cfg.Memory.Budget, cfg.Memory.GlobalNamespaces, cfg.Memory.GlobalBudget, cfg.Memory.SystemNamespaces, cfg.Memory.SystemBudget, profiles, chatProfiles)
 		if err != nil {
 			st.Close()
 			return nil, fmt.Errorf("init memory store: %w", err)
@@ -60,6 +78,8 @@ func New(cfg config.Config) (*Daemon, error) {
 			"global_budget", cfg.Memory.GlobalBudget,
 			"system_namespaces", cfg.Memory.SystemNamespaces,
 			"system_budget", cfg.Memory.SystemBudget,
+			"profiles", len(profiles),
+			"chat_profiles", len(chatProfiles),
 		)
 	}
 
@@ -72,6 +92,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			WorkDir:              cfg.Claude.WorkDir,
 			TestCmd:              cfg.Planner.TestCmd,
 			Conventions:          cfg.Planner.Conventions,
+			VerifyInstructions:   cfg.Planner.VerifyInstructions,
 			MaxRetries:           cfg.Planner.MaxRetries,
 			Timeout:              cfg.Planner.Timeout, // 0 → planner defaults to 30m
 			AutoApproveThreshold: cfg.Planner.AutoApproveThreshold,
@@ -80,7 +101,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	// Create bridge
-	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir)
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap)
 
 	// Create auth
 	auth := telegram.NewAuth(cfg.Telegram.AllowedUsers)

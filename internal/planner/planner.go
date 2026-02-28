@@ -26,12 +26,13 @@ const (
 
 // TaskResult describes what happened with a single task.
 type TaskResult struct {
-	Task       string
-	Verdict    Verdict
-	Summary    string // review output or error message
-	Attempts   int
-	Diff       string // git diff at time of failure
-	TestOutput string // test output at time of failure
+	Task              string
+	Verdict           Verdict
+	Summary           string   // review output or error message
+	Attempts          int
+	Diff              string   // git diff at time of failure
+	TestOutput        string   // test output at time of failure
+	ReviewerLearnings []string // [remember] blocks extracted from reviewer output
 }
 
 // ReviewPackage bundles everything the reviewer needs to make a verdict.
@@ -56,9 +57,11 @@ type Config struct {
 	WorkDir              string        // project working directory
 	TestCmd              string        // test command (e.g. "go test ./...")
 	Conventions          string        // conventions text for the reviewer
+	VerifyInstructions   string        // from config: E2E commands for the reviewer to run
 	MaxRetries           int           // retries per task on needs_revision
 	Timeout              time.Duration // per-claude-invocation timeout
 	AutoApproveThreshold int           // max diff lines to auto-approve without review
+	CriticalFlows        string        // injected by bridge from reviewer memory
 }
 
 // Planner orchestrates plan execution.
@@ -87,6 +90,13 @@ func (p *Planner) WorkDir() string {
 func (p *Planner) CloneWithWorkDir(workDir string) *Planner {
 	cfg := p.cfg
 	cfg.WorkDir = workDir
+	return &Planner{cfg: cfg}
+}
+
+// WithCriticalFlows returns a new Planner with CriticalFlows set.
+func (p *Planner) WithCriticalFlows(flows string) *Planner {
+	cfg := p.cfg
+	cfg.CriticalFlows = flows
 	return &Planner{cfg: cfg}
 }
 
@@ -122,6 +132,7 @@ func ParsePlan(planText string) []string {
 func (p *Planner) RunTask(ctx context.Context, task, completedContext string, progress ProgressFunc) TaskResult {
 	p.snapshotBase(ctx)
 	feedback := ""
+	var allLearnings []string
 
 	for attempt := 0; attempt <= p.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -133,7 +144,7 @@ func (p *Planner) RunTask(ctx context.Context, task, completedContext string, pr
 		execOutput, err := p.execute(ctx, task, feedback, completedContext)
 		if err != nil {
 			progress(fmt.Sprintf("Execution error: %v", err))
-			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: err.Error(), Attempts: attempt + 1, Diff: p.getDiff(ctx)}
+			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: err.Error(), Attempts: attempt + 1, Diff: p.getDiff(ctx), ReviewerLearnings: allLearnings}
 		}
 
 		// Step 2: Test
@@ -152,12 +163,12 @@ func (p *Planner) RunTask(ctx context.Context, task, completedContext string, pr
 		diffOutput := p.getDiff(ctx)
 		if diffOutput == "" {
 			progress("No changes detected. Skipping review.")
-			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "No changes needed", Attempts: attempt + 1}
+			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "No changes needed", Attempts: attempt + 1, ReviewerLearnings: allLearnings}
 		}
 
 		if p.shouldSkipReview(diffOutput, true) {
 			progress(fmt.Sprintf("Auto-approved (%d lines, threshold %d).", diffLineCount(diffOutput), p.cfg.AutoApproveThreshold))
-			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "Auto-approved: tests pass, diff within threshold", Attempts: attempt + 1}
+			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "Auto-approved: tests pass, diff within threshold", Attempts: attempt + 1, ReviewerLearnings: allLearnings}
 		}
 
 		// Step 4: Review
@@ -173,14 +184,15 @@ func (p *Planner) RunTask(ctx context.Context, task, completedContext string, pr
 		}
 
 		progress("Reviewing changes...")
-		verdict, reviewText := p.review(ctx, pkg)
+		verdict, reviewText, learnings := p.review(ctx, pkg)
+		allLearnings = append(allLearnings, learnings...)
 		progress(fmt.Sprintf("Review verdict: %s", verdict))
 
 		switch verdict {
 		case VerdictDone:
-			return TaskResult{Task: task, Verdict: VerdictDone, Summary: reviewText, Attempts: attempt + 1}
+			return TaskResult{Task: task, Verdict: VerdictDone, Summary: reviewText, Attempts: attempt + 1, ReviewerLearnings: allLearnings}
 		case VerdictNeedsHuman:
-			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: reviewText, Attempts: attempt + 1, Diff: diffOutput, TestOutput: testOutput}
+			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: reviewText, Attempts: attempt + 1, Diff: diffOutput, TestOutput: testOutput, ReviewerLearnings: allLearnings}
 		case VerdictNeedsRevision:
 			feedback = buildRetryFeedback(reviewText, diffOutput, changedFiles, attempt+1)
 			progress("Reviewer requested revision.")
@@ -188,7 +200,7 @@ func (p *Planner) RunTask(ctx context.Context, task, completedContext string, pr
 	}
 
 	// Exhausted retries
-	return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: "Exhausted retries. Last feedback:\n" + feedback, Attempts: p.cfg.MaxRetries + 1, Diff: p.getDiff(ctx), TestOutput: feedback}
+	return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: "Exhausted retries. Last feedback:\n" + feedback, Attempts: p.cfg.MaxRetries + 1, Diff: p.getDiff(ctx), TestOutput: feedback, ReviewerLearnings: allLearnings}
 }
 
 // RunPlan executes all tasks from a plan. Stops on first needs_human or failure.
@@ -241,6 +253,7 @@ func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, compl
 
 	// Same logic as RunTask but with pre-seeded feedback.
 	feedback := initialFeedback
+	var allLearnings []string
 
 	for attempt := 0; attempt <= p.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -251,7 +264,7 @@ func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, compl
 		execOutput, err := p.execute(ctx, task, feedback, completedContext)
 		if err != nil {
 			progress(fmt.Sprintf("Execution error: %v", err))
-			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: err.Error(), Attempts: attempt + 1, Diff: p.getDiff(ctx)}
+			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: err.Error(), Attempts: attempt + 1, Diff: p.getDiff(ctx), ReviewerLearnings: allLearnings}
 		}
 
 		progress("Running tests...")
@@ -268,12 +281,12 @@ func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, compl
 		diffOutput := p.getDiff(ctx)
 		if diffOutput == "" {
 			progress("No changes detected. Skipping review.")
-			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "No changes needed", Attempts: attempt + 1}
+			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "No changes needed", Attempts: attempt + 1, ReviewerLearnings: allLearnings}
 		}
 
 		if p.shouldSkipReview(diffOutput, true) {
 			progress(fmt.Sprintf("Auto-approved (%d lines, threshold %d).", diffLineCount(diffOutput), p.cfg.AutoApproveThreshold))
-			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "Auto-approved: tests pass, diff within threshold", Attempts: attempt + 1}
+			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "Auto-approved: tests pass, diff within threshold", Attempts: attempt + 1, ReviewerLearnings: allLearnings}
 		}
 
 		changedFiles := extractChangedFiles(diffOutput)
@@ -288,21 +301,22 @@ func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, compl
 		}
 
 		progress("Reviewing changes...")
-		verdict, reviewText := p.review(ctx, pkg)
+		verdict, reviewText, learnings := p.review(ctx, pkg)
+		allLearnings = append(allLearnings, learnings...)
 		progress(fmt.Sprintf("Review verdict: %s", verdict))
 
 		switch verdict {
 		case VerdictDone:
-			return TaskResult{Task: task, Verdict: VerdictDone, Summary: reviewText, Attempts: attempt + 1}
+			return TaskResult{Task: task, Verdict: VerdictDone, Summary: reviewText, Attempts: attempt + 1, ReviewerLearnings: allLearnings}
 		case VerdictNeedsHuman:
-			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: reviewText, Attempts: attempt + 1, Diff: diffOutput, TestOutput: testOutput}
+			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: reviewText, Attempts: attempt + 1, Diff: diffOutput, TestOutput: testOutput, ReviewerLearnings: allLearnings}
 		case VerdictNeedsRevision:
 			feedback = buildRetryFeedback(reviewText, diffOutput, changedFiles, attempt+1)
 			progress("Reviewer requested revision.")
 		}
 	}
 
-	return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: "Exhausted retries. Last feedback:\n" + feedback, Attempts: p.cfg.MaxRetries + 1, Diff: p.getDiff(ctx), TestOutput: feedback}
+	return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: "Exhausted retries. Last feedback:\n" + feedback, Attempts: p.cfg.MaxRetries + 1, Diff: p.getDiff(ctx), TestOutput: feedback, ReviewerLearnings: allLearnings}
 }
 
 // RunPlanFrom continues a plan from startIdx (0-based), skipping earlier tasks.
@@ -391,9 +405,10 @@ A reviewer found issues with your previous attempt. You MUST address this:
 }
 
 // review runs a second Claude invocation to evaluate the diff.
-// The reviewer is text-only (no tools) — it evaluates the diff and test
-// results provided inline, keeping it fast and deterministic.
-func (p *Planner) review(ctx context.Context, pkg ReviewPackage) (Verdict, string) {
+// The reviewer has Bash+Read tools for active verification. It follows a
+// structured checklist and can emit [remember] blocks for persistent learning.
+// Returns verdict, review text, and any extracted learnings.
+func (p *Planner) review(ctx context.Context, pkg ReviewPackage) (Verdict, string, []string) {
 	conventionsBlock := ""
 	if p.cfg.Conventions != "" {
 		conventionsBlock = fmt.Sprintf(`
@@ -409,60 +424,83 @@ func (p *Planner) review(ctx context.Context, pkg ReviewPackage) (Verdict, strin
 `, pkg.ExecSummary)
 	}
 
-	prompt := fmt.Sprintf(`You are reviewing whether an automated coding agent completed a task correctly.
-Tests have already passed. Your job is to check that the diff matches the task intent.
+	criticalFlowsBlock := "None recorded yet."
+	if p.cfg.CriticalFlows != "" {
+		criticalFlowsBlock = p.cfg.CriticalFlows
+	}
+
+	verifyBlock := "Use your judgment."
+	if p.cfg.VerifyInstructions != "" {
+		verifyBlock = p.cfg.VerifyInstructions
+	}
+
+	// Build a robust diff header — never show "0 files" when there's diff content.
+	diffHeader := "## Git Diff"
+	if n := len(pkg.ChangedFiles); n > 0 {
+		diffHeader = fmt.Sprintf("## Git Diff (%d files changed: %s)", n, strings.Join(pkg.ChangedFiles, ", "))
+	}
+
+	prompt := fmt.Sprintf(`You are an active verification gate. You have Bash and Read tools.
+An agent completed a task and ALL TESTS PASSED. Your DEFAULT verdict is DONE.
 
 ## Task
 %s
 %s%s
-## Git Diff (%d files changed)
+## Known Critical Flows
 %s
 
-## Test Results
+## E2E Verification Commands
 %s
 
-## Instructions
-Look at the diff and decide: does this implement the task?
+%s
+%s
 
-Accept (VERDICT: done) if:
-- The diff implements what the task asked for
-- Tests pass
-- No obvious bugs that would cause runtime failures
+## Verification Checklist
 
-Reject (VERDICT: needs_revision) ONLY if:
-- The diff has clear bugs (e.g. wrong variable, broken logic)
-- The diff is missing a key part of what the task asked for
-- Give specific, actionable feedback the agent can fix
+### 1. Scope Check
+Read the diff. Do the changes relate to the task?
 
-Escalate (VERDICT: needs_human) ONLY if:
-- The approach is fundamentally wrong and needs human guidance
-- There are clear convention violations (schema changes, new CLI commands, new interfaces not in the task)
+### 2. Completeness Check
+Does the diff cover all requirements explicitly stated in the task?
 
-Do NOT reject for:
-- Style preferences or minor idiom differences
-- Uncommitted changes (the planner commits after approval)
-- Things working correctly but done differently than you would
+### 3. E2E Verification
+Run verification commands. Report what you ran and the result.
 
-Respond with EXACTLY one verdict on the first line:
-VERDICT: done
-VERDICT: needs_revision
-VERDICT: needs_human
+### 4. Critical Flow Verification
+Check known critical flows still work. Read changed files for obvious bugs.
 
-Then a brief explanation.`, pkg.Task, conventionsBlock, execSummaryBlock, len(pkg.ChangedFiles), pkg.Diff, pkg.TestSummary)
+### 5. Summary
+Based on checks 1-4, give your verdict.
 
-	output, err := p.runClaudeTextOnly(ctx, prompt)
+## Decision Rules
+VERDICT: done — DEFAULT. Use when checks pass.
+VERDICT: needs_revision — ONLY when a check FAILed with evidence.
+VERDICT: needs_human — ONLY when approach is fundamentally wrong.
+
+## Learning
+If you discover something important about this codebase, emit:
+[remember]what you learned[/remember]
+
+Respond with EXACTLY this format:
+VERDICT: done|needs_revision|needs_human
+<brief explanation>`, pkg.Task, conventionsBlock, execSummaryBlock, criticalFlowsBlock, verifyBlock, diffHeader, pkg.Diff)
+
+	output, err := p.runClaudeReviewer(ctx, prompt)
 	if err != nil {
-		return VerdictNeedsHuman, fmt.Sprintf("Review failed: %v", err)
+		return VerdictNeedsHuman, fmt.Sprintf("Review failed: %v", err), nil
 	}
+
+	// Extract learnings before parsing verdict.
+	cleanedOutput, learnings := extractLearnings(output)
 
 	// Extract verdict
 	re := regexp.MustCompile(`VERDICT:\s*(done|needs_revision|needs_human)`)
-	match := re.FindStringSubmatch(output)
+	match := re.FindStringSubmatch(cleanedOutput)
 	if match == nil {
-		return VerdictNeedsHuman, "Could not parse reviewer verdict.\n\n" + output
+		return VerdictNeedsHuman, "Could not parse reviewer verdict.\n\n" + cleanedOutput, learnings
 	}
 
-	return Verdict(match[1]), output
+	return Verdict(match[1]), cleanedOutput, learnings
 }
 
 // extractChangedFiles parses a git diff to extract the list of changed file paths.
@@ -480,6 +518,16 @@ func extractChangedFiles(diff string) []string {
 		}
 	}
 
+	// Match deleted files: --- a/path/to/file (where +++ is /dev/null)
+	reDel := regexp.MustCompile(`(?m)^--- a/(.+)$`)
+	for _, m := range reDel.FindAllStringSubmatch(diff, -1) {
+		f := m[1]
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+
 	// Match new untracked files: --- new file: path/to/file ---
 	reNew := regexp.MustCompile(`(?m)^--- new file: (.+) ---$`)
 	for _, m := range reNew.FindAllStringSubmatch(diff, -1) {
@@ -487,6 +535,18 @@ func extractChangedFiles(diff string) []string {
 		if !seen[f] {
 			seen[f] = true
 			files = append(files, f)
+		}
+	}
+
+	// Fallback: parse "diff --git a/X b/Y" headers if nothing matched above.
+	if len(files) == 0 {
+		reGit := regexp.MustCompile(`(?m)^diff --git a/(.+) b/(.+)$`)
+		for _, m := range reGit.FindAllStringSubmatch(diff, -1) {
+			f := m[2] // prefer the "b/" (destination) path
+			if !seen[f] {
+				seen[f] = true
+				files = append(files, f)
+			}
 		}
 	}
 
@@ -647,6 +707,28 @@ func (p *Planner) runClaudeTextOnly(ctx context.Context, prompt string) (string,
 	})
 }
 
+// reviewTimeout caps how long the reviewer subprocess can run.
+// Much shorter than the execute timeout — the reviewer should verify, not explore.
+const reviewTimeout = 5 * time.Minute
+
+// reviewMaxTurns caps how many agentic tool-use turns the reviewer gets.
+// Enough for a few verification commands + file reads, not open-ended exploration.
+const reviewMaxTurns = 10
+
+// runClaudeReviewer spawns a Claude CLI subprocess with Bash+Read tools for
+// active verification. The reviewer can run commands and read files but cannot
+// modify the codebase (no Write/Edit). Capped at reviewMaxTurns turns and
+// reviewTimeout to prevent runaway sessions.
+func (p *Planner) runClaudeReviewer(ctx context.Context, prompt string) (string, error) {
+	reviewCtx, cancel := context.WithTimeout(ctx, reviewTimeout)
+	defer cancel()
+	return p.runClaudeWithArgs(reviewCtx, prompt, []string{
+		"--allowedTools", "Bash,Read",
+		"--permission-mode", "bypassPermissions",
+		"--max-turns", fmt.Sprintf("%d", reviewMaxTurns),
+	})
+}
+
 // runClaude spawns a Claude CLI subprocess with full tool access and
 // permissions bypassed. Used for task execution where the planner's
 // own test+review gates provide safety.
@@ -725,6 +807,36 @@ func filterEnv(env []string, name string) []string {
 		}
 	}
 	return filtered
+}
+
+// learningRe matches [remember]...[/remember] blocks in reviewer output.
+var learningRe = regexp.MustCompile(`(?s)\[remember\]\s*(.*?)\s*\[/remember\]`)
+
+// extractLearnings parses [remember]...[/remember] blocks from text.
+// Returns the cleaned text (blocks removed) and the list of learning strings.
+func extractLearnings(text string) (string, []string) {
+	matches := learningRe.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text, nil
+	}
+
+	var learnings []string
+	clean := text
+	for i := len(matches) - 1; i >= 0; i-- {
+		loc := matches[i]
+		content := strings.TrimSpace(text[loc[2]:loc[3]])
+		if content != "" {
+			learnings = append(learnings, content)
+		}
+		clean = clean[:loc[0]] + clean[loc[1]:]
+	}
+
+	// Reverse learnings to preserve original order (we iterated backwards).
+	for i, j := 0, len(learnings)-1; i < j; i, j = i+1, j-1 {
+		learnings[i], learnings[j] = learnings[j], learnings[i]
+	}
+
+	return strings.TrimSpace(clean), learnings
 }
 
 // DraftPlan asks Claude to generate a markdown checklist from a high-level

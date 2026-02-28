@@ -127,22 +127,22 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "h1 heading",
 			input: "# Hello World",
-			want:  "*__Hello World__*",
+			want:  "*__📌 Hello World__*",
 		},
 		{
 			name:  "h2 heading",
 			input: "## Sub Heading",
-			want:  "*Sub Heading*",
+			want:  "*▸ Sub Heading*",
 		},
 		{
 			name:  "h3 heading",
 			input: "### Details",
-			want:  "_Details_",
+			want:  "_· Details_",
 		},
 		{
 			name:  "heading with special chars",
 			input: "# Version 1.0!",
-			want:  "*__Version 1\\.0\\!__*",
+			want:  "*__📌 Version 1\\.0\\!__*",
 		},
 		{
 			name:  "hash not at line start",
@@ -152,7 +152,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "heading mid-text",
 			input: "intro\n# Title\nbody",
-			want:  "intro\n*__Title__*\nbody",
+			want:  "intro\n*__📌 Title__*\nbody",
 		},
 
 		// Bullet lists
@@ -229,6 +229,80 @@ func TestFormatForMarkdownV2(t *testing.T) {
 			want:  "\\- bullet\n1\\. numbered",
 		},
 
+		// Bullet lists with inline formatting
+		{
+			name:  "bullet list with bold",
+			input: "- **important** item",
+			want:  "\\- *important* item",
+		},
+		{
+			name:  "bullet list with italic",
+			input: "- *emphasis* here",
+			want:  "\\- _emphasis_ here",
+		},
+		{
+			name:  "bullet list with inline code",
+			input: "- use `fmt.Println` here",
+			want:  "\\- use `fmt.Println` here",
+		},
+		{
+			name:  "bullet list with link",
+			input: "- see [Google](https://google.com)",
+			want:  "\\- see [Google](https://google.com)",
+		},
+		{
+			name:  "bullet list with bold italic",
+			input: "- ***bold italic*** text",
+			want:  "\\- *_bold italic_* text",
+		},
+		{
+			name:  "bullet list with strikethrough",
+			input: "- ~~removed~~ text",
+			want:  "\\- ~removed~ text",
+		},
+		{
+			name:  "bullet list with spoiler",
+			input: "- ||hidden|| text",
+			want:  "\\- ||hidden|| text",
+		},
+		{
+			name:  "bullet list with multiple formatting",
+			input: "- **bold** and *italic* and `code`",
+			want:  "\\- *bold* and _italic_ and `code`",
+		},
+		{
+			name:  "multiline bullet list with formatting",
+			input: "- **bold** line\n- *italic* line",
+			want:  "\\- *bold* line\n\\- _italic_ line",
+		},
+
+		// Numbered lists with inline formatting
+		{
+			name:  "numbered list with bold",
+			input: "1. **important** item",
+			want:  "1\\. *important* item",
+		},
+		{
+			name:  "numbered list with italic",
+			input: "1. *emphasis* here",
+			want:  "1\\. _emphasis_ here",
+		},
+		{
+			name:  "numbered list with inline code",
+			input: "1. use `fmt.Println` here",
+			want:  "1\\. use `fmt.Println` here",
+		},
+		{
+			name:  "numbered list with link",
+			input: "1. see [Google](https://google.com)",
+			want:  "1\\. see [Google](https://google.com)",
+		},
+		{
+			name:  "numbered list with multiple formatting",
+			input: "1. **bold** and `code`\n2. *italic* text",
+			want:  "1\\. *bold* and `code`\n2\\. _italic_ text",
+		},
+
 		// Blockquotes
 		{
 			name:  "blockquote single line",
@@ -278,7 +352,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "blockquote mixed with heading",
 			input: "# Title\n> quoted line\nnormal text",
-			want:  "*__Title__*\n>quoted line\nnormal text",
+			want:  "*__📌 Title__*\n>quoted line\nnormal text",
 		},
 		{
 			name:  "blockquote mixed with bullet list",
@@ -310,6 +384,48 @@ func TestFormatForMarkdownV2(t *testing.T) {
 			input: "> **bold** line\n> *italic* line",
 			want:  ">*bold* line\n>_italic_ line",
 		},
+		{
+			name:  "blockquote block then text then blockquote",
+			input: "> block1 line1\n> block1 line2\ntext\n> block2",
+			want:  ">block1 line1\n>block1 line2\ntext\n>block2",
+		},
+		{
+			name:  "blockquote with empty line in middle",
+			input: "> first\n>\n> third",
+			want:  ">first\n>\n>third",
+		},
+
+		// Horizontal rules
+		{
+			name:  "horizontal rule with three dashes",
+			input: "---",
+			want:  "———",
+		},
+		{
+			name:  "horizontal rule with many dashes",
+			input: "-----",
+			want:  "———",
+		},
+		{
+			name:  "horizontal rule between paragraphs",
+			input: "above\n---\nbelow",
+			want:  "above\n———\nbelow",
+		},
+		{
+			name:  "horizontal rule with trailing spaces",
+			input: "---   ",
+			want:  "———",
+		},
+		{
+			name:  "two dashes is not a horizontal rule",
+			input: "--",
+			want:  `\-\-`,
+		},
+		{
+			name:  "dash with text is not a horizontal rule",
+			input: "--- text",
+			want:  `\-\-\- text`,
+		},
 
 		// Strikethrough
 		{
@@ -323,6 +439,33 @@ func TestFormatForMarkdownV2(t *testing.T) {
 			want:  `\~\~no closing`,
 		},
 
+		// Spoiler
+		{
+			name:  "spoiler",
+			input: "this is ||hidden|| text",
+			want:  `this is ||hidden|| text`,
+		},
+		{
+			name:  "spoiler with special chars",
+			input: "||secret! (info)||",
+			want:  `||secret\! \(info\)||`,
+		},
+		{
+			name:  "unmatched spoiler",
+			input: "||no closing",
+			want:  `\|\|no closing`,
+		},
+		{
+			name:  "spoiler with bold inside",
+			input: "see ||**hidden**|| here",
+			want:  `see ||\*\*hidden\*\*|| here`,
+		},
+		{
+			name:  "single pipe not spoiler",
+			input: "a | b",
+			want:  `a \| b`,
+		},
+
 		// Multiple formatting in sequence
 		{
 			name:  "bold then italic",
@@ -333,6 +476,227 @@ func TestFormatForMarkdownV2(t *testing.T) {
 			name:  "code then bold",
 			input: "use `code` or **bold**",
 			want:  "use `code` or *bold*",
+		},
+
+		// Nested bullet lists
+		{
+			name:  "nested bullet list two levels",
+			input: "- parent\n  - child",
+			want:  "\\- parent\n  \\- child",
+		},
+		{
+			name:  "nested bullet list three levels",
+			input: "- level 1\n  - level 2\n    - level 3",
+			want:  "\\- level 1\n  \\- level 2\n    \\- level 3",
+		},
+		{
+			name:  "nested bullet list with multiple children",
+			input: "- parent\n  - child 1\n  - child 2\n- sibling",
+			want:  "\\- parent\n  \\- child 1\n  \\- child 2\n\\- sibling",
+		},
+		{
+			name:  "nested bullet list with inline formatting",
+			input: "- **bold parent**\n  - *italic child*\n  - `code child`",
+			want:  "\\- *bold parent*\n  \\- _italic child_\n  \\- `code child`",
+		},
+		{
+			name:  "nested bullet list 4-space indent",
+			input: "- top\n    - nested",
+			want:  "\\- top\n    \\- nested",
+		},
+		{
+			name:  "nested bullet list with tab indent",
+			input: "- top\n\t- nested",
+			want:  "\\- top\n\t\\- nested",
+		},
+
+		// Nested numbered lists
+		{
+			name:  "nested numbered list two levels",
+			input: "1. parent\n   1. child",
+			want:  "1\\. parent\n   1\\. child",
+		},
+		{
+			name:  "nested numbered list three levels",
+			input: "1. level 1\n   1. level 2\n      1. level 3",
+			want:  "1\\. level 1\n   1\\. level 2\n      1\\. level 3",
+		},
+		{
+			name:  "nested numbered list with multiple children",
+			input: "1. parent\n   1. child 1\n   2. child 2\n2. sibling",
+			want:  "1\\. parent\n   1\\. child 1\n   2\\. child 2\n2\\. sibling",
+		},
+		{
+			name:  "nested numbered list with formatting",
+			input: "1. **bold parent**\n   1. *italic child*",
+			want:  "1\\. *bold parent*\n   1\\. _italic child_",
+		},
+
+		// Mixed nested lists (bullet under numbered, numbered under bullet)
+		{
+			name:  "bullet under numbered",
+			input: "1. numbered\n   - bullet child",
+			want:  "1\\. numbered\n   \\- bullet child",
+		},
+		{
+			name:  "numbered under bullet",
+			input: "- bullet\n  1. numbered child",
+			want:  "\\- bullet\n  1\\. numbered child",
+		},
+		{
+			name:  "deeply mixed nesting",
+			input: "- bullet\n  1. number\n    - sub-bullet\n      2. deep number",
+			want:  "\\- bullet\n  1\\. number\n    \\- sub\\-bullet\n      2\\. deep number",
+		},
+
+		// Nested lists with surrounding content
+		{
+			name:  "nested list after heading",
+			input: "## Items\n- parent\n  - child",
+			want:  "*▸ Items*\n\\- parent\n  \\- child",
+		},
+		{
+			name:  "nested list between paragraphs",
+			input: "intro\n- parent\n  - child\noutro",
+			want:  "intro\n\\- parent\n  \\- child\noutro",
+		},
+		{
+			name:  "nested list with link child",
+			input: "- see below\n  - [Google](https://google.com)",
+			want:  "\\- see below\n  \\- [Google](https://google.com)",
+		},
+
+		// Asterisk bullet lists
+		{
+			name:  "asterisk bullet single item",
+			input: "* item one",
+			want:  `\* item one`,
+		},
+		{
+			name:  "asterisk bullet multiple items",
+			input: "* first\n* second\n* third",
+			want:  "\\* first\n\\* second\n\\* third",
+		},
+		{
+			name:  "asterisk bullet with inline formatting",
+			input: "* **bold** and *italic*",
+			want:  "\\* *bold* and _italic_",
+		},
+		{
+			name:  "nested asterisk bullets",
+			input: "* parent\n  * child\n    * grandchild",
+			want:  "\\* parent\n  \\* child\n    \\* grandchild",
+		},
+		{
+			name:  "asterisk not a bullet mid-line",
+			input: "text * not a bullet",
+			want:  `text \* not a bullet`,
+		},
+		{
+			name:  "asterisk bullet with bold child",
+			input: "* top\n  * **bold child**",
+			want:  "\\* top\n  \\* *bold child*",
+		},
+
+		// Plus bullet lists
+		{
+			name:  "plus bullet single item",
+			input: "+ item one",
+			want:  `\+ item one`,
+		},
+		{
+			name:  "plus bullet multiple items",
+			input: "+ first\n+ second",
+			want:  "\\+ first\n\\+ second",
+		},
+		{
+			name:  "nested plus bullets",
+			input: "+ parent\n  + child",
+			want:  "\\+ parent\n  \\+ child",
+		},
+		{
+			name:  "plus not a bullet mid-line",
+			input: "a + b",
+			want:  `a \+ b`,
+		},
+		{
+			name:  "plus bullet with formatting",
+			input: "+ **bold** and `code`",
+			want:  "\\+ *bold* and `code`",
+		},
+
+		// Mixed marker nested lists
+		{
+			name:  "dash parent with asterisk children",
+			input: "- parent\n  * child 1\n  * child 2",
+			want:  "\\- parent\n  \\* child 1\n  \\* child 2",
+		},
+		{
+			name:  "asterisk parent with dash children",
+			input: "* parent\n  - child 1\n  - child 2",
+			want:  "\\* parent\n  \\- child 1\n  \\- child 2",
+		},
+		{
+			name:  "all three markers nested",
+			input: "- dash\n  * asterisk\n    + plus",
+			want:  "\\- dash\n  \\* asterisk\n    \\+ plus",
+		},
+		{
+			name:  "numbered with asterisk children",
+			input: "1. parent\n   * child",
+			want:  "1\\. parent\n   \\* child",
+		},
+
+		// Tables
+		{
+			name:  "simple table with separator",
+			input: "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |",
+			want:  "```\nName  │ Age\n──────┼────\nAlice │ 30\nBob   │ 25\n```",
+		},
+		{
+			name:  "table with header separator",
+			input: "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1 | Cell 2 |",
+			want:  "```\nHeader 1 │ Header 2\n─────────┼─────────\nCell 1   │ Cell 2\n```",
+		},
+		{
+			name:  "table without separator",
+			input: "| A | B |\n| C | D |",
+			want:  "```\nA │ B\nC │ D\n```",
+		},
+		{
+			name:  "table between paragraphs",
+			input: "intro\n| X | Y |\n|---|---|\n| 1 | 2 |\noutro",
+			want:  "intro\n```\nX │ Y\n──┼──\n1 │ 2\n```\noutro",
+		},
+		{
+			name:  "table with backtick in cell",
+			input: "| Code | Desc |\n|------|------|\n| `x` | test |",
+			want:  "```\nCode  │ Desc\n──────┼─────\n\\`x\\` │ test\n```",
+		},
+		{
+			name:  "table with alignment markers",
+			input: "| Left | Center | Right |\n|:-----|:------:|------:|\n| L | C | R |",
+			want:  "```\nLeft │ Center │ Right\n─────┼────────┼──────\nL    │ C      │ R\n```",
+		},
+		{
+			name:  "three column table",
+			input: "| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |",
+			want:  "```\nA │ B │ C\n──┼───┼──\n1 │ 2 │ 3\n4 │ 5 │ 6\n```",
+		},
+		{
+			name:  "single pipe line not a table",
+			input: "| just a pipe",
+			want:  `\| just a pipe`,
+		},
+		{
+			name:  "pipe not at line start not a table",
+			input: "text | more | text",
+			want:  `text \| more \| text`,
+		},
+		{
+			name:  "table after heading",
+			input: "## Data\n| K | V |\n|---|---|\n| a | b |",
+			want:  "*▸ Data*\n```\nK │ V\n──┼──\na │ b\n```",
 		},
 
 		// Special characters only
@@ -475,6 +839,30 @@ func TestSplitMessage_FormattedLengthRespected(t *testing.T) {
 	}
 }
 
+func TestSplitMessage_CodeBlockIntact(t *testing.T) {
+	// The code block contains a \n\n inside it. Without code-block awareness,
+	// splitMessage would split at that \n\n, breaking the code block.
+	prefix := strings.Repeat("x", 50)
+	codeBlock := "```\nfoo\n\nbar\n```"
+	suffix := strings.Repeat("y", 200)
+	msg := prefix + "\n" + codeBlock + "\n" + suffix
+
+	chunks := splitMessage(msg, 100)
+
+	// Verify no chunk has unbalanced code fences.
+	for i, chunk := range chunks {
+		if strings.Count(chunk, "```")%2 != 0 {
+			t.Errorf("chunk %d has unbalanced code fences: %q", i, chunk)
+		}
+	}
+
+	// Verify all content is preserved.
+	reassembled := strings.Join(chunks, "")
+	if reassembled != msg {
+		t.Error("reassembled message doesn't match original")
+	}
+}
+
 func TestCloseOpenMarkdown(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -506,6 +894,11 @@ func TestCloseOpenMarkdown(t *testing.T) {
 			name:  "complete strikethrough",
 			input: "this is ~~deleted~~ text",
 			want:  "this is ~~deleted~~ text",
+		},
+		{
+			name:  "complete spoiler",
+			input: "this is ||hidden|| text",
+			want:  "this is ||hidden|| text",
 		},
 		{
 			name:  "no formatting",
@@ -540,6 +933,11 @@ func TestCloseOpenMarkdown(t *testing.T) {
 			want:  "this is ~~deleted text~~",
 		},
 		{
+			name:  "unclosed spoiler",
+			input: "this is ||hidden text",
+			want:  "this is ||hidden text||",
+		},
+		{
 			name:  "unclosed fenced code block",
 			input: "```go\nfmt.Println()",
 			want:  "```go\nfmt.Println()\n```",
@@ -565,6 +963,11 @@ func TestCloseOpenMarkdown(t *testing.T) {
 			name:  "bare strikethrough marker",
 			input: "text ~~",
 			want:  "text ~~",
+		},
+		{
+			name:  "bare spoiler marker",
+			input: "text ||",
+			want:  "text ||",
 		},
 
 		// Mixed / nested unclosed formatting.
@@ -694,6 +1097,7 @@ func TestCloseOpenMarkdown_ThenFormat(t *testing.T) {
 		{"unclosed inline code", "use `some.Function and more"},
 		{"unclosed italic", "this is *italic streaming"},
 		{"unclosed strikethrough", "this is ~~struck streaming"},
+		{"unclosed spoiler", "this is ||hidden streaming"},
 		{"mixed", "**bold then `code and more"},
 	}
 
@@ -797,6 +1201,39 @@ func TestFormatForMarkdownV2_EmptyPrefixes(t *testing.T) {
 			got := formatForMarkdownV2(tt.input)
 			if got != tt.want {
 				t.Errorf("formatForMarkdownV2(%q)\n  got:  %q\n  want: %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatErrorForMarkdownV2(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{
+			name: "simple error",
+			msg:  "something went wrong",
+			want: ">⚠️ *Error*\n>\n>something went wrong",
+		},
+		{
+			name: "error with special chars",
+			msg:  "failed to parse config.yaml: unexpected token",
+			want: ">⚠️ *Error*\n>\n>failed to parse config\\.yaml: unexpected token",
+		},
+		{
+			name: "multiline error",
+			msg:  "line one\nline two",
+			want: ">⚠️ *Error*\n>\n>line one\n>line two",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatErrorForMarkdownV2(tt.msg)
+			if got != tt.want {
+				t.Errorf("formatErrorForMarkdownV2(%q)\n  got:  %q\n  want: %q", tt.msg, got, tt.want)
 			}
 		})
 	}
