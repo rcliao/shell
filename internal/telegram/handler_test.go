@@ -127,17 +127,22 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "h1 heading",
 			input: "# Hello World",
-			want:  `*Hello World*`,
+			want:  "📌 *__Hello World__*",
 		},
 		{
 			name:  "h2 heading",
 			input: "## Sub Heading",
-			want:  `*Sub Heading*`,
+			want:  "🔹 *__Sub Heading__*",
+		},
+		{
+			name:  "h3 heading",
+			input: "### Details",
+			want:  "▸ *Details*",
 		},
 		{
 			name:  "heading with special chars",
 			input: "# Version 1.0!",
-			want:  `*Version 1\.0\!*`,
+			want:  "📌 *__Version 1\\.0\\!__*",
 		},
 		{
 			name:  "hash not at line start",
@@ -147,7 +152,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "heading mid-text",
 			input: "intro\n# Title\nbody",
-			want:  "intro\n*Title*\nbody",
+			want:  "intro\n📌 *__Title__*\nbody",
 		},
 
 		// Bullet lists
@@ -273,7 +278,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "blockquote mixed with heading",
 			input: "# Title\n> quoted line\nnormal text",
-			want:  "*Title*\n>quoted line\nnormal text",
+			want:  "📌 *__Title__*\n>quoted line\nnormal text",
 		},
 		{
 			name:  "blockquote mixed with bullet list",

@@ -184,12 +184,14 @@ func formatForMarkdownV2(text string) string {
 			}
 		}
 
-		// 6. Headings: # at start of line → bold text
+		// 6. Headings: # at start of line → emoji marker + bold/underline based on level
 		if text[i] == '#' && (i == 0 || text[i-1] == '\n') {
 			// Count heading level and skip # characters
 			j := i
+			level := 0
 			for j < n && text[j] == '#' {
 				j++
+				level++
 			}
 			// Skip space after #
 			if j < n && text[j] == ' ' {
@@ -204,9 +206,24 @@ func formatForMarkdownV2(text string) string {
 			} else {
 				heading = text[j : j+lineEnd]
 			}
-			result.WriteString("*")
-			result.WriteString(escapeMarkdownV2Text(heading))
-			result.WriteString("*")
+			escaped := escapeMarkdownV2Text(heading)
+			switch {
+			case level == 1:
+				// H1: pin emoji + bold + underline
+				result.WriteString("📌 *__")
+				result.WriteString(escaped)
+				result.WriteString("__*")
+			case level == 2:
+				// H2: diamond emoji + bold + underline
+				result.WriteString("🔹 *__")
+				result.WriteString(escaped)
+				result.WriteString("__*")
+			default:
+				// H3+: arrow emoji + bold (no underline for visual hierarchy)
+				result.WriteString("▸ *")
+				result.WriteString(escaped)
+				result.WriteString("*")
+			}
 			i = j + lineEnd
 			if i < n && text[i] == '\n' {
 				result.WriteByte('\n')
@@ -541,6 +558,39 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 		"new_reaction", reaction.NewReaction,
 		"old_reaction", reaction.OldReaction,
 	)
+
+	// Auth check: only process reactions from allowed users.
+	if reaction.User != nil && !h.auth.IsAllowed(reaction.User.ID) {
+		slog.Warn("unauthorized reaction", "user_id", reaction.User.ID)
+		return
+	}
+
+	// Extract the first emoji from new reactions.
+	if len(reaction.NewReaction) == 0 {
+		return
+	}
+	emoji := ""
+	for _, r := range reaction.NewReaction {
+		if r.ReactionTypeEmoji != nil {
+			emoji = r.ReactionTypeEmoji.Emoji
+			break
+		}
+	}
+	if emoji == "" {
+		return
+	}
+
+	chatID := reaction.Chat.ID
+	response, err := h.bridge.HandleReaction(ctx, chatID, emoji)
+	if err != nil {
+		slog.Error("bridge handle reaction failed", "error", err, "chat_id", chatID, "emoji", emoji)
+		return
+	}
+	if response == "" {
+		return
+	}
+
+	h.sendChunked(ctx, b, chatID, response)
 }
 
 func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
@@ -560,6 +610,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
 		return
+	}
+
+	// Build sender display name for Claude to identify who is speaking.
+	senderName := msg.From.FirstName
+	if senderName == "" {
+		senderName = msg.From.Username
 	}
 
 	// React with 👀 to acknowledge receipt.
@@ -652,7 +708,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 	}
 
-	response, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, onUpdate)
+	response, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, onUpdate)
 
 	if err != nil {
 		slog.Error("bridge handle message failed", "error", err, "chat_id", msg.Chat.ID)

@@ -34,6 +34,17 @@ type TaskResult struct {
 	TestOutput string // test output at time of failure
 }
 
+// ReviewPackage bundles everything the reviewer needs to make a verdict.
+type ReviewPackage struct {
+	Task         string
+	ExecSummary  string   // what the execute agent said it did (truncated to 2000 chars)
+	Diff         string
+	ChangedFiles []string
+	TestsPassed  bool
+	TestSummary  string // condensed: "All tests passed (showing last 10)" or failure details
+	Attempt      int
+}
+
 // ProgressFunc is called to report progress. The planner does not know about
 // Telegram — the caller wires this to whatever output channel they want.
 type ProgressFunc func(msg string)
@@ -124,15 +135,14 @@ func (p *Planner) RunTask(ctx context.Context, task, completedContext string, pr
 			progress(fmt.Sprintf("Execution error: %v", err))
 			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: err.Error(), Attempts: attempt + 1, Diff: p.getDiff(ctx)}
 		}
-		_ = execOutput // logged by progress, used for context
 
 		// Step 2: Test
 		progress("Running tests...")
 		testOutput, testOk := p.runTests(ctx)
 		if !testOk {
 			diff := p.getDiff(ctx)
-			tail := lastNLines(testOutput, 40)
-			feedback = fmt.Sprintf("Tests failed:\n%s\n\nYour current changes on disk:\n%s", tail, diff)
+			testSummary := summarizeTestOutput(testOutput, false)
+			feedback = buildTestFailureFeedback(testSummary, diff, attempt+1)
 			progress(fmt.Sprintf("Tests FAILED:\n%s", lastNLines(testOutput, 20)))
 			continue
 		}
@@ -151,8 +161,19 @@ func (p *Planner) RunTask(ctx context.Context, task, completedContext string, pr
 		}
 
 		// Step 4: Review
+		changedFiles := extractChangedFiles(diffOutput)
+		pkg := ReviewPackage{
+			Task:         task,
+			ExecSummary:  truncate(execOutput, 2000),
+			Diff:         diffOutput,
+			ChangedFiles: changedFiles,
+			TestsPassed:  true,
+			TestSummary:  summarizeTestOutput(testOutput, true),
+			Attempt:      attempt + 1,
+		}
+
 		progress("Reviewing changes...")
-		verdict, reviewText := p.review(ctx, task, diffOutput, testOutput)
+		verdict, reviewText := p.review(ctx, pkg)
 		progress(fmt.Sprintf("Review verdict: %s", verdict))
 
 		switch verdict {
@@ -161,7 +182,7 @@ func (p *Planner) RunTask(ctx context.Context, task, completedContext string, pr
 		case VerdictNeedsHuman:
 			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: reviewText, Attempts: attempt + 1, Diff: diffOutput, TestOutput: testOutput}
 		case VerdictNeedsRevision:
-			feedback = reviewText + "\n\nYour current changes on disk:\n" + diffOutput
+			feedback = buildRetryFeedback(reviewText, diffOutput, changedFiles, attempt+1)
 			progress("Reviewer requested revision.")
 		}
 	}
@@ -232,14 +253,13 @@ func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, compl
 			progress(fmt.Sprintf("Execution error: %v", err))
 			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: err.Error(), Attempts: attempt + 1, Diff: p.getDiff(ctx)}
 		}
-		_ = execOutput
 
 		progress("Running tests...")
 		testOutput, testOk := p.runTests(ctx)
 		if !testOk {
 			d := p.getDiff(ctx)
-			tail := lastNLines(testOutput, 40)
-			feedback = fmt.Sprintf("Tests failed:\n%s\n\nYour current changes on disk:\n%s", tail, d)
+			testSummary := summarizeTestOutput(testOutput, false)
+			feedback = buildTestFailureFeedback(testSummary, d, attempt+1)
 			progress(fmt.Sprintf("Tests FAILED:\n%s", lastNLines(testOutput, 20)))
 			continue
 		}
@@ -256,8 +276,19 @@ func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, compl
 			return TaskResult{Task: task, Verdict: VerdictDone, Summary: "Auto-approved: tests pass, diff within threshold", Attempts: attempt + 1}
 		}
 
+		changedFiles := extractChangedFiles(diffOutput)
+		pkg := ReviewPackage{
+			Task:         task,
+			ExecSummary:  truncate(execOutput, 2000),
+			Diff:         diffOutput,
+			ChangedFiles: changedFiles,
+			TestsPassed:  true,
+			TestSummary:  summarizeTestOutput(testOutput, true),
+			Attempt:      attempt + 1,
+		}
+
 		progress("Reviewing changes...")
-		verdict, reviewText := p.review(ctx, task, diffOutput, testOutput)
+		verdict, reviewText := p.review(ctx, pkg)
 		progress(fmt.Sprintf("Review verdict: %s", verdict))
 
 		switch verdict {
@@ -266,7 +297,7 @@ func (p *Planner) RunTaskWithGuidance(ctx context.Context, task, guidance, compl
 		case VerdictNeedsHuman:
 			return TaskResult{Task: task, Verdict: VerdictNeedsHuman, Summary: reviewText, Attempts: attempt + 1, Diff: diffOutput, TestOutput: testOutput}
 		case VerdictNeedsRevision:
-			feedback = reviewText + "\n\nYour current changes on disk:\n" + diffOutput
+			feedback = buildRetryFeedback(reviewText, diffOutput, changedFiles, attempt+1)
 			progress("Reviewer requested revision.")
 		}
 	}
@@ -360,7 +391,9 @@ A reviewer found issues with your previous attempt. You MUST address this:
 }
 
 // review runs a second Claude invocation to evaluate the diff.
-func (p *Planner) review(ctx context.Context, task, diffOutput, testOutput string) (Verdict, string) {
+// The reviewer is text-only (no tools) — it evaluates the diff and test
+// results provided inline, keeping it fast and deterministic.
+func (p *Planner) review(ctx context.Context, pkg ReviewPackage) (Verdict, string) {
 	conventionsBlock := ""
 	if p.cfg.Conventions != "" {
 		conventionsBlock = fmt.Sprintf(`
@@ -368,58 +401,56 @@ func (p *Planner) review(ctx context.Context, task, diffOutput, testOutput strin
 %s`, p.cfg.Conventions)
 	}
 
-	changedFiles := extractChangedFiles(diffOutput)
-	fileList := strings.Join(changedFiles, "\n")
-
-	prompt := fmt.Sprintf(`You are a strict code reviewer evaluating whether an automated agent completed a task correctly.
-You are the last line of defense before code is accepted. Be critical.
-
-## Task That Was Assigned
+	execSummaryBlock := ""
+	if pkg.ExecSummary != "" {
+		execSummaryBlock = fmt.Sprintf(`
+## What the Agent Did
 %s
-%s
-## Changed Files
-%s
+`, pkg.ExecSummary)
+	}
 
-## Git Diff (summary of changes)
+	prompt := fmt.Sprintf(`You are reviewing whether an automated coding agent completed a task correctly.
+Tests have already passed. Your job is to check that the diff matches the task intent.
+
+## Task
+%s
+%s%s
+## Git Diff (%d files changed)
 %s
 
 ## Test Results
 %s
 
-## Your Job
-You MUST read the actual source files listed above using the Read tool before making your verdict.
-Do NOT evaluate the diff text alone — you need to see the full file context to judge correctness.
+## Instructions
+Look at the diff and decide: does this implement the task?
 
-Step 1: Read each changed file to understand the full context of the changes.
-Step 2: Evaluate the changes against BOTH the task description AND the project conventions.
+Accept (VERDICT: done) if:
+- The diff implements what the task asked for
+- Tests pass
+- No obvious bugs that would cause runtime failures
 
-Check for correctness:
-- Does the diff actually implement what the task asked for?
-- Is the implementation correct and idiomatic in context of the surrounding code?
-- Are there bugs, edge cases, or missing error handling?
+Reject (VERDICT: needs_revision) ONLY if:
+- The diff has clear bugs (e.g. wrong variable, broken logic)
+- The diff is missing a key part of what the task asked for
+- Give specific, actionable feedback the agent can fix
 
-Check for convention violations (MUST flag as needs_human):
-- Does it change the database schema without the task explicitly calling for it?
-- Does it add new CLI subcommands, data models, or Store interface methods that aren't specified?
-- Does it break backwards compatibility?
-- Does it touch more than 8 non-test files?
+Escalate (VERDICT: needs_human) ONLY if:
+- The approach is fundamentally wrong and needs human guidance
+- There are clear convention violations (schema changes, new CLI commands, new interfaces not in the task)
 
-Check for scope creep (flag as needs_revision or needs_human):
-- Did the agent make design decisions that the task didn't specify?
-- Did the agent add features beyond what was asked?
-- Is the agent guessing at requirements instead of keeping to what's specified?
+Do NOT reject for:
+- Style preferences or minor idiom differences
+- Uncommitted changes (the planner commits after approval)
+- Things working correctly but done differently than you would
 
-You MUST respond with EXACTLY one of these three verdicts on the FIRST line:
+Respond with EXACTLY one verdict on the first line:
 VERDICT: done
 VERDICT: needs_revision
 VERDICT: needs_human
 
-Rules for choosing:
-- done: Implementation matches the task, follows conventions, no scope creep. If tests pass and the diff matches the task intent, use done.
-- needs_revision: Has bugs or incomplete work the agent can fix (give specific feedback)
-- needs_human: Use ONLY for clear convention violations or fundamentally wrong approaches. Do NOT use needs_human just because the agent made minor judgement calls.`, task, conventionsBlock, fileList, diffOutput, testOutput)
+Then a brief explanation.`, pkg.Task, conventionsBlock, execSummaryBlock, len(pkg.ChangedFiles), pkg.Diff, pkg.TestSummary)
 
-	output, err := p.runClaudeReadOnly(ctx, prompt)
+	output, err := p.runClaudeTextOnly(ctx, prompt)
 	if err != nil {
 		return VerdictNeedsHuman, fmt.Sprintf("Review failed: %v", err)
 	}
@@ -539,7 +570,9 @@ func (p *Planner) getDiff(ctx context.Context) string {
 
 	// git diff <base> shows all changes (staged + unstaged) vs the base.
 	// If the execute agent also committed, this captures those commits too.
-	diff := run("diff", base)
+	// Use 10 lines of context so the reviewer can judge changes without
+	// needing to read the full files.
+	diff := run("diff", "-U10", base)
 
 	// Include new untracked files
 	untracked := strings.TrimSpace(run("ls-files", "--others", "--exclude-standard"))
@@ -620,15 +653,6 @@ func (p *Planner) runClaudeTextOnly(ctx context.Context, prompt string) (string,
 func (p *Planner) runClaude(ctx context.Context, prompt string) (string, error) {
 	return p.runClaudeWithArgs(ctx, prompt, []string{
 		"--allowedTools", "Bash,Write,Edit,Read",
-		"--permission-mode", "bypassPermissions",
-	})
-}
-
-// runClaudeReadOnly spawns a Claude CLI subprocess with read-only tool access.
-// Used for reviews where the agent should inspect files but never modify them.
-func (p *Planner) runClaudeReadOnly(ctx context.Context, prompt string) (string, error) {
-	return p.runClaudeWithArgs(ctx, prompt, []string{
-		"--allowedTools", "Bash,Read,Glob,Grep",
 		"--permission-mode", "bypassPermissions",
 	})
 }
@@ -726,6 +750,52 @@ func (p *Planner) DraftPlan(ctx context.Context, intent, previousDraft, feedback
 	}
 
 	return p.runClaudeTextOnly(ctx, prompt)
+}
+
+// truncate returns s truncated to maxLen characters.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "\n... (truncated)"
+}
+
+// summarizeTestOutput condenses raw test output for the reviewer.
+// Pass: "All tests passed." + last 10 lines.
+// Fail: "Tests FAILED:" + last 40 lines.
+func summarizeTestOutput(raw string, passed bool) string {
+	if passed {
+		tail := lastNLines(raw, 10)
+		return "All tests passed.\n\n" + tail
+	}
+	tail := lastNLines(raw, 40)
+	return "Tests FAILED:\n\n" + tail
+}
+
+// buildRetryFeedback creates structured markdown feedback for the execute agent
+// after a needs_revision verdict.
+func buildRetryFeedback(reviewText, diff string, changedFiles []string, attempt int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Review Feedback (attempt %d)\n\n", attempt)
+	b.WriteString(reviewText)
+	b.WriteString("\n\n## Changed Files\n\n")
+	for _, f := range changedFiles {
+		fmt.Fprintf(&b, "- %s\n", f)
+	}
+	b.WriteString("\n## Current Diff\n\n")
+	b.WriteString(diff)
+	return b.String()
+}
+
+// buildTestFailureFeedback creates structured markdown feedback for the execute
+// agent after a test failure.
+func buildTestFailureFeedback(testSummary, diff string, attempt int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Test Failure (attempt %d)\n\n", attempt)
+	b.WriteString(testSummary)
+	b.WriteString("\n\n## Current Diff\n\n")
+	b.WriteString(diff)
+	return b.String()
 }
 
 // lastNLines returns the last n lines of a string.

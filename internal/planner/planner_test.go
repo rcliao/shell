@@ -154,7 +154,7 @@ done
 printf '%%s' "$PROMPT" > "$CAPTURE_DIR/call_${CALL_NUM}_prompt.txt"
 
 # Respond based on prompt content.
-if printf '%%s' "$PROMPT" | grep -q "strict code reviewer"; then
+if printf '%%s' "$PROMPT" | grep -q "does this implement the task"; then
   # Track review call count.
   REVIEW_COUNT_FILE="$CAPTURE_DIR/review_count"
   COUNT=0
@@ -215,28 +215,43 @@ func TestRunTask_ReviewUsesReadOnlyTools(t *testing.T) {
 	reviewArgs := readCapture(t, captureDir, calls-1, "args")
 	reviewPrompt := readCapture(t, captureDir, calls-1, "prompt")
 
-	// Execute call should have full tools.
+	// Execute call should have full tools via --allowedTools.
 	execArgs := readCapture(t, captureDir, 0, "args")
 	execTools := allowedToolsFromArgs(t, execArgs)
 	if execTools != "Bash,Write,Edit,Read" {
 		t.Errorf("execute call should have full tools.\nGot --allowedTools: %s", execTools)
 	}
 
-	// Review call should have read-only tools.
-	reviewTools := allowedToolsFromArgs(t, reviewArgs)
-	if reviewTools != "Bash,Read,Glob,Grep" {
-		t.Errorf("review call should use read-only tools.\nGot --allowedTools: %s", reviewTools)
+	// Review call should be text-only via --disallowedTools.
+	reviewDisallowed := disallowedToolsFromArgs(t, reviewArgs)
+	if reviewDisallowed != "Bash,Write,Edit" {
+		t.Errorf("review call should disallow Bash,Write,Edit.\nGot --disallowedTools: %s", reviewDisallowed)
 	}
 
-	// Review prompt should instruct reading files.
-	if !strings.Contains(reviewPrompt, "Read tool") {
-		t.Error("review prompt should instruct reviewer to use the Read tool")
+	// Review prompt should contain the diff with the task context.
+	if !strings.Contains(reviewPrompt, "does this implement the task") {
+		t.Error("review prompt should ask whether diff implements the task")
 	}
-	if !strings.Contains(reviewPrompt, "Changed Files") {
-		t.Error("review prompt should contain a 'Changed Files' section")
+	if !strings.Contains(reviewPrompt, "main.go") || !strings.Contains(reviewPrompt, "fmt.Println") {
+		t.Error("review prompt should contain the diff showing changed code")
 	}
-	if !strings.Contains(reviewPrompt, "main.go") {
-		t.Error("review prompt should list main.go as a changed file")
+
+	// Review prompt should contain the "What the Agent Did" section with execute output.
+	if !strings.Contains(reviewPrompt, "What the Agent Did") {
+		t.Error("review prompt should contain 'What the Agent Did' section")
+	}
+	if !strings.Contains(reviewPrompt, "Task completed successfully.") {
+		t.Error("review prompt should contain the execute agent's output")
+	}
+
+	// Review prompt should contain file count in diff header.
+	if !strings.Contains(reviewPrompt, "files changed)") {
+		t.Error("review prompt should contain file count in diff header")
+	}
+
+	// Review prompt should contain condensed test summary, not raw output.
+	if !strings.Contains(reviewPrompt, "All tests passed.") {
+		t.Error("review prompt should contain condensed test summary")
 	}
 }
 
@@ -274,17 +289,17 @@ func TestRunTask_NeedsRevisionRetry(t *testing.T) {
 		t.Fatalf("expected at least 2 attempts, got %d", result.Attempts)
 	}
 
-	// Verify all review calls used read-only tools.
+	// Verify all review calls are text-only.
 	calls := countCaptures(t, captureDir)
 	for i := 0; i < calls; i++ {
 		prompt := readCapture(t, captureDir, i, "prompt")
-		if !strings.Contains(prompt, "strict code reviewer") {
+		if !strings.Contains(prompt, "does this implement the task") {
 			continue // not a review call
 		}
 		args := readCapture(t, captureDir, i, "args")
-		tools := allowedToolsFromArgs(t, args)
-		if tools != "Bash,Read,Glob,Grep" {
-			t.Errorf("review call %d should use read-only tools.\nGot --allowedTools: %s", i, tools)
+		disallowed := disallowedToolsFromArgs(t, args)
+		if disallowed != "Bash,Write,Edit" {
+			t.Errorf("review call %d should disallow Bash,Write,Edit.\nGot --disallowedTools: %s", i, disallowed)
 		}
 	}
 
@@ -391,4 +406,95 @@ func allowedToolsFromArgs(t *testing.T, args string) string {
 	}
 	t.Fatal("--allowedTools not found in captured args")
 	return ""
+}
+
+// disallowedToolsFromArgs extracts the --disallowedTools value from captured args.
+func disallowedToolsFromArgs(t *testing.T, args string) string {
+	t.Helper()
+	lines := strings.Split(args, "\n")
+	for i, line := range lines {
+		if line == "--disallowedTools" && i+1 < len(lines) {
+			return lines[i+1]
+		}
+	}
+	t.Fatal("--disallowedTools not found in captured args")
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests: summarizeTestOutput
+// ---------------------------------------------------------------------------
+
+func TestSummarizeTestOutput_Pass(t *testing.T) {
+	// Build test output with 20 lines
+	var lines []string
+	for i := 1; i <= 20; i++ {
+		lines = append(lines, fmt.Sprintf("ok  pkg%d 0.003s", i))
+	}
+	raw := strings.Join(lines, "\n")
+
+	summary := summarizeTestOutput(raw, true)
+
+	if !strings.Contains(summary, "All tests passed.") {
+		t.Error("pass summary should start with 'All tests passed.'")
+	}
+	// Should contain only the last 10 lines
+	if !strings.Contains(summary, "ok  pkg11 0.003s") {
+		t.Error("pass summary should include last 10 lines")
+	}
+	if strings.Contains(summary, "ok  pkg10 0.003s") {
+		t.Error("pass summary should NOT include lines beyond last 10")
+	}
+}
+
+func TestSummarizeTestOutput_Fail(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 50; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	raw := strings.Join(lines, "\n")
+
+	summary := summarizeTestOutput(raw, false)
+
+	if !strings.Contains(summary, "Tests FAILED:") {
+		t.Error("fail summary should start with 'Tests FAILED:'")
+	}
+	// Should contain the last 40 lines
+	if !strings.Contains(summary, "line 11") {
+		t.Error("fail summary should include last 40 lines")
+	}
+	if strings.Contains(summary, "line 10\n") {
+		t.Error("fail summary should NOT include lines beyond last 40")
+	}
+}
+
+func TestSummarizeTestOutput_ShortOutput(t *testing.T) {
+	raw := "ok  mypkg 0.001s"
+	summary := summarizeTestOutput(raw, true)
+	if !strings.Contains(summary, "All tests passed.") {
+		t.Error("short pass summary should contain 'All tests passed.'")
+	}
+	if !strings.Contains(summary, "ok  mypkg 0.001s") {
+		t.Error("short pass summary should include the full output")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests: truncate
+// ---------------------------------------------------------------------------
+
+func TestTruncate(t *testing.T) {
+	short := "hello"
+	if truncate(short, 100) != short {
+		t.Error("truncate should not modify short strings")
+	}
+
+	long := strings.Repeat("x", 3000)
+	result := truncate(long, 2000)
+	if len(result) > 2020 { // 2000 + "... (truncated)" suffix
+		t.Errorf("truncated result too long: %d", len(result))
+	}
+	if !strings.Contains(result, "... (truncated)") {
+		t.Error("truncated result should contain truncation marker")
+	}
 }

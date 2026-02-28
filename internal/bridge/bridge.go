@@ -92,8 +92,42 @@ func (b *Bridge) SetNotifier(fn NotifyFunc) {
 	b.notify = fn
 }
 
+// HandleReaction processes an emoji reaction as a user action.
+// 👍 confirms (equivalent to "go"), 👎 cancels (equivalent to "stop").
+// Returns a response message if the reaction triggered an action, or empty string if ignored.
+func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, emoji string) (string, error) {
+	var text string
+	switch emoji {
+	case "👍":
+		text = "go"
+	case "👎":
+		text = "stop"
+	default:
+		return "", nil
+	}
+
+	// Only act on reactions when a plan is in an interactive state.
+	b.planMu.Lock()
+	run, hasPlan := b.planRuns[chatID]
+	b.planMu.Unlock()
+
+	if !hasPlan {
+		return "", nil
+	}
+
+	switch run.state {
+	case planStateDrafting:
+		return b.handlePlanDraft(ctx, chatID, text)
+	case planStateBlocked:
+		return b.handlePlanBlocked(ctx, chatID, text)
+	default:
+		return "", nil
+	}
+}
+
 // HandleMessage processes an incoming user message and returns Claude's response.
-func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string) (string, error) {
+// senderName identifies who sent the message (e.g. Telegram first name).
+func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, senderName string) (string, error) {
 	// Check for active plan draft — intercept the message.
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
@@ -121,6 +155,11 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string
 		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
 	}
 
+	// Tag the message with sender identity so Claude knows who is speaking
+	if senderName != "" {
+		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
+	}
+
 	// Determine claude session ID for --resume
 	procSess, _ := b.proc.Get(chatID)
 	claudeSessionID := ""
@@ -128,7 +167,6 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string
 		claudeSessionID = procSess.ClaudeSessionID
 	}
 
-	// Send to Claude
 	// Build system prompt from memory if available.
 	systemPrompt := ""
 	if b.memory != nil {
@@ -172,7 +210,8 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg string
 }
 
 // HandleMessageStreaming is like HandleMessage but calls onUpdate with partial text as Claude generates it.
-func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg string, onUpdate process.StreamFunc) (string, error) {
+// senderName identifies who sent the message (e.g. Telegram first name).
+func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, onUpdate process.StreamFunc) (string, error) {
 	// Check for active plan draft — intercept the message (no streaming needed).
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
@@ -198,6 +237,11 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	augmentedMsg := userMsg
 	if b.memory != nil {
 		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
+	}
+
+	// Tag the message with sender identity so Claude knows who is speaking
+	if senderName != "" {
+		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
 	}
 
 	// Determine claude session ID for --resume
