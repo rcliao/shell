@@ -46,6 +46,7 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/new", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/status", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/reactions", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/remember", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/forget", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/memories", bot.MatchTypePrefix, b.commandHandler)

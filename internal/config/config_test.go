@@ -77,9 +77,12 @@ func TestDefaultReactionMap(t *testing.T) {
 	expected := map[string]string{
 		"👍": "go",
 		"👎": "stop",
-		"🔄": "retry",
 		"❌": "cancel",
 		"📋": "status",
+		"🔄": "regenerate",
+		"📌": "remember",
+		"🗑": "forget",
+		"🔁": "retry",
 	}
 	for emoji, action := range expected {
 		if got := rm[emoji]; got != action {

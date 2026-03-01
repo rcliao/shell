@@ -80,7 +80,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "fenced code block",
 			input: "```go\nfmt.Println(\"hello\")\n```",
-			want:  "```go\nfmt.Println(\"hello\")\n```",
+			want:  "```go\n// go\nfmt.Println(\"hello\")\n```",
 		},
 		{
 			name:  "code block with backticks inside",
@@ -458,7 +458,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "spoiler with bold inside",
 			input: "see ||**hidden**|| here",
-			want:  `see ||\*\*hidden\*\*|| here`,
+			want:  `see ||*hidden*|| here`,
 		},
 		{
 			name:  "single pipe not spoiler",
@@ -476,6 +476,58 @@ func TestFormatForMarkdownV2(t *testing.T) {
 			name:  "code then bold",
 			input: "use `code` or **bold**",
 			want:  "use `code` or *bold*",
+		},
+
+		// Nested inline formatting
+		{
+			name:  "bold with italic inside",
+			input: "**bold *italic* text**",
+			want:  "*bold _italic_ text*",
+		},
+		{
+			name:  "bold with code inside",
+			input: "**bold `code` text**",
+			want:  "*bold `code` text*",
+		},
+		{
+			name:  "italic with bold inside",
+			input: "*italic **bold** text*",
+			want:  "_italic *bold* text_",
+		},
+		{
+			name:  "italic with code inside",
+			input: "*italic `code` text*",
+			want:  "_italic `code` text_",
+		},
+		{
+			name:  "bold italic with code inside",
+			input: "***bold italic `code` text***",
+			want:  "*_bold italic `code` text_*",
+		},
+		{
+			name:  "strikethrough with bold inside",
+			input: "~~strike **bold** text~~",
+			want:  "~strike *bold* text~",
+		},
+		{
+			name:  "strikethrough with code inside",
+			input: "~~strike `code` text~~",
+			want:  "~strike `code` text~",
+		},
+		{
+			name:  "bold with link inside",
+			input: "**see [Google](https://google.com) here**",
+			want:  "*see [Google](https://google.com) here*",
+		},
+		{
+			name:  "italic with link inside",
+			input: "*see [Google](https://google.com) here*",
+			want:  "_see [Google](https://google.com) here_",
+		},
+		{
+			name:  "bold with strikethrough inside",
+			input: "**bold ~~strike~~ text**",
+			want:  "*bold ~strike~ text*",
 		},
 
 		// Nested bullet lists
@@ -651,37 +703,37 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "simple table with separator",
 			input: "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |",
-			want:  "```\nName  │ Age\n──────┼────\nAlice │ 30\nBob   │ 25\n```",
+			want:  "```\n┌───────┬─────┐\n│ Name  │ Age │\n├───────┼─────┤\n│ Alice │ 30  │\n│ Bob   │ 25  │\n└───────┴─────┘\n```",
 		},
 		{
 			name:  "table with header separator",
 			input: "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1 | Cell 2 |",
-			want:  "```\nHeader 1 │ Header 2\n─────────┼─────────\nCell 1   │ Cell 2\n```",
+			want:  "```\n┌──────────┬──────────┐\n│ Header 1 │ Header 2 │\n├──────────┼──────────┤\n│ Cell 1   │ Cell 2   │\n└──────────┴──────────┘\n```",
 		},
 		{
 			name:  "table without separator",
 			input: "| A | B |\n| C | D |",
-			want:  "```\nA │ B\nC │ D\n```",
+			want:  "```\n┌───┬───┐\n│ A │ B │\n│ C │ D │\n└───┴───┘\n```",
 		},
 		{
 			name:  "table between paragraphs",
 			input: "intro\n| X | Y |\n|---|---|\n| 1 | 2 |\noutro",
-			want:  "intro\n```\nX │ Y\n──┼──\n1 │ 2\n```\noutro",
+			want:  "intro\n```\n┌───┬───┐\n│ X │ Y │\n├───┼───┤\n│ 1 │ 2 │\n└───┴───┘\n```\noutro",
 		},
 		{
 			name:  "table with backtick in cell",
 			input: "| Code | Desc |\n|------|------|\n| `x` | test |",
-			want:  "```\nCode  │ Desc\n──────┼─────\n\\`x\\` │ test\n```",
+			want:  "```\n┌───────┬──────┐\n│ Code  │ Desc │\n├───────┼──────┤\n│ \\`x\\` │ test │\n└───────┴──────┘\n```",
 		},
 		{
 			name:  "table with alignment markers",
 			input: "| Left | Center | Right |\n|:-----|:------:|------:|\n| L | C | R |",
-			want:  "```\nLeft │ Center │ Right\n─────┼────────┼──────\nL    │ C      │ R\n```",
+			want:  "```\n┌──────┬────────┬───────┐\n│ Left │ Center │ Right │\n├──────┼────────┼───────┤\n│ L    │ C      │ R     │\n└──────┴────────┴───────┘\n```",
 		},
 		{
 			name:  "three column table",
 			input: "| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |",
-			want:  "```\nA │ B │ C\n──┼───┼──\n1 │ 2 │ 3\n4 │ 5 │ 6\n```",
+			want:  "```\n┌───┬───┬───┐\n│ A │ B │ C │\n├───┼───┼───┤\n│ 1 │ 2 │ 3 │\n│ 4 │ 5 │ 6 │\n└───┴───┴───┘\n```",
 		},
 		{
 			name:  "single pipe line not a table",
@@ -696,7 +748,7 @@ func TestFormatForMarkdownV2(t *testing.T) {
 		{
 			name:  "table after heading",
 			input: "## Data\n| K | V |\n|---|---|\n| a | b |",
-			want:  "*▸ Data*\n```\nK │ V\n──┼──\na │ b\n```",
+			want:  "*▸ Data*\n```\n┌───┬───┐\n│ K │ V │\n├───┼───┤\n│ a │ b │\n└───┴───┘\n```",
 		},
 
 		// Special characters only

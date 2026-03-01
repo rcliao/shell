@@ -31,6 +31,20 @@ type Message struct {
 	CreatedAt time.Time
 }
 
+// MessageMap links Telegram message IDs to session exchanges so that
+// reactions on a specific bot response can be traced back to the
+// originating user message and session.
+type MessageMap struct {
+	ID             int64
+	ChatID         int64
+	UserMessageID  int
+	BotMessageID   int
+	SessionID      int64
+	UserMessage    string // original user message text
+	BotResponse    string // bot response text
+	CreatedAt      time.Time
+}
+
 func Open(dbPath string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
@@ -76,11 +90,33 @@ func (s *Store) migrate() error {
 		FOREIGN KEY (session_id) REFERENCES sessions(id)
 	);
 
+	CREATE TABLE IF NOT EXISTS message_map (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		user_message_id INTEGER NOT NULL,
+		bot_message_id INTEGER NOT NULL,
+		session_id INTEGER NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (session_id) REFERENCES sessions(id)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_sessions_chat_id ON sessions(chat_id);
 	CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
+	CREATE INDEX IF NOT EXISTS idx_message_map_chat_bot ON message_map(chat_id, bot_message_id);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Add columns for message content (idempotent for existing databases).
+	for _, col := range []string{
+		"ALTER TABLE message_map ADD COLUMN user_message TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE message_map ADD COLUMN bot_response TEXT NOT NULL DEFAULT ''",
+	} {
+		s.db.Exec(col) // ignore "duplicate column" errors
+	}
+
+	return nil
 }
 
 func (s *Store) SaveSession(chatID int64, claudeSessionID string) error {
@@ -148,6 +184,74 @@ func (s *Store) GetMessages(sessionID int64, limit int) ([]Message, error) {
 	return msgs, nil
 }
 
+// SaveMessageMap persists a mapping between a user's Telegram message and
+// the bot's response message within a session, including the message content.
+func (s *Store) SaveMessageMap(chatID int64, userMessageID, botMessageID int, sessionID int64, userMessage, botResponse string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO message_map (chat_id, user_message_id, bot_message_id, session_id, user_message, bot_response)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, chatID, userMessageID, botMessageID, sessionID, userMessage, botResponse)
+	return err
+}
+
+// GetMessageMapByBotMsg looks up a message map entry by the bot's response
+// message ID within a chat. Returns nil if no mapping is found.
+func (s *Store) GetMessageMapByBotMsg(chatID int64, botMessageID int) (*MessageMap, error) {
+	row := s.db.QueryRow(`
+		SELECT id, chat_id, user_message_id, bot_message_id, session_id, user_message, bot_response, created_at
+		FROM message_map WHERE chat_id = ? AND bot_message_id = ?
+	`, chatID, botMessageID)
+
+	var m MessageMap
+	err := row.Scan(&m.ID, &m.ChatID, &m.UserMessageID, &m.BotMessageID, &m.SessionID, &m.UserMessage, &m.BotResponse, &m.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// UpdateMessageMapResponse updates the bot_response text for an existing
+// message_map entry. Used when regenerating a response in-place.
+func (s *Store) UpdateMessageMapResponse(id int64, botResponse string) error {
+	_, err := s.db.Exec("UPDATE message_map SET bot_response = ? WHERE id = ?", botResponse, id)
+	return err
+}
+
+// DeleteMessageMap deletes a single message_map entry by its row ID.
+func (s *Store) DeleteMessageMap(id int64) error {
+	_, err := s.db.Exec("DELETE FROM message_map WHERE id = ?", id)
+	return err
+}
+
+// DeleteExchangeMessages removes the most recent user+assistant message pair
+// matching the given content from a session's message log.
+func (s *Store) DeleteExchangeMessages(sessionID int64, userMessage, botResponse string) error {
+	if userMessage != "" {
+		row := s.db.QueryRow(
+			"SELECT id FROM messages WHERE session_id = ? AND role = 'user' AND content = ? ORDER BY id DESC LIMIT 1",
+			sessionID, userMessage,
+		)
+		var id int64
+		if err := row.Scan(&id); err == nil {
+			s.db.Exec("DELETE FROM messages WHERE id = ?", id)
+		}
+	}
+	if botResponse != "" {
+		row := s.db.QueryRow(
+			"SELECT id FROM messages WHERE session_id = ? AND role = 'assistant' AND content = ? ORDER BY id DESC LIMIT 1",
+			sessionID, botResponse,
+		)
+		var id int64
+		if err := row.Scan(&id); err == nil {
+			s.db.Exec("DELETE FROM messages WHERE id = ?", id)
+		}
+	}
+	return nil
+}
+
 func (s *Store) DeleteSession(chatID int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -155,7 +259,17 @@ func (s *Store) DeleteSession(chatID int64) error {
 	}
 	defer tx.Rollback()
 
-	// Delete messages first
+	// Delete message_map entries first
+	_, err = tx.Exec(`
+		DELETE FROM message_map WHERE session_id IN (
+			SELECT id FROM sessions WHERE chat_id = ?
+		)
+	`, chatID)
+	if err != nil {
+		return err
+	}
+
+	// Delete messages
 	_, err = tx.Exec(`
 		DELETE FROM messages WHERE session_id IN (
 			SELECT id FROM sessions WHERE chat_id = ?

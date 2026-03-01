@@ -36,10 +36,9 @@ func formatErrorForMarkdownV2(msg string) string {
 	return b.String()
 }
 
-// escapeMarkdownV2Text escapes special characters for Telegram MarkdownV2
-// in plain text that should not be interpreted as formatting.
-func escapeMarkdownV2Text(text string) string {
-	replacer := strings.NewReplacer(
+// Pre-compiled replacers for MarkdownV2 escaping, shared across calls.
+var (
+	mdV2TextReplacer = strings.NewReplacer(
 		`\`, `\\`,
 		`_`, `\_`,
 		`*`, `\*`,
@@ -60,27 +59,32 @@ func escapeMarkdownV2Text(text string) string {
 		`.`, `\.`,
 		`!`, `\!`,
 	)
-	return replacer.Replace(text)
+	mdV2CodeReplacer = strings.NewReplacer(
+		`\`, `\\`,
+		"`", "\\`",
+	)
+	mdV2URLReplacer = strings.NewReplacer(
+		`\`, `\\`,
+		`)`, `\)`,
+	)
+)
+
+// escapeMarkdownV2Text escapes special characters for Telegram MarkdownV2
+// in plain text that should not be interpreted as formatting.
+func escapeMarkdownV2Text(text string) string {
+	return mdV2TextReplacer.Replace(text)
 }
 
 // escapeCodeContent escapes only \ and ` inside code blocks/inline code
 // per Telegram MarkdownV2 rules.
 func escapeCodeContent(text string) string {
-	replacer := strings.NewReplacer(
-		`\`, `\\`,
-		"`", "\\`",
-	)
-	return replacer.Replace(text)
+	return mdV2CodeReplacer.Replace(text)
 }
 
 // escapeMarkdownV2URL escapes only \ and ) inside the URL part of an inline
 // link, per Telegram MarkdownV2 rules.
 func escapeMarkdownV2URL(url string) string {
-	replacer := strings.NewReplacer(
-		`\`, `\\`,
-		`)`, `\)`,
-	)
-	return replacer.Replace(url)
+	return mdV2URLReplacer.Replace(url)
 }
 
 // isLineStart reports whether position i in text is at the effective start
@@ -188,37 +192,49 @@ func formatTableBlock(lines []string) string {
 		}
 	}
 
+	// Helper to build a horizontal border line.
+	borderLine := func(left, mid, right string) string {
+		var b strings.Builder
+		for j := 0; j < maxCols; j++ {
+			if j == 0 {
+				b.WriteString(left)
+			} else {
+				b.WriteString(mid)
+			}
+			b.WriteString(strings.Repeat("─", colWidths[j]+2))
+		}
+		b.WriteString(right)
+		return b.String()
+	}
+
 	// Build aligned monospace table inside a code block.
 	var content strings.Builder
 	content.WriteByte('\n')
+	content.WriteString(borderLine("┌", "┬", "┐"))
+	content.WriteByte('\n')
 	for ri, r := range escaped {
+		content.WriteString("│")
 		for j := 0; j < maxCols; j++ {
-			if j > 0 {
-				content.WriteString(" │ ")
-			}
 			cell := ""
 			if j < len(r) {
 				cell = r[j]
 			}
+			content.WriteByte(' ')
 			content.WriteString(cell)
-			if j < maxCols-1 {
-				for k := len(cell); k < colWidths[j]; k++ {
-					content.WriteByte(' ')
-				}
+			for k := len(cell); k < colWidths[j]; k++ {
+				content.WriteByte(' ')
 			}
+			content.WriteString(" │")
 		}
 		content.WriteByte('\n')
 		// Draw separator after first row when the markdown had a separator.
 		if ri == 0 && hasSep {
-			for j := 0; j < maxCols; j++ {
-				if j > 0 {
-					content.WriteString("─┼─")
-				}
-				content.WriteString(strings.Repeat("─", colWidths[j]))
-			}
+			content.WriteString(borderLine("├", "┼", "┤"))
 			content.WriteByte('\n')
 		}
 	}
+	content.WriteString(borderLine("└", "┴", "┘"))
+	content.WriteByte('\n')
 
 	var result strings.Builder
 	result.WriteString("```")
@@ -245,7 +261,20 @@ func formatForMarkdownV2(text string) string {
 			if end != -1 {
 				content := text[i+3 : i+3+end]
 				result.WriteString("```")
-				result.WriteString(escapeCodeContent(content))
+				// Add language label (e.g., "// go") if language is specified
+				if nlIdx := strings.Index(content, "\n"); nlIdx != -1 {
+					lang := strings.TrimSpace(content[:nlIdx])
+					if lang != "" {
+						result.WriteString(escapeCodeContent(lang))
+						result.WriteString("\n// ")
+						result.WriteString(escapeCodeContent(lang))
+						result.WriteString(escapeCodeContent(content[nlIdx:]))
+					} else {
+						result.WriteString(escapeCodeContent(content))
+					}
+				} else {
+					result.WriteString(escapeCodeContent(content))
+				}
 				result.WriteString("```")
 				i = i + 3 + end + 3
 				continue
@@ -268,10 +297,8 @@ func formatForMarkdownV2(text string) string {
 		// 3. Bullet list item with * marker: "* text" at start of a line.
 		// Must come before bold/italic checks — in CommonMark, "* " at line
 		// start is always a bullet, never italic (space after * prevents
-		// left-flanking delimiter). Only single *, not ** or ***.
-		if text[i] == '*' && i+1 < n && text[i+1] == ' ' &&
-			(i+2 >= n || text[i+2] != '*') && // not "* *..." (unlikely but safe)
-			isLineStart(text, i) {
+		// left-flanking delimiter).
+		if text[i] == '*' && i+1 < n && text[i+1] == ' ' && isLineStart(text, i) {
 			lineEnd := strings.Index(text[i+2:], "\n")
 			var content string
 			if lineEnd == -1 {
@@ -296,7 +323,7 @@ func formatForMarkdownV2(text string) string {
 			if end != -1 && end > 0 {
 				inner := text[i+3 : i+3+end]
 				result.WriteString("*_")
-				result.WriteString(escapeMarkdownV2Text(inner))
+				result.WriteString(formatForMarkdownV2(inner))
 				result.WriteString("_*")
 				i = i + 3 + end + 3
 				continue
@@ -309,7 +336,7 @@ func formatForMarkdownV2(text string) string {
 			if end != -1 && end > 0 {
 				inner := text[i+2 : i+2+end]
 				result.WriteString("*")
-				result.WriteString(escapeMarkdownV2Text(inner))
+				result.WriteString(formatForMarkdownV2(inner))
 				result.WriteString("*")
 				i = i + 2 + end + 2
 				continue
@@ -319,18 +346,33 @@ func formatForMarkdownV2(text string) string {
 		// 4. Italic: *text* → _text_ (Telegram MarkdownV2 italic)
 		// Only match single * not preceded by another *
 		if text[i] == '*' && (i == 0 || text[i-1] != '*') && (i+1 >= n || text[i+1] != '*') {
-			end := strings.Index(text[i+1:], "*")
-			if end != -1 && end > 0 {
-				// Ensure the closing * is not part of **
-				closePos := i + 1 + end
-				if closePos+1 >= n || text[closePos+1] != '*' {
-					inner := text[i+1 : i+1+end]
-					result.WriteString("_")
-					result.WriteString(escapeMarkdownV2Text(inner))
-					result.WriteString("_")
-					i = closePos + 1
+			// Search for a closing standalone * (not adjacent to another *)
+			found := false
+			searchFrom := i + 1
+			for searchFrom < n {
+				relEnd := strings.Index(text[searchFrom:], "*")
+				if relEnd == -1 {
+					break
+				}
+				closePos := searchFrom + relEnd
+				if closePos <= i+1 {
+					searchFrom = closePos + 1
 					continue
 				}
+				// Closing * must be standalone: not preceded or followed by *
+				if (closePos+1 >= n || text[closePos+1] != '*') && text[closePos-1] != '*' {
+					inner := text[i+1 : closePos]
+					result.WriteString("_")
+					result.WriteString(formatForMarkdownV2(inner))
+					result.WriteString("_")
+					i = closePos + 1
+					found = true
+					break
+				}
+				searchFrom = closePos + 1
+			}
+			if found {
+				continue
 			}
 		}
 
@@ -590,7 +632,7 @@ func formatForMarkdownV2(text string) string {
 			if end != -1 && end > 0 {
 				inner := text[i+2 : i+2+end]
 				result.WriteString("~")
-				result.WriteString(escapeMarkdownV2Text(inner))
+				result.WriteString(formatForMarkdownV2(inner))
 				result.WriteString("~")
 				i = i + 2 + end + 2
 				continue
@@ -603,7 +645,7 @@ func formatForMarkdownV2(text string) string {
 			if end != -1 && end > 0 {
 				inner := text[i+2 : i+2+end]
 				result.WriteString("||")
-				result.WriteString(escapeMarkdownV2Text(inner))
+				result.WriteString(formatForMarkdownV2(inner))
 				result.WriteString("||")
 				i = i + 2 + end + 2
 				continue
@@ -886,16 +928,171 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 	}
 
 	chatID := reaction.Chat.ID
-	response, err := h.bridge.HandleReaction(ctx, chatID, emoji)
+
+	// Regenerate is handled specially: stream the new response into the
+	// existing bot message instead of sending a separate reply.
+	if h.bridge.ReactionAction(emoji) == "regenerate" {
+		h.handleRegenerate(ctx, b, chatID, reaction.MessageID)
+		return
+	}
+
+	response, err := h.bridge.HandleReaction(ctx, chatID, reaction.MessageID, emoji)
 	if err != nil {
 		slog.Error("bridge handle reaction failed", "error", err, "chat_id", chatID, "emoji", emoji)
+		setReaction(ctx, b, chatID, reaction.MessageID, "❌")
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      formatErrorForMarkdownV2(err.Error()),
+			ParseMode: models.ParseModeMarkdown,
+		})
 		return
 	}
 	if response == "" {
 		return
 	}
 
-	h.sendChunked(ctx, b, chatID, response)
+	setReaction(ctx, b, chatID, reaction.MessageID, "✅")
+	ids := h.sendChunked(ctx, b, chatID, response)
+	action := h.bridge.ReactionAction(emoji)
+	if (action == "remember" || action == "forget") && len(ids) > 0 {
+		setReaction(ctx, b, chatID, ids[len(ids)-1], "✅")
+	}
+}
+
+// handleRegenerate re-sends the original user message to Claude and streams
+// the new response into the existing bot message, replacing its content.
+func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64, botMessageID int) {
+	// Show a "Regenerating..." placeholder while Claude processes.
+	b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: botMessageID,
+		Text:      escapeMarkdownV2Text("Regenerating..."),
+		ParseMode: models.ParseModeMarkdown,
+	})
+
+	// Set up streaming state to throttle edits.
+	var mu sync.Mutex
+	var accumulated strings.Builder
+	lastEdit := time.Time{}
+	markdownFailed := false
+	lastSentContent := ""
+	lastUsedMarkdown := false
+
+	onUpdate := func(chunk string) {
+		mu.Lock()
+		accumulated.WriteString(chunk)
+		current := accumulated.String()
+		now := time.Now()
+		shouldEdit := now.Sub(lastEdit) >= streamEditInterval
+		if shouldEdit {
+			lastEdit = now
+		}
+		failed := markdownFailed
+		mu.Unlock()
+
+		if !shouldEdit {
+			return
+		}
+
+		if !failed {
+			formatted, ok := formatForTelegram(current, maxMessageLength)
+			if ok {
+				_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					ChatID:    chatID,
+					MessageID: botMessageID,
+					Text:      formatted,
+					ParseMode: models.ParseModeMarkdown,
+				})
+				if editErr == nil {
+					mu.Lock()
+					lastSentContent = current
+					lastUsedMarkdown = true
+					mu.Unlock()
+					return
+				}
+				slog.Debug("regenerate markdown edit failed, disabling", "error", editErr)
+				mu.Lock()
+				markdownFailed = true
+				mu.Unlock()
+			}
+		}
+
+		plain := current
+		if len(plain) > maxMessageLength-3 {
+			plain = "..." + plain[len(plain)-maxMessageLength+3:]
+		}
+		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: botMessageID,
+			Text:      plain,
+		})
+		if editErr != nil {
+			slog.Debug("failed to edit regenerate message", "error", editErr)
+		} else {
+			mu.Lock()
+			lastSentContent = current
+			lastUsedMarkdown = false
+			mu.Unlock()
+		}
+	}
+
+	response, err := h.bridge.RegenerateStreaming(ctx, chatID, botMessageID, onUpdate)
+	if err != nil {
+		slog.Error("regenerate failed", "error", err, "chat_id", chatID)
+		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: botMessageID,
+			Text:      formatErrorForMarkdownV2(err.Error()),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		return
+	}
+
+	if response == "" {
+		response = "(empty response)"
+	}
+
+	setReaction(ctx, b, chatID, botMessageID, "✅")
+
+	// Final edit with fully formatted response.
+	formatted := formatForMarkdownV2(response)
+
+	mu.Lock()
+	alreadySent := lastUsedMarkdown && lastSentContent == response
+	mu.Unlock()
+
+	if alreadySent && len(formatted) <= maxMessageLength {
+		return
+	}
+
+	if len(formatted) <= maxMessageLength {
+		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: botMessageID,
+			Text:      formatted,
+			ParseMode: models.ParseModeMarkdown,
+		})
+		if editErr != nil {
+			b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    chatID,
+				MessageID: botMessageID,
+				Text:      response,
+			})
+		}
+	} else if len(response) <= maxMessageLength {
+		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: botMessageID,
+			Text:      response,
+		})
+	} else {
+		// Response too long — delete original and send chunked.
+		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    chatID,
+			MessageID: botMessageID,
+		})
+		h.sendChunked(ctx, b, chatID, response)
+	}
 }
 
 func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
@@ -1067,8 +1264,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	alreadySent := lastUsedMarkdown && lastSentContent == response
 	mu.Unlock()
 
+	// Track which bot message IDs correspond to this exchange.
+	var botMsgIDs []int
+
 	if alreadySent && len(formatted) <= maxMessageLength {
 		// Streaming already displayed the final formatted content.
+		botMsgIDs = []int{msgID}
 	} else if len(formatted) <= maxMessageLength {
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
@@ -1085,6 +1286,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 				Text:      response,
 			})
 		}
+		botMsgIDs = []int{msgID}
 	} else if len(response) <= maxMessageLength {
 		// Formatted text exceeds the limit but raw text fits — send unformatted.
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -1092,13 +1294,21 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			MessageID: msgID,
 			Text:      response,
 		})
+		botMsgIDs = []int{msgID}
 	} else {
 		// Delete placeholder and send chunked formatted response.
 		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
 		})
-		h.sendChunked(ctx, b, msg.Chat.ID, response)
+		botMsgIDs = h.sendChunked(ctx, b, msg.Chat.ID, response)
+	}
+
+	// Persist message-to-response mapping so reactions can target specific exchanges.
+	for _, botID := range botMsgIDs {
+		if err := h.bridge.SaveMessageMap(msg.Chat.ID, msg.ID, botID, text, response); err != nil {
+			slog.Warn("failed to save message map", "error", err, "chat_id", msg.Chat.ID)
+		}
 	}
 
 	// Pick a finishing reaction: 🤔 when Claude is asking for clarification, ✅ otherwise.
@@ -1146,25 +1356,30 @@ func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Mes
 		return
 	}
 
-	h.sendChunked(ctx, b, msg.Chat.ID, response)
+	ids := h.sendChunked(ctx, b, msg.Chat.ID, response)
+	if (cmd == "remember" || cmd == "forget") && len(ids) > 0 {
+		setReaction(ctx, b, msg.Chat.ID, ids[len(ids)-1], "✅")
+	}
 }
 
-// sendChunked splits long messages at paragraph boundaries and sends them sequentially.
-func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID int64, text string) {
+// sendChunked splits long messages at paragraph boundaries and sends them
+// sequentially. It returns the Telegram message IDs of the sent messages.
+func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID int64, text string) []int {
 	if text == "" {
 		text = "(empty response)"
 	}
 
 	chunks := splitMessage(text, maxMessageLength)
+	var ids []int
 	for _, chunk := range chunks {
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    chatID,
 			Text:      formatForMarkdownV2(chunk),
 			ParseMode: models.ParseModeMarkdown,
 		})
 		if err != nil {
 			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID)
-			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+			sent, err = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   chunk,
 			})
@@ -1172,7 +1387,11 @@ func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID int64, tex
 				slog.Error("failed to send message", "error", err, "chat_id", chatID)
 			}
 		}
+		if sent != nil {
+			ids = append(ids, sent.ID)
+		}
 	}
+	return ids
 }
 
 // codeBlockStart returns the start index of the fenced code block (```)

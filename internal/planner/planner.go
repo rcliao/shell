@@ -3,6 +3,7 @@
 package planner
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -109,10 +111,12 @@ func (p *Planner) snapshotBase(ctx context.Context) {
 	}
 	out, err := cmd.Output()
 	if err != nil {
+		slog.Warn("planner: snapshotBase failed", "error", err, "workdir", p.cfg.WorkDir)
 		p.taskBase = ""
 		return
 	}
 	p.taskBase = strings.TrimSpace(string(out))
+	slog.Info("planner: snapshotBase", "sha", p.taskBase, "workdir", p.cfg.WorkDir)
 }
 
 // ParsePlan extracts unchecked tasks from plan text.
@@ -401,12 +405,28 @@ A reviewer found issues with your previous attempt. You MUST address this:
 - Keep changes minimal and focused on the task
 - If the task is ambiguous or would require violating a convention, explain what you need clarified instead of guessing`, task, feedbackBlock, conventionsBlock, contextBlock, testRule)
 
-	return p.runClaude(ctx, prompt)
+	slog.Info("planner: execute start",
+		"task", truncate(task, 100),
+		"attempt", feedback != "",
+		"has_feedback", feedback != "",
+	)
+	start := time.Now()
+	output, err := p.runClaude(ctx, prompt)
+	elapsed := time.Since(start)
+	if err != nil {
+		slog.Error("planner: execute failed", "elapsed", elapsed, "error", err)
+	} else {
+		slog.Info("planner: execute done",
+			"elapsed", elapsed,
+			"output_len", len(output),
+		)
+	}
+	return output, err
 }
 
-// review runs a second Claude invocation to evaluate the diff.
-// The reviewer has Bash+Read tools for active verification. It follows a
-// structured checklist and can emit [remember] blocks for persistent learning.
+// review runs verification commands ourselves (with a hard timeout), then
+// passes all evidence to a text-only Claude reviewer. No Bash tool — the
+// reviewer only analyzes the diff, test results, and verification output.
 // Returns verdict, review text, and any extracted learnings.
 func (p *Planner) review(ctx context.Context, pkg ReviewPackage) (Verdict, string, []string) {
 	conventionsBlock := ""
@@ -429,9 +449,30 @@ func (p *Planner) review(ctx context.Context, pkg ReviewPackage) (Verdict, strin
 		criticalFlowsBlock = p.cfg.CriticalFlows
 	}
 
-	verifyBlock := "Use your judgment."
+	slog.Info("planner: review start",
+		"task", truncate(pkg.Task, 100),
+		"attempt", pkg.Attempt,
+		"changed_files", len(pkg.ChangedFiles),
+		"diff_lines", diffLineCount(pkg.Diff),
+	)
+
+	// Run E2E verification commands ourselves with a hard timeout.
+	verifyResultBlock := "No verification commands configured."
 	if p.cfg.VerifyInstructions != "" {
-		verifyBlock = p.cfg.VerifyInstructions
+		slog.Info("planner: verify commands start", "cmd", p.cfg.VerifyInstructions)
+		vStart := time.Now()
+		verifyOutput, verifyOk := p.runVerifyCommands(ctx)
+		status := "PASSED"
+		if !verifyOk {
+			status = "FAILED"
+		}
+		slog.Info("planner: verify commands done",
+			"elapsed", time.Since(vStart),
+			"status", status,
+			"output_len", len(verifyOutput),
+		)
+		verifyResultBlock = fmt.Sprintf("Command: %s\nStatus: %s\nOutput:\n%s",
+			p.cfg.VerifyInstructions, status, truncate(verifyOutput, 3000))
 	}
 
 	// Build a robust diff header — never show "0 files" when there's diff content.
@@ -440,8 +481,8 @@ func (p *Planner) review(ctx context.Context, pkg ReviewPackage) (Verdict, strin
 		diffHeader = fmt.Sprintf("## Git Diff (%d files changed: %s)", n, strings.Join(pkg.ChangedFiles, ", "))
 	}
 
-	prompt := fmt.Sprintf(`You are an active verification gate. You have Bash and Read tools.
-An agent completed a task and ALL TESTS PASSED. Your DEFAULT verdict is DONE.
+	prompt := fmt.Sprintf(`You are a verification gate. An agent completed a task and ALL TESTS PASSED.
+Your DEFAULT verdict is DONE.
 
 ## Task
 %s
@@ -449,7 +490,7 @@ An agent completed a task and ALL TESTS PASSED. Your DEFAULT verdict is DONE.
 ## Known Critical Flows
 %s
 
-## E2E Verification Commands
+## E2E Verification Result
 %s
 
 %s
@@ -464,10 +505,10 @@ Read the diff. Do the changes relate to the task?
 Does the diff cover all requirements explicitly stated in the task?
 
 ### 3. E2E Verification
-Run verification commands. Report what you ran and the result.
+Review the verification result above. Did it pass?
 
-### 4. Critical Flow Verification
-Check known critical flows still work. Read changed files for obvious bugs.
+### 4. Critical Flow Check
+Based on the diff and known critical flows, are there obvious bugs?
 
 ### 5. Summary
 Based on checks 1-4, give your verdict.
@@ -483,12 +524,17 @@ If you discover something important about this codebase, emit:
 
 Respond with EXACTLY this format:
 VERDICT: done|needs_revision|needs_human
-<brief explanation>`, pkg.Task, conventionsBlock, execSummaryBlock, criticalFlowsBlock, verifyBlock, diffHeader, pkg.Diff)
+<brief explanation>`, pkg.Task, conventionsBlock, execSummaryBlock, criticalFlowsBlock, verifyResultBlock, diffHeader, pkg.Diff)
 
-	output, err := p.runClaudeReviewer(ctx, prompt)
+	slog.Info("planner: reviewer claude start", "prompt_len", len(prompt))
+	rStart := time.Now()
+	output, err := p.runClaudeTextOnly(ctx, prompt)
+	rElapsed := time.Since(rStart)
 	if err != nil {
+		slog.Error("planner: reviewer claude failed", "elapsed", rElapsed, "error", err)
 		return VerdictNeedsHuman, fmt.Sprintf("Review failed: %v", err), nil
 	}
+	slog.Info("planner: reviewer claude done", "elapsed", rElapsed, "output_len", len(output))
 
 	// Extract learnings before parsing verdict.
 	cleanedOutput, learnings := extractLearnings(output)
@@ -497,10 +543,17 @@ VERDICT: done|needs_revision|needs_human
 	re := regexp.MustCompile(`VERDICT:\s*(done|needs_revision|needs_human)`)
 	match := re.FindStringSubmatch(cleanedOutput)
 	if match == nil {
+		slog.Warn("planner: reviewer verdict unparseable", "output", truncate(cleanedOutput, 200))
 		return VerdictNeedsHuman, "Could not parse reviewer verdict.\n\n" + cleanedOutput, learnings
 	}
 
-	return Verdict(match[1]), cleanedOutput, learnings
+	verdict := Verdict(match[1])
+	slog.Info("planner: review done",
+		"verdict", verdict,
+		"learnings", len(learnings),
+		"elapsed_total", time.Since(rStart),
+	)
+	return verdict, cleanedOutput, learnings
 }
 
 // extractChangedFiles parses a git diff to extract the list of changed file paths.
@@ -565,6 +618,9 @@ func (p *Planner) runTests(ctx context.Context) (string, bool) {
 
 // runStaticTests executes a fixed test command.
 func (p *Planner) runStaticTests(ctx context.Context) (string, bool) {
+	slog.Info("planner: tests start", "cmd", p.cfg.TestCmd)
+	start := time.Now()
+
 	testCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -574,7 +630,13 @@ func (p *Planner) runStaticTests(ctx context.Context) (string, bool) {
 	}
 
 	output, err := cmd.CombinedOutput()
-	return string(output), err == nil
+	passed := err == nil
+	slog.Info("planner: tests done",
+		"elapsed", time.Since(start),
+		"passed", passed,
+		"output_len", len(output),
+	)
+	return string(output), passed
 }
 
 // runAgentTests asks Claude to determine and run the appropriate tests.
@@ -634,7 +696,25 @@ func (p *Planner) getDiff(ctx context.Context) string {
 	// needing to read the full files.
 	diff := run("diff", "-U10", base)
 
-	// Include new untracked files
+	// Also capture committed changes since the base (agent may have committed).
+	if diff == "" && base != "HEAD" {
+		diff = run("diff", "-U10", base, "HEAD")
+	}
+
+	// Log diagnostics when diff is empty — helps debug "no changes detected".
+	if diff == "" {
+		currentHead := strings.TrimSpace(run("rev-parse", "HEAD"))
+		status := run("status", "--short")
+		slog.Warn("planner: getDiff empty",
+			"base", base,
+			"head", currentHead,
+			"same_commit", base == currentHead,
+			"status_len", len(strings.TrimSpace(status)),
+			"workdir", p.cfg.WorkDir,
+		)
+	}
+
+	// Include new untracked files (skip binary files).
 	untracked := strings.TrimSpace(run("ls-files", "--others", "--exclude-standard"))
 	if untracked != "" {
 		for _, f := range strings.Split(untracked, "\n") {
@@ -644,6 +724,15 @@ func (p *Planner) getDiff(ctx context.Context) string {
 			}
 			content, err := os.ReadFile(path)
 			if err != nil {
+				continue
+			}
+			// Skip binary files (contain null bytes in first 8KB).
+			probe := content
+			if len(probe) > 8192 {
+				probe = probe[:8192]
+			}
+			if bytes.ContainsRune(probe, 0) {
+				diff += fmt.Sprintf("\n--- new file: %s (binary, skipped) ---\n", f)
 				continue
 			}
 			// Limit to first 100 lines
@@ -707,40 +796,361 @@ func (p *Planner) runClaudeTextOnly(ctx context.Context, prompt string) (string,
 	})
 }
 
-// reviewTimeout caps how long the reviewer subprocess can run.
-// Much shorter than the execute timeout — the reviewer should verify, not explore.
-const reviewTimeout = 5 * time.Minute
+// verifyTimeout caps how long E2E verification commands can run.
+const verifyTimeout = 60 * time.Second
 
-// reviewMaxTurns caps how many agentic tool-use turns the reviewer gets.
-// Enough for a few verification commands + file reads, not open-ended exploration.
-const reviewMaxTurns = 10
+// runVerifyCommands executes VerifyInstructions as a shell command with a hard
+// timeout. Returns the combined stdout/stderr output and whether it succeeded.
+// Returns ("", true) if no verify instructions are configured.
+func (p *Planner) runVerifyCommands(ctx context.Context) (string, bool) {
+	if p.cfg.VerifyInstructions == "" {
+		return "", true
+	}
 
-// runClaudeReviewer spawns a Claude CLI subprocess with Bash+Read tools for
-// active verification. The reviewer can run commands and read files but cannot
-// modify the codebase (no Write/Edit). Capped at reviewMaxTurns turns and
-// reviewTimeout to prevent runaway sessions.
-func (p *Planner) runClaudeReviewer(ctx context.Context, prompt string) (string, error) {
-	reviewCtx, cancel := context.WithTimeout(ctx, reviewTimeout)
+	vCtx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
-	return p.runClaudeWithArgs(reviewCtx, prompt, []string{
-		"--allowedTools", "Bash,Read",
-		"--permission-mode", "bypassPermissions",
-		"--max-turns", fmt.Sprintf("%d", reviewMaxTurns),
-	})
+
+	cmd := exec.CommandContext(vCtx, "sh", "-c", p.cfg.VerifyInstructions)
+	cmd.Env = append(
+		filterEnv(os.Environ(), "CLAUDECODE"),
+		"GIT_PAGER=cat",
+		"PAGER=cat",
+	)
+	if p.cfg.WorkDir != "" {
+		cmd.Dir = p.cfg.WorkDir
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if vCtx.Err() == context.DeadlineExceeded {
+		return string(output) + "\n(verification timed out)", false
+	}
+	return string(output), err == nil
 }
 
 // runClaude spawns a Claude CLI subprocess with full tool access and
 // permissions bypassed. Used for task execution where the planner's
 // own test+review gates provide safety.
+//
+// Uses --output-format json (NOT stream-json) because stream-json
+// changes Claude's agentic behavior, causing it to read/analyze without
+// making file changes. A background monitor logs git diff progress
+// every 30s for visibility during long-running executions.
 func (p *Planner) runClaude(ctx context.Context, prompt string) (string, error) {
-	return p.runClaudeWithArgs(ctx, prompt, []string{
+	return p.runClaudeWithMonitor(ctx, prompt, p.cfg.Timeout, []string{
 		"--allowedTools", "Bash,Write,Edit,Read",
 		"--permission-mode", "bypassPermissions",
 	})
 }
 
+// runClaudeWithMonitor runs Claude with --output-format json (for correct
+// tool execution) while a background goroutine periodically logs git diff
+// stats to provide visibility into what's changing during long executions.
+func (p *Planner) runClaudeWithMonitor(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string) (string, error) {
+	// Start a background progress monitor that logs git activity.
+	monCtx, monCancel := context.WithCancel(ctx)
+	defer monCancel()
+	if p.cfg.WorkDir != "" {
+		go p.monitorProgress(monCtx)
+	}
+
+	return p.runClaudeWithTimeout(ctx, prompt, timeout, extraArgs)
+}
+
+// monitorProgress periodically logs git diff stats in the working directory.
+// Runs until the context is cancelled (when the execute step completes).
+func (p *Planner) monitorProgress(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Check for file changes via git status.
+			cmd := exec.CommandContext(ctx, "git", "diff", "--stat", "HEAD")
+			cmd.Dir = p.cfg.WorkDir
+			out, _ := cmd.Output()
+			stat := strings.TrimSpace(string(out))
+
+			// Also check for untracked files.
+			ucmd := exec.CommandContext(ctx, "git", "ls-files", "--others", "--exclude-standard")
+			ucmd.Dir = p.cfg.WorkDir
+			uout, _ := ucmd.Output()
+			untracked := strings.TrimSpace(string(uout))
+
+			if stat != "" || untracked != "" {
+				slog.Info("planner: progress",
+					"diff_stat", truncate(stat, 500),
+					"untracked", truncate(untracked, 200),
+				)
+			} else {
+				slog.Info("planner: progress", "status", "no changes yet")
+			}
+		}
+	}
+}
+
+// streamEvent represents a single NDJSON event from --output-format stream-json.
+type streamEvent struct {
+	Type    string          `json:"type"`
+	Name    string          `json:"name,omitempty"`    // tool_use: tool name
+	Input   json.RawMessage `json:"input,omitempty"`   // tool_use: tool input
+	Result  string          `json:"result,omitempty"`  // result: final text
+	IsError bool            `json:"is_error,omitempty"`
+}
+
+// runClaudeStreaming spawns Claude with --output-format stream-json and reads
+// NDJSON events in real-time. Tool usage is logged as it happens, giving
+// visibility into what Claude is doing during long-running executions.
+func (p *Planner) runClaudeStreaming(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string) (string, error) {
+	procCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	args := []string{
+		"-p", prompt,
+		"--output-format", "stream-json",
+		"--verbose",
+	}
+	args = append(args, extraArgs...)
+	if p.cfg.Model != "" {
+		args = append(args, "--model", p.cfg.Model)
+	}
+
+	binary := p.cfg.ClaudeBinary
+	if binary == "" {
+		binary = "claude"
+	}
+
+	slog.Info("planner: spawning claude (streaming)",
+		"timeout", timeout,
+		"prompt_len", len(prompt),
+	)
+	spawnStart := time.Now()
+
+	cmd := exec.CommandContext(procCtx, binary, args...)
+	cmd.Env = append(
+		filterEnv(os.Environ(), "CLAUDECODE"),
+		"GIT_PAGER=cat",
+		"PAGER=cat",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	if p.cfg.WorkDir != "" {
+		cmd.Dir = p.cfg.WorkDir
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("creating stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("starting claude: %w", err)
+	}
+
+	// Read NDJSON events from stdout line-by-line.
+	// Using bufio.Scanner instead of json.Decoder so non-JSON lines
+	// (e.g. verbose progress output) don't kill the parser.
+	var finalResult string
+	var toolCount int
+	var lastTool string
+	eventTypes := make(map[string]int) // count every event type we see
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024) // 2MB per line
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		// Parse into a generic map first to see all fields.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("planner: stream non-json line", "line", truncate(string(line), 200))
+			continue
+		}
+
+		// Extract the type field.
+		var evType string
+		if t, ok := raw["type"]; ok {
+			json.Unmarshal(t, &evType)
+		}
+		eventTypes[evType]++
+
+		// Detect tool usage from any event that contains tool info.
+		// The stream-json format may use various type names.
+		if isToolUseEvent(evType, raw) {
+			toolCount++
+			toolName := extractToolName(raw)
+			lastTool = toolName
+			slog.Info("planner: tool_use",
+				"tool", toolName,
+				"event_type", evType,
+				"input", truncate(extractToolInput(raw), 200),
+				"seq", toolCount,
+				"elapsed", time.Since(spawnStart),
+			)
+		}
+
+		if evType == "result" {
+			var ev streamEvent
+			json.Unmarshal(line, &ev)
+			finalResult = ev.Result
+			slog.Info("planner: stream result",
+				"is_error", ev.IsError,
+				"result_len", len(ev.Result),
+				"elapsed", time.Since(spawnStart),
+				"event_types", eventTypes,
+			)
+			break // Result is the final event — stop reading.
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("planner: stream scanner error", "error", err)
+	}
+
+	// Kill process if still running — we have what we need.
+	cancel()
+
+	err = cmd.Wait()
+	spawnElapsed := time.Since(spawnStart)
+
+	// If we got the result, the process was killed by us — that's success.
+	if finalResult != "" {
+		slog.Info("planner: claude done (streaming)",
+			"elapsed", spawnElapsed,
+			"result_len", len(finalResult),
+			"tools_used", toolCount,
+			"event_types", eventTypes,
+		)
+		return finalResult, nil
+	}
+
+	// No result event received — check for errors.
+	if err != nil {
+		if procCtx.Err() == context.DeadlineExceeded {
+			slog.Error("planner: claude timed out",
+				"type", "execute-streaming",
+				"elapsed", spawnElapsed,
+				"timeout", timeout,
+				"tools_used", toolCount,
+				"last_tool", lastTool,
+				"event_types", eventTypes,
+			)
+			return "", fmt.Errorf("claude timed out after %s (used %d tools, last: %s)", timeout, toolCount, lastTool)
+		}
+		stderrStr := strings.TrimSpace(stderr.String())
+		slog.Error("planner: claude failed",
+			"type", "execute-streaming",
+			"elapsed", spawnElapsed,
+			"error", err,
+			"stderr_len", len(stderrStr),
+			"tools_used", toolCount,
+			"event_types", eventTypes,
+		)
+		if stderrStr != "" {
+			return "", fmt.Errorf("claude failed: %w\nstderr: %s", err, stderrStr)
+		}
+		return "", fmt.Errorf("claude failed: %w", err)
+	}
+
+	// Process exited without result event.
+	slog.Warn("planner: claude exited without result event",
+		"elapsed", spawnElapsed,
+		"tools_used", toolCount,
+		"event_types", eventTypes,
+	)
+	return "", fmt.Errorf("claude exited without producing a result")
+}
+
+// isToolUseEvent checks if a stream event represents tool usage.
+// Handles multiple possible formats from Claude CLI stream-json.
+func isToolUseEvent(evType string, raw map[string]json.RawMessage) bool {
+	// Direct tool_use type
+	if evType == "tool_use" {
+		return true
+	}
+	// content_block_start with nested tool_use (API streaming format)
+	if evType == "content_block_start" {
+		if cb, ok := raw["content_block"]; ok {
+			var block struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(cb, &block) == nil && block.Type == "tool_use" {
+				return true
+			}
+		}
+	}
+	// Any event with a "tool" or "name" field alongside tool-like content
+	if _, hasName := raw["name"]; hasName {
+		if _, hasInput := raw["input"]; hasInput {
+			return true
+		}
+	}
+	return false
+}
+
+// extractToolName extracts the tool name from a stream event.
+func extractToolName(raw map[string]json.RawMessage) string {
+	// Try top-level "name" field
+	if n, ok := raw["name"]; ok {
+		var name string
+		if json.Unmarshal(n, &name) == nil && name != "" {
+			return name
+		}
+	}
+	// Try nested content_block.name
+	if cb, ok := raw["content_block"]; ok {
+		var block struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(cb, &block) == nil && block.Name != "" {
+			return block.Name
+		}
+	}
+	// Try nested tool.name
+	if t, ok := raw["tool"]; ok {
+		var tool struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(t, &tool) == nil && tool.Name != "" {
+			return tool.Name
+		}
+	}
+	return "unknown"
+}
+
+// extractToolInput extracts a string representation of tool input from a stream event.
+func extractToolInput(raw map[string]json.RawMessage) string {
+	if inp, ok := raw["input"]; ok {
+		return string(inp)
+	}
+	if cb, ok := raw["content_block"]; ok {
+		var block struct {
+			Input json.RawMessage `json:"input"`
+		}
+		if json.Unmarshal(cb, &block) == nil && len(block.Input) > 0 {
+			return string(block.Input)
+		}
+	}
+	return ""
+}
+
 func (p *Planner) runClaudeWithArgs(ctx context.Context, prompt string, extraArgs []string) (string, error) {
-	procCtx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
+	return p.runClaudeWithTimeout(ctx, prompt, p.cfg.Timeout, extraArgs)
+}
+
+func (p *Planner) runClaudeWithTimeout(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string) (string, error) {
+	procCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	args := []string{
@@ -757,12 +1167,42 @@ func (p *Planner) runClaudeWithArgs(ctx context.Context, prompt string, extraArg
 		binary = "claude"
 	}
 
-	slog.Debug("planner: spawning claude", "binary", binary)
+	// Identify the invocation type from the args for logging.
+	invocationType := "execute"
+	for _, a := range extraArgs {
+		if a == "Bash,Write,Edit" { // --disallowedTools value for text-only
+			invocationType = "text-only"
+			break
+		}
+	}
+	slog.Info("planner: spawning claude",
+		"type", invocationType,
+		"timeout", timeout,
+		"prompt_len", len(prompt),
+	)
+	spawnStart := time.Now()
 
 	cmd := exec.CommandContext(procCtx, binary, args...)
-	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
+
+	// Disable pagers — git, less, and other tools will hang forever
+	// waiting for TTY input when spawned as Bash tool children.
+	cmd.Env = append(
+		filterEnv(os.Environ(), "CLAUDECODE"),
+		"GIT_PAGER=cat",
+		"PAGER=cat",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+
 	if p.cfg.WorkDir != "" {
 		cmd.Dir = p.cfg.WorkDir
+	}
+
+	// Create a new process group so we can kill the entire tree
+	// (claude + any child bash processes) on timeout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Kill the entire process group, not just the parent.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -770,11 +1210,26 @@ func (p *Planner) runClaudeWithArgs(ctx context.Context, prompt string, extraArg
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		spawnElapsed := time.Since(spawnStart)
 		if procCtx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("claude timed out after %s", p.cfg.Timeout)
+			slog.Error("planner: claude timed out",
+				"type", invocationType,
+				"elapsed", spawnElapsed,
+				"timeout", timeout,
+				"stdout_len", stdout.Len(),
+				"stderr_len", stderr.Len(),
+			)
+			return "", fmt.Errorf("claude timed out after %s", timeout)
 		}
 		stderrStr := strings.TrimSpace(stderr.String())
 		stdoutStr := strings.TrimSpace(stdout.String())
+		slog.Error("planner: claude failed",
+			"type", invocationType,
+			"elapsed", spawnElapsed,
+			"error", err,
+			"stderr_len", len(stderrStr),
+			"stdout_len", len(stdoutStr),
+		)
 		switch {
 		case stderrStr != "" && stdoutStr != "":
 			return "", fmt.Errorf("claude failed: %w\nstderr: %s\nstdout: %s", err, stderrStr, stdoutStr)
@@ -786,6 +1241,12 @@ func (p *Planner) runClaudeWithArgs(ctx context.Context, prompt string, extraArg
 			return "", fmt.Errorf("claude failed: %w", err)
 		}
 	}
+
+	slog.Info("planner: claude done",
+		"type", invocationType,
+		"elapsed", time.Since(spawnStart),
+		"stdout_len", stdout.Len(),
+	)
 
 	// Parse JSON output if possible
 	var result struct {

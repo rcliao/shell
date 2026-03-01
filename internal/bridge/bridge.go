@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,13 +146,56 @@ func (b *Bridge) SetNotifier(fn NotifyFunc) {
 	b.notify = fn
 }
 
+// SaveMessageMap persists a mapping between a user's Telegram message and the
+// bot's response message for the current session, including message content.
+func (b *Bridge) SaveMessageMap(chatID int64, userMessageID, botMessageID int, userMessage, botResponse string) error {
+	sess, err := b.store.GetSession(chatID)
+	if err != nil || sess == nil {
+		return err
+	}
+	return b.store.SaveMessageMap(chatID, userMessageID, botMessageID, sess.ID, userMessage, botResponse)
+}
+
+// GetMessageMapByBotMsg looks up a message mapping by bot response message ID.
+func (b *Bridge) GetMessageMapByBotMsg(chatID int64, botMessageID int) (*store.MessageMap, error) {
+	return b.store.GetMessageMapByBotMsg(chatID, botMessageID)
+}
+
+// ReactionContext holds the message context for a reaction: the original
+// user message and bot response that the reaction was placed on.
+type ReactionContext struct {
+	UserMessage string // original user message text
+	BotResponse string // bot response text
+	MessageMap  *store.MessageMap
+}
+
 // HandleReaction processes an emoji reaction as a user action.
 // The emoji→action mapping is controlled by Config.Telegram.ReactionMap.
+// messageID is the Telegram message ID that was reacted to, used to look up
+// which exchange the reaction targets.
 // Returns a response message if the reaction triggered an action, or empty string if ignored.
-func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, emoji string) (string, error) {
+func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, messageID int, emoji string) (string, error) {
 	action, ok := b.reactionMap[emoji]
 	if !ok || action == "" {
-		return "", nil
+		return b.unmappedReactionHint(emoji), nil
+	}
+
+	// Look up which exchange the reaction targets (if any).
+	var rc *ReactionContext
+	if msgMap, err := b.store.GetMessageMapByBotMsg(chatID, messageID); err == nil && msgMap != nil {
+		rc = &ReactionContext{
+			UserMessage: msgMap.UserMessage,
+			BotResponse: msgMap.BotResponse,
+			MessageMap:  msgMap,
+		}
+		slog.Info("reaction targets mapped exchange",
+			"chat_id", chatID, "emoji", emoji, "action", action,
+			"bot_message_id", msgMap.BotMessageID,
+			"user_message_id", msgMap.UserMessageID,
+			"session_id", msgMap.SessionID,
+			"user_message_len", len(msgMap.UserMessage),
+			"bot_response_len", len(msgMap.BotResponse),
+		)
 	}
 
 	// Actions that work regardless of plan state.
@@ -162,6 +206,18 @@ func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, emoji string)
 		return b.PlanStop(chatID)
 	case "retry":
 		return b.PlanRetry(ctx, chatID)
+	case "regenerate":
+		return b.Regenerate(ctx, chatID, rc)
+	case "remember":
+		return b.RememberResponse(ctx, chatID, rc)
+	case "forget":
+		return b.ForgetExchange(ctx, chatID, rc)
+	}
+
+	// Log context availability for plan actions.
+	if rc != nil {
+		slog.Debug("reaction context available for plan action",
+			"action", action, "user_message", rc.UserMessage)
 	}
 
 	// Remaining actions ("go", "stop", or custom) require an interactive plan.
@@ -379,6 +435,8 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.Status(chatID)
 	case "help":
 		return b.Help(), nil
+	case "reactions":
+		return b.Reactions(), nil
 	case "start":
 		return b.Start(ctx, chatID)
 	case "remember":
@@ -408,7 +466,7 @@ func (b *Bridge) Start(ctx context.Context, chatID int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "Welcome to teeny-relay! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/help — Show help", nil
+	return "Welcome to teeny-relay! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
 }
 
 // Reset kills the current session and creates a fresh one.
@@ -482,7 +540,23 @@ func (b *Bridge) Help() string {
 			"- `/planretry` — Retry blocked task automatically\n"
 	}
 
-	help += "\n---\n\n`/help` — Show this help message"
+	if len(b.reactionMap) > 0 {
+		help += "\n### Reactions\n\nReact to any message with:\n\n"
+		// Sort by action name for stable output.
+		type entry struct{ emoji, action string }
+		entries := make([]entry, 0, len(b.reactionMap))
+		for emoji, action := range b.reactionMap {
+			entries = append(entries, entry{emoji, action})
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].action < entries[j].action })
+		for _, e := range entries {
+			help += fmt.Sprintf("- %s → `%s`\n", e.emoji, e.action)
+		}
+	}
+
+	help += "\n---\n\n" +
+		"`/reactions` — Show emoji→action mappings\n" +
+		"`/help` — Show this help message"
 	return help
 }
 
@@ -522,6 +596,122 @@ func (b *Bridge) ListMemories(ctx context.Context, chatID int64) (string, error)
 		return "Memory is not enabled.", nil
 	}
 	return b.memory.ListMemories(ctx, chatID)
+}
+
+// ReactionAction returns the action name mapped to the given emoji, or "".
+func (b *Bridge) ReactionAction(emoji string) string {
+	return b.reactionMap[emoji]
+}
+
+// Reactions returns a formatted list of the current emoji→action mappings.
+func (b *Bridge) Reactions() string {
+	if len(b.reactionMap) == 0 {
+		return "No emoji reactions configured."
+	}
+	msg := "## Reactions\n\nReact to any message with these emoji:\n\n"
+	for emoji, action := range b.reactionMap {
+		msg += fmt.Sprintf("- %s → `%s`\n", emoji, action)
+	}
+	return msg
+}
+
+// unmappedReactionHint returns a short message listing available emoji reactions.
+func (b *Bridge) unmappedReactionHint(emoji string) string {
+	if len(b.reactionMap) == 0 {
+		return fmt.Sprintf("%s is not a recognized reaction.", emoji)
+	}
+	pairs := make([]string, 0, len(b.reactionMap))
+	for e, action := range b.reactionMap {
+		pairs = append(pairs, fmt.Sprintf("%s %s", e, action))
+	}
+	sort.Strings(pairs)
+	return fmt.Sprintf("%s is not mapped. Available reactions: %s", emoji, strings.Join(pairs, ", "))
+}
+
+// Regenerate re-sends the original user message to get a fresh response from Claude.
+func (b *Bridge) Regenerate(ctx context.Context, chatID int64, rc *ReactionContext) (string, error) {
+	if rc == nil || rc.UserMessage == "" {
+		return "Cannot regenerate: message not found.", nil
+	}
+	// Don't regenerate during an active plan.
+	b.planMu.Lock()
+	run, hasPlan := b.planRuns[chatID]
+	b.planMu.Unlock()
+	if hasPlan && run.state != planStateDone {
+		return "Cannot regenerate while a plan is active.", nil
+	}
+	return b.HandleMessage(ctx, chatID, rc.UserMessage, "")
+}
+
+// RegenerateStreaming re-sends the original user message with streaming support.
+// It looks up the exchange by botMessageID, checks plan state, and streams the
+// new response via onUpdate. On success it updates the stored message map entry.
+func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessageID int, onUpdate process.StreamFunc) (string, error) {
+	msgMap, err := b.store.GetMessageMapByBotMsg(chatID, botMessageID)
+	if err != nil || msgMap == nil || msgMap.UserMessage == "" {
+		return "Cannot regenerate: message not found.", nil
+	}
+
+	// Don't regenerate during an active plan.
+	b.planMu.Lock()
+	run, hasPlan := b.planRuns[chatID]
+	b.planMu.Unlock()
+	if hasPlan && run.state != planStateDone {
+		return "Cannot regenerate while a plan is active.", nil
+	}
+
+	response, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", onUpdate)
+	if err != nil {
+		return "", err
+	}
+
+	// Update the stored bot response so subsequent reactions see the new text.
+	if err := b.store.UpdateMessageMapResponse(msgMap.ID, response); err != nil {
+		slog.Warn("failed to update message map response", "error", err)
+	}
+
+	return response, nil
+}
+
+// RememberResponse saves the bot response (with user question context) to long-term memory.
+func (b *Bridge) RememberResponse(ctx context.Context, chatID int64, rc *ReactionContext) (string, error) {
+	if b.memory == nil {
+		return "Memory is not enabled.", nil
+	}
+	if rc == nil || rc.BotResponse == "" {
+		return "Cannot remember: message not found.", nil
+	}
+	// Build a memory entry with both question and answer for context.
+	userPart := rc.UserMessage
+	if len(userPart) > 200 {
+		userPart = userPart[:200] + "..."
+	}
+	botPart := rc.BotResponse
+	if len(botPart) > 500 {
+		botPart = botPart[:500] + "..."
+	}
+	content := fmt.Sprintf("Q: %s\nA: %s", userPart, botPart)
+	if err := b.memory.Remember(ctx, chatID, content); err != nil {
+		return "", fmt.Errorf("remember: %w", err)
+	}
+	return "Response saved to memory.", nil
+}
+
+// ForgetExchange removes a specific exchange from the message log and message map.
+func (b *Bridge) ForgetExchange(ctx context.Context, chatID int64, rc *ReactionContext) (string, error) {
+	if rc == nil || rc.MessageMap == nil {
+		return "Cannot forget: message not found.", nil
+	}
+	mm := rc.MessageMap
+	// Delete the message log entries for this exchange.
+	if err := b.store.DeleteExchangeMessages(mm.SessionID, mm.UserMessage, mm.BotResponse); err != nil {
+		slog.Warn("failed to delete exchange messages", "error", err)
+	}
+	// Delete the message_map entry.
+	if err := b.store.DeleteMessageMap(mm.ID); err != nil {
+		return "", fmt.Errorf("forget: %w", err)
+	}
+	return "Exchange forgotten.", nil
 }
 
 // Plan starts plan drafting. If the input contains checklist tasks, it skips

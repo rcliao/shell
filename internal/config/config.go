@@ -130,9 +130,12 @@ func DefaultReactionMap() map[string]string {
 	return map[string]string{
 		"👍": "go",
 		"👎": "stop",
-		"🔄": "retry",
 		"❌": "cancel",
 		"📋": "status",
+		"🔄": "regenerate",
+		"📌": "remember",
+		"🗑": "forget",
+		"🔁": "retry",
 	}
 }
 

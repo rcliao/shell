@@ -161,11 +161,11 @@ func writeMockClaude(t *testing.T, auxDir string, reviewResponses []string) stri
 	var reviewBranches strings.Builder
 	for i, resp := range reviewResponses {
 		reviewBranches.WriteString(fmt.Sprintf(
-			"    %d) printf '{\"result\":\"%s\"}' ;;\n", i+1, resp))
+			"    %d) respond \"%s\" ;;\n", i+1, resp))
 	}
 	// Fallback for extra calls
 	reviewBranches.WriteString(fmt.Sprintf(
-		"    *) printf '{\"result\":\"%s\"}' ;;\n",
+		"    *) respond \"%s\" ;;\n",
 		"VERDICT: done\\nFallback approval."))
 
 	captureDir := filepath.Join(auxDir, "captures")
@@ -182,13 +182,25 @@ printf '%%s\n' "$@" > "$CAPTURE_DIR/call_${CALL_NUM}_args.txt"
 
 # Extract -p prompt value.
 PROMPT=""
+OUTPUT_FORMAT="json"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -p) PROMPT="$2"; shift 2 ;;
+    --output-format) OUTPUT_FORMAT="$2"; shift 2 ;;
     *)  shift ;;
   esac
 done
 printf '%%s' "$PROMPT" > "$CAPTURE_DIR/call_${CALL_NUM}_prompt.txt"
+
+# Helper: output response in the correct format.
+respond() {
+  local RESULT="$1"
+  if [ "$OUTPUT_FORMAT" = "stream-json" ]; then
+    printf '{"type":"result","result":"%%s","is_error":false}\n' "$RESULT"
+  else
+    printf '{"result":"%%s"}' "$RESULT"
+  fi
+}
 
 # Respond based on prompt content.
 if printf '%%s' "$PROMPT" | grep -q "DEFAULT verdict is DONE"; then
@@ -204,7 +216,7 @@ if printf '%%s' "$PROMPT" | grep -q "DEFAULT verdict is DONE"; then
   case "$COUNT" in
 %s  esac
 else
-  printf '{"result":"Task completed successfully."}'
+  respond "Task completed successfully."
 fi
 `, captureDir, reviewBranches.String())
 
@@ -215,10 +227,10 @@ fi
 	return mockPath
 }
 
-// TestRunTask_ReviewUsesVerificationTools verifies the happy-path end-to-end:
-// execute → test → review, and that the review invocation uses Bash+Read tools
-// with bypassPermissions for active verification.
-func TestRunTask_ReviewUsesVerificationTools(t *testing.T) {
+// TestRunTask_ReviewIsTextOnly verifies the happy-path end-to-end:
+// execute → test → review, and that the review invocation is text-only
+// (no Bash) so it can't hang on interactive commands.
+func TestRunTask_ReviewIsTextOnly(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -259,22 +271,10 @@ func TestRunTask_ReviewUsesVerificationTools(t *testing.T) {
 		t.Errorf("execute call should have full tools.\nGot --allowedTools: %s", execTools)
 	}
 
-	// Review call should use Bash,Read via --allowedTools.
-	reviewTools := allowedToolsFromArgs(t, reviewArgs)
-	if reviewTools != "Bash,Read" {
-		t.Errorf("review call should allow Bash,Read.\nGot --allowedTools: %s", reviewTools)
-	}
-
-	// Review call should use bypassPermissions.
-	reviewPerm := permissionModeFromArgs(t, reviewArgs)
-	if reviewPerm != "bypassPermissions" {
-		t.Errorf("review call should use bypassPermissions.\nGot --permission-mode: %s", reviewPerm)
-	}
-
-	// Review call should have --max-turns to prevent runaway sessions.
-	reviewMaxTurns := maxTurnsFromArgs(t, reviewArgs)
-	if reviewMaxTurns == "" {
-		t.Error("review call should have --max-turns set")
+	// Review call should be text-only via --disallowedTools (no Bash access).
+	reviewDisallowed := disallowedToolsFromArgs(t, reviewArgs)
+	if reviewDisallowed != "Bash,Write,Edit" {
+		t.Errorf("review call should disallow Bash,Write,Edit.\nGot --disallowedTools: %s", reviewDisallowed)
 	}
 
 	// Review prompt should set acceptance as default.
@@ -351,7 +351,7 @@ func TestRunTask_NeedsRevisionRetry(t *testing.T) {
 		t.Fatalf("expected at least 2 attempts, got %d", result.Attempts)
 	}
 
-	// Verify all review calls use Bash,Read with bypassPermissions.
+	// Verify all review calls are text-only (no Bash).
 	calls := countCaptures(t, captureDir)
 	for i := 0; i < calls; i++ {
 		prompt := readCapture(t, captureDir, i, "prompt")
@@ -359,13 +359,9 @@ func TestRunTask_NeedsRevisionRetry(t *testing.T) {
 			continue // not a review call
 		}
 		args := readCapture(t, captureDir, i, "args")
-		tools := allowedToolsFromArgs(t, args)
-		if tools != "Bash,Read" {
-			t.Errorf("review call %d should allow Bash,Read.\nGot --allowedTools: %s", i, tools)
-		}
-		perm := permissionModeFromArgs(t, args)
-		if perm != "bypassPermissions" {
-			t.Errorf("review call %d should use bypassPermissions.\nGot --permission-mode: %s", i, perm)
+		disallowed := disallowedToolsFromArgs(t, args)
+		if disallowed != "Bash,Write,Edit" {
+			t.Errorf("review call %d should disallow Bash,Write,Edit.\nGot --disallowedTools: %s", i, disallowed)
 		}
 	}
 
@@ -474,29 +470,16 @@ func allowedToolsFromArgs(t *testing.T, args string) string {
 	return ""
 }
 
-// permissionModeFromArgs extracts the --permission-mode value from captured args.
-func permissionModeFromArgs(t *testing.T, args string) string {
+// disallowedToolsFromArgs extracts the --disallowedTools value from captured args.
+func disallowedToolsFromArgs(t *testing.T, args string) string {
 	t.Helper()
 	lines := strings.Split(args, "\n")
 	for i, line := range lines {
-		if line == "--permission-mode" && i+1 < len(lines) {
+		if line == "--disallowedTools" && i+1 < len(lines) {
 			return lines[i+1]
 		}
 	}
-	t.Fatal("--permission-mode not found in captured args")
-	return ""
-}
-
-// maxTurnsFromArgs extracts the --max-turns value from captured args.
-func maxTurnsFromArgs(t *testing.T, args string) string {
-	t.Helper()
-	lines := strings.Split(args, "\n")
-	for i, line := range lines {
-		if line == "--max-turns" && i+1 < len(lines) {
-			return lines[i+1]
-		}
-	}
-	t.Fatal("--max-turns not found in captured args")
+	t.Fatal("--disallowedTools not found in captured args")
 	return ""
 }
 
