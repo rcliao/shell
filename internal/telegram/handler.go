@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,6 +18,17 @@ import (
 const streamEditInterval = time.Second // minimum interval between Telegram message edits
 
 const maxMessageLength = 4096
+
+// albumCollectDelay is how long to wait for additional photos in a media group
+// before processing the album. Telegram delivers album photos as separate
+// messages in quick succession, so a short delay is sufficient.
+const albumCollectDelay = 500 * time.Millisecond
+
+// albumEntry holds buffered messages belonging to a single media group (album).
+type albumEntry struct {
+	messages []*models.Message
+	timer    *time.Timer
+}
 
 // HeadingPrefixes controls text prefixes prepended to each heading level when
 // rendered in Telegram MarkdownV2. Index 0 = H1, 1 = H2, 2 = H3+.
@@ -868,10 +880,17 @@ func formatForTelegram(text string, maxLen int) (string, bool) {
 type Handler struct {
 	auth   *Auth
 	bridge *bridge.Bridge
+
+	albumsMu sync.Mutex
+	albums   map[string]*albumEntry // keyed by MediaGroupID
 }
 
 func NewHandler(auth *Auth, br *bridge.Bridge) *Handler {
-	return &Handler{auth: auth, bridge: br}
+	return &Handler{
+		auth:   auth,
+		bridge: br,
+		albums: make(map[string]*albumEntry),
+	}
 }
 
 // setReaction sets an emoji reaction on a message, replacing any previous reaction.
@@ -1110,6 +1129,43 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	}
 
 	text := strings.TrimSpace(msg.Text)
+
+	// If this message contains a photo (or a document with an image MIME type),
+	// download it and pass the image info to the bridge so it can augment the
+	// Claude message with the file path and metadata.
+	var images []bridge.ImageInfo
+	if len(msg.Photo) > 0 {
+		if text == "" {
+			text = strings.TrimSpace(msg.Caption)
+		}
+		if text == "" {
+			text = "(photo)"
+		}
+		img, err := DownloadPhoto(ctx, b, msg.Photo)
+		if err != nil {
+			slog.Error("failed to download photo", "error", err, "chat_id", msg.Chat.ID)
+			setReaction(ctx, b, msg.Chat.ID, msg.ID, "❌")
+			return
+		}
+		defer func() { os.Remove(img.Path) }()
+		images = []bridge.ImageInfo{img}
+	} else if IsImageDocument(msg.Document) {
+		if text == "" {
+			text = strings.TrimSpace(msg.Caption)
+		}
+		if text == "" {
+			text = "(photo)"
+		}
+		img, err := DownloadDocument(ctx, b, msg.Document)
+		if err != nil {
+			slog.Error("failed to download document image", "error", err, "chat_id", msg.Chat.ID)
+			setReaction(ctx, b, msg.Chat.ID, msg.ID, "❌")
+			return
+		}
+		defer func() { os.Remove(img.Path) }()
+		images = []bridge.ImageInfo{img}
+	}
+
 	if text == "" {
 		return
 	}
@@ -1237,7 +1293,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 	}
 
-	response, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, onUpdate)
+	response, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, onUpdate)
 
 	if err != nil {
 		slog.Error("bridge handle message failed", "error", err, "chat_id", msg.Chat.ID)
@@ -1317,6 +1373,298 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		finalEmoji = "🤔"
 	}
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, finalEmoji)
+}
+
+// HandlePhoto processes an incoming photo message. If the message belongs to a
+// media group (album), it buffers the message and waits for more photos before
+// processing them together. Single photos are delegated to HandleMessage.
+func (h *Handler) HandlePhoto(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	if msg.MediaGroupID == "" {
+		h.HandleMessage(ctx, b, msg)
+		return
+	}
+
+	h.albumsMu.Lock()
+	entry, ok := h.albums[msg.MediaGroupID]
+	if !ok {
+		entry = &albumEntry{}
+		h.albums[msg.MediaGroupID] = entry
+	}
+	entry.messages = append(entry.messages, msg)
+
+	// Reset (or start) the debounce timer. When it fires we process the
+	// complete album. We capture the bot pointer and a background context
+	// so the timer goroutine doesn't depend on the per-request context.
+	if entry.timer != nil {
+		entry.timer.Stop()
+	}
+	groupID := msg.MediaGroupID
+	entry.timer = time.AfterFunc(albumCollectDelay, func() {
+		h.processAlbum(context.Background(), b, groupID)
+	})
+	h.albumsMu.Unlock()
+}
+
+// processAlbum downloads all photos in a buffered album and sends them to
+// Claude as a single message with multiple attached images.
+func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) {
+	h.albumsMu.Lock()
+	entry, ok := h.albums[groupID]
+	if !ok {
+		h.albumsMu.Unlock()
+		return
+	}
+	messages := entry.messages
+	delete(h.albums, groupID)
+	h.albumsMu.Unlock()
+
+	if len(messages) == 0 {
+		return
+	}
+
+	// Use the first message for metadata (chat, sender, auth).
+	first := messages[0]
+	if first.From == nil {
+		return
+	}
+	if !h.auth.IsAllowed(first.From.ID) {
+		slog.Warn("unauthorized user (album)", "user_id", first.From.ID)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    first.Chat.ID,
+			Text:      formatErrorForMarkdownV2("Unauthorized. Your user ID is not in the allowlist."),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		return
+	}
+
+	// Collect caption: use the first non-empty caption found.
+	text := ""
+	for _, m := range messages {
+		if c := strings.TrimSpace(m.Caption); c != "" {
+			text = c
+			break
+		}
+	}
+	if text == "" {
+		text = fmt.Sprintf("(%d photos)", len(messages))
+	}
+
+	// Download all photos.
+	var images []bridge.ImageInfo
+	for _, m := range messages {
+		if len(m.Photo) == 0 {
+			continue
+		}
+		img, err := DownloadPhoto(ctx, b, m.Photo)
+		if err != nil {
+			slog.Error("failed to download album photo", "error", err, "chat_id", first.Chat.ID)
+			continue
+		}
+		images = append(images, img)
+	}
+	defer func() {
+		for _, img := range images {
+			os.Remove(img.Path)
+		}
+	}()
+
+	if len(images) == 0 {
+		slog.Error("no photos downloaded from album", "chat_id", first.Chat.ID)
+		setReaction(ctx, b, first.Chat.ID, first.ID, "❌")
+		return
+	}
+
+	senderName := first.From.FirstName
+	if senderName == "" {
+		senderName = first.From.Username
+	}
+
+	// React with 👀 on the first message to acknowledge receipt.
+	setReaction(ctx, b, first.Chat.ID, first.ID, "👀")
+
+	// Switch to ⏳ if processing takes a while.
+	longRunning := time.AfterFunc(longRunningThreshold, func() {
+		setReaction(ctx, b, first.Chat.ID, first.ID, "⏳")
+	})
+	defer longRunning.Stop()
+
+	// Send an initial placeholder.
+	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    first.Chat.ID,
+		Text:      escapeMarkdownV2Text("Thinking..."),
+		ParseMode: models.ParseModeMarkdown,
+	})
+	if err != nil {
+		slog.Error("failed to send placeholder (album)", "error", err, "chat_id", first.Chat.ID)
+		return
+	}
+	msgID := placeholder.ID
+
+	// Update the placeholder with elapsed time until the first chunk arrives.
+	thinkingStart := time.Now()
+	firstChunk := make(chan struct{})
+	var firstChunkOnce sync.Once
+	stopThinking := func() { firstChunkOnce.Do(func() { close(firstChunk) }) }
+	defer stopThinking()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-firstChunk:
+				return
+			case t := <-ticker.C:
+				elapsed := int(t.Sub(thinkingStart).Seconds())
+				txt := fmt.Sprintf("Thinking\\.\\.\\. \\(%ds\\)", elapsed)
+				b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					ChatID:    first.Chat.ID,
+					MessageID: msgID,
+					Text:      txt,
+					ParseMode: models.ParseModeMarkdown,
+				})
+			}
+		}
+	}()
+
+	// Set up streaming state.
+	var mu sync.Mutex
+	var accumulated strings.Builder
+	lastEdit := time.Time{}
+	markdownFailed := false
+	lastSentContent := ""
+	lastUsedMarkdown := false
+
+	onUpdate := func(chunk string) {
+		stopThinking()
+		mu.Lock()
+		accumulated.WriteString(chunk)
+		current := accumulated.String()
+		now := time.Now()
+		shouldEdit := now.Sub(lastEdit) >= streamEditInterval
+		if shouldEdit {
+			lastEdit = now
+		}
+		failed := markdownFailed
+		mu.Unlock()
+
+		if !shouldEdit {
+			return
+		}
+
+		if !failed {
+			formatted, ok := formatForTelegram(current, maxMessageLength)
+			if ok {
+				_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					ChatID:    first.Chat.ID,
+					MessageID: msgID,
+					Text:      formatted,
+					ParseMode: models.ParseModeMarkdown,
+				})
+				if editErr == nil {
+					mu.Lock()
+					lastSentContent = current
+					lastUsedMarkdown = true
+					mu.Unlock()
+					return
+				}
+				slog.Debug("streaming markdown edit failed (album)", "error", editErr)
+				mu.Lock()
+				markdownFailed = true
+				mu.Unlock()
+			}
+		}
+
+		plain := current
+		if len(plain) > maxMessageLength-3 {
+			plain = "..." + plain[len(plain)-maxMessageLength+3:]
+		}
+		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    first.Chat.ID,
+			MessageID: msgID,
+			Text:      plain,
+		})
+		if editErr != nil {
+			slog.Debug("failed to edit streaming message (album)", "error", editErr)
+		} else {
+			mu.Lock()
+			lastSentContent = current
+			lastUsedMarkdown = false
+			mu.Unlock()
+		}
+	}
+
+	response, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, text, senderName, images, onUpdate)
+	if err != nil {
+		slog.Error("bridge handle message failed (album)", "error", err, "chat_id", first.Chat.ID)
+		setReaction(ctx, b, first.Chat.ID, first.ID, "❌")
+		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    first.Chat.ID,
+			MessageID: msgID,
+			Text:      formatErrorForMarkdownV2(err.Error()),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		return
+	}
+
+	if response == "" {
+		response = "(empty response)"
+	}
+
+	formatted := formatForMarkdownV2(response)
+
+	mu.Lock()
+	alreadySent := lastUsedMarkdown && lastSentContent == response
+	mu.Unlock()
+
+	var botMsgIDs []int
+
+	if alreadySent && len(formatted) <= maxMessageLength {
+		botMsgIDs = []int{msgID}
+	} else if len(formatted) <= maxMessageLength {
+		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    first.Chat.ID,
+			MessageID: msgID,
+			Text:      formatted,
+			ParseMode: models.ParseModeMarkdown,
+		})
+		if editErr != nil {
+			setReaction(ctx, b, first.Chat.ID, first.ID, "🔄")
+			b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    first.Chat.ID,
+				MessageID: msgID,
+				Text:      response,
+			})
+		}
+		botMsgIDs = []int{msgID}
+	} else if len(response) <= maxMessageLength {
+		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    first.Chat.ID,
+			MessageID: msgID,
+			Text:      response,
+		})
+		botMsgIDs = []int{msgID}
+	} else {
+		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    first.Chat.ID,
+			MessageID: msgID,
+		})
+		botMsgIDs = h.sendChunked(ctx, b, first.Chat.ID, response)
+	}
+
+	// Map all album messages to the bot response for reaction support.
+	for _, m := range messages {
+		for _, botID := range botMsgIDs {
+			if err := h.bridge.SaveMessageMap(first.Chat.ID, m.ID, botID, text, response); err != nil {
+				slog.Warn("failed to save message map (album)", "error", err, "chat_id", first.Chat.ID)
+			}
+		}
+	}
+
+	finalEmoji := "✅"
+	if looksLikeClarification(response) {
+		finalEmoji = "🤔"
+	}
+	setReaction(ctx, b, first.Chat.ID, first.ID, finalEmoji)
 }
 
 func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Message) {

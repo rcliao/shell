@@ -20,6 +20,15 @@ import (
 	"github.com/rcliao/teeny-relay/internal/worktree"
 )
 
+// ImageInfo holds a downloaded image file path together with optional metadata
+// from the Telegram API (dimensions and file size).
+type ImageInfo struct {
+	Path   string // local file path
+	Width  int    // image width in pixels (0 if unknown)
+	Height int    // image height in pixels (0 if unknown)
+	Size   int64  // file size in bytes (0 if unknown)
+}
+
 // relayDirective represents a message to send to another chat.
 type relayDirective struct {
 	ChatID  int64
@@ -334,7 +343,9 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 
 // HandleMessageStreaming is like HandleMessage but calls onUpdate with partial text as Claude generates it.
 // senderName identifies who sent the message (e.g. Telegram first name).
-func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, onUpdate process.StreamFunc) (string, error) {
+// images optionally contains downloaded image metadata that should be
+// included in the message sent to Claude (e.g. downloaded Telegram photos).
+func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, images []ImageInfo, onUpdate process.StreamFunc) (string, error) {
 	// Check for active plan draft — intercept the message (no streaming needed).
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
@@ -365,6 +376,22 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	// Tag the message with sender identity so Claude knows who is speaking
 	if senderName != "" {
 		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
+	}
+
+	// Prepend image file paths with metadata so Claude can read the attached images.
+	if len(images) > 0 {
+		var sb strings.Builder
+		for _, img := range images {
+			fmt.Fprintf(&sb, "[Attached image: %s", img.Path)
+			if img.Width > 0 && img.Height > 0 {
+				fmt.Fprintf(&sb, " | %dx%d", img.Width, img.Height)
+			}
+			if img.Size > 0 {
+				fmt.Fprintf(&sb, " | %s", formatFileSize(img.Size))
+			}
+			sb.WriteString("]\n")
+		}
+		augmentedMsg = sb.String() + augmentedMsg
 	}
 
 	// Determine claude session ID for --resume
@@ -660,7 +687,7 @@ func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessa
 		return "Cannot regenerate while a plan is active.", nil
 	}
 
-	response, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", onUpdate)
+	response, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", nil, onUpdate)
 	if err != nil {
 		return "", err
 	}
@@ -1006,6 +1033,18 @@ func (b *Bridge) cleanupWorktree(run *planRun) {
 		slog.Info("worktree merged and cleaned up", "branch", run.worktreeBranch)
 	}
 	// For blocked/stopped state, worktree is cleaned up by PlanStop
+}
+
+// formatFileSize returns a human-readable file size string.
+func formatFileSize(bytes int64) string {
+	switch {
+	case bytes >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1<<20))
+	case bytes >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 func formatDraftResponse(draft string) string {

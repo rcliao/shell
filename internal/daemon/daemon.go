@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rcliao/teeny-relay/internal/bridge"
@@ -37,12 +39,13 @@ func New(cfg config.Config) (*Daemon, error) {
 
 	// Create process manager
 	proc := process.NewManager(process.ManagerConfig{
-		Binary:      cfg.Claude.Binary,
-		Model:       cfg.Claude.Model,
-		Timeout:     cfg.Claude.Timeout,
-		MaxSessions: cfg.Claude.MaxSessions,
-		WorkDir:     cfg.Claude.WorkDir,
-		ExtraArgs:   cfg.Claude.ExtraArgs,
+		Binary:       cfg.Claude.Binary,
+		Model:        cfg.Claude.Model,
+		Timeout:      cfg.Claude.Timeout,
+		MaxSessions:  cfg.Claude.MaxSessions,
+		WorkDir:      cfg.Claude.WorkDir,
+		AllowedTools: cfg.Claude.AllowedTools,
+		ExtraArgs:    cfg.Claude.ExtraArgs,
 	})
 
 	// Initialize memory store if enabled
@@ -169,6 +172,11 @@ func New(cfg config.Config) (*Daemon, error) {
 
 // Run starts the daemon and blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
+	// Write PID file
+	if err := writePID(d.cfg.Daemon.PIDFile); err != nil {
+		slog.Warn("failed to write PID file", "path", d.cfg.Daemon.PIDFile, "error", err)
+	}
+
 	// Start live reloader if enabled.
 	if d.reloader != nil {
 		go func() {
@@ -204,6 +212,7 @@ func (d *Daemon) Shutdown() {
 	if d.memory != nil {
 		d.memory.Close()
 	}
+	removePID(d.cfg.Daemon.PIDFile)
 	slog.Info("daemon stopped")
 }
 
@@ -244,4 +253,31 @@ func (d *Daemon) cleanupLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// writePID writes the current process ID to the given path.
+func writePID(path string) error {
+	if path == "" {
+		return nil
+	}
+	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0644)
+}
+
+// removePID removes the PID file at the given path.
+func removePID(path string) {
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to remove PID file", "path", path, "error", err)
+	}
+}
+
+// ReadPID reads a PID from the given file path.
+func ReadPID(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(data)))
 }

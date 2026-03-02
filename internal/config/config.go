@@ -54,12 +54,13 @@ func (t *TelegramConfig) UnmarshalJSON(data []byte) error {
 }
 
 type ClaudeConfig struct {
-	Binary      string        `json:"binary"`
-	Model       string        `json:"model"`
-	Timeout     time.Duration `json:"timeout"`
-	MaxSessions int           `json:"max_sessions"`
-	WorkDir     string        `json:"work_dir"`
-	ExtraArgs   []string      `json:"extra_args"`
+	Binary       string        `json:"binary"`
+	Model        string        `json:"model"`
+	Timeout      time.Duration `json:"timeout"`
+	MaxSessions  int           `json:"max_sessions"`
+	WorkDir      string        `json:"work_dir"`
+	AllowedTools []string      `json:"allowed_tools"`
+	ExtraArgs    []string      `json:"extra_args"`
 }
 
 type StoreConfig struct {
@@ -161,12 +162,13 @@ func Default() Config {
 			ReactionMap:  DefaultReactionMap(),
 		},
 		Claude: ClaudeConfig{
-			Binary:      "claude",
-			Model:       "",
-			Timeout:     30 * time.Minute,
-			MaxSessions: 4,
-			WorkDir:     "",
-			ExtraArgs:   []string{},
+			Binary:       "claude",
+			Model:        "",
+			Timeout:      30 * time.Minute,
+			MaxSessions:  4,
+			WorkDir:      "",
+			AllowedTools: []string{},
+			ExtraArgs:    []string{},
 		},
 		Store: StoreConfig{
 			DBPath: filepath.Join(configDir, "relay.db"),

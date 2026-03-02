@@ -68,21 +68,23 @@ type Manager struct {
 	sessions map[int64]*Session
 	mu       sync.RWMutex
 
-	binary      string
-	model       string
-	timeout     time.Duration
-	maxSessions int
-	workDir     string
-	extraArgs   []string
+	binary       string
+	model        string
+	timeout      time.Duration
+	maxSessions  int
+	workDir      string
+	allowedTools []string
+	extraArgs    []string
 }
 
 type ManagerConfig struct {
-	Binary      string
-	Model       string
-	Timeout     time.Duration
-	MaxSessions int
-	WorkDir     string
-	ExtraArgs   []string
+	Binary       string
+	Model        string
+	Timeout      time.Duration
+	MaxSessions  int
+	WorkDir      string
+	AllowedTools []string
+	ExtraArgs    []string
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -96,13 +98,14 @@ func NewManager(cfg ManagerConfig) *Manager {
 		cfg.MaxSessions = 4
 	}
 	return &Manager{
-		sessions:    make(map[int64]*Session),
-		binary:      cfg.Binary,
-		model:       cfg.Model,
-		timeout:     cfg.Timeout,
-		maxSessions: cfg.MaxSessions,
-		workDir:     cfg.WorkDir,
-		extraArgs:   cfg.ExtraArgs,
+		sessions:     make(map[int64]*Session),
+		binary:       cfg.Binary,
+		model:        cfg.Model,
+		timeout:      cfg.Timeout,
+		maxSessions:  cfg.MaxSessions,
+		workDir:      cfg.WorkDir,
+		allowedTools: cfg.AllowedTools,
+		extraArgs:    cfg.ExtraArgs,
 	}
 }
 
@@ -174,6 +177,9 @@ func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID, syste
 	}
 	if systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
+	}
+	if len(m.allowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(m.allowedTools, ","))
 	}
 	args = append(args, m.extraArgs...)
 
@@ -282,6 +288,9 @@ func (m *Manager) runClaudeStreaming(ctx context.Context, message, claudeSession
 	}
 	if systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
+	}
+	if len(m.allowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(m.allowedTools, ","))
 	}
 	args = append(args, m.extraArgs...)
 

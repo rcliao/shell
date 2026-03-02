@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/rcliao/teeny-relay/internal/config"
 	"github.com/rcliao/teeny-relay/internal/daemon"
@@ -80,7 +81,25 @@ func main() {
 				return fmt.Errorf("init daemon: %w", err)
 			}
 
-			// Ensure clean shutdown
+			// SIGHUP → graceful restart (re-exec with same args)
+			sighup := make(chan os.Signal, 1)
+			signal.Notify(sighup, syscall.SIGHUP)
+			go func() {
+				<-sighup
+				slog.Info("received SIGHUP, restarting")
+				d.Shutdown()
+				binary, err := os.Executable()
+				if err != nil {
+					slog.Error("restart: cannot resolve executable", "error", err)
+					os.Exit(1)
+				}
+				if err := syscall.Exec(binary, os.Args, os.Environ()); err != nil {
+					slog.Error("restart: exec failed", "error", err)
+					os.Exit(1)
+				}
+			}()
+
+			// Ensure clean shutdown on SIGINT/SIGTERM
 			go func() {
 				<-ctx.Done()
 				d.Shutdown()
@@ -235,8 +254,59 @@ func main() {
 		},
 	}
 
+	// restart command
+	restartCmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Send SIGHUP to running daemon (graceful restart)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfig()
+			pid, err := daemon.ReadPID(cfg.Daemon.PIDFile)
+			if err != nil {
+				return fmt.Errorf("cannot read PID file %s: %w", cfg.Daemon.PIDFile, err)
+			}
+			// Check if process is alive
+			if err := syscall.Kill(pid, 0); err != nil {
+				return fmt.Errorf("daemon (pid %d) is not running: %w", pid, err)
+			}
+			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+				return fmt.Errorf("failed to send SIGHUP to pid %d: %w", pid, err)
+			}
+			fmt.Printf("Sent SIGHUP to daemon (pid %d) — restarting\n", pid)
+			return nil
+		},
+	}
+
+	// stop command
+	stopCmd := &cobra.Command{
+		Use:   "stop",
+		Short: "Send SIGTERM to running daemon (graceful shutdown)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfig()
+			pid, err := daemon.ReadPID(cfg.Daemon.PIDFile)
+			if err != nil {
+				return fmt.Errorf("cannot read PID file %s: %w", cfg.Daemon.PIDFile, err)
+			}
+			if err := syscall.Kill(pid, 0); err != nil {
+				return fmt.Errorf("daemon (pid %d) is not running: %w", pid, err)
+			}
+			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+				return fmt.Errorf("failed to send SIGTERM to pid %d: %w", pid, err)
+			}
+			// Poll for process exit (up to 5 seconds)
+			for i := 0; i < 50; i++ {
+				time.Sleep(100 * time.Millisecond)
+				if err := syscall.Kill(pid, 0); err != nil {
+					fmt.Printf("Daemon (pid %d) stopped\n", pid)
+					return nil
+				}
+			}
+			fmt.Printf("Sent SIGTERM to daemon (pid %d) — still shutting down\n", pid)
+			return nil
+		},
+	}
+
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd)
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

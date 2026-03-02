@@ -56,6 +56,22 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planskip", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planretry", bot.MatchTypePrefix, b.commandHandler)
 
+	// Register handler for photo messages.
+	tgBot.RegisterHandlerMatchFunc(
+		func(update *models.Update) bool {
+			return update.Message != nil && len(update.Message.Photo) > 0
+		},
+		b.photoHandler,
+	)
+
+	// Register handler for documents with image MIME types (uncompressed photos).
+	tgBot.RegisterHandlerMatchFunc(
+		func(update *models.Update) bool {
+			return update.Message != nil && IsImageDocument(update.Message.Document)
+		},
+		b.defaultHandler,
+	)
+
 	// Register handler for incoming emoji reactions.
 	tgBot.RegisterHandlerMatchFunc(
 		func(update *models.Update) bool { return update.MessageReaction != nil },
@@ -108,6 +124,13 @@ func (b *Bot) commandHandler(ctx context.Context, tgBot *bot.Bot, update *models
 		return
 	}
 	b.handler.HandleCommand(ctx, tgBot, update.Message)
+}
+
+func (b *Bot) photoHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	b.handler.HandlePhoto(ctx, tgBot, update.Message)
 }
 
 func (b *Bot) reactionHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
