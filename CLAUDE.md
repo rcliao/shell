@@ -9,13 +9,19 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 - `internal/store/` — SQLite persistence (sessions + message log)
 - `internal/process/` — Claude CLI subprocess lifecycle
 - `internal/bridge/` — Core routing: Telegram ↔ Claude Code
-- `internal/telegram/` — Bot wrapper, handlers, auth
-- `internal/daemon/` — Daemon lifecycle, signal handling
+- `internal/telegram/` — Bot wrapper, handlers, auth, photo download
+- `internal/daemon/` — Daemon lifecycle, PID file, signal handling
+- `internal/memory/` — Optional memory store integration (agent-memory)
+- `internal/planner/` — Optional plan-execute-review loop
+- `internal/reload/` — Live reload watcher (rebuild + syscall.Exec)
+- `internal/worktree/` — Git worktree isolation for plan execution
 
 ## Commands
 
 - `relay init` — Create config directory and default config
-- `relay daemon` — Start the bot daemon
+- `relay daemon` — Start the bot daemon (`--watch` for live reload)
+- `relay restart` — Send SIGHUP to running daemon (graceful restart)
+- `relay stop` — Send SIGTERM to running daemon (graceful shutdown)
 - `relay send "msg"` — One-shot test without Telegram
 - `relay status` — Show active sessions
 - `relay session list|kill <chat-id>` — Session management
@@ -26,14 +32,21 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 make build    # Build binary
 make test     # Run tests
 make vet      # Run go vet
+make watch    # Build and run with --watch
 ```
 
 ## Key Patterns
 
-- Each Telegram message spawns: `claude -p "msg" --continue --session-id <sid> --output-format text`
+- Each Telegram message spawns: `claude -p "msg" --resume <sid> --output-format stream-json`
 - Sessions persist across restarts via SQLite
 - Allowlist-based auth by Telegram user ID
-- Configurable timeout (default 5m) and max concurrent sessions (default 4)
+- Streaming responses with live Telegram message edits
+- Photo/image attachments: downloaded to temp files, passed as file path references in prompt
+- Album support: multiple photos buffered with 500ms debounce, sent as single message
+- PID file at `~/.teeny-relay/relay.pid` for restart/stop commands
+- SIGHUP triggers graceful restart via syscall.Exec (same pattern as reload.go)
+- Config: `~/.teeny-relay/config.json` with `allowed_tools` for auto-approving Claude CLI tools
+- Emoji reactions map to actions (go, stop, cancel, status, regenerate, remember, forget, retry)
 
 ## Available CLI Tools
 
