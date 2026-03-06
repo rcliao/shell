@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -1763,6 +1764,55 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		finalEmoji = "🤔"
 	}
 	setReaction(ctx, b, first.Chat.ID, first.ID, finalEmoji)
+}
+
+func (h *Handler) HandleImagine(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	if msg.From == nil {
+		return
+	}
+	if !h.auth.IsAllowed(msg.From.ID) {
+		slog.Warn("unauthorized user /imagine", "user_id", msg.From.ID)
+		return
+	}
+
+	parts := strings.SplitN(msg.Text, " ", 2)
+	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "Usage: /imagine <prompt>",
+		})
+		return
+	}
+	prompt := strings.TrimSpace(parts[1])
+
+	// Show upload_photo action while generating
+	b.SendChatAction(ctx, &bot.SendChatActionParams{
+		ChatID: msg.Chat.ID,
+		Action: models.ChatActionUploadPhoto,
+	})
+
+	imageData, err := h.bridge.HandleImagine(ctx, prompt)
+	if err != nil {
+		slog.Error("/imagine failed", "error", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    msg.Chat.ID,
+			Text:      formatErrorForMarkdownV2(err.Error()),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		return
+	}
+
+	_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{
+		ChatID: msg.Chat.ID,
+		Photo: &models.InputFileUpload{
+			Filename: "image.png",
+			Data:     bytes.NewReader(imageData),
+		},
+		Caption: prompt,
+	})
+	if err != nil {
+		slog.Error("failed to send generated photo", "error", err, "chat_id", msg.Chat.ID)
+	}
 }
 
 func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Message) {

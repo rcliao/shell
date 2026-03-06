@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -55,6 +56,8 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planstop", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planskip", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planretry", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/schedule", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/imagine", bot.MatchTypePrefix, b.imagineHandler)
 
 	// Register handler for photo messages.
 	tgBot.RegisterHandlerMatchFunc(
@@ -126,6 +129,29 @@ func (b *Bot) SendText(chatID int64, text string) {
 			}
 		}
 	}
+}
+
+// SendPhoto sends an image to a chat as a Telegram photo message.
+func (b *Bot) SendPhoto(chatID int64, imageData []byte, caption string) {
+	ctx := context.Background()
+	_, err := b.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+		ChatID: chatID,
+		Photo: &models.InputFileUpload{
+			Filename: "image.png",
+			Data:     bytes.NewReader(imageData),
+		},
+		Caption: caption,
+	})
+	if err != nil {
+		slog.Error("failed to send photo", "error", err, "chat_id", chatID)
+	}
+}
+
+func (b *Bot) imagineHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	b.handler.HandleImagine(ctx, tgBot, update.Message)
 }
 
 func (b *Bot) defaultHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {

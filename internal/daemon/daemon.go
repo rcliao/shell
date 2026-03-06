@@ -12,22 +12,25 @@ import (
 
 	"github.com/rcliao/teeny-relay/internal/bridge"
 	"github.com/rcliao/teeny-relay/internal/config"
+	"github.com/rcliao/teeny-relay/internal/imagen"
 	"github.com/rcliao/teeny-relay/internal/memory"
 	"github.com/rcliao/teeny-relay/internal/planner"
 	"github.com/rcliao/teeny-relay/internal/process"
 	"github.com/rcliao/teeny-relay/internal/reload"
+	"github.com/rcliao/teeny-relay/internal/scheduler"
 	"github.com/rcliao/teeny-relay/internal/store"
 	"github.com/rcliao/teeny-relay/internal/telegram"
 )
 
 type Daemon struct {
-	cfg      config.Config
-	bot      *telegram.Bot
-	bridge   *bridge.Bridge
-	proc     *process.Manager
-	store    *store.Store
-	memory   *memory.Memory       // nil if disabled
-	reloader *reload.Watcher      // nil if disabled
+	cfg       config.Config
+	bot       *telegram.Bot
+	bridge    *bridge.Bridge
+	proc      *process.Manager
+	store     *store.Store
+	memory    *memory.Memory       // nil if disabled
+	reloader  *reload.Watcher      // nil if disabled
+	scheduler *scheduler.Scheduler // nil if disabled
 }
 
 func New(cfg config.Config) (*Daemon, error) {
@@ -103,8 +106,20 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("planner initialized", "test_cmd", cfg.Planner.TestCmd, "max_retries", cfg.Planner.MaxRetries)
 	}
 
+	// Initialize image generator if Google API key is configured.
+	var ig *imagen.Generator
+	if apiKey := cfg.GoogleAPIKey(); apiKey != "" {
+		var err error
+		ig, err = imagen.New(apiKey, cfg.Google.Model, cfg.Google.Timeout)
+		if err != nil {
+			slog.Warn("imagen: failed to initialize", "error", err)
+		} else {
+			slog.Info("imagen initialized", "model", cfg.Google.Model)
+		}
+	}
+
 	// Create bridge
-	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap)
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig)
 
 	// Create auth
 	auth := telegram.NewAuth(cfg.Telegram.AllowedUsers)
@@ -120,18 +135,50 @@ func New(cfg config.Config) (*Daemon, error) {
 		return nil, err
 	}
 
+	// Wire image sender: generate-image directive → Telegram photo
+	br.SetImageSender(func(chatID int64, imageData []byte, caption string) {
+		bot.SendPhoto(chatID, imageData, caption)
+	})
+
 	// Wire async notifications: plan progress → Telegram
 	br.SetNotifier(func(chatID int64, msg string) {
 		bot.SendText(chatID, msg)
 	})
 
+	// Register cron parser for bridge schedule commands/directives.
+	bridge.SetCronParser(func(expr string) (interface{ Next(time.Time) time.Time }, error) {
+		return scheduler.ParseCron(expr)
+	})
+
+	// Initialize scheduler if enabled.
+	var sched *scheduler.Scheduler
+	if cfg.Scheduler.Enabled {
+		adapter := scheduler.NewStoreAdapter(st)
+		onNotify := func(chatID int64, msg string) {
+			bot.SendText(chatID, msg)
+		}
+		onPrompt := func(chatID int64, msg string) {
+			// Route through bridge as if user sent it
+			resp, err := br.HandleMessageStreaming(context.Background(), chatID, msg, "scheduler", nil, nil, nil)
+			if err != nil {
+				slog.Error("scheduler prompt failed", "chat_id", chatID, "error", err)
+				return
+			}
+			bot.SendText(chatID, resp)
+		}
+		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
+		br.SetSchedulerConfig(true, cfg.Scheduler.Timezone)
+		slog.Info("scheduler initialized", "timezone", cfg.Scheduler.Timezone)
+	}
+
 	d := &Daemon{
-		cfg:    cfg,
-		bot:    bot,
-		bridge: br,
-		proc:   proc,
-		store:  st,
-		memory: mem,
+		cfg:       cfg,
+		bot:       bot,
+		bridge:    br,
+		proc:      proc,
+		store:     st,
+		memory:    mem,
+		scheduler: sched,
 	}
 
 	// Resolve source directory for reload and self-restart.
@@ -196,6 +243,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 				slog.Error("reload: watcher stopped", "error", err)
 			}
 		}()
+	}
+
+	// Start scheduler if enabled.
+	if d.scheduler != nil {
+		go d.scheduler.Run(ctx)
 	}
 
 	// Start stale session cleanup ticker

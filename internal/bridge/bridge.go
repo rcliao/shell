@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rcliao/teeny-relay/internal/config"
+	"github.com/rcliao/teeny-relay/internal/imagen"
 	"github.com/rcliao/teeny-relay/internal/memory"
 	"github.com/rcliao/teeny-relay/internal/planner"
 	"github.com/rcliao/teeny-relay/internal/process"
@@ -44,6 +45,18 @@ type relayDirective struct {
 
 // relayRe matches [relay to=CHAT_ID]message[/relay] blocks in Claude's response.
 var relayRe = regexp.MustCompile(`(?s)\[relay to=(\d+)\]\s*(.*?)\s*\[/relay\]`)
+
+// scheduleRe matches [schedule at="..." tz="..."]message[/schedule] or [schedule cron="..." ...]message[/schedule].
+var scheduleRe = regexp.MustCompile(`(?s)\[schedule\s+(.*?)\](.*?)\[/schedule\]`)
+
+// scheduleAttrRe extracts key="value" pairs from schedule directive attributes.
+var scheduleAttrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
+
+// generateImageRe matches [generate-image prompt="..."] directives in Claude's response.
+var generateImageRe = regexp.MustCompile(`\[generate-image prompt="([^"]+)"\]`)
+
+// ImageSendFunc sends an image to a chat. Used by the bridge to send generated images.
+type ImageSendFunc func(chatID int64, imageData []byte, caption string)
 
 // parseRelayDirectives extracts relay blocks from response text.
 // Returns the cleaned response (relays stripped) and the list of relay messages.
@@ -151,6 +164,14 @@ type Bridge struct {
 	selfSourceDir string // resolved path to relay's source dir (empty = disabled)
 	onSelfRestart func() // called when self-modification detected after merge
 
+	// Scheduler
+	schedulerEnabled bool
+	schedulerTZ      string // default timezone for schedules
+
+	// Image generation
+	imagen    *imagen.Generator // nil if not configured
+	imageSend ImageSendFunc     // sends generated images to Telegram
+
 	planMu   sync.Mutex
 	planRuns map[int64]*planRun
 
@@ -158,7 +179,7 @@ type Bridge struct {
 	reviewCache map[int64][]memory.ReviewEntry // last /review result per chat
 }
 
-func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string) *Bridge {
+func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *imagen.Generator) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
@@ -175,9 +196,20 @@ func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *plan
 		repoDir:     repoDir,
 		worktreeDir: wtDir,
 		reactionMap: reactionMap,
+		imagen:      ig,
 		planRuns:    make(map[int64]*planRun),
 		reviewCache: make(map[int64][]memory.ReviewEntry),
 	}
+}
+
+// SetImageSender sets the function used to send generated images to Telegram.
+func (b *Bridge) SetImageSender(fn ImageSendFunc) {
+	b.imageSend = fn
+}
+
+// Imagen returns the image generator, or nil if not configured.
+func (b *Bridge) Imagen() *imagen.Generator {
+	return b.imagen
 }
 
 // SetNotifier sets the function used to push async messages (plan progress) to users.
@@ -331,6 +363,8 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	if b.memory != nil {
 		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
 	}
+	systemPrompt += b.scheduleSystemPrompt()
+	systemPrompt += b.imagenSystemPrompt()
 
 	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt)
 	if err != nil {
@@ -358,6 +392,12 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	if b.memory != nil {
 		response = b.memory.ParseMemoryDirectives(ctx, chatID, response)
 	}
+
+	// Parse schedule directives ([schedule ...]...[/schedule])
+	response = b.parseScheduleDirectives(chatID, response)
+
+	// Parse generate-image directives
+	response = b.parseGenerateImageDirectives(ctx, chatID, response)
 
 	// Log assistant response
 	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
@@ -454,6 +494,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	if b.memory != nil {
 		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
 	}
+	systemPrompt += b.scheduleSystemPrompt()
+	systemPrompt += b.imagenSystemPrompt()
 
 	// Send to Claude with streaming
 	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt, onUpdate)
@@ -482,6 +524,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	if b.memory != nil {
 		response = b.memory.ParseMemoryDirectives(ctx, chatID, response)
 	}
+
+	// Parse schedule directives ([schedule ...]...[/schedule])
+	response = b.parseScheduleDirectives(chatID, response)
+
+	// Parse generate-image directives
+	response = b.parseGenerateImageDirectives(ctx, chatID, response)
 
 	// Log assistant response
 	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
@@ -534,6 +582,8 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.PlanSkip(chatID)
 	case "planretry":
 		return b.PlanRetry(ctx, chatID)
+	case "schedule":
+		return b.Schedule(ctx, chatID, args)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -635,10 +685,385 @@ func (b *Bridge) Help() string {
 		}
 	}
 
+	if b.schedulerEnabled {
+		help += "\n### Scheduler\n\n" +
+			"- `/schedule add \"*/30 * * * *\" Reminder text` — Recurring notification\n" +
+			"- `/schedule add --prompt \"0 9 * * 1-5\" Check PRs` — Recurring prompt (via Claude)\n" +
+			"- `/schedule add \"2026-03-10T09:00:00\" One-time reminder` — One-shot\n" +
+			"- `/schedule list` — Show all schedules\n" +
+			"- `/schedule delete <id>` — Remove a schedule\n"
+	}
+
+	if b.imagen != nil {
+		help += "\n### Image Generation\n\n" +
+			"- `/imagine <prompt>` — Generate an image from a text prompt\n" +
+			"- Claude can also generate images in conversation when appropriate\n"
+	}
+
 	help += "\n---\n\n" +
 		"`/reactions` — Show emoji→action mappings\n" +
 		"`/help` — Show this help message"
 	return help
+}
+
+// scheduleSystemPrompt returns the system prompt addition that documents
+// the [schedule] directive for Claude. Empty if scheduler is disabled.
+func (b *Bridge) scheduleSystemPrompt() string {
+	if !b.schedulerEnabled {
+		return ""
+	}
+	return "\n\n## Scheduling\n\n" +
+		"You can create scheduled reminders and prompts using the [schedule] directive in your responses.\n\n" +
+		"### One-shot (fires once at a specific time):\n" +
+		"```\n[schedule at=\"2026-03-10T09:00:00\" tz=\"America/Los_Angeles\"]Remind me to check deployment[/schedule]\n```\n\n" +
+		"### Recurring (cron expression):\n" +
+		"```\n[schedule cron=\"0 9 * * 1-5\" tz=\"UTC\"]Weekly standup check[/schedule]\n```\n\n" +
+		"### Attributes:\n" +
+		"- `at` — ISO8601 datetime for one-shot schedules (without timezone suffix, uses `tz`)\n" +
+		"- `cron` — 5-field cron expression (minute hour day-of-month month day-of-week)\n" +
+		"- `tz` — timezone (optional, default: " + b.schedulerTZ + ")\n" +
+		"- `mode` — \"notify\" (default, plain message) or \"prompt\" (routed back through you)\n\n" +
+		"The directive is stripped from your visible response and replaced with a confirmation.\n" +
+		"Use this when the user asks to be reminded about something or wants recurring notifications.\n"
+}
+
+// SetSchedulerConfig enables schedule commands and sets the default timezone.
+func (b *Bridge) SetSchedulerConfig(enabled bool, tz string) {
+	b.schedulerEnabled = enabled
+	b.schedulerTZ = tz
+	if b.schedulerTZ == "" {
+		b.schedulerTZ = "UTC"
+	}
+}
+
+// Schedule handles the /schedule command with subcommands: add, list, delete.
+func (b *Bridge) Schedule(ctx context.Context, chatID int64, args string) (string, error) {
+	if !b.schedulerEnabled {
+		return "Scheduler is not enabled.", nil
+	}
+
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return "Usage: /schedule add|list|delete ...", nil
+	}
+
+	// Parse subcommand
+	parts := strings.SplitN(args, " ", 2)
+	sub := parts[0]
+	rest := ""
+	if len(parts) > 1 {
+		rest = strings.TrimSpace(parts[1])
+	}
+
+	switch sub {
+	case "add":
+		return b.scheduleAdd(chatID, rest)
+	case "list":
+		return b.scheduleList(chatID)
+	case "delete":
+		return b.scheduleDelete(chatID, rest)
+	default:
+		return "Unknown subcommand. Usage: /schedule add|list|delete ...", nil
+	}
+}
+
+func (b *Bridge) scheduleAdd(chatID int64, args string) (string, error) {
+	if args == "" {
+		return "Usage: /schedule add [--prompt] \"<cron or datetime>\" <message>", nil
+	}
+
+	mode := "notify"
+	if strings.HasPrefix(args, "--prompt ") {
+		mode = "prompt"
+		args = strings.TrimPrefix(args, "--prompt ")
+		args = strings.TrimSpace(args)
+	}
+
+	// Extract quoted expression or first token
+	var expr, message string
+	if strings.HasPrefix(args, "\"") {
+		endQuote := strings.Index(args[1:], "\"")
+		if endQuote == -1 {
+			return "Missing closing quote for schedule expression.", nil
+		}
+		expr = args[1 : endQuote+1]
+		message = strings.TrimSpace(args[endQuote+2:])
+	} else {
+		return "Schedule expression must be quoted. Example: /schedule add \"*/5 * * * *\" My reminder", nil
+	}
+
+	if message == "" {
+		return "Please provide a message after the schedule expression.", nil
+	}
+
+	tz := b.schedulerTZ
+	sched := &store.Schedule{
+		ChatID:   chatID,
+		Label:    message,
+		Message:  message,
+		Schedule: expr,
+		Timezone: tz,
+		Mode:     mode,
+		Enabled:  true,
+	}
+
+	// Auto-detect type: try to parse as datetime first
+	if t, err := time.Parse(time.RFC3339, expr); err == nil {
+		sched.Type = "once"
+		sched.NextRunAt = t.UTC()
+	} else if t, err := time.Parse("2006-01-02T15:04:05", expr); err == nil {
+		// Parse in the configured timezone
+		loc, _ := time.LoadLocation(tz)
+		if loc == nil {
+			loc = time.UTC
+		}
+		sched.Type = "once"
+		sched.NextRunAt = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, loc).UTC()
+	} else {
+		// Try as cron expression
+		cronExpr, err := parseScheduleCron(expr)
+		if err != nil {
+			return fmt.Sprintf("Invalid schedule expression: %s", err), nil
+		}
+		sched.Type = "cron"
+		loc, _ := time.LoadLocation(tz)
+		if loc == nil {
+			loc = time.UTC
+		}
+		nextRun := cronExpr.Next(time.Now().In(loc)).UTC()
+		if nextRun.IsZero() {
+			return "Could not compute next run time.", nil
+		}
+		sched.NextRunAt = nextRun
+	}
+
+	id, err := b.store.SaveSchedule(sched)
+	if err != nil {
+		return "", fmt.Errorf("save schedule: %w", err)
+	}
+
+	modeStr := ""
+	if mode == "prompt" {
+		modeStr = " (prompt mode)"
+	}
+
+	if sched.Type == "once" {
+		return fmt.Sprintf("Scheduled #%d: %s at %s%s", id, message, sched.NextRunAt.Format("2006-01-02 15:04 UTC"), modeStr), nil
+	}
+	return fmt.Sprintf("Scheduled #%d: %s (%s) next: %s%s", id, message, expr, sched.NextRunAt.Format("2006-01-02 15:04 UTC"), modeStr), nil
+}
+
+func (b *Bridge) scheduleList(chatID int64) (string, error) {
+	schedules, err := b.store.ListSchedules(chatID)
+	if err != nil {
+		return "", fmt.Errorf("list schedules: %w", err)
+	}
+	if len(schedules) == 0 {
+		return "No schedules found.", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("**Schedules:**\n\n")
+	for _, sc := range schedules {
+		status := "enabled"
+		if !sc.Enabled {
+			status = "disabled"
+		}
+		modeTag := ""
+		if sc.Mode == "prompt" {
+			modeTag = " [prompt]"
+		}
+		if sc.Type == "once" {
+			sb.WriteString(fmt.Sprintf("**#%d** %s — at %s (%s)%s\n",
+				sc.ID, sc.Label, sc.NextRunAt.Format("2006-01-02 15:04 UTC"), status, modeTag))
+		} else {
+			sb.WriteString(fmt.Sprintf("**#%d** %s — `%s` next: %s (%s)%s\n",
+				sc.ID, sc.Label, sc.Schedule, sc.NextRunAt.Format("2006-01-02 15:04 UTC"), status, modeTag))
+		}
+	}
+	return sb.String(), nil
+}
+
+func (b *Bridge) scheduleDelete(chatID int64, args string) (string, error) {
+	args = strings.TrimSpace(args)
+	id, err := strconv.ParseInt(args, 10, 64)
+	if err != nil {
+		return "Usage: /schedule delete <id>", nil
+	}
+	if err := b.store.DeleteSchedule(chatID, id); err != nil {
+		return fmt.Sprintf("Failed to delete: %s", err), nil
+	}
+	return fmt.Sprintf("Schedule #%d deleted.", id), nil
+}
+
+// parseScheduleDirectives extracts [schedule ...] directives from Claude's response.
+// Returns the cleaned response and creates schedules in the store.
+// parseGenerateImageDirectives extracts [generate-image prompt="..."] directives
+// from Claude's response, generates images, and sends them via Telegram.
+func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, chatID int64, response string) string {
+	if b.imagen == nil || b.imageSend == nil {
+		return response
+	}
+
+	matches := generateImageRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response
+	}
+
+	clean := response
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		prompt := response[m[2]:m[3]]
+
+		imageData, err := b.imagen.Generate(ctx, prompt)
+		if err != nil {
+			slog.Error("image generation failed", "prompt", prompt, "error", err)
+			clean = clean[:m[0]] + "(image generation failed: " + err.Error() + ")" + clean[m[1]:]
+			continue
+		}
+
+		b.imageSend(chatID, imageData, prompt)
+		clean = clean[:m[0]] + clean[m[1]:]
+	}
+
+	return strings.TrimSpace(clean)
+}
+
+// HandleImagine generates an image from the given prompt and returns the image bytes.
+func (b *Bridge) HandleImagine(ctx context.Context, prompt string) ([]byte, error) {
+	if b.imagen == nil {
+		return nil, fmt.Errorf("image generation is not configured (set GEMINI_API_KEY)")
+	}
+	return b.imagen.Generate(ctx, prompt)
+}
+
+// imagenSystemPrompt returns the system prompt addition that documents
+// the [generate-image] directive for Claude. Empty if imagen is not configured.
+func (b *Bridge) imagenSystemPrompt() string {
+	if b.imagen == nil {
+		return ""
+	}
+	return "\n\n## Image Generation\n\n" +
+		"You can generate images for the user using the [generate-image] directive.\n" +
+		"When the user asks you to create, draw, generate, or visualize an image, include this directive in your response:\n\n" +
+		"```\n[generate-image prompt=\"a detailed description of the image to generate\"]\n```\n\n" +
+		"The prompt should be a detailed, descriptive text that captures what the user wants.\n" +
+		"The directive will be replaced with the generated image sent as a photo.\n" +
+		"You can include multiple directives in one response for multiple images.\n" +
+		"Use this proactively when the user's request would benefit from a visual.\n"
+}
+
+func (b *Bridge) parseScheduleDirectives(chatID int64, response string) string {
+	if !b.schedulerEnabled {
+		return response
+	}
+
+	matches := scheduleRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response
+	}
+
+	var cleaned strings.Builder
+	lastEnd := 0
+
+	for _, match := range matches {
+		cleaned.WriteString(response[lastEnd:match[0]])
+		lastEnd = match[1]
+
+		attrs := response[match[2]:match[3]]
+		msg := strings.TrimSpace(response[match[4]:match[5]])
+
+		// Parse attributes
+		attrMap := make(map[string]string)
+		for _, am := range scheduleAttrRe.FindAllStringSubmatch(attrs, -1) {
+			attrMap[am[1]] = am[2]
+		}
+
+		tz := attrMap["tz"]
+		if tz == "" {
+			tz = b.schedulerTZ
+		}
+		mode := attrMap["mode"]
+		if mode == "" {
+			mode = "notify"
+		}
+
+		sched := &store.Schedule{
+			ChatID:   chatID,
+			Label:    msg,
+			Message:  msg,
+			Timezone: tz,
+			Mode:     mode,
+			Enabled:  true,
+		}
+
+		if at, ok := attrMap["at"]; ok {
+			sched.Schedule = at
+			sched.Type = "once"
+			if t, err := time.Parse(time.RFC3339, at); err == nil {
+				sched.NextRunAt = t.UTC()
+			} else if t, err := time.Parse("2006-01-02T15:04:05", at); err == nil {
+				loc, _ := time.LoadLocation(tz)
+				if loc == nil {
+					loc = time.UTC
+				}
+				sched.NextRunAt = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, loc).UTC()
+			} else {
+				slog.Warn("schedule directive: invalid at time", "at", at)
+				continue
+			}
+		} else if cronStr, ok := attrMap["cron"]; ok {
+			sched.Schedule = cronStr
+			sched.Type = "cron"
+			cronExpr, err := parseScheduleCron(cronStr)
+			if err != nil {
+				slog.Warn("schedule directive: invalid cron", "cron", cronStr, "error", err)
+				continue
+			}
+			loc, _ := time.LoadLocation(tz)
+			if loc == nil {
+				loc = time.UTC
+			}
+			nextRun := cronExpr.Next(time.Now().In(loc)).UTC()
+			if nextRun.IsZero() {
+				continue
+			}
+			sched.NextRunAt = nextRun
+		} else {
+			slog.Warn("schedule directive: missing at or cron attribute")
+			continue
+		}
+
+		id, err := b.store.SaveSchedule(sched)
+		if err != nil {
+			slog.Error("schedule directive: failed to save", "error", err)
+			continue
+		}
+
+		// Append a confirmation to the cleaned output
+		if sched.Type == "once" {
+			cleaned.WriteString(fmt.Sprintf("\n\n📅 Scheduled #%d: %s at %s", id, msg, sched.NextRunAt.Format("2006-01-02 15:04 UTC")))
+		} else {
+			cleaned.WriteString(fmt.Sprintf("\n\n📅 Scheduled #%d: %s (%s) next: %s", id, msg, sched.Schedule, sched.NextRunAt.Format("2006-01-02 15:04 UTC")))
+		}
+	}
+
+	cleaned.WriteString(response[lastEnd:])
+	return strings.TrimSpace(cleaned.String())
+}
+
+// parseScheduleCron is a bridge-level wrapper that calls the scheduler's cron parser.
+func parseScheduleCron(expr string) (interface{ Next(time.Time) time.Time }, error) {
+	return schedulerParseCron(expr)
+}
+
+// schedulerParseCron is set by the daemon during initialization to avoid
+// a direct import of the scheduler package from bridge.
+var schedulerParseCron func(string) (interface{ Next(time.Time) time.Time }, error)
+
+// SetCronParser sets the cron parsing function used by schedule commands.
+func SetCronParser(fn func(string) (interface{ Next(time.Time) time.Time }, error)) {
+	schedulerParseCron = fn
 }
 
 // Remember handles the /remember command.

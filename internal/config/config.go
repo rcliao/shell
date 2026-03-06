@@ -10,13 +10,15 @@ import (
 )
 
 type Config struct {
-	Telegram TelegramConfig `json:"telegram"`
-	Claude   ClaudeConfig   `json:"claude"`
-	Store    StoreConfig    `json:"store"`
-	Daemon   DaemonConfig   `json:"daemon"`
-	Memory   MemoryConfig   `json:"memory"`
-	Planner  PlannerConfig  `json:"planner"`
-	Reload   ReloadConfig   `json:"reload"`
+	Telegram  TelegramConfig  `json:"telegram"`
+	Claude    ClaudeConfig    `json:"claude"`
+	Store     StoreConfig     `json:"store"`
+	Daemon    DaemonConfig    `json:"daemon"`
+	Memory    MemoryConfig    `json:"memory"`
+	Planner   PlannerConfig   `json:"planner"`
+	Scheduler SchedulerConfig `json:"scheduler"`
+	Reload    ReloadConfig    `json:"reload"`
+	Google    GoogleConfig    `json:"google"`
 }
 
 type TelegramConfig struct {
@@ -109,10 +111,55 @@ func (m MemoryConfig) ChatProfileMap() map[int64]string {
 	return out
 }
 
+type SchedulerConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Timezone string `json:"timezone"` // default: "UTC"
+}
+
 type ReloadConfig struct {
 	Enabled   bool   `json:"enabled"`
 	SourceDir string `json:"source_dir"` // auto-detected from go.mod if empty
 	Debounce  string `json:"debounce"`   // duration string, default "500ms"
+}
+
+type GoogleConfig struct {
+	APIKeyEnv string        `json:"api_key_env"` // env var name (default: "GEMINI_API_KEY")
+	Model     string        `json:"model"`       // default: "gemini-2.0-flash-preview-image-generation"
+	Timeout   time.Duration `json:"timeout"`     // default: 2m
+}
+
+// MarshalJSON implements custom JSON marshaling for GoogleConfig duration fields.
+func (c GoogleConfig) MarshalJSON() ([]byte, error) {
+	type Alias GoogleConfig
+	return json.Marshal(&struct {
+		Timeout string `json:"timeout,omitempty"`
+		*Alias
+	}{
+		Timeout: c.Timeout.String(),
+		Alias:   (*Alias)(&c),
+	})
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for GoogleConfig duration fields.
+func (c *GoogleConfig) UnmarshalJSON(data []byte) error {
+	type Alias GoogleConfig
+	aux := &struct {
+		Timeout string `json:"timeout"`
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if aux.Timeout != "" {
+		d, err := time.ParseDuration(aux.Timeout)
+		if err != nil {
+			return fmt.Errorf("parsing google timeout: %w", err)
+		}
+		c.Timeout = d
+	}
+	return nil
 }
 
 type PlannerConfig struct {
@@ -191,10 +238,19 @@ func Default() Config {
 			MaxRetries:           2,
 			AutoApproveThreshold: 80,
 		},
+		Scheduler: SchedulerConfig{
+			Enabled:  false,
+			Timezone: "UTC",
+		},
 		Reload: ReloadConfig{
 			Enabled:   false,
 			SourceDir: "",
 			Debounce:  "500ms",
+		},
+		Google: GoogleConfig{
+			APIKeyEnv: "GEMINI_API_KEY",
+			Model:     "gemini-2.0-flash-preview-image-generation",
+			Timeout:   2 * time.Minute,
 		},
 	}
 }
@@ -227,6 +283,10 @@ func Load(path string) (Config, error) {
 
 func (c Config) TelegramToken() string {
 	return os.Getenv(c.Telegram.TokenEnv)
+}
+
+func (c Config) GoogleAPIKey() string {
+	return os.Getenv(c.Google.APIKeyEnv)
 }
 
 // MarshalJSON implements custom JSON marshaling for duration fields.
