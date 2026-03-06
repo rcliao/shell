@@ -13,33 +13,50 @@ import (
 	"time"
 )
 
+// ListRepos returns a map of repo name → absolute path for git repositories
+// found under workDir (up to 3 levels deep).
+func ListRepos(workDir string) map[string]string {
+	repos := findGitRepos(workDir, 3)
+	result := make(map[string]string, len(repos))
+	for _, r := range repos {
+		result[filepath.Base(r)] = r
+	}
+	return result
+}
+
 // ResolveRepoDir determines which git repository to use for worktree creation.
-// If workDir itself is a git repo, it is returned directly. Otherwise, subdirectories
-// (up to 3 levels deep) are scanned for git repos. When multiple repos are found,
-// the intent text is matched against directory names to pick the right one.
+// When workDir contains nested repos, it checks those first so that an intent
+// matching a nested repo name is preferred over the parent. Falls back to workDir
+// itself if it is a git repo and no nested match is found.
 func ResolveRepoDir(workDir, intent string) (string, error) {
+	// Always check nested repos first so mono-repo parents don't shadow children.
+	repos := findGitRepos(workDir, 3)
+
+	if len(repos) > 0 {
+		if len(repos) == 1 {
+			return repos[0], nil
+		}
+
+		// Try to match intent against repo directory names
+		intentLower := strings.ToLower(intent)
+		for _, repo := range repos {
+			name := strings.ToLower(filepath.Base(repo))
+			if strings.Contains(intentLower, name) {
+				return repo, nil
+			}
+		}
+	}
+
+	// Fall back to workDir if it is itself a git repo.
 	if isGitRepo(workDir) {
 		return workDir, nil
 	}
 
-	repos := findGitRepos(workDir, 3)
 	if len(repos) == 0 {
 		return "", fmt.Errorf("no git repository found under %s", workDir)
 	}
-	if len(repos) == 1 {
-		return repos[0], nil
-	}
 
-	// Try to match intent against repo directory names
-	intentLower := strings.ToLower(intent)
-	for _, repo := range repos {
-		name := strings.ToLower(filepath.Base(repo))
-		if strings.Contains(intentLower, name) {
-			return repo, nil
-		}
-	}
-
-	// List repo names for the error message
+	// Multiple repos found but no intent match and parent isn't a repo.
 	names := make([]string, len(repos))
 	for i, r := range repos {
 		names[i] = filepath.Base(r)
@@ -62,6 +79,11 @@ func isGitRepo(dir string) bool {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return false
+	}
+	// Resolve symlinks so that e.g. /var → /private/var on macOS doesn't
+	// cause a false mismatch with git's resolved toplevel path.
+	if resolved, err := filepath.EvalSymlinks(absDir); err == nil {
+		absDir = resolved
 	}
 	if filepath.Clean(toplevel) != filepath.Clean(absDir) {
 		return false

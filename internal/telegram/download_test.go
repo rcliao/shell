@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-telegram/bot"
@@ -183,6 +184,204 @@ func TestDownloadDocument_NilDoc(t *testing.T) {
 	_, err := DownloadDocument(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("expected error for nil document")
+	}
+}
+
+func TestIsPDFDocument(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  *models.Document
+		want bool
+	}{
+		{"nil document", nil, false},
+		{"application/pdf", &models.Document{MimeType: "application/pdf"}, true},
+		{"image/jpeg", &models.Document{MimeType: "image/jpeg"}, false},
+		{"text/plain", &models.Document{MimeType: "text/plain"}, false},
+		{"empty mime", &models.Document{MimeType: ""}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPDFDocument(tt.doc); got != tt.want {
+				t.Errorf("IsPDFDocument() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDownloadPDF(t *testing.T) {
+	// Minimal PDF header bytes.
+	pdfBytes := []byte("%PDF-1.4 minimal test content")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/botTEST_TOKEN/getMe":
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"result": map[string]any{"id": 1, "is_bot": true, "first_name": "Test"},
+			})
+		case r.URL.Path == "/botTEST_TOKEN/getFile":
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": models.File{
+					FileID:   "pdf123",
+					FilePath: "documents/report.pdf",
+				},
+			})
+		case r.URL.Path == "/file/botTEST_TOKEN/documents/report.pdf":
+			w.Header().Set("Content-Type", "application/pdf")
+			w.Write(pdfBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	b, err := bot.New("TEST_TOKEN", bot.WithServerURL(srv.URL))
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+
+	doc := &models.Document{
+		FileID:   "pdf123",
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		FileSize: int64(len(pdfBytes)),
+	}
+
+	info, err := DownloadPDF(context.Background(), b, doc)
+	if err != nil {
+		t.Fatalf("DownloadPDF: %v", err)
+	}
+	defer os.Remove(info.Path)
+
+	data, err := os.ReadFile(info.Path)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+
+	if len(data) != len(pdfBytes) {
+		t.Errorf("file size = %d, want %d", len(data), len(pdfBytes))
+	}
+
+	if ext := info.Path[len(info.Path)-4:]; ext != ".pdf" {
+		t.Errorf("extension = %q, want .pdf", ext)
+	}
+
+	if info.Size != int64(len(pdfBytes)) {
+		t.Errorf("size = %d, want %d", info.Size, len(pdfBytes))
+	}
+}
+
+func TestDownloadPDF_NilDoc(t *testing.T) {
+	_, err := DownloadPDF(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for nil document")
+	}
+}
+
+func TestDownloadPDF_WrongMIME(t *testing.T) {
+	doc := &models.Document{
+		FileID:   "img123",
+		MimeType: "image/png",
+	}
+	_, err := DownloadPDF(context.Background(), nil, doc)
+	if err == nil {
+		t.Fatal("expected error for non-PDF document")
+	}
+}
+
+func TestDownloadPDF_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/botTEST_TOKEN/getMe":
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"result": map[string]any{"id": 1, "is_bot": true, "first_name": "Test"},
+			})
+		case r.URL.Path == "/botTEST_TOKEN/getFile":
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": models.File{
+					FileID:   "pdf123",
+					FilePath: "documents/report.pdf",
+				},
+			})
+		case r.URL.Path == "/file/botTEST_TOKEN/documents/report.pdf":
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	b, err := bot.New("TEST_TOKEN", bot.WithServerURL(srv.URL))
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+
+	doc := &models.Document{
+		FileID:   "pdf123",
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+	}
+
+	_, err = DownloadPDF(context.Background(), b, doc)
+	if err == nil {
+		t.Fatal("expected error for HTTP 500 response")
+	}
+	if got := err.Error(); !strings.Contains(got, "unexpected status") {
+		t.Errorf("expected 'unexpected status' in error, got %q", got)
+	}
+}
+
+// TestPDFHandlerRouting verifies the match function logic used in bot.go
+// to route PDF documents to the PDF handler.
+func TestPDFHandlerRouting(t *testing.T) {
+	// The match function in bot.go is:
+	//   update.Message != nil && IsPDFDocument(update.Message.Document)
+	// We test all combinations.
+	tests := []struct {
+		name    string
+		msg     *models.Message
+		want    bool
+	}{
+		{
+			name: "pdf document matches",
+			msg:  &models.Message{Document: &models.Document{MimeType: "application/pdf"}},
+			want: true,
+		},
+		{
+			name: "image document does not match",
+			msg:  &models.Message{Document: &models.Document{MimeType: "image/png"}},
+			want: false,
+		},
+		{
+			name: "nil document does not match",
+			msg:  &models.Message{},
+			want: false,
+		},
+		{
+			name: "nil message does not match",
+			msg:  nil,
+			want: false,
+		},
+		{
+			name: "text message without document does not match",
+			msg:  &models.Message{Text: "hello"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Replicate the match logic from bot.go.
+			got := tt.msg != nil && IsPDFDocument(tt.msg.Document)
+			if got != tt.want {
+				t.Errorf("PDF match = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

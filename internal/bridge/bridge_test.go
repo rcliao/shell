@@ -2,7 +2,9 @@ package bridge
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -418,5 +420,165 @@ func TestHandleReaction_Forget_WithContext(t *testing.T) {
 	msgs, _ := b.store.GetMessages(sess.ID, 10)
 	if len(msgs) != 0 {
 		t.Errorf("expected 0 messages after forget, got %d", len(msgs))
+	}
+}
+
+func TestCountPDFPages(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{
+			name:    "single page",
+			content: "%PDF-1.4\n/Type /Page\n%%EOF",
+			want:    1,
+		},
+		{
+			name:    "multiple pages",
+			content: "%PDF-1.4\n/Type /Page\n/Type /Page\n/Type /Page\n%%EOF",
+			want:    3,
+		},
+		{
+			name:    "pages tree excluded",
+			content: "%PDF-1.4\n/Type /Pages\n/Type /Page\n%%EOF",
+			want:    1,
+		},
+		{
+			name:    "no pages",
+			content: "%PDF-1.4\n%%EOF",
+			want:    0,
+		},
+		{
+			name:    "nonexistent file",
+			content: "",
+			want:    0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.name == "nonexistent file" {
+				if got := countPDFPages("/nonexistent/file.pdf"); got != 0 {
+					t.Errorf("countPDFPages(nonexistent) = %d, want 0", got)
+				}
+				return
+			}
+			tmp := filepath.Join(t.TempDir(), "test.pdf")
+			if err := os.WriteFile(tmp, []byte(tt.content), 0o644); err != nil {
+				t.Fatalf("write temp pdf: %v", err)
+			}
+			if got := countPDFPages(tmp); got != tt.want {
+				t.Errorf("countPDFPages() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatFileSize(t *testing.T) {
+	tests := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1048576, "1.0 MB"},
+		{1572864, "1.5 MB"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := formatFileSize(tt.bytes); got != tt.want {
+				t.Errorf("formatFileSize(%d) = %q, want %q", tt.bytes, got, tt.want)
+			}
+		})
+	}
+}
+
+// buildAttachmentPrefix replicates the augmentation logic from
+// HandleMessageStreaming so we can unit-test the formatting without
+// needing the full Bridge/process machinery.
+func buildAttachmentPrefix(images []ImageInfo, pdfs []PDFInfo) string {
+	if len(images) == 0 && len(pdfs) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, img := range images {
+		sb.WriteString("[Attached image: " + img.Path)
+		if img.Width > 0 && img.Height > 0 {
+			sb.WriteString(" | " + strconv.Itoa(img.Width) + "x" + strconv.Itoa(img.Height))
+		}
+		if img.Size > 0 {
+			sb.WriteString(" | " + formatFileSize(img.Size))
+		}
+		sb.WriteString("]\n")
+	}
+	for _, pdf := range pdfs {
+		sb.WriteString("[Attached PDF: " + pdf.Path)
+		if pages := countPDFPages(pdf.Path); pages > 0 {
+			sb.WriteString(" | " + strconv.Itoa(pages) + " pages")
+		}
+		if pdf.Size > 0 {
+			sb.WriteString(" | " + formatFileSize(pdf.Size))
+		}
+		sb.WriteString("]\n")
+	}
+	return sb.String()
+}
+
+func TestAugmentMessage_PDFMetadata(t *testing.T) {
+	// Create a temp PDF with 2 page markers.
+	tmp := filepath.Join(t.TempDir(), "test.pdf")
+	if err := os.WriteFile(tmp, []byte("%PDF-1.4\n/Type /Page\n/Type /Page\n%%EOF"), 0o644); err != nil {
+		t.Fatalf("write temp pdf: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		images  []ImageInfo
+		pdfs    []PDFInfo
+		want    []string // substrings expected in result
+		notWant []string // substrings that must NOT appear
+	}{
+		{
+			name: "pdf with size and pages",
+			pdfs: []PDFInfo{{Path: tmp, Size: 348160}},
+			want: []string{"[Attached PDF: " + tmp, "2 pages", "340.0 KB", "]\n"},
+		},
+		{
+			name:   "image and pdf together",
+			images: []ImageInfo{{Path: "/tmp/photo.jpg", Width: 800, Height: 600, Size: 50000}},
+			pdfs:   []PDFInfo{{Path: tmp, Size: 1048576}},
+			want:   []string{"[Attached image:", "800x600", "[Attached PDF:", "1.0 MB"},
+		},
+		{
+			name:    "pdf without size omits size",
+			pdfs:    []PDFInfo{{Path: tmp, Size: 0}},
+			want:    []string{"[Attached PDF:", "2 pages"},
+			notWant: []string{"0 B"},
+		},
+		{
+			name: "no attachments returns empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildAttachmentPrefix(tt.images, tt.pdfs)
+			for _, w := range tt.want {
+				if !strings.Contains(result, w) {
+					t.Errorf("missing %q in:\n%s", w, result)
+				}
+			}
+			for _, nw := range tt.notWant {
+				if strings.Contains(result, nw) {
+					t.Errorf("unexpected %q in:\n%s", nw, result)
+				}
+			}
+			if len(tt.want) == 0 && result != "" {
+				t.Errorf("expected empty, got %q", result)
+			}
+		})
 	}
 }

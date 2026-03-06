@@ -64,6 +64,22 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 		b.photoHandler,
 	)
 
+	// Register handler for sticker messages.
+	tgBot.RegisterHandlerMatchFunc(
+		func(update *models.Update) bool {
+			return update.Message != nil && update.Message.Sticker != nil
+		},
+		b.stickerHandler,
+	)
+
+	// Register handler for PDF documents.
+	tgBot.RegisterHandlerMatchFunc(
+		func(update *models.Update) bool {
+			return update.Message != nil && IsPDFDocument(update.Message.Document)
+		},
+		b.pdfHandler,
+	)
+
 	// Register handler for documents with image MIME types (uncompressed photos).
 	tgBot.RegisterHandlerMatchFunc(
 		func(update *models.Update) bool {
@@ -131,6 +147,20 @@ func (b *Bot) photoHandler(ctx context.Context, tgBot *bot.Bot, update *models.U
 		return
 	}
 	b.handler.HandlePhoto(ctx, tgBot, update.Message)
+}
+
+func (b *Bot) stickerHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	b.handler.HandleSticker(ctx, tgBot, update.Message)
+}
+
+func (b *Bot) pdfHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	b.handler.HandlePDF(ctx, tgBot, update.Message)
 }
 
 func (b *Bot) reactionHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {

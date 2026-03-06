@@ -130,6 +130,39 @@ func ParsePlan(planText string) []string {
 	return tasks
 }
 
+// RepoTask associates a task with the repository it targets.
+type RepoTask struct {
+	Repo string // repo name from ## header, or "" if no header found
+	Task string
+}
+
+// ParsePlanByRepo parses a plan with ## repo-name headers and returns tasks
+// grouped by repo. Tasks before any header get Repo="" and are skipped with
+// a warning log.
+func ParsePlanByRepo(planText string) []RepoTask {
+	headerRe := regexp.MustCompile(`(?m)^## (.+)$`)
+	taskRe := regexp.MustCompile(`(?m)^- \[ \] (.+)$`)
+
+	var result []RepoTask
+	currentRepo := ""
+
+	for _, line := range strings.Split(planText, "\n") {
+		if m := headerRe.FindStringSubmatch(line); m != nil {
+			currentRepo = strings.TrimSpace(m[1])
+			continue
+		}
+		if m := taskRe.FindStringSubmatch(line); m != nil {
+			task := strings.TrimSpace(m[1])
+			if currentRepo == "" {
+				slog.Warn("task has no repo header, skipping", "task", task)
+				continue
+			}
+			result = append(result, RepoTask{Repo: currentRepo, Task: task})
+		}
+	}
+	return result
+}
+
 // RunTask executes a single task through the full loop:
 // execute → test → review → decide. Returns the result.
 // completedContext summarises previously completed tasks for continuity.
@@ -1303,23 +1336,34 @@ func extractLearnings(text string) (string, []string) {
 // DraftPlan asks Claude to generate a markdown checklist from a high-level
 // intent. If feedback is non-empty, the previous draft and user feedback are
 // included so Claude can revise.
-func (p *Planner) DraftPlan(ctx context.Context, intent, previousDraft, feedback string) (string, error) {
+func (p *Planner) DraftPlan(ctx context.Context, intent, previousDraft, feedback string, repoNames ...string) (string, error) {
 	granularity := "Each task MUST be small and focused — at most 3-4 files changed per task. Break larger work into multiple sequential tasks."
+
+	repoInstructions := ""
+	if len(repoNames) > 0 {
+		repoInstructions = fmt.Sprintf(
+			"Group tasks by target repository using ## headers.\n"+
+				"Available repositories: %s\n\n"+
+				"Format:\n## <repo-name>\n- [ ] task description\n\n",
+			strings.Join(repoNames, ", "))
+	}
 
 	var prompt string
 	if feedback == "" {
 		prompt = fmt.Sprintf(
 			"Generate a concise markdown task checklist for the following goal. "+
+				"%s"+
 				"Output ONLY the checklist lines, each starting with \"- [ ] \". "+
 				"No preamble, no explanation.\n\n"+
-				"%s\n\nGoal: %s", granularity, intent)
+				"%s\n\nGoal: %s", repoInstructions, granularity, intent)
 	} else {
 		prompt = fmt.Sprintf(
 			"Revise the following task checklist based on the user's feedback. "+
+				"%s"+
 				"Output ONLY the updated checklist lines, each starting with \"- [ ] \". "+
 				"No preamble, no explanation.\n\n"+
 				"%s\n\n"+
-				"Previous plan:\n%s\n\nFeedback: %s", granularity, previousDraft, feedback)
+				"Previous plan:\n%s\n\nFeedback: %s", repoInstructions, granularity, previousDraft, feedback)
 	}
 
 	return p.runClaudeTextOnly(ctx, prompt)

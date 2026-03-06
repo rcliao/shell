@@ -1130,10 +1130,11 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 
 	text := strings.TrimSpace(msg.Text)
 
-	// If this message contains a photo (or a document with an image MIME type),
-	// download it and pass the image info to the bridge so it can augment the
+	// If this message contains a photo, document image, or PDF,
+	// download it and pass the info to the bridge so it can augment the
 	// Claude message with the file path and metadata.
 	var images []bridge.ImageInfo
+	var pdfs []bridge.PDFInfo
 	if len(msg.Photo) > 0 {
 		if text == "" {
 			text = strings.TrimSpace(msg.Caption)
@@ -1149,6 +1150,62 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 		defer func() { os.Remove(img.Path) }()
 		images = []bridge.ImageInfo{img}
+	} else if msg.Sticker != nil {
+		if text == "" {
+			text = strings.TrimSpace(msg.Caption)
+		}
+		if text == "" {
+			text = "(sticker)"
+		}
+		// Annotate animated/video stickers so Claude knows it's seeing a thumbnail.
+		if msg.Sticker.IsAnimated {
+			text += " [animated sticker]"
+		} else if msg.Sticker.IsVideo {
+			text += " [video sticker]"
+		}
+		// Append emoji and sticker set context so Claude can interpret the sticker.
+		var ctxParts []string
+		if msg.Sticker.Emoji != "" {
+			ctxParts = append(ctxParts, "emoji: "+msg.Sticker.Emoji)
+		}
+		if msg.Sticker.SetName != "" {
+			ctxParts = append(ctxParts, "set: "+msg.Sticker.SetName)
+		}
+		if len(ctxParts) > 0 {
+			text += " [" + strings.Join(ctxParts, ", ") + "]"
+		}
+		// For animated/video stickers, download the thumbnail instead of the
+		// full sticker file (which Claude can't interpret).
+		if (msg.Sticker.IsAnimated || msg.Sticker.IsVideo) && msg.Sticker.Thumbnail != nil {
+			img, err := DownloadPhoto(ctx, b, []models.PhotoSize{*msg.Sticker.Thumbnail})
+			if err != nil {
+				slog.Warn("failed to download sticker thumbnail, falling back to text-only", "error", err, "chat_id", msg.Chat.ID)
+			} else {
+				defer func() { os.Remove(img.Path) }()
+				images = []bridge.ImageInfo{img}
+			}
+		} else if msg.Sticker.IsAnimated || msg.Sticker.IsVideo {
+			// No thumbnail available; proceed with text-only context.
+			slog.Info("animated/video sticker has no thumbnail, falling back to text-only", "chat_id", msg.Chat.ID)
+		} else {
+			img, err := DownloadSticker(ctx, b, msg.Sticker)
+			if err != nil {
+				slog.Warn("failed to download sticker", "error", err, "chat_id", msg.Chat.ID)
+				// Try the thumbnail as a fallback before going text-only.
+				if msg.Sticker.Thumbnail != nil {
+					thumbImg, thumbErr := DownloadPhoto(ctx, b, []models.PhotoSize{*msg.Sticker.Thumbnail})
+					if thumbErr != nil {
+						slog.Warn("failed to download sticker thumbnail, falling back to text-only", "error", thumbErr, "chat_id", msg.Chat.ID)
+					} else {
+						defer func() { os.Remove(thumbImg.Path) }()
+						images = []bridge.ImageInfo{thumbImg}
+					}
+				}
+			} else {
+				defer func() { os.Remove(img.Path) }()
+				images = []bridge.ImageInfo{img}
+			}
+		}
 	} else if IsImageDocument(msg.Document) {
 		if text == "" {
 			text = strings.TrimSpace(msg.Caption)
@@ -1164,6 +1221,21 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 		defer func() { os.Remove(img.Path) }()
 		images = []bridge.ImageInfo{img}
+	} else if IsPDFDocument(msg.Document) {
+		if text == "" {
+			text = strings.TrimSpace(msg.Caption)
+		}
+		if text == "" {
+			text = "(pdf)"
+		}
+		pdfInfo, err := DownloadPDF(ctx, b, msg.Document)
+		if err != nil {
+			slog.Error("failed to download pdf", "error", err, "chat_id", msg.Chat.ID)
+			setReaction(ctx, b, msg.Chat.ID, msg.ID, "❌")
+			return
+		}
+		defer func() { os.Remove(pdfInfo.Path) }()
+		pdfs = []bridge.PDFInfo{{Path: pdfInfo.Path, Size: pdfInfo.Size}}
 	}
 
 	if text == "" {
@@ -1293,7 +1365,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 	}
 
-	response, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, onUpdate)
+	response, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, pdfs, onUpdate)
 
 	if err != nil {
 		slog.Error("bridge handle message failed", "error", err, "chat_id", msg.Chat.ID)
@@ -1373,6 +1445,32 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		finalEmoji = "🤔"
 	}
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, finalEmoji)
+}
+
+// HandleSticker processes an incoming sticker message by downloading it (or its
+// thumbnail for animated/video stickers), converting to PNG, and delegating to
+// HandleMessage with emoji/set-name context.
+func (h *Handler) HandleSticker(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	h.HandleMessage(ctx, b, msg)
+}
+
+// HandlePDF processes an incoming PDF document message by delegating to
+// HandleMessage, which will detect the PDF document and download it.
+func (h *Handler) HandlePDF(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	h.HandleMessage(ctx, b, msg)
+}
+
+
+// formatBytes formats a byte count as a human-readable string.
+func formatBytes(bytes int64) string {
+	switch {
+	case bytes >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1<<20))
+	case bytes >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 // HandlePhoto processes an incoming photo message. If the message belongs to a
@@ -1593,7 +1691,7 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		}
 	}
 
-	response, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, text, senderName, images, onUpdate)
+	response, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, text, senderName, images, nil, onUpdate)
 	if err != nil {
 		slog.Error("bridge handle message failed (album)", "error", err, "chat_id", first.Chat.ID)
 		setReaction(ctx, b, first.Chat.ID, first.ID, "❌")
