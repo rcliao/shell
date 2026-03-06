@@ -404,6 +404,102 @@ func (m *Memory) StoreReviewerLearning(ctx context.Context, namespace, content s
 	return err
 }
 
+// ReviewEntry holds a memory reference for the review index.
+type ReviewEntry struct {
+	NS  string
+	Key string
+}
+
+// ReviewMemories returns a formatted summary of all memories (semantic + episodic)
+// and a lookup slice for correction by index.
+func (m *Memory) ReviewMemories(ctx context.Context, chatID int64) (string, []ReviewEntry, error) {
+	ns := namespace(chatID)
+
+	// Fetch semantic memories
+	semantic, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:    ns,
+		Kind:  "semantic",
+		Limit: 50,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Fetch episodic memories
+	episodic, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:    ns,
+		Kind:  "episodic",
+		Limit: 20,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+
+	if len(semantic) == 0 && len(episodic) == 0 {
+		return "No memories found. Use /remember <text> to save one.", nil, nil
+	}
+
+	var sb strings.Builder
+	var entries []ReviewEntry
+	idx := 1
+
+	if len(semantic) > 0 {
+		sb.WriteString("## Saved Memories\n\n")
+		for _, mem := range semantic {
+			sb.WriteString(fmt.Sprintf("`%d.` **%s**\n%s\n\n", idx, mem.Key, mem.Content))
+			entries = append(entries, ReviewEntry{NS: ns, Key: mem.Key})
+			idx++
+		}
+	}
+
+	if len(episodic) > 0 {
+		sb.WriteString("## Recent Conversations\n\n")
+		for _, mem := range episodic {
+			// Truncate long episodic entries for summary
+			content := mem.Content
+			if len(content) > 120 {
+				content = content[:120] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("`%d.` %s\n\n", idx, content))
+			entries = append(entries, ReviewEntry{NS: ns, Key: mem.Key})
+			idx++
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("---\n\n*%d total memories* — Use `/correct <number> <new text>` to fix or `/forget <key>` to remove", len(entries)))
+	return sb.String(), entries, nil
+}
+
+// CorrectMemory updates the content of a memory identified by namespace and key.
+func (m *Memory) CorrectMemory(ctx context.Context, ns, key, newContent string) error {
+	// Look up the existing memory to preserve its kind/priority
+	existing, err := m.store.Get(ctx, agentmemory.GetParams{
+		NS:  ns,
+		Key: key,
+	})
+	if err != nil {
+		return fmt.Errorf("get memory: %w", err)
+	}
+
+	kind := "semantic"
+	priority := "high"
+	if len(existing) > 0 {
+		kind = existing[0].Kind
+		if existing[0].Priority != "" {
+			priority = existing[0].Priority
+		}
+	}
+
+	_, err = m.store.Put(ctx, agentmemory.PutParams{
+		NS:       ns,
+		Key:      key,
+		Content:  newContent,
+		Kind:     kind,
+		Priority: priority,
+	})
+	return err
+}
+
 // Close closes the underlying store.
 func (m *Memory) Close() error {
 	return m.store.Close()

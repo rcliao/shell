@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -27,6 +28,12 @@ type ImageInfo struct {
 	Width  int    // image width in pixels (0 if unknown)
 	Height int    // image height in pixels (0 if unknown)
 	Size   int64  // file size in bytes (0 if unknown)
+}
+
+// PDFInfo holds a downloaded PDF file path together with optional metadata.
+type PDFInfo struct {
+	Path string // local file path
+	Size int64  // file size in bytes (0 if unknown)
 }
 
 // relayDirective represents a message to send to another chat.
@@ -88,6 +95,14 @@ const (
 	planStateDone      planState = "done"
 )
 
+// repoWorktree holds worktree state for a single repository.
+type repoWorktree struct {
+	repoDir string           // resolved git repo path
+	path    string           // worktree checkout path
+	branch  string           // git branch name
+	planner *planner.Planner // planner with this worktree as WorkDir
+}
+
 // planRun tracks the state of an active or completed plan execution.
 type planRun struct {
 	cancel    context.CancelFunc
@@ -103,8 +118,15 @@ type planRun struct {
 
 	// Blocked state: index of the task that needs human guidance
 	failedTaskIdx int
+	failedRepo    string // repo name of the failed task (for multi-repo routing)
 
-	// Worktree isolation
+	// Multi-repo worktree isolation
+	repoWorktrees map[string]*repoWorktree // repo name → worktree info
+
+	// Available repo names discovered at plan time
+	repoNames []string
+
+	// Legacy single-repo fields kept for backwards compat with non-repo-grouped plans
 	worktreeRepoDir string           // resolved git repo directory (source of the worktree)
 	worktreePath    string           // filesystem path to the worktree checkout
 	worktreeBranch  string           // git branch name for the worktree
@@ -125,8 +147,15 @@ type Bridge struct {
 
 	reactionMap map[string]string // emoji → action (e.g. "👍":"go")
 
+	// Self-restart: when a plan modifies the relay's own source
+	selfSourceDir string // resolved path to relay's source dir (empty = disabled)
+	onSelfRestart func() // called when self-modification detected after merge
+
 	planMu   sync.Mutex
 	planRuns map[int64]*planRun
+
+	reviewMu    sync.Mutex
+	reviewCache map[int64][]memory.ReviewEntry // last /review result per chat
 }
 
 func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string) *Bridge {
@@ -147,12 +176,19 @@ func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *plan
 		worktreeDir: wtDir,
 		reactionMap: reactionMap,
 		planRuns:    make(map[int64]*planRun),
+		reviewCache: make(map[int64][]memory.ReviewEntry),
 	}
 }
 
 // SetNotifier sets the function used to push async messages (plan progress) to users.
 func (b *Bridge) SetNotifier(fn NotifyFunc) {
 	b.notify = fn
+}
+
+// SetSelfRestart configures auto-restart when a plan modifies the relay's own source.
+func (b *Bridge) SetSelfRestart(sourceDir string, fn func()) {
+	b.selfSourceDir = sourceDir
+	b.onSelfRestart = fn
 }
 
 // SaveMessageMap persists a mapping between a user's Telegram message and the
@@ -345,7 +381,9 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 // senderName identifies who sent the message (e.g. Telegram first name).
 // images optionally contains downloaded image metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram photos).
-func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, images []ImageInfo, onUpdate process.StreamFunc) (string, error) {
+// pdfs optionally contains downloaded PDF metadata that should be
+// included in the message sent to Claude (e.g. downloaded Telegram documents).
+func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (string, error) {
 	// Check for active plan draft — intercept the message (no streaming needed).
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
@@ -378,8 +416,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
 	}
 
-	// Prepend image file paths with metadata so Claude can read the attached images.
-	if len(images) > 0 {
+	// Prepend attachment metadata so Claude can read the attached files.
+	if len(images) > 0 || len(pdfs) > 0 {
 		var sb strings.Builder
 		for _, img := range images {
 			fmt.Fprintf(&sb, "[Attached image: %s", img.Path)
@@ -388,6 +426,16 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 			}
 			if img.Size > 0 {
 				fmt.Fprintf(&sb, " | %s", formatFileSize(img.Size))
+			}
+			sb.WriteString("]\n")
+		}
+		for _, pdf := range pdfs {
+			fmt.Fprintf(&sb, "[Attached PDF: %s", pdf.Path)
+			if pages := countPDFPages(pdf.Path); pages > 0 {
+				fmt.Fprintf(&sb, " | %d pages", pages)
+			}
+			if pdf.Size > 0 {
+				fmt.Fprintf(&sb, " | %s", formatFileSize(pdf.Size))
 			}
 			sb.WriteString("]\n")
 		}
@@ -472,6 +520,10 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.Forget(ctx, chatID, args)
 	case "memories":
 		return b.ListMemories(ctx, chatID)
+	case "review":
+		return b.Review(ctx, chatID)
+	case "correct":
+		return b.Correct(ctx, chatID, args)
 	case "plan":
 		return b.Plan(ctx, chatID, args)
 	case "planstatus":
@@ -493,7 +545,7 @@ func (b *Bridge) Start(ctx context.Context, chatID int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "Welcome to teeny-relay! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
+	return "Welcome to teeny-relay! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/review — Review all memories with summary\n/correct <n> <text> — Correct a memory by number\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
 }
 
 // Reset kills the current session and creates a fresh one.
@@ -556,7 +608,9 @@ func (b *Bridge) Help() string {
 		"- `/status` — Show current session info\n" +
 		"- `/remember <text>` — Save a memory\n" +
 		"- `/forget <key>` — Remove a stored memory\n" +
-		"- `/memories` — List all stored memories\n"
+		"- `/memories` — List all stored memories\n" +
+		"- `/review` — Review all memories with summary\n" +
+		"- `/correct <n> <text>` — Correct a memory by number\n"
 
 	if b.plan != nil {
 		help += "\n### Plan execution\n\n" +
@@ -625,6 +679,64 @@ func (b *Bridge) ListMemories(ctx context.Context, chatID int64) (string, error)
 	return b.memory.ListMemories(ctx, chatID)
 }
 
+// Review handles the /review command — shows all memories with correction indices.
+func (b *Bridge) Review(ctx context.Context, chatID int64) (string, error) {
+	if b.memory == nil {
+		return "Memory is not enabled.", nil
+	}
+	text, entries, err := b.memory.ReviewMemories(ctx, chatID)
+	if err != nil {
+		return "", err
+	}
+	if entries != nil {
+		b.reviewMu.Lock()
+		b.reviewCache[chatID] = entries
+		b.reviewMu.Unlock()
+	}
+	return text, nil
+}
+
+// Correct handles the /correct command — updates a memory by review index.
+func (b *Bridge) Correct(ctx context.Context, chatID int64, args string) (string, error) {
+	if b.memory == nil {
+		return "Memory is not enabled.", nil
+	}
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return "Usage: /correct <number> <new content>\nRun /review first to see numbered memories.", nil
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	if len(parts) < 2 {
+		return "Usage: /correct <number> <new content>", nil
+	}
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil || idx < 1 {
+		return "Invalid number. Run /review to see the list.", nil
+	}
+	newContent := strings.TrimSpace(parts[1])
+	if newContent == "" {
+		return "New content cannot be empty.", nil
+	}
+
+	b.reviewMu.Lock()
+	entries := b.reviewCache[chatID]
+	b.reviewMu.Unlock()
+
+	if len(entries) == 0 {
+		return "No review data cached. Run /review first.", nil
+	}
+	if idx > len(entries) {
+		return fmt.Sprintf("Number %d out of range (1–%d). Run /review to refresh.", idx, len(entries)), nil
+	}
+
+	entry := entries[idx-1]
+	if err := b.memory.CorrectMemory(ctx, entry.NS, entry.Key, newContent); err != nil {
+		return "", fmt.Errorf("correct memory: %w", err)
+	}
+	return fmt.Sprintf("Updated memory #%d (**%s**): %s", idx, entry.Key, newContent), nil
+}
+
 // ReactionAction returns the action name mapped to the given emoji, or "".
 func (b *Bridge) ReactionAction(emoji string) string {
 	return b.reactionMap[emoji]
@@ -687,7 +799,7 @@ func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessa
 		return "Cannot regenerate while a plan is active.", nil
 	}
 
-	response, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", nil, onUpdate)
+	response, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", nil, nil, onUpdate)
 	if err != nil {
 		return "", err
 	}
@@ -766,8 +878,18 @@ func (b *Bridge) Plan(ctx context.Context, chatID int64, input string) (string, 
 		return b.startExecution(ctx, chatID, input, input)
 	}
 
+	// Discover available repos for repo-aware plan generation.
+	var repoNames []string
+	if b.repoDir != "" {
+		repos := worktree.ListRepos(b.repoDir)
+		for name := range repos {
+			repoNames = append(repoNames, name)
+		}
+		sort.Strings(repoNames)
+	}
+
 	// Otherwise, draft a plan from the intent.
-	draft, err := b.plan.DraftPlan(ctx, input, "", "")
+	draft, err := b.plan.DraftPlan(ctx, input, "", "", repoNames...)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate plan: %w", err)
 	}
@@ -778,6 +900,7 @@ func (b *Bridge) Plan(ctx context.Context, chatID int64, input string) (string, 
 		draftPlan: draft,
 		intent:    input,
 		startedAt: time.Now(),
+		repoNames: repoNames,
 	}
 	b.planMu.Unlock()
 
@@ -802,7 +925,7 @@ func (b *Bridge) handlePlanDraft(ctx context.Context, chatID int64, userMsg stri
 		return "Plan cancelled.", nil
 	default:
 		// Treat as revision feedback.
-		revised, err := b.plan.DraftPlan(ctx, run.intent, run.draftPlan, userMsg)
+		revised, err := b.plan.DraftPlan(ctx, run.intent, run.draftPlan, userMsg, run.repoNames...)
 		if err != nil {
 			return "", fmt.Errorf("failed to revise plan: %w", err)
 		}
@@ -820,7 +943,7 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 	run := b.planRuns[chatID]
 	failedIdx := run.failedTaskIdx
 	planText := run.draftPlan
-	tasks := planner.ParsePlan(planText)
+	failedRepo := run.failedRepo
 	b.planMu.Unlock()
 
 	normalized := strings.TrimSpace(strings.ToLower(userMsg))
@@ -831,15 +954,42 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 		return "Plan cancelled.", nil
 	}
 
-	// Re-run the failed task with user guidance.
-	failedTask := tasks[failedIdx]
+	// Determine the failed task and the correct planner.
+	var failedTask string
+	var tasks []string // flat task list for legacy context building
+
+	repoTasks := planner.ParsePlanByRepo(planText)
+	isMultiRepo := len(repoTasks) > 0
+
+	if isMultiRepo && failedIdx < len(repoTasks) {
+		failedTask = repoTasks[failedIdx].Task
+		for _, rt := range repoTasks {
+			tasks = append(tasks, rt.Task)
+		}
+	} else {
+		tasks = planner.ParsePlan(planText)
+		if failedIdx < len(tasks) {
+			failedTask = tasks[failedIdx]
+		}
+	}
+
 	planCtx, cancel := context.WithCancel(context.Background())
 
 	b.planMu.Lock()
 	run.cancel = cancel
 	run.state = planStateExecuting
 	completedCtx := buildCompletedContext(tasks, run.results, failedIdx)
-	execPlan := run.execPlanner
+
+	// Route to the correct repo's planner for multi-repo plans.
+	var execPlan *planner.Planner
+	if isMultiRepo && failedRepo != "" {
+		if rw, ok := run.repoWorktrees[failedRepo]; ok {
+			execPlan = rw.planner
+		}
+	}
+	if execPlan == nil {
+		execPlan = run.execPlanner
+	}
 	if execPlan == nil {
 		execPlan = b.plan
 	}
@@ -866,7 +1016,6 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 		b.planMu.Unlock()
 
 		if result.Verdict != planner.VerdictDone {
-			// Still blocked on this task.
 			b.planMu.Lock()
 			run.state = planStateBlocked
 			b.planMu.Unlock()
@@ -876,14 +1025,15 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 			return
 		}
 
-		// Git checkpoint after guided retry succeeds.
 		execPlan.GitCheckpoint(planCtx, failedTask)
-
-		// Update completed context for remaining tasks.
 		updatedCtx := completedCtx + fmt.Sprintf("- %s: %s\n", failedTask, result.Summary)
 
-		// Task passed — continue with remaining tasks.
-		if failedIdx+1 < len(tasks) {
+		// Continue with remaining tasks.
+		if isMultiRepo && failedIdx+1 < len(repoTasks) {
+			// Multi-repo: continue with remaining repo tasks.
+			remaining := repoTasks[failedIdx+1:]
+			b.executeMultiRepoFrom(planCtx, chatID, run, remaining, updatedCtx, progress)
+		} else if failedIdx+1 < len(tasks) {
 			remaining := execPlan.RunPlanFrom(planCtx, planText, failedIdx+1, updatedCtx, progress)
 
 			b.planMu.Lock()
@@ -891,7 +1041,6 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 
 			lastIdx := len(remaining) - 1
 			if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
-				// Another task blocked — calculate its absolute index.
 				run.state = planStateBlocked
 				run.failedTaskIdx = failedIdx + 1 + lastIdx
 				run.done = false
@@ -907,11 +1056,8 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 			b.planMu.Unlock()
 		}
 
-		// Store reviewer learnings to memory.
 		b.storeReviewerLearnings(planCtx, run)
-
-		// Handle worktree cleanup on completion
-		b.cleanupWorktree(run)
+		b.cleanupWorktree(run, chatID)
 
 		if b.notify != nil {
 			b.notify(chatID, b.formatPlanSummary(run))
@@ -925,23 +1071,67 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 // intent is used to resolve which git repo to create a worktree from when the
 // workspace contains multiple repositories.
 func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, intent string) (string, error) {
-	tasks := planner.ParsePlan(planText)
-	if len(tasks) == 0 {
-		return "No tasks found in plan.", nil
+	// Try repo-grouped parsing first; fall back to flat.
+	repoTasks := planner.ParsePlanByRepo(planText)
+	isMultiRepo := len(repoTasks) > 0
+
+	if !isMultiRepo {
+		flatTasks := planner.ParsePlan(planText)
+		if len(flatTasks) == 0 {
+			return "No tasks found in plan.", nil
+		}
 	}
 
 	planCtx, cancel := context.WithCancel(context.Background())
 	run := &planRun{
-		cancel:    cancel,
-		state:     planStateExecuting,
-		draftPlan: planText,
-		intent:    intent,
-		startedAt: time.Now(),
+		cancel:        cancel,
+		state:         planStateExecuting,
+		draftPlan:     planText,
+		intent:        intent,
+		startedAt:     time.Now(),
+		repoWorktrees: make(map[string]*repoWorktree),
 	}
 
-	// Create worktree for isolation if enabled
-	execPlan := b.plan
-	if b.useWorktree && b.repoDir != "" {
+	if isMultiRepo && b.useWorktree && b.repoDir != "" {
+		// Multi-repo: create one worktree per unique repo.
+		availableRepos := worktree.ListRepos(b.repoDir)
+		seen := map[string]bool{}
+		for _, rt := range repoTasks {
+			if seen[rt.Repo] {
+				continue
+			}
+			seen[rt.Repo] = true
+
+			repoPath, ok := availableRepos[rt.Repo]
+			if !ok {
+				// Try ResolveRepoDir as fallback
+				resolved, err := worktree.ResolveRepoDir(b.repoDir, rt.Repo)
+				if err != nil {
+					slog.Warn("worktree: unknown repo in plan, skipping worktree", "repo", rt.Repo, "error", err)
+					continue
+				}
+				repoPath = resolved
+			}
+
+			wtPath, branch, err := worktree.Create(repoPath, b.worktreeDir, chatID)
+			if err != nil {
+				slog.Warn("worktree: failed to create for repo", "repo", rt.Repo, "error", err)
+				continue
+			}
+
+			pl := b.plan.CloneWithWorkDir(wtPath)
+			pl = b.injectReviewerMemory(ctx, pl)
+
+			run.repoWorktrees[rt.Repo] = &repoWorktree{
+				repoDir: repoPath,
+				path:    wtPath,
+				branch:  branch,
+				planner: pl,
+			}
+			slog.Info("plan execution using worktree", "chat_id", chatID, "repo", rt.Repo, "branch", branch, "path", wtPath)
+		}
+	} else if !isMultiRepo && b.useWorktree && b.repoDir != "" {
+		// Legacy single-repo path
 		repoDir, err := worktree.ResolveRepoDir(b.repoDir, intent)
 		if err != nil {
 			slog.Warn("worktree: could not resolve repo, running without isolation", "error", err)
@@ -954,14 +1144,19 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 			run.worktreeRepoDir = repoDir
 			run.worktreePath = wtPath
 			run.worktreeBranch = branch
-			execPlan = b.plan.CloneWithWorkDir(wtPath)
-
+			execPlan := b.plan.CloneWithWorkDir(wtPath)
+			execPlan = b.injectReviewerMemory(ctx, execPlan)
+			run.execPlanner = execPlan
 			slog.Info("plan execution using worktree", "chat_id", chatID, "repo", repoDir, "branch", branch, "path", wtPath)
 		}
 	}
-	// Inject reviewer memory (critical flows) before execution.
-	execPlan = b.injectReviewerMemory(ctx, execPlan)
-	run.execPlanner = execPlan
+
+	// Ensure legacy execPlanner is set for non-multi-repo plans.
+	if run.execPlanner == nil && !isMultiRepo {
+		execPlan := b.plan
+		execPlan = b.injectReviewerMemory(ctx, execPlan)
+		run.execPlanner = execPlan
+	}
 
 	b.planMu.Lock()
 	b.planRuns[chatID] = run
@@ -977,6 +1172,26 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 		}
 	}
 
+	if isMultiRepo {
+		go func() {
+			defer cancel()
+			b.executeMultiRepo(planCtx, chatID, run, repoTasks, progress)
+		}()
+
+		var branches []string
+		for repo, rw := range run.repoWorktrees {
+			branches = append(branches, fmt.Sprintf("%s: %s", repo, rw.branch))
+		}
+		sort.Strings(branches)
+		extra := ""
+		if len(branches) > 0 {
+			extra = "\nWorktree branches:\n" + strings.Join(branches, "\n")
+		}
+		return fmt.Sprintf("Plan started with %d tasks across %d repos. Progress will be reported as tasks complete.\nUse /planstatus to check, /planstop to cancel.%s",
+			len(repoTasks), len(run.repoWorktrees), extra), nil
+	}
+
+	// Legacy flat plan execution
 	go func() {
 		defer cancel()
 		results := run.execPlanner.RunPlan(planCtx, planText, progress)
@@ -994,11 +1209,8 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 		}
 		b.planMu.Unlock()
 
-		// Store reviewer learnings to memory.
 		b.storeReviewerLearnings(planCtx, run)
-
-		// Handle worktree cleanup
-		b.cleanupWorktree(run)
+		b.cleanupWorktree(run, chatID)
 
 		if b.notify != nil {
 			b.notify(chatID, b.formatPlanSummary(run))
@@ -1009,30 +1221,231 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 	if run.worktreeBranch != "" {
 		extra = fmt.Sprintf("\nWorktree branch: %s", run.worktreeBranch)
 	}
-	return fmt.Sprintf("Plan started with %d tasks. Progress will be reported as tasks complete.\nUse /planstatus to check, /planstop to cancel.%s", len(tasks), extra), nil
+	return fmt.Sprintf("Plan started with %d tasks. Progress will be reported as tasks complete.\nUse /planstatus to check, /planstop to cancel.%s", len(planner.ParsePlan(planText)), extra), nil
+}
+
+// executeMultiRepo runs repo-grouped tasks sequentially, routing each to the
+// correct repo's planner. Stops on first needs_human.
+func (b *Bridge) executeMultiRepo(ctx context.Context, chatID int64, run *planRun, repoTasks []planner.RepoTask, progress planner.ProgressFunc) {
+	total := len(repoTasks)
+	progress(fmt.Sprintf("Plan has %d tasks across repos.", total))
+	var completedContext string
+
+	for i, rt := range repoTasks {
+		rw, ok := run.repoWorktrees[rt.Repo]
+		if !ok {
+			progress(fmt.Sprintf("Skipping task %d/%d (no worktree for repo %s): %s", i+1, total, rt.Repo, rt.Task))
+			continue
+		}
+
+		progress(fmt.Sprintf("\n=== Task %d/%d [%s]: %s ===", i+1, total, rt.Repo, rt.Task))
+		result := rw.planner.RunTask(ctx, rt.Task, completedContext, progress)
+
+		b.planMu.Lock()
+		run.results = append(run.results, result)
+		b.planMu.Unlock()
+
+		if result.Verdict != planner.VerdictDone {
+			progress(fmt.Sprintf("Task %d stopped: %s", i+1, result.Verdict))
+			b.planMu.Lock()
+			run.state = planStateBlocked
+			run.failedTaskIdx = i
+			run.failedRepo = rt.Repo
+			run.done = false
+			b.planMu.Unlock()
+
+			b.storeReviewerLearningsMultiRepo(ctx, run)
+
+			if b.notify != nil {
+				b.notify(chatID, b.formatPlanSummary(run))
+			}
+			return
+		}
+
+		rw.planner.GitCheckpoint(ctx, rt.Task)
+		completedContext += fmt.Sprintf("- [%s] %s: %s\n", rt.Repo, rt.Task, result.Summary)
+		progress(fmt.Sprintf("Task %d/%d: DONE", i+1, total))
+
+		if i < total-1 {
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	b.planMu.Lock()
+	run.state = planStateDone
+	run.done = true
+	b.planMu.Unlock()
+
+	b.storeReviewerLearningsMultiRepo(ctx, run)
+	b.cleanupWorktree(run, chatID)
+
+	if b.notify != nil {
+		b.notify(chatID, b.formatPlanSummary(run))
+	}
+}
+
+// executeMultiRepoFrom continues multi-repo execution from a slice of remaining
+// repo tasks, using the given completedContext. Called when resuming after a
+// blocked task is resolved.
+func (b *Bridge) executeMultiRepoFrom(ctx context.Context, chatID int64, run *planRun, remaining []planner.RepoTask, completedContext string, progress planner.ProgressFunc) {
+	total := len(remaining)
+	for i, rt := range remaining {
+		rw, ok := run.repoWorktrees[rt.Repo]
+		if !ok {
+			progress(fmt.Sprintf("Skipping task (no worktree for repo %s): %s", rt.Repo, rt.Task))
+			continue
+		}
+
+		progress(fmt.Sprintf("\n=== Continuing [%s]: %s ===", rt.Repo, rt.Task))
+		result := rw.planner.RunTask(ctx, rt.Task, completedContext, progress)
+
+		b.planMu.Lock()
+		run.results = append(run.results, result)
+		b.planMu.Unlock()
+
+		if result.Verdict != planner.VerdictDone {
+			b.planMu.Lock()
+			run.state = planStateBlocked
+			// Calculate absolute index from original repoTasks
+			allRepoTasks := planner.ParsePlanByRepo(run.draftPlan)
+			run.failedTaskIdx = len(allRepoTasks) - total + i
+			run.failedRepo = rt.Repo
+			run.done = false
+			b.planMu.Unlock()
+			return
+		}
+
+		rw.planner.GitCheckpoint(ctx, rt.Task)
+		completedContext += fmt.Sprintf("- [%s] %s: %s\n", rt.Repo, rt.Task, result.Summary)
+
+		if i < total-1 {
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	b.planMu.Lock()
+	run.state = planStateDone
+	run.done = true
+	b.planMu.Unlock()
+}
+
+// storeReviewerLearningsMultiRepo persists reviewer learnings from all repo planners.
+func (b *Bridge) storeReviewerLearningsMultiRepo(ctx context.Context, run *planRun) {
+	if b.memory == nil {
+		return
+	}
+	for _, rw := range run.repoWorktrees {
+		if rw.planner == nil {
+			continue
+		}
+		ns := reviewerNamespace(rw.planner.WorkDir())
+		for _, result := range run.results {
+			for _, learning := range result.ReviewerLearnings {
+				if err := b.memory.StoreReviewerLearning(ctx, ns, learning); err != nil {
+					slog.Warn("failed to store reviewer learning", "ns", ns, "error", err)
+				}
+			}
+		}
+	}
 }
 
 // cleanupWorktree handles worktree lifecycle at the end of a plan.
 // On success (all done): merge branch into main repo and remove worktree.
 // On blocked/failure: remove worktree but keep the branch for inspection.
-func (b *Bridge) cleanupWorktree(run *planRun) {
+func (b *Bridge) cleanupWorktree(run *planRun, chatID int64) {
+	selfModified := false
+
+	// Multi-repo cleanup
+	if len(run.repoWorktrees) > 0 {
+		if run.state == planStateDone && run.done {
+			for repo, rw := range run.repoWorktrees {
+				if err := worktree.MergeAndCleanup(rw.repoDir, rw.path, rw.branch); err != nil {
+					slog.Warn("worktree merge failed", "repo", repo, "branch", rw.branch, "error", err)
+					run.progress = append(run.progress, fmt.Sprintf("Worktree merge failed for %s: %v\nBranch %s is still available for manual merge.", repo, err, rw.branch))
+				} else {
+					slog.Info("worktree merged and cleaned up", "repo", repo, "branch", rw.branch)
+					if b.isSelfRepo(rw.repoDir) {
+						selfModified = true
+					}
+				}
+			}
+		}
+		// For blocked/stopped state, worktrees are cleaned up by PlanStop
+		if selfModified {
+			b.triggerSelfRestart(run, chatID)
+		}
+		return
+	}
+
+	// Legacy single-repo cleanup
 	if run.worktreePath == "" {
 		return
 	}
 
 	if run.state == planStateDone && run.done {
-		// All tasks completed — merge and clean up
 		if err := worktree.MergeAndCleanup(run.worktreeRepoDir, run.worktreePath, run.worktreeBranch); err != nil {
 			slog.Warn("worktree merge failed", "branch", run.worktreeBranch, "error", err)
-			if b.notify != nil {
-				// Find chatID from the run — notify via progress
-				run.progress = append(run.progress, fmt.Sprintf("Worktree merge failed: %v\nBranch %s is still available for manual merge.", err, run.worktreeBranch))
-			}
+			run.progress = append(run.progress, fmt.Sprintf("Worktree merge failed: %v\nBranch %s is still available for manual merge.", err, run.worktreeBranch))
 			return
 		}
 		slog.Info("worktree merged and cleaned up", "branch", run.worktreeBranch)
+		if b.isSelfRepo(run.worktreeRepoDir) {
+			selfModified = true
+		}
 	}
-	// For blocked/stopped state, worktree is cleaned up by PlanStop
+
+	if selfModified {
+		b.triggerSelfRestart(run, chatID)
+	}
+}
+
+// isSelfRepo checks if repoDir matches the relay's own source directory.
+func (b *Bridge) isSelfRepo(repoDir string) bool {
+	if b.selfSourceDir == "" || repoDir == "" {
+		return false
+	}
+	// Resolve symlinks for reliable comparison.
+	selfReal, err1 := filepath.EvalSymlinks(b.selfSourceDir)
+	repoReal, err2 := filepath.EvalSymlinks(repoDir)
+	if err1 != nil || err2 != nil {
+		return b.selfSourceDir == repoDir
+	}
+	return selfReal == repoReal
+}
+
+// triggerSelfRestart notifies the user and triggers a rebuild + restart.
+func (b *Bridge) triggerSelfRestart(run *planRun, chatID int64) {
+	if b.onSelfRestart == nil {
+		return
+	}
+	slog.Info("self-modification detected after plan merge, scheduling rebuild+restart")
+	run.progress = append(run.progress, "Changes affect relay itself — rebuilding and restarting...")
+	// Give a short delay so the notification can be sent before restart.
+	notify := b.notify
+	go func() {
+		time.Sleep(2 * time.Second)
+		b.onSelfRestart()
+		// If we get here, restart failed (exec replaces the process on success).
+		msg := "Self-restart failed. Relay continues running with old code."
+		slog.Error("self-restart: onSelfRestart returned (rebuild likely failed)")
+		if notify != nil && chatID != 0 {
+			notify(chatID, msg)
+		}
+	}()
+}
+
+// pdfPagePattern matches "/Type /Page" but not "/Type /Pages".
+var pdfPagePattern = regexp.MustCompile(`/Type\s*/Page[^s]`)
+
+// countPDFPages returns the number of pages in a PDF file by counting
+// "/Type /Page" object references (excluding "/Type /Pages" which is the
+// page tree root). Returns 0 if the file cannot be read or parsed.
+func countPDFPages(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return len(pdfPagePattern.FindAllIndex(data, -1))
 }
 
 // formatFileSize returns a human-readable file size string.
@@ -1066,6 +1479,7 @@ func (b *Bridge) PlanStatus(chatID int64) (string, error) {
 	progressCount := len(run.progress)
 	draft := run.draftPlan
 	wtBranch := run.worktreeBranch
+	repoWTs := run.repoWorktrees
 	b.planMu.Unlock()
 
 	switch state {
@@ -1076,7 +1490,12 @@ func (b *Bridge) PlanStatus(chatID int64) (string, error) {
 		var sb strings.Builder
 		sb.WriteString("Plan: RUNNING\n")
 		sb.WriteString(fmt.Sprintf("Elapsed: %s\n", elapsed))
-		if wtBranch != "" {
+		if len(repoWTs) > 0 {
+			sb.WriteString("Worktree branches:\n")
+			for repo, rw := range repoWTs {
+				sb.WriteString(fmt.Sprintf("  %s: %s\n", repo, rw.branch))
+			}
+		} else if wtBranch != "" {
 			sb.WriteString(fmt.Sprintf("Worktree branch: %s\n", wtBranch))
 		}
 		sb.WriteString(fmt.Sprintf("Progress messages: %d\n\n", progressCount))
@@ -1131,18 +1550,24 @@ func (b *Bridge) PlanStop(chatID int64) (string, error) {
 		run.cancel()
 	}
 
-	// Clean up worktree if one was created
-	wtBranch := run.worktreeBranch
+	// Clean up worktrees
+	var branches []string
+	for repo, rw := range run.repoWorktrees {
+		worktree.Cleanup(rw.repoDir, rw.path, rw.branch)
+		branches = append(branches, fmt.Sprintf("%s: %s", repo, rw.branch))
+	}
 	if run.worktreePath != "" {
 		worktree.Cleanup(run.worktreeRepoDir, run.worktreePath, run.worktreeBranch)
+		branches = append(branches, run.worktreeBranch)
 	}
 
 	delete(b.planRuns, chatID)
 	b.planMu.Unlock()
 
 	suffix := ""
-	if wtBranch != "" {
-		suffix = fmt.Sprintf("\nWorktree removed. Branch %s kept for inspection.", wtBranch)
+	if len(branches) > 0 {
+		sort.Strings(branches)
+		suffix = fmt.Sprintf("\nWorktrees removed. Branches kept for inspection:\n%s", strings.Join(branches, "\n"))
 	}
 
 	switch state {
@@ -1323,13 +1748,25 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 
 	failedIdx := run.failedTaskIdx
 	planText := run.draftPlan
-	tasks := planner.ParsePlan(planText)
+
+	// Determine task list — multi-repo or flat.
+	repoTasks := planner.ParsePlanByRepo(planText)
+	isMultiRepo := len(repoTasks) > 0
+
+	var tasks []string
+	if isMultiRepo {
+		for _, rt := range repoTasks {
+			tasks = append(tasks, rt.Task)
+		}
+	} else {
+		tasks = planner.ParsePlan(planText)
+	}
 
 	if failedIdx+1 >= len(tasks) {
 		run.state = planStateDone
 		run.done = true
 		b.planMu.Unlock()
-		b.cleanupWorktree(run)
+		b.cleanupWorktree(run, chatID)
 		return "Skipped last task. Plan complete.", nil
 	}
 
@@ -1337,9 +1774,14 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 	run.cancel = cancel
 	run.state = planStateExecuting
 	completedCtx := buildCompletedContext(tasks, run.results, failedIdx)
-	execPlan := run.execPlanner
-	if execPlan == nil {
-		execPlan = b.plan
+
+	// Resolve exec planner for non-multi-repo.
+	var execPlan *planner.Planner
+	if !isMultiRepo {
+		execPlan = run.execPlanner
+		if execPlan == nil {
+			execPlan = b.plan
+		}
 	}
 	b.planMu.Unlock()
 
@@ -1356,23 +1798,35 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 		defer cancel()
 		progress(fmt.Sprintf("Skipped task %d, continuing from task %d.", failedIdx+1, failedIdx+2))
 
-		remaining := execPlan.RunPlanFrom(planCtx, planText, failedIdx+1, completedCtx, progress)
+		if isMultiRepo {
+			remaining := repoTasks[failedIdx+1:]
+			b.executeMultiRepoFrom(planCtx, chatID, run, remaining, completedCtx, progress)
 
-		b.planMu.Lock()
-		run.results = append(run.results, remaining...)
-		lastIdx := len(remaining) - 1
-		if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
-			run.state = planStateBlocked
-			run.failedTaskIdx = failedIdx + 1 + lastIdx
-			run.done = false
+			// Check if executeMultiRepoFrom left us in done state.
+			b.planMu.Lock()
+			if run.state != planStateBlocked {
+				run.state = planStateDone
+				run.done = true
+			}
+			b.planMu.Unlock()
 		} else {
-			run.state = planStateDone
-			run.done = true
-		}
-		b.planMu.Unlock()
+			remaining := execPlan.RunPlanFrom(planCtx, planText, failedIdx+1, completedCtx, progress)
 
-		// Handle worktree cleanup on completion
-		b.cleanupWorktree(run)
+			b.planMu.Lock()
+			run.results = append(run.results, remaining...)
+			lastIdx := len(remaining) - 1
+			if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
+				run.state = planStateBlocked
+				run.failedTaskIdx = failedIdx + 1 + lastIdx
+				run.done = false
+			} else {
+				run.state = planStateDone
+				run.done = true
+			}
+			b.planMu.Unlock()
+		}
+
+		b.cleanupWorktree(run, chatID)
 
 		if b.notify != nil {
 			b.notify(chatID, b.formatPlanSummary(run))
