@@ -134,37 +134,49 @@ func New(cfg config.Config) (*Daemon, error) {
 		memory: mem,
 	}
 
+	// Resolve source directory for reload and self-restart.
+	sourceDir := cfg.Reload.SourceDir
+	if sourceDir == "" {
+		exe, err := os.Executable()
+		if err == nil {
+			sourceDir, err = reload.FindSourceDir(filepath.Dir(exe))
+		}
+		if err != nil {
+			slog.Debug("could not auto-detect source dir", "error", err)
+		}
+	}
+
 	// Initialize live reloader if enabled.
-	if cfg.Reload.Enabled {
-		sourceDir := cfg.Reload.SourceDir
-		if sourceDir == "" {
-			exe, err := os.Executable()
-			if err == nil {
-				sourceDir, err = reload.FindSourceDir(filepath.Dir(exe))
-			}
-			if err != nil {
-				slog.Warn("reload: could not auto-detect source dir, disabling", "error", err)
+	if cfg.Reload.Enabled && sourceDir != "" {
+		debounce := 500 * time.Millisecond
+		if cfg.Reload.Debounce != "" {
+			if parsed, err := time.ParseDuration(cfg.Reload.Debounce); err == nil {
+				debounce = parsed
 			}
 		}
-		if sourceDir != "" {
-			debounce := 500 * time.Millisecond
-			if cfg.Reload.Debounce != "" {
-				if parsed, err := time.ParseDuration(cfg.Reload.Debounce); err == nil {
-					debounce = parsed
-				}
-			}
-			rw, err := reload.New(reload.Config{
-				SourceDir:  sourceDir,
-				Debounce:   debounce,
-				OnShutdown: d.Shutdown,
-			})
-			if err != nil {
-				slog.Warn("reload: failed to create watcher", "error", err)
-			} else {
-				d.reloader = rw
-				slog.Info("reload: live reload enabled", "source_dir", sourceDir, "debounce", debounce)
-			}
+		rw, err := reload.New(reload.Config{
+			SourceDir:  sourceDir,
+			Debounce:   debounce,
+			OnShutdown: d.Shutdown,
+		})
+		if err != nil {
+			slog.Warn("reload: failed to create watcher", "error", err)
+		} else {
+			d.reloader = rw
+			slog.Info("reload: live reload enabled", "source_dir", sourceDir, "debounce", debounce)
 		}
+	}
+
+	// Wire self-restart: when a plan modifies relay source, rebuild and restart.
+	if sourceDir != "" {
+		binaryPath, _ := os.Executable()
+		br.SetSelfRestart(sourceDir, func() {
+			slog.Info("self-restart: rebuilding relay...")
+			if err := reload.RebuildAndRestart(binaryPath, "./cmd/relay", d.Shutdown); err != nil {
+				slog.Error("self-restart: failed", "error", err)
+			}
+		})
+		slog.Info("self-restart enabled", "source_dir", sourceDir)
 	}
 
 	return d, nil

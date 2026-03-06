@@ -73,8 +73,8 @@ func New(cfg Config) (*Watcher, error) {
 		onShutdown:    cfg.OnShutdown,
 		maxRestarts:   5,
 		restartWindow: 60 * time.Second,
-		buildFunc:     defaultBuild,
-		restartFunc:   defaultRestart,
+		buildFunc:     Build,
+		restartFunc:   Restart,
 	}, nil
 }
 
@@ -209,17 +209,38 @@ func (w *Watcher) isDisabled() bool {
 	return w.disabled
 }
 
-func defaultBuild(binaryPath, buildPkg string) error {
+// Build compiles the Go package buildPkg into the binary at binaryPath.
+func Build(binaryPath, buildPkg string) error {
 	cmd := exec.Command("go", "build", "-o", binaryPath, buildPkg)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-func defaultRestart(binaryPath string) error {
+// Restart replaces the current process with the binary at binaryPath
+// using syscall.Exec, preserving the original arguments and environment.
+func Restart(binaryPath string) error {
 	args := os.Args
 	env := os.Environ()
 	return syscall.Exec(binaryPath, args, env)
+}
+
+// RebuildAndRestart builds a new binary, replaces the current one, and execs into it.
+// onShutdown is called after a successful build but before exec.
+func RebuildAndRestart(binaryPath, buildPkg string, onShutdown func()) error {
+	stagingPath := binaryPath + ".selfrestart.tmp"
+	if err := Build(stagingPath, buildPkg); err != nil {
+		os.Remove(stagingPath)
+		return fmt.Errorf("build failed: %w", err)
+	}
+	if err := os.Rename(stagingPath, binaryPath); err != nil {
+		os.Remove(stagingPath)
+		return fmt.Errorf("replace binary: %w", err)
+	}
+	if onShutdown != nil {
+		onShutdown()
+	}
+	return Restart(binaryPath)
 }
 
 func isGoFile(name string) bool {
