@@ -144,22 +144,38 @@ gog forms responses list <formId> --json
 
 ---
 
-## Web Search — `ddgr`
+## Web Search — `search`
 
-DuckDuckGo search from the command line. Use `--json` for structured output.
+Agent-friendly web search CLI (Brave Search API by default, falls back to DuckDuckGo).
+Returns results as markdown (default) or JSON. Prefer `search` over `ddgr` for better results.
 
 ```bash
-# Search and get JSON results
+# Search (markdown output, agent-friendly)
+search "search query" -n 5
+
+# JSON output
+search "search query" --json -n 5
+
+# Filter by freshness: pd (24h), pw (7d), pm (31d), py (1yr)
+search "recent topic" -f pw -n 5
+
+# Use a specific provider
+search "query" -p brave -n 5
+search "query" -p tavily -n 5
+search "query" -p ddgr -n 5
+
+# Filter by country
+search "query" --country us -n 5
+```
+
+### Legacy: `ddgr`
+
+DuckDuckGo search (used as fallback when no API keys are set).
+
+```bash
 ddgr --json -n 5 "search query"
-
-# Search a specific site
 ddgr --json -n 5 -w example.com "query"
-
-# Search with time filter (d=day, w=week, m=month, y=year)
 ddgr --json -n 5 -t m "recent topic"
-
-# Search a specific region
-ddgr --json -n 5 -r us-en "query"
 ```
 
 ---
