@@ -351,6 +351,9 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
 	}
 
+	// Inject current time when scheduler is enabled so Claude can compute relative times
+	augmentedMsg = b.injectCurrentTime(augmentedMsg)
+
 	// Determine claude session ID for --resume
 	procSess, _ := b.proc.Get(chatID)
 	claudeSessionID := ""
@@ -455,6 +458,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	if senderName != "" {
 		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
 	}
+
+	// Inject current time when scheduler is enabled so Claude can compute relative times
+	augmentedMsg = b.injectCurrentTime(augmentedMsg)
 
 	// Prepend attachment metadata so Claude can read the attached files.
 	if len(images) > 0 || len(pdfs) > 0 {
@@ -584,6 +590,8 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.PlanRetry(ctx, chatID)
 	case "schedule":
 		return b.Schedule(ctx, chatID, args)
+	case "heartbeat":
+		return b.Heartbeat(ctx, chatID, args)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -688,10 +696,19 @@ func (b *Bridge) Help() string {
 	if b.schedulerEnabled {
 		help += "\n### Scheduler\n\n" +
 			"- `/schedule add \"*/30 * * * *\" Reminder text` — Recurring notification\n" +
+			"- `/schedule add @daily Good morning` — Unquoted alias (`@hourly`, `@daily`, `@weekly`, `@monthly`)\n" +
 			"- `/schedule add --prompt \"0 9 * * 1-5\" Check PRs` — Recurring prompt (via Claude)\n" +
+			"- `/schedule add --tz America/Los_Angeles \"0 9 * * *\" Check PRs` — Per-schedule timezone\n" +
 			"- `/schedule add \"2026-03-10T09:00:00\" One-time reminder` — One-shot\n" +
 			"- `/schedule list` — Show all schedules\n" +
-			"- `/schedule delete <id>` — Remove a schedule\n"
+			"- `/schedule enable <id>` — Re-enable a paused schedule\n" +
+			"- `/schedule pause <id>` — Pause a schedule\n" +
+			"- `/schedule delete <id>` — Remove a schedule\n" +
+			"\n### Heartbeat\n\n" +
+			"Periodic check-in that routes through Claude with session context (like cron but conversational).\n\n" +
+			"- `/heartbeat 30m Check inbox and calendar` — Set heartbeat (one per chat)\n" +
+			"- `/heartbeat` or `/heartbeat status` — Show current heartbeat\n" +
+			"- `/heartbeat stop` — Stop the heartbeat\n"
 	}
 
 	if b.imagen != nil {
@@ -712,19 +729,58 @@ func (b *Bridge) scheduleSystemPrompt() string {
 	if !b.schedulerEnabled {
 		return ""
 	}
+
+	loc, _ := time.LoadLocation(b.schedulerTZ)
+	if loc == nil {
+		loc = time.UTC
+	}
+	now := time.Now().In(loc)
+	nowStr := now.Format("2006-01-02T15:04:05")
+	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
+
 	return "\n\n## Scheduling\n\n" +
-		"You can create scheduled reminders and prompts using the [schedule] directive in your responses.\n\n" +
+		"**Current time:** " + nowStr + " (" + b.schedulerTZ + ")\n" +
+		"**User timezone:** " + b.schedulerTZ + "\n\n" +
+		"You can create scheduled reminders and prompts using the [schedule] directive in your responses.\n" +
+		"Use this when the user asks to be reminded about something or wants recurring notifications.\n\n" +
+		"### Natural language mapping:\n" +
+		"- \"remind me tomorrow at 9am\" → `[schedule at=\"" + tomorrow + "T09:00:00\" tz=\"" + b.schedulerTZ + "\"]...[/schedule]`\n" +
+		"- \"every weekday at 3pm\" → `[schedule cron=\"0 15 * * 1-5\" tz=\"" + b.schedulerTZ + "\"]...[/schedule]`\n" +
+		"- \"daily at 8am\" → `[schedule cron=\"0 8 * * *\" tz=\"" + b.schedulerTZ + "\"]...[/schedule]`\n" +
+		"- \"in 2 hours\" → compute " + nowStr + " + 2h and use `at=` with the result\n" +
+		"- \"every hour\" → `[schedule cron=\"0 * * * *\"]...[/schedule]`\n\n" +
 		"### One-shot (fires once at a specific time):\n" +
 		"```\n[schedule at=\"2026-03-10T09:00:00\" tz=\"America/Los_Angeles\"]Remind me to check deployment[/schedule]\n```\n\n" +
 		"### Recurring (cron expression):\n" +
-		"```\n[schedule cron=\"0 9 * * 1-5\" tz=\"UTC\"]Weekly standup check[/schedule]\n```\n\n" +
+		"```\n[schedule cron=\"0 9 * * 1-5\" tz=\"" + b.schedulerTZ + "\"]Weekly standup check[/schedule]\n```\n\n" +
+		"### Cron aliases:\n" +
+		"`@hourly` = `0 * * * *`, `@daily` = `0 0 * * *`, `@weekly` = `0 0 * * 0`, `@monthly` = `0 0 1 * *`\n\n" +
 		"### Attributes:\n" +
 		"- `at` — ISO8601 datetime for one-shot schedules (without timezone suffix, uses `tz`)\n" +
 		"- `cron` — 5-field cron expression (minute hour day-of-month month day-of-week)\n" +
 		"- `tz` — timezone (optional, default: " + b.schedulerTZ + ")\n" +
 		"- `mode` — \"notify\" (default, plain message) or \"prompt\" (routed back through you)\n\n" +
 		"The directive is stripped from your visible response and replaced with a confirmation.\n" +
-		"Use this when the user asks to be reminded about something or wants recurring notifications.\n"
+		"Always include the `tz` attribute explicitly. Compute exact dates/times based on the current time shown above.\n\n" +
+		"### Heartbeat\n" +
+		"Messages prefixed with `[Heartbeat]` are periodic check-ins routed through you with full session context.\n" +
+		"Respond naturally as a proactive assistant — summarize what you checked, report findings, and suggest actions.\n" +
+		"Keep heartbeat responses concise and actionable.\n"
+}
+
+// injectCurrentTime prepends a precise timestamp to the user message when the
+// scheduler is enabled, so Claude always knows the exact current time for
+// computing relative schedule expressions like "in 30 minutes".
+func (b *Bridge) injectCurrentTime(msg string) string {
+	if !b.schedulerEnabled {
+		return msg
+	}
+	loc, _ := time.LoadLocation(b.schedulerTZ)
+	if loc == nil {
+		loc = time.UTC
+	}
+	now := time.Now().In(loc)
+	return fmt.Sprintf("[Current time: %s (%s)]\n%s", now.Format("2006-01-02T15:04:05"), b.schedulerTZ, msg)
 }
 
 // SetSchedulerConfig enables schedule commands and sets the default timezone.
@@ -762,14 +818,18 @@ func (b *Bridge) Schedule(ctx context.Context, chatID int64, args string) (strin
 		return b.scheduleList(chatID)
 	case "delete":
 		return b.scheduleDelete(chatID, rest)
+	case "enable":
+		return b.scheduleEnable(chatID, rest)
+	case "pause", "disable":
+		return b.schedulePause(chatID, rest)
 	default:
-		return "Unknown subcommand. Usage: /schedule add|list|delete ...", nil
+		return "Unknown subcommand. Usage: /schedule add|list|delete|enable|pause ...", nil
 	}
 }
 
 func (b *Bridge) scheduleAdd(chatID int64, args string) (string, error) {
 	if args == "" {
-		return "Usage: /schedule add [--prompt] \"<cron or datetime>\" <message>", nil
+		return "Usage: /schedule add [--prompt] [--tz <timezone>] \"<cron or datetime>\" <message>\n\nUnquoted aliases also work: /schedule add @daily Good morning", nil
 	}
 
 	mode := "notify"
@@ -779,7 +839,18 @@ func (b *Bridge) scheduleAdd(chatID int64, args string) (string, error) {
 		args = strings.TrimSpace(args)
 	}
 
-	// Extract quoted expression or first token
+	// Parse --tz flag
+	tzOverride := ""
+	if strings.Contains(args, "--tz ") {
+		idx := strings.Index(args, "--tz ")
+		after := args[idx+5:]
+		tzParts := strings.SplitN(after, " ", 2)
+		tzOverride = tzParts[0]
+		// Remove --tz <tz> from args
+		args = strings.TrimSpace(args[:idx] + " " + strings.TrimSpace(after[len(tzParts[0]):]))
+	}
+
+	// Extract quoted expression, @-prefixed alias, or error
 	var expr, message string
 	if strings.HasPrefix(args, "\"") {
 		endQuote := strings.Index(args[1:], "\"")
@@ -788,8 +859,15 @@ func (b *Bridge) scheduleAdd(chatID int64, args string) (string, error) {
 		}
 		expr = args[1 : endQuote+1]
 		message = strings.TrimSpace(args[endQuote+2:])
+	} else if strings.HasPrefix(args, "@") {
+		// Unquoted @alias: split on first space
+		aliasParts := strings.SplitN(args, " ", 2)
+		expr = aliasParts[0]
+		if len(aliasParts) > 1 {
+			message = strings.TrimSpace(aliasParts[1])
+		}
 	} else {
-		return "Schedule expression must be quoted. Example: /schedule add \"*/5 * * * *\" My reminder", nil
+		return "Schedule expression must be quoted or use an @alias. Example: /schedule add \"*/5 * * * *\" My reminder", nil
 	}
 
 	if message == "" {
@@ -797,6 +875,12 @@ func (b *Bridge) scheduleAdd(chatID int64, args string) (string, error) {
 	}
 
 	tz := b.schedulerTZ
+	if tzOverride != "" {
+		if _, err := time.LoadLocation(tzOverride); err != nil {
+			return fmt.Sprintf("Invalid timezone: %s", tzOverride), nil
+		}
+		tz = tzOverride
+	}
 	sched := &store.Schedule{
 		ChatID:   chatID,
 		Label:    message,
@@ -896,8 +980,188 @@ func (b *Bridge) scheduleDelete(chatID int64, args string) (string, error) {
 	return fmt.Sprintf("Schedule #%d deleted.", id), nil
 }
 
-// parseScheduleDirectives extracts [schedule ...] directives from Claude's response.
-// Returns the cleaned response and creates schedules in the store.
+func (b *Bridge) scheduleEnable(chatID int64, args string) (string, error) {
+	args = strings.TrimSpace(args)
+	id, err := strconv.ParseInt(args, 10, 64)
+	if err != nil {
+		return "Usage: /schedule enable <id>", nil
+	}
+	sc, err := b.store.GetSchedule(chatID, id)
+	if err != nil {
+		return "", fmt.Errorf("get schedule: %w", err)
+	}
+	if sc == nil {
+		return fmt.Sprintf("Schedule #%d not found.", id), nil
+	}
+
+	// Recompute next_run_at for cron types
+	if sc.Type == "cron" {
+		cronExpr, err := parseScheduleCron(sc.Schedule)
+		if err != nil {
+			return fmt.Sprintf("Failed to parse cron expression: %s", err), nil
+		}
+		loc, _ := time.LoadLocation(sc.Timezone)
+		if loc == nil {
+			loc = time.UTC
+		}
+		nextRun := cronExpr.Next(time.Now().In(loc)).UTC()
+		if nextRun.IsZero() {
+			return "Could not compute next run time.", nil
+		}
+		lastRun := time.Time{}
+		if sc.LastRunAt != nil {
+			lastRun = *sc.LastRunAt
+		}
+		if err := b.store.UpdateScheduleNextRun(id, nextRun, lastRun); err != nil {
+			return "", fmt.Errorf("update next run: %w", err)
+		}
+		sc.NextRunAt = nextRun
+	}
+
+	if err := b.store.EnableSchedule(id); err != nil {
+		return "", fmt.Errorf("enable schedule: %w", err)
+	}
+	return fmt.Sprintf("Schedule #%d enabled. Next run: %s", id, sc.NextRunAt.Format("2006-01-02 15:04 UTC")), nil
+}
+
+func (b *Bridge) schedulePause(chatID int64, args string) (string, error) {
+	args = strings.TrimSpace(args)
+	id, err := strconv.ParseInt(args, 10, 64)
+	if err != nil {
+		return "Usage: /schedule pause <id>", nil
+	}
+	// Verify the schedule belongs to this chat
+	sc, err := b.store.GetSchedule(chatID, id)
+	if err != nil {
+		return "", fmt.Errorf("get schedule: %w", err)
+	}
+	if sc == nil {
+		return fmt.Sprintf("Schedule #%d not found.", id), nil
+	}
+	if err := b.store.DisableSchedule(id); err != nil {
+		return "", fmt.Errorf("disable schedule: %w", err)
+	}
+	return fmt.Sprintf("Schedule #%d paused.", id), nil
+}
+
+// Heartbeat manages the per-chat heartbeat: a periodic prompt that routes through
+// Claude with full session context, like a check-in.
+func (b *Bridge) Heartbeat(ctx context.Context, chatID int64, args string) (string, error) {
+	if !b.schedulerEnabled {
+		return "Scheduler is not enabled.", nil
+	}
+
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return b.heartbeatStatus(chatID)
+	}
+
+	// Parse subcommand
+	parts := strings.SplitN(args, " ", 2)
+	sub := parts[0]
+
+	switch sub {
+	case "stop":
+		return b.heartbeatStop(chatID)
+	case "status":
+		return b.heartbeatStatus(chatID)
+	default:
+		// Treat as: /heartbeat <interval> <message>
+		return b.heartbeatSet(chatID, args)
+	}
+}
+
+func (b *Bridge) heartbeatSet(chatID int64, args string) (string, error) {
+	parts := strings.SplitN(args, " ", 2)
+	if len(parts) < 2 {
+		return "Usage: /heartbeat <interval> <message>\n\nExamples:\n" +
+			"  /heartbeat 30m Check inbox and calendar\n" +
+			"  /heartbeat 1h Review open PRs and summarize\n" +
+			"  /heartbeat 15m Any new notifications?", nil
+	}
+
+	intervalStr := parts[0]
+	message := strings.TrimSpace(parts[1])
+
+	interval, err := time.ParseDuration(intervalStr)
+	if err != nil {
+		return fmt.Sprintf("Invalid interval %q. Use Go duration format: 15m, 1h, 30m, 2h30m", intervalStr), nil
+	}
+	if interval < 1*time.Minute {
+		return "Heartbeat interval must be at least 1 minute.", nil
+	}
+
+	// Remove existing heartbeat for this chat (one per chat)
+	if err := b.store.DeleteHeartbeat(chatID); err != nil {
+		slog.Warn("failed to delete old heartbeat", "error", err)
+	}
+
+	tz := b.schedulerTZ
+	nextRun := time.Now().Add(interval).UTC()
+
+	sched := &store.Schedule{
+		ChatID:    chatID,
+		Label:     "Heartbeat: " + message,
+		Message:   message,
+		Schedule:  intervalStr, // store the duration string
+		Timezone:  tz,
+		Type:      "heartbeat",
+		Mode:      "prompt", // always prompt mode
+		NextRunAt: nextRun,
+		Enabled:   true,
+	}
+
+	id, err := b.store.SaveSchedule(sched)
+	if err != nil {
+		return "", fmt.Errorf("save heartbeat: %w", err)
+	}
+
+	return fmt.Sprintf("Heartbeat #%d set: every %s\nMessage: %s\nNext: %s",
+		id, intervalStr, message, nextRun.Format("2006-01-02 15:04 UTC")), nil
+}
+
+func (b *Bridge) heartbeatStop(chatID int64) (string, error) {
+	hb, err := b.store.GetHeartbeat(chatID)
+	if err != nil {
+		return "", fmt.Errorf("get heartbeat: %w", err)
+	}
+	if hb == nil {
+		return "No active heartbeat.", nil
+	}
+	if err := b.store.DeleteHeartbeat(chatID); err != nil {
+		return "", fmt.Errorf("delete heartbeat: %w", err)
+	}
+	return "Heartbeat stopped.", nil
+}
+
+func (b *Bridge) heartbeatStatus(chatID int64) (string, error) {
+	hb, err := b.store.GetHeartbeat(chatID)
+	if err != nil {
+		return "", fmt.Errorf("get heartbeat: %w", err)
+	}
+	if hb == nil {
+		return "No active heartbeat.\n\nUsage: /heartbeat <interval> <message>\nExample: /heartbeat 30m Check inbox and calendar", nil
+	}
+
+	status := "active"
+	if !hb.Enabled {
+		status = "paused"
+	}
+	lastRun := "never"
+	if hb.LastRunAt != nil {
+		lastRun = hb.LastRunAt.Format("2006-01-02 15:04 UTC")
+	}
+
+	return fmt.Sprintf("**Heartbeat #%d** (%s)\n"+
+		"**Interval:** %s\n"+
+		"**Message:** %s\n"+
+		"**Next run:** %s\n"+
+		"**Last run:** %s\n\n"+
+		"Use `/heartbeat stop` to disable.",
+		hb.ID, status, hb.Schedule, hb.Message,
+		hb.NextRunAt.Format("2006-01-02 15:04 UTC"), lastRun), nil
+}
+
 // parseGenerateImageDirectives extracts [generate-image prompt="..."] directives
 // from Claude's response, generates images, and sends them via Telegram.
 func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, chatID int64, response string) string {

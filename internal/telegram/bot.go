@@ -57,6 +57,7 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planskip", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planretry", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/schedule", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/heartbeat", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/imagine", bot.MatchTypePrefix, b.imagineHandler)
 
 	// Register handler for photo messages.

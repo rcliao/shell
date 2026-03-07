@@ -15,6 +15,7 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 - `internal/planner/` — Optional plan-execute-review loop
 - `internal/reload/` — Live reload watcher (rebuild + syscall.Exec)
 - `internal/worktree/` — Git worktree isolation for plan execution
+- `internal/scheduler/` — Cron/one-shot scheduler with SQLite persistence
 
 ## Commands
 
@@ -47,6 +48,9 @@ make watch    # Build and run with --watch
 - SIGHUP triggers graceful restart via syscall.Exec (same pattern as reload.go)
 - Config: `~/.teeny-relay/config.json` with `allowed_tools` for auto-approving Claude CLI tools
 - Emoji reactions map to actions (go, stop, cancel, status, regenerate, remember, forget, retry)
+- Scheduler: `/schedule add|list|delete|enable|pause` commands + `[schedule]` response directive for Claude-initiated scheduling
+- Heartbeat: `/heartbeat <interval> <message>` — periodic check-in routed through Claude with session context (one per chat)
+- Scheduler config: `{"scheduler": {"enabled": true, "timezone": "UTC"}}` in config.json
 
 ## Available CLI Tools
 

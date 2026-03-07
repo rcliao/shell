@@ -500,6 +500,19 @@ func (m *Memory) CorrectMemory(ctx context.Context, ns, key, newContent string) 
 	return err
 }
 
+// SeedNamespace stores a high-priority semantic memory in the given namespace.
+// Uses Put with the same NS+key, so repeated calls are idempotent (upserts).
+func (m *Memory) SeedNamespace(ctx context.Context, ns, key, content string) error {
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:       ns,
+		Key:      key,
+		Content:  content,
+		Kind:     "semantic",
+		Priority: "high",
+	})
+	return err
+}
+
 // Close closes the underlying store.
 func (m *Memory) Close() error {
 	return m.store.Close()

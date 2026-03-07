@@ -51,6 +51,21 @@ func New(cfg config.Config) (*Daemon, error) {
 		ExtraArgs:    cfg.Claude.ExtraArgs,
 	})
 
+	// If scheduler is enabled, inject relay:capabilities into system namespaces
+	// so schedule docs are always visible in the system prompt.
+	if cfg.Scheduler.Enabled {
+		capNS := "relay:capabilities"
+		if !containsStr(cfg.Memory.SystemNamespaces, capNS) {
+			cfg.Memory.SystemNamespaces = append(cfg.Memory.SystemNamespaces, capNS)
+		}
+		for name, p := range cfg.Memory.Profiles {
+			if !containsStr(p.SystemNamespaces, capNS) {
+				p.SystemNamespaces = append(p.SystemNamespaces, capNS)
+				cfg.Memory.Profiles[name] = p
+			}
+		}
+	}
+
 	// Initialize memory store if enabled
 	var mem *memory.Memory
 	if cfg.Memory.Enabled {
@@ -169,6 +184,16 @@ func New(cfg config.Config) (*Daemon, error) {
 		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
 		br.SetSchedulerConfig(true, cfg.Scheduler.Timezone)
 		slog.Info("scheduler initialized", "timezone", cfg.Scheduler.Timezone)
+
+		// Seed schedule docs into memory so they're always visible in system prompt.
+		if mem != nil {
+			if err := mem.SeedNamespace(context.Background(), "relay:capabilities", "scheduling",
+				"Schedule capabilities: Use [schedule at=\"...\"] for one-shot or [schedule cron=\"...\"] for recurring reminders. "+
+					"Commands: /schedule add|list|delete|enable|pause. Supports @daily, @hourly, @weekly, @monthly aliases. "+
+					"Use --tz flag for per-schedule timezone override."); err != nil {
+				slog.Warn("failed to seed schedule docs", "error", err)
+			}
+		}
 	}
 
 	d := &Daemon{
@@ -344,4 +369,14 @@ func ReadPID(path string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(strings.TrimSpace(string(data)))
+}
+
+// containsStr checks if a string slice contains a given value.
+func containsStr(ss []string, v string) bool {
+	for _, s := range ss {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }

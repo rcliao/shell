@@ -45,6 +45,22 @@ type MessageMap struct {
 	CreatedAt      time.Time
 }
 
+// Schedule represents a scheduled notification or prompt.
+type Schedule struct {
+	ID        int64
+	ChatID    int64
+	Label     string
+	Message   string
+	Schedule  string // cron expression or ISO8601 for one-shot
+	Timezone  string
+	Type      string // "cron" or "once"
+	Mode      string // "notify" or "prompt"
+	NextRunAt time.Time
+	LastRunAt *time.Time
+	Enabled   bool
+	CreatedAt time.Time
+}
+
 func Open(dbPath string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
@@ -103,6 +119,23 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_sessions_chat_id ON sessions(chat_id);
 	CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
 	CREATE INDEX IF NOT EXISTS idx_message_map_chat_bot ON message_map(chat_id, bot_message_id);
+
+	CREATE TABLE IF NOT EXISTS schedules (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id     INTEGER NOT NULL,
+		label       TEXT NOT NULL DEFAULT '',
+		message     TEXT NOT NULL,
+		schedule    TEXT NOT NULL,
+		timezone    TEXT NOT NULL DEFAULT 'UTC',
+		type        TEXT NOT NULL DEFAULT 'cron',
+		mode        TEXT NOT NULL DEFAULT 'notify',
+		next_run_at DATETIME NOT NULL,
+		last_run_at DATETIME,
+		enabled     INTEGER NOT NULL DEFAULT 1,
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(enabled, next_run_at);
+	CREATE INDEX IF NOT EXISTS idx_schedules_chat ON schedules(chat_id);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -336,6 +369,163 @@ func (s *Store) StaleSessionChatIDs(idleDuration time.Duration) ([]int64, error)
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// SaveSchedule inserts a new schedule and returns its ID.
+func (s *Store) SaveSchedule(sched *Schedule) (int64, error) {
+	enabled := 0
+	if sched.Enabled {
+		enabled = 1
+	}
+	result, err := s.db.Exec(`
+		INSERT INTO schedules (chat_id, label, message, schedule, timezone, type, mode, next_run_at, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, sched.ChatID, sched.Label, sched.Message, sched.Schedule, sched.Timezone, sched.Type, sched.Mode, sched.NextRunAt, enabled)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// ListSchedules returns all schedules for a given chat.
+func (s *Store) ListSchedules(chatID int64) ([]Schedule, error) {
+	rows, err := s.db.Query(`
+		SELECT id, chat_id, label, message, schedule, timezone, type, mode, next_run_at, last_run_at, enabled, created_at
+		FROM schedules WHERE chat_id = ? ORDER BY id
+	`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var schedules []Schedule
+	for rows.Next() {
+		var sc Schedule
+		var enabled int
+		var lastRun sql.NullTime
+		if err := rows.Scan(&sc.ID, &sc.ChatID, &sc.Label, &sc.Message, &sc.Schedule, &sc.Timezone, &sc.Type, &sc.Mode, &sc.NextRunAt, &lastRun, &enabled, &sc.CreatedAt); err != nil {
+			return nil, err
+		}
+		sc.Enabled = enabled != 0
+		if lastRun.Valid {
+			sc.LastRunAt = &lastRun.Time
+		}
+		schedules = append(schedules, sc)
+	}
+	return schedules, nil
+}
+
+// GetDueSchedules returns enabled schedules whose next_run_at is at or before now.
+func (s *Store) GetDueSchedules(now time.Time) ([]Schedule, error) {
+	rows, err := s.db.Query(`
+		SELECT id, chat_id, label, message, schedule, timezone, type, mode, next_run_at, last_run_at, enabled, created_at
+		FROM schedules WHERE enabled = 1 AND next_run_at <= ?
+	`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var schedules []Schedule
+	for rows.Next() {
+		var sc Schedule
+		var enabled int
+		var lastRun sql.NullTime
+		if err := rows.Scan(&sc.ID, &sc.ChatID, &sc.Label, &sc.Message, &sc.Schedule, &sc.Timezone, &sc.Type, &sc.Mode, &sc.NextRunAt, &lastRun, &enabled, &sc.CreatedAt); err != nil {
+			return nil, err
+		}
+		sc.Enabled = enabled != 0
+		if lastRun.Valid {
+			sc.LastRunAt = &lastRun.Time
+		}
+		schedules = append(schedules, sc)
+	}
+	return schedules, nil
+}
+
+// UpdateScheduleNextRun updates the next and last run times for a schedule.
+func (s *Store) UpdateScheduleNextRun(id int64, nextRun time.Time, lastRun time.Time) error {
+	_, err := s.db.Exec(`UPDATE schedules SET next_run_at = ?, last_run_at = ? WHERE id = ?`, nextRun, lastRun, id)
+	return err
+}
+
+// DisableSchedule sets enabled=0 for a schedule (used for completed one-shots).
+func (s *Store) DisableSchedule(id int64) error {
+	_, err := s.db.Exec(`UPDATE schedules SET enabled = 0 WHERE id = ?`, id)
+	return err
+}
+
+// GetHeartbeat returns the heartbeat schedule for a chat, or nil if none exists.
+func (s *Store) GetHeartbeat(chatID int64) (*Schedule, error) {
+	row := s.db.QueryRow(`
+		SELECT id, chat_id, label, message, schedule, timezone, type, mode, next_run_at, last_run_at, enabled, created_at
+		FROM schedules WHERE chat_id = ? AND type = 'heartbeat' LIMIT 1
+	`, chatID)
+
+	var sc Schedule
+	var enabled int
+	var lastRun sql.NullTime
+	err := row.Scan(&sc.ID, &sc.ChatID, &sc.Label, &sc.Message, &sc.Schedule, &sc.Timezone, &sc.Type, &sc.Mode, &sc.NextRunAt, &lastRun, &enabled, &sc.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sc.Enabled = enabled != 0
+	if lastRun.Valid {
+		sc.LastRunAt = &lastRun.Time
+	}
+	return &sc, nil
+}
+
+// DeleteHeartbeat removes the heartbeat schedule for a chat.
+func (s *Store) DeleteHeartbeat(chatID int64) error {
+	_, err := s.db.Exec(`DELETE FROM schedules WHERE chat_id = ? AND type = 'heartbeat'`, chatID)
+	return err
+}
+
+// GetSchedule returns a single schedule by ID scoped to a chat, or nil if not found.
+func (s *Store) GetSchedule(chatID, id int64) (*Schedule, error) {
+	row := s.db.QueryRow(`
+		SELECT id, chat_id, label, message, schedule, timezone, type, mode, next_run_at, last_run_at, enabled, created_at
+		FROM schedules WHERE id = ? AND chat_id = ?
+	`, id, chatID)
+
+	var sc Schedule
+	var enabled int
+	var lastRun sql.NullTime
+	err := row.Scan(&sc.ID, &sc.ChatID, &sc.Label, &sc.Message, &sc.Schedule, &sc.Timezone, &sc.Type, &sc.Mode, &sc.NextRunAt, &lastRun, &enabled, &sc.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sc.Enabled = enabled != 0
+	if lastRun.Valid {
+		sc.LastRunAt = &lastRun.Time
+	}
+	return &sc, nil
+}
+
+// EnableSchedule sets enabled=1 for a schedule.
+func (s *Store) EnableSchedule(id int64) error {
+	_, err := s.db.Exec(`UPDATE schedules SET enabled = 1 WHERE id = ?`, id)
+	return err
+}
+
+// DeleteSchedule removes a schedule scoped to a specific chat.
+func (s *Store) DeleteSchedule(chatID, id int64) error {
+	result, err := s.db.Exec(`DELETE FROM schedules WHERE id = ? AND chat_id = ?`, id, chatID)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("schedule #%d not found", id)
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
