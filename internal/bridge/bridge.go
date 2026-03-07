@@ -52,11 +52,17 @@ var scheduleRe = regexp.MustCompile(`(?s)\[schedule\s+(.*?)\](.*?)\[/schedule\]`
 // scheduleAttrRe extracts key="value" pairs from schedule directive attributes.
 var scheduleAttrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
+// heartbeatLearningRe matches [heartbeat-learning]...[/heartbeat-learning] blocks.
+var heartbeatLearningRe = regexp.MustCompile(`(?s)\[heartbeat-learning\]\s*(.*?)\s*\[/heartbeat-learning\]`)
+
 // generateImageRe matches [generate-image prompt="..."] directives in Claude's response.
 var generateImageRe = regexp.MustCompile(`\[generate-image prompt="([^"]+)"\]`)
 
 // ImageSendFunc sends an image to a chat. Used by the bridge to send generated images.
 type ImageSendFunc func(chatID int64, imageData []byte, caption string)
+
+// ChatActionFunc sends a chat action (e.g. "upload_photo") to a chat.
+type ChatActionFunc func(chatID int64, action string)
 
 // parseRelayDirectives extracts relay blocks from response text.
 // Returns the cleaned response (relays stripped) and the list of relay messages.
@@ -92,6 +98,77 @@ func (b *Bridge) sendRelays(relays []relayDirective) {
 		slog.Info("relaying message", "to_chat_id", r.ChatID, "len", len(r.Message))
 		b.notify(r.ChatID, r.Message)
 	}
+}
+
+// parseHeartbeatLearnings extracts [heartbeat-learning] blocks from the response,
+// stores them to the heartbeat namespace, and returns the cleaned response.
+func (b *Bridge) parseHeartbeatLearnings(ctx context.Context, chatID int64, response string) string {
+	if b.memory == nil {
+		return response
+	}
+	matches := heartbeatLearningRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response
+	}
+
+	clean := response
+	for i := len(matches) - 1; i >= 0; i-- {
+		loc := matches[i]
+		content := strings.TrimSpace(response[loc[2]:loc[3]])
+		clean = clean[:loc[0]] + clean[loc[1]:]
+
+		if err := b.memory.StoreHeartbeatLearning(ctx, chatID, content); err != nil {
+			slog.Warn("failed to store heartbeat learning", "error", err)
+		} else {
+			slog.Info("stored heartbeat learning", "chat_id", chatID, "len", len(content))
+		}
+	}
+	return strings.TrimSpace(clean)
+}
+
+// enrichHeartbeatPrompt augments a heartbeat message with recent conversation
+// history and previous heartbeat insights for self-improvement reflection.
+// Returns the original message unchanged if there's nothing to reflect on.
+func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg string) string {
+	// Fetch context up front to decide whether enrichment is worthwhile
+	exchanges := b.memory.RecentExchanges(ctx, chatID, 10)
+	insights := b.memory.HeartbeatContext(ctx, chatID, 500)
+
+	// Skip enrichment if there's no history and no prior learnings
+	if len(exchanges) == 0 && insights == "" {
+		slog.Debug("heartbeat: skipping enrichment, no history or insights", "chat_id", chatID)
+		return msg
+	}
+
+	var sb strings.Builder
+
+	if len(exchanges) > 0 {
+		sb.WriteString("[Recent conversation history for reflection]\n")
+		for _, ex := range exchanges {
+			sb.WriteString("- ")
+			sb.WriteString(ex)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("[End of recent history]\n\n")
+	}
+
+	if insights != "" {
+		sb.WriteString("[Previous heartbeat insights]\n")
+		sb.WriteString(insights)
+		sb.WriteString("\n[End of previous insights]\n\n")
+	}
+
+	sb.WriteString(msg)
+
+	// Only add reflection instructions if there are recent exchanges to reflect on
+	if len(exchanges) > 0 {
+		sb.WriteString("\n\n---\nAfter completing the task above, briefly reflect on the recent conversations.\n")
+		sb.WriteString("If you notice reusable patterns, user preferences, or useful corrections, emit:\n")
+		sb.WriteString("[heartbeat-learning]<specific, actionable insight>[/heartbeat-learning]\n")
+		sb.WriteString("Only emit learnings that are genuinely new or refine previous ones. Keep each to 1-2 sentences.")
+	}
+
+	return sb.String()
 }
 
 // NotifyFunc sends a message to a chat. Used for async plan progress reporting.
@@ -346,6 +423,12 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
 	}
 
+	// Enrich heartbeat messages with conversation history and previous insights
+	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ")
+	if isHeartbeat && b.memory != nil {
+		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg)
+	}
+
 	// Tag the message with sender identity so Claude knows who is speaking
 	if senderName != "" {
 		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
@@ -390,6 +473,11 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	// Extract and send relay directives (messages to other chats)
 	response, relays := parseRelayDirectives(response)
 	b.sendRelays(relays)
+
+	// Parse heartbeat learning directives
+	if isHeartbeat && b.memory != nil {
+		response = b.parseHeartbeatLearnings(ctx, chatID, response)
+	}
 
 	// Parse memory directives ([remember]...[/remember])
 	if b.memory != nil {
@@ -452,6 +540,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	augmentedMsg := userMsg
 	if b.memory != nil {
 		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
+	}
+
+	// Enrich heartbeat messages with conversation history and previous insights
+	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ")
+	if isHeartbeat && b.memory != nil {
+		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg)
 	}
 
 	// Tag the message with sender identity so Claude knows who is speaking
@@ -525,6 +619,11 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	// Extract and send relay directives (messages to other chats)
 	response, relays := parseRelayDirectives(response)
 	b.sendRelays(relays)
+
+	// Parse heartbeat learning directives
+	if isHeartbeat && b.memory != nil {
+		response = b.parseHeartbeatLearnings(ctx, chatID, response)
+	}
 
 	// Parse memory directives ([remember]...[/remember])
 	if b.memory != nil {
@@ -764,7 +863,10 @@ func (b *Bridge) scheduleSystemPrompt() string {
 		"Always include the `tz` attribute explicitly. Compute exact dates/times based on the current time shown above.\n\n" +
 		"### Heartbeat\n" +
 		"Messages prefixed with `[Heartbeat]` are periodic check-ins routed through you with full session context.\n" +
+		"Recent conversation history and previous heartbeat insights are included for your reflection.\n" +
 		"Respond naturally as a proactive assistant — summarize what you checked, report findings, and suggest actions.\n" +
+		"If you notice patterns, user preferences, or useful corrections, emit:\n" +
+		"`[heartbeat-learning]<specific actionable insight>[/heartbeat-learning]`\n" +
 		"Keep heartbeat responses concise and actionable.\n"
 }
 
@@ -2573,8 +2675,69 @@ func (b *Bridge) ensureSession(ctx context.Context, chatID int64) (*store.Sessio
 		return nil, fmt.Errorf("save session: %w", err)
 	}
 
+	// Auto-create default heartbeat for new chats if scheduler + memory are enabled
+	if b.schedulerEnabled && b.memory != nil {
+		b.ensureDefaultHeartbeat(chatID)
+	}
+
 	// Re-read to get the DB-assigned ID
 	return b.store.GetSession(chatID)
+}
+
+// defaultHeartbeatInterval is the interval for auto-created heartbeats.
+const defaultHeartbeatInterval = "1h"
+
+// defaultHeartbeatMessage is the prompt for auto-created heartbeats.
+const defaultHeartbeatMessage = "Review recent activity and check for anything that needs attention."
+
+// EnsureDefaultHeartbeats creates default heartbeats for all active sessions
+// that don't already have one. Called at daemon startup.
+func (b *Bridge) EnsureDefaultHeartbeats() {
+	if !b.schedulerEnabled || b.memory == nil {
+		return
+	}
+	sessions, err := b.store.ListActiveSessions()
+	if err != nil {
+		slog.Warn("failed to list sessions for default heartbeats", "error", err)
+		return
+	}
+	for _, sess := range sessions {
+		b.ensureDefaultHeartbeat(sess.ChatID)
+	}
+}
+
+// ensureDefaultHeartbeat creates a default 1-hour heartbeat for a chat if none exists.
+func (b *Bridge) ensureDefaultHeartbeat(chatID int64) {
+	hb, err := b.store.GetHeartbeat(chatID)
+	if err != nil {
+		slog.Warn("failed to check for existing heartbeat", "chat_id", chatID, "error", err)
+		return
+	}
+	if hb != nil {
+		return // already has a heartbeat
+	}
+
+	interval, _ := time.ParseDuration(defaultHeartbeatInterval)
+	nextRun := time.Now().Add(interval).UTC()
+
+	sched := &store.Schedule{
+		ChatID:    chatID,
+		Label:     "Heartbeat: " + defaultHeartbeatMessage,
+		Message:   defaultHeartbeatMessage,
+		Schedule:  defaultHeartbeatInterval,
+		Timezone:  b.schedulerTZ,
+		Type:      "heartbeat",
+		Mode:      "prompt",
+		NextRunAt: nextRun,
+		Enabled:   true,
+	}
+
+	id, err := b.store.SaveSchedule(sched)
+	if err != nil {
+		slog.Warn("failed to create default heartbeat", "chat_id", chatID, "error", err)
+		return
+	}
+	slog.Info("default heartbeat created", "chat_id", chatID, "id", id, "interval", defaultHeartbeatInterval)
 }
 
 // CleanupStaleSessions kills sessions that have been idle too long.

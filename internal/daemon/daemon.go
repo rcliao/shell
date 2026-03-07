@@ -193,6 +193,12 @@ func New(cfg config.Config) (*Daemon, error) {
 					"Use --tz flag for per-schedule timezone override."); err != nil {
 				slog.Warn("failed to seed schedule docs", "error", err)
 			}
+			if err := mem.SeedNamespace(context.Background(), "relay:capabilities", "heartbeat-learning",
+				"Heartbeat self-improvement: During [Heartbeat] check-ins, recent conversations and previous "+
+					"insights are provided. Use [heartbeat-learning]...[/heartbeat-learning] to store reusable "+
+					"patterns discovered during heartbeats."); err != nil {
+				slog.Warn("failed to seed heartbeat-learning docs", "error", err)
+			}
 		}
 	}
 
@@ -280,6 +286,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Restore active sessions from store
 	d.restoreSessions()
+
+	// Ensure default heartbeats for existing sessions
+	d.bridge.EnsureDefaultHeartbeats()
 
 	slog.Info("daemon starting",
 		"allowed_users", len(d.cfg.Telegram.AllowedUsers),

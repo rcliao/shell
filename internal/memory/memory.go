@@ -363,6 +363,98 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 	return strings.TrimSpace(clean)
 }
 
+// heartbeatNamespace returns the per-chat heartbeat learning namespace.
+func heartbeatNamespace(chatID int64) string {
+	return fmt.Sprintf("relay:heartbeat:%d", chatID)
+}
+
+// RecentExchanges returns the last N episodic exchanges for a chat.
+func (m *Memory) RecentExchanges(ctx context.Context, chatID int64, limit int) []string {
+	if limit <= 0 {
+		limit = 10
+	}
+	memories, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:    namespace(chatID),
+		Kind:  "episodic",
+		Limit: limit,
+	})
+	if err != nil {
+		slog.Warn("recent exchanges fetch failed", "error", err)
+		return nil
+	}
+	var result []string
+	for _, mem := range memories {
+		result = append(result, mem.Content)
+	}
+	return result
+}
+
+// maxHeartbeatLearnings is the cap on stored heartbeat learnings per chat.
+const maxHeartbeatLearnings = 20
+
+// StoreHeartbeatLearning stores a heartbeat learning as semantic/high-priority memory.
+// Prunes oldest entries beyond maxHeartbeatLearnings.
+func (m *Memory) StoreHeartbeatLearning(ctx context.Context, chatID int64, content string) error {
+	ns := heartbeatNamespace(chatID)
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:       ns,
+		Key:      fmt.Sprintf("hb-%d", time.Now().UnixMilli()),
+		Content:  content,
+		Kind:     "semantic",
+		Priority: "high",
+	})
+	if err != nil {
+		return err
+	}
+
+	// Prune oldest learnings beyond cap
+	all, listErr := m.store.List(ctx, agentmemory.ListParams{
+		NS:    ns,
+		Kind:  "semantic",
+		Limit: maxHeartbeatLearnings + 20, // fetch extra to find ones to delete
+	})
+	if listErr != nil {
+		slog.Warn("heartbeat learning prune list failed", "error", listErr)
+		return nil
+	}
+	if len(all) > maxHeartbeatLearnings {
+		// List returns newest first; delete from the end
+		for _, mem := range all[maxHeartbeatLearnings:] {
+			if rmErr := m.store.Rm(ctx, agentmemory.RmParams{NS: ns, Key: mem.Key}); rmErr != nil {
+				slog.Warn("heartbeat learning prune failed", "key", mem.Key, "error", rmErr)
+			}
+		}
+		slog.Info("pruned heartbeat learnings", "chat_id", chatID, "removed", len(all)-maxHeartbeatLearnings)
+	}
+	return nil
+}
+
+// HeartbeatContext returns relevant heartbeat learnings for a chat as a bullet list.
+func (m *Memory) HeartbeatContext(ctx context.Context, chatID int64, budget int) string {
+	if budget <= 0 {
+		budget = 500
+	}
+	result, err := m.store.Context(ctx, agentmemory.ContextParams{
+		NS:     heartbeatNamespace(chatID) + "*",
+		Query:  "heartbeat patterns insights",
+		Budget: budget,
+	})
+	if err != nil {
+		slog.Warn("heartbeat context fetch failed", "error", err)
+		return ""
+	}
+	if len(result.Memories) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, mem := range result.Memories {
+		sb.WriteString("- ")
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
 // ReviewerContext queries the store for relevant reviewer learnings in the given
 // namespace and returns a formatted bullet list. Returns "" if nothing relevant is found.
 func (m *Memory) ReviewerContext(ctx context.Context, namespace, query string, budget int) string {

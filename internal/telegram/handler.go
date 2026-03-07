@@ -884,14 +884,30 @@ type Handler struct {
 
 	albumsMu sync.Mutex
 	albums   map[string]*albumEntry // keyed by MediaGroupID
+
+	chatLocksMu sync.Mutex
+	chatLocks   map[int64]*sync.Mutex // per-chat message serialization
 }
 
 func NewHandler(auth *Auth, br *bridge.Bridge) *Handler {
 	return &Handler{
-		auth:   auth,
-		bridge: br,
-		albums: make(map[string]*albumEntry),
+		auth:      auth,
+		bridge:    br,
+		albums:    make(map[string]*albumEntry),
+		chatLocks: make(map[int64]*sync.Mutex),
 	}
+}
+
+// getChatLock returns the per-chat mutex, creating one if needed.
+func (h *Handler) getChatLock(chatID int64) *sync.Mutex {
+	h.chatLocksMu.Lock()
+	defer h.chatLocksMu.Unlock()
+	mu, ok := h.chatLocks[chatID]
+	if !ok {
+		mu = &sync.Mutex{}
+		h.chatLocks[chatID] = mu
+	}
+	return mu
 }
 
 // setReaction sets an emoji reaction on a message, replacing any previous reaction.
@@ -982,6 +998,20 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 // handleRegenerate re-sends the original user message to Claude and streams
 // the new response into the existing bot message, replacing its content.
 func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64, botMessageID int) {
+	// Serialize with other messages for this chat.
+	chatMu := h.getChatLock(chatID)
+	if !chatMu.TryLock() {
+		// Edit the target message to indicate it's queued.
+		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: botMessageID,
+			Text:      escapeMarkdownV2Text("Queued for regeneration..."),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		chatMu.Lock()
+	}
+	defer chatMu.Unlock()
+
 	// Show a "Regenerating..." placeholder while Claude processes.
 	b.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:    chatID,
@@ -1248,6 +1278,14 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	if senderName == "" {
 		senderName = msg.From.Username
 	}
+
+	// Serialize messages per chat so concurrent sends queue instead of failing.
+	chatMu := h.getChatLock(msg.Chat.ID)
+	if !chatMu.TryLock() {
+		setReaction(ctx, b, msg.Chat.ID, msg.ID, "🕐")
+		chatMu.Lock()
+	}
+	defer chatMu.Unlock()
 
 	// React with 👀 to acknowledge receipt.
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, "👀")
@@ -1577,6 +1615,14 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 	if senderName == "" {
 		senderName = first.From.Username
 	}
+
+	// Serialize messages per chat so concurrent sends queue instead of failing.
+	chatMu := h.getChatLock(first.Chat.ID)
+	if !chatMu.TryLock() {
+		setReaction(ctx, b, first.Chat.ID, first.ID, "🕐")
+		chatMu.Lock()
+	}
+	defer chatMu.Unlock()
 
 	// React with 👀 on the first message to acknowledge receipt.
 	setReaction(ctx, b, first.Chat.ID, first.ID, "👀")
