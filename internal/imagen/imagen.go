@@ -26,7 +26,7 @@ func New(apiKey, model string, timeout time.Duration) (*Generator, error) {
 		return nil, fmt.Errorf("create genai client: %w", err)
 	}
 	if model == "" {
-		model = "gemini-2.0-flash-preview-image-generation"
+		model = "gemini-3.1-flash-image-preview"
 	}
 	if timeout == 0 {
 		timeout = 2 * time.Minute

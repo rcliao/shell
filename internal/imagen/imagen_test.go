@@ -22,7 +22,7 @@ func TestNewDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if g.model != "gemini-2.0-flash-preview-image-generation" {
+	if g.model != "gemini-3.1-flash-image-preview" {
 		t.Errorf("expected default model, got %q", g.model)
 	}
 	if g.timeout != 2*time.Minute {

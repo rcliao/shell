@@ -124,7 +124,7 @@ type ReloadConfig struct {
 
 type GoogleConfig struct {
 	APIKeyEnv string        `json:"api_key_env"` // env var name (default: "GEMINI_API_KEY")
-	Model     string        `json:"model"`       // default: "gemini-2.0-flash-preview-image-generation"
+	Model     string        `json:"model"`       // default: "gemini-3.1-flash-image-preview"
 	Timeout   time.Duration `json:"timeout"`     // default: 2m
 }
 
@@ -249,7 +249,7 @@ func Default() Config {
 		},
 		Google: GoogleConfig{
 			APIKeyEnv: "GEMINI_API_KEY",
-			Model:     "gemini-2.0-flash-preview-image-generation",
+			Model:     "gemini-3.1-flash-image-preview",
 			Timeout:   2 * time.Minute,
 		},
 	}
