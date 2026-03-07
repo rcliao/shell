@@ -1784,18 +1784,48 @@ func (h *Handler) HandleImagine(ctx context.Context, b *bot.Bot, msg *models.Mes
 		return
 	}
 	prompt := strings.TrimSpace(parts[1])
+	chatID := msg.Chat.ID
 
-	// Show upload_photo action while generating
-	b.SendChatAction(ctx, &bot.SendChatActionParams{
-		ChatID: msg.Chat.ID,
-		Action: models.ChatActionUploadPhoto,
+	// React with 🎨 to acknowledge the request.
+	setReaction(ctx, b, chatID, msg.ID, "🎨")
+
+	// Keep upload_photo action alive every 4s until generation completes.
+	actionCtx, actionCancel := context.WithCancel(ctx)
+	defer actionCancel()
+	go func() {
+		b.SendChatAction(actionCtx, &bot.SendChatActionParams{
+			ChatID: chatID,
+			Action: models.ChatActionUploadPhoto,
+		})
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-actionCtx.Done():
+				return
+			case <-ticker.C:
+				b.SendChatAction(actionCtx, &bot.SendChatActionParams{
+					ChatID: chatID,
+					Action: models.ChatActionUploadPhoto,
+				})
+			}
+		}
+	}()
+
+	// Switch to ⏳ if generation takes a while.
+	longRunning := time.AfterFunc(longRunningThreshold, func() {
+		setReaction(ctx, b, chatID, msg.ID, "⏳")
 	})
+	defer longRunning.Stop()
 
 	imageData, err := h.bridge.HandleImagine(ctx, prompt)
+	actionCancel() // stop the upload_photo loop
+
 	if err != nil {
 		slog.Error("/imagine failed", "error", err)
+		setReaction(ctx, b, chatID, msg.ID, "❌")
 		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    msg.Chat.ID,
+			ChatID:    chatID,
 			Text:      formatErrorForMarkdownV2(err.Error()),
 			ParseMode: models.ParseModeMarkdown,
 		})
@@ -1803,7 +1833,7 @@ func (h *Handler) HandleImagine(ctx context.Context, b *bot.Bot, msg *models.Mes
 	}
 
 	_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{
-		ChatID: msg.Chat.ID,
+		ChatID: chatID,
 		Photo: &models.InputFileUpload{
 			Filename: "image.png",
 			Data:     bytes.NewReader(imageData),
@@ -1811,8 +1841,12 @@ func (h *Handler) HandleImagine(ctx context.Context, b *bot.Bot, msg *models.Mes
 		Caption: prompt,
 	})
 	if err != nil {
-		slog.Error("failed to send generated photo", "error", err, "chat_id", msg.Chat.ID)
+		slog.Error("failed to send generated photo", "error", err, "chat_id", chatID)
+		setReaction(ctx, b, chatID, msg.ID, "❌")
+		return
 	}
+
+	setReaction(ctx, b, chatID, msg.ID, "✅")
 }
 
 func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Message) {
