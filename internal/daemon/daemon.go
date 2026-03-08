@@ -12,6 +12,8 @@ import (
 
 	"github.com/rcliao/shell/internal/bridge"
 	browser "github.com/rcliao/shell-browser"
+	pm "github.com/rcliao/shell-pm"
+	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/config"
 	shellimagen "github.com/rcliao/shell-imagen"
 	"github.com/rcliao/shell/internal/memory"
@@ -32,6 +34,8 @@ type Daemon struct {
 	memory    *memory.Memory       // nil if disabled
 	reloader  *reload.Watcher      // nil if disabled
 	scheduler *scheduler.Scheduler // nil if disabled
+	tunnelMgr *tunnel.Manager      // nil if disabled
+	pmMgr     *pm.Manager          // nil if disabled
 }
 
 func New(cfg config.Config) (*Daemon, error) {
@@ -49,6 +53,15 @@ func New(cfg config.Config) (*Daemon, error) {
 	st, err := store.Open(cfg.Store.DBPath)
 	if err != nil {
 		return nil, err
+	}
+
+	// Ensure playground directory exists if configured.
+	if cfg.Claude.PlaygroundDir != "" {
+		if err := os.MkdirAll(cfg.Claude.PlaygroundDir, 0755); err != nil {
+			slog.Warn("playground: failed to create dir", "path", cfg.Claude.PlaygroundDir, "error", err)
+		} else {
+			slog.Info("playground initialized", "path", cfg.Claude.PlaygroundDir)
+		}
 	}
 
 	// Create process manager
@@ -153,7 +166,31 @@ func New(cfg config.Config) (*Daemon, error) {
 		TimeoutSeconds: cfg.Browser.TimeoutSeconds,
 		ChromePath:     cfg.Browser.ChromePath,
 	}
-	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig, braveKey, tavilyKey, browserCfg)
+
+	// Initialize tunnel manager if enabled.
+	var tunnelMgr *tunnel.Manager
+	if cfg.Tunnel.Enabled {
+		tunnelMgr = tunnel.NewManager(tunnel.Config{
+			Enabled:         true,
+			CloudflaredBin:  cfg.Tunnel.CloudflaredBin,
+			MaxTunnels:      cfg.Tunnel.MaxTunnels,
+			DefaultProtocol: cfg.Tunnel.DefaultProtocol,
+		})
+		slog.Info("tunnel manager initialized")
+	}
+
+	// Initialize process manager if enabled.
+	var pmMgr *pm.Manager
+	if cfg.PM.Enabled {
+		pmMgr = pm.NewManager(pm.Config{
+			Enabled:  true,
+			MaxProcs: cfg.PM.MaxProcs,
+			LogLines: cfg.PM.LogLines,
+		})
+		slog.Info("process manager initialized")
+	}
+
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig, braveKey, tavilyKey, browserCfg, tunnelMgr, pmMgr)
 	if braveKey != "" {
 		slog.Info("search initialized", "provider", "brave")
 	} else if tavilyKey != "" {
@@ -235,6 +272,32 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
+	// Seed playground docs into memory if configured.
+	if cfg.Claude.PlaygroundDir != "" && mem != nil {
+		if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "playground",
+			fmt.Sprintf("Playground directory: %s — You have full write access to this directory. "+
+				"Create project subdirectories here (e.g. %s/my-app/) for web apps, experiments, and prototypes. "+
+				"Files here can be written and edited without permission prompts. "+
+				"IMPORTANT: When running web servers or long-running processes, ALWAYS run them in the background "+
+				"(e.g. 'nohup python -m http.server 8080 &' or 'node server.js &') so you can continue with "+
+				"other tasks like setting up tunnels. Never run a server in the foreground or your session will block.",
+				cfg.Claude.PlaygroundDir, cfg.Claude.PlaygroundDir)); err != nil {
+			slog.Warn("failed to seed playground docs", "error", err)
+		}
+	}
+
+	// Seed tunnel docs into memory if tunnels are enabled.
+	if tunnelMgr != nil && mem != nil {
+		if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "tunnel",
+			"HTTP tunnel capabilities: Use [tunnel port=\"...\"] to expose a local port via Cloudflare quick tunnel. "+
+				"Use [tunnel action=\"stop\" port=\"...\"] to stop a tunnel, or [tunnel action=\"list\"] to list active tunnels. "+
+				"Optional protocol attribute: protocol=\"https\". Tunnels provide public URLs for local web apps. "+
+				"WORKFLOW: 1) Write app files, 2) Start server in background (e.g. 'node server.js &'), "+
+				"3) Use [tunnel port=\"...\"] to expose it. The tunnel directive is handled by the bridge, not by Bash."); err != nil {
+			slog.Warn("failed to seed tunnel docs", "error", err)
+		}
+	}
+
 	d := &Daemon{
 		cfg:       cfg,
 		bot:       bot,
@@ -243,6 +306,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		store:     st,
 		memory:    mem,
 		scheduler: sched,
+		tunnelMgr: tunnelMgr,
+		pmMgr:     pmMgr,
 	}
 
 	// Resolve source directory for reload and self-restart.
@@ -309,9 +374,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 	}
 
-	// Start scheduler if enabled.
+	// Start scheduler if enabled — register as a pm-managed process.
 	if d.scheduler != nil {
-		go d.scheduler.Run(ctx)
+		if d.pmMgr != nil {
+			sched := d.scheduler
+			d.pmMgr.StartFunc(ctx, "scheduler", func(fctx context.Context) error {
+				sched.Run(fctx)
+				return nil
+			}, "cron/heartbeat scheduler", pm.WithTags(map[string]string{"type": "system"}), pm.WithRestart(pm.RestartAlways))
+		} else {
+			go d.scheduler.Run(ctx)
+		}
 	}
 
 	// Start stale session cleanup ticker
@@ -338,6 +411,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 // Shutdown gracefully stops all components.
 func (d *Daemon) Shutdown() {
 	slog.Info("daemon shutting down")
+	if d.pmMgr != nil {
+		d.pmMgr.StopAll()
+	}
+	if d.tunnelMgr != nil {
+		d.tunnelMgr.StopAll()
+	}
 	d.proc.KillAll()
 	d.store.Close()
 	if d.memory != nil {

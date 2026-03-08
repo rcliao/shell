@@ -24,7 +24,7 @@ func testBridge(t *testing.T) *Bridge {
 	t.Cleanup(func() { s.Close() })
 
 	proc := process.NewManager(process.ManagerConfig{Binary: "echo"})
-	return New(proc, s, nil, nil, false, "", nil, nil, "", "", browser.Config{})
+	return New(proc, s, nil, nil, false, "", nil, nil, "", "", browser.Config{}, nil, nil)
 }
 
 func TestHandleReaction_NoPlan(t *testing.T) {
@@ -169,7 +169,7 @@ func TestHandleReaction_CustomReactionMap(t *testing.T) {
 
 	proc := process.NewManager(process.ManagerConfig{Binary: "echo"})
 	customMap := map[string]string{"🚀": "go"}
-	b := New(proc, s, nil, nil, false, "", customMap, nil, "", "", browser.Config{})
+	b := New(proc, s, nil, nil, false, "", customMap, nil, "", "", browser.Config{}, nil, nil)
 	ctx := context.Background()
 
 	// 🚀 should work like 👍 (mapped to "go")
@@ -320,7 +320,7 @@ func testBridgeWithMemory(t *testing.T) *Bridge {
 	t.Cleanup(func() { mem.Close() })
 
 	proc := process.NewManager(process.ManagerConfig{Binary: "echo"})
-	return New(proc, s, mem, nil, false, "", nil, nil, "", "", browser.Config{})
+	return New(proc, s, mem, nil, false, "", nil, nil, "", "", browser.Config{}, nil, nil)
 }
 
 func TestHandleReaction_Remember_NoMemory(t *testing.T) {

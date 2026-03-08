@@ -101,6 +101,30 @@ Expose local ports to the internet via Cloudflare quick tunnels using the `[tunn
 
 Requires `"tunnel": {"enabled": true}` in config and `cloudflared` installed (`brew install cloudflared`).
 
+## Process Manager
+
+Use the `[pm]` directive to manage background processes. **NEVER** run long-running processes (servers, watchers) directly via Bash — use `[pm]` instead.
+
+```
+[pm name="myserver" cmd="node server.js" dir="/path/to/app"]
+[pm action="list"]
+[pm action="logs" name="myserver"]
+[pm action="stop" name="myserver"]
+[pm action="remove" name="myserver"]
+```
+
+- `name` — unique process name (required for start/stop/logs/remove)
+- `cmd` — shell command (required for start)
+- `dir` — working directory (optional)
+- `action` — `start` (default when cmd provided), `stop`, `list`, `logs`, `remove`
+
+Requires `"pm": {"enabled": true}` in config.
+
+**Web app workflow:**
+1. Write app files
+2. `[pm name="web" cmd="node server.js" dir="/path/to/app"]` — starts in background
+3. `[tunnel port="8080"]` — expose via public URL
+
 ## Available CLI Tools
 
 See `TOOLS.md` for the full reference of CLI tools available via Bash. Read it when users request:

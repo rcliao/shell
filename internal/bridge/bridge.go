@@ -14,6 +14,8 @@ import (
 	"time"
 
 	browser "github.com/rcliao/shell-browser"
+	pm "github.com/rcliao/shell-pm"
+	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/config"
 	shellimagen "github.com/rcliao/shell-imagen"
 	"github.com/rcliao/shell/internal/memory"
@@ -342,7 +344,7 @@ type planRun struct {
 }
 
 type Bridge struct {
-	proc    *process.Manager
+	proc    process.Agent
 	store   *store.Store
 	memory  *memory.Memory   // nil if disabled
 	plan    *planner.Planner // nil if not configured
@@ -375,6 +377,12 @@ type Bridge struct {
 	// Browser automation
 	browserCfg browser.Config
 
+	// Tunnel manager
+	tunnelMgr *tunnel.Manager // nil if disabled
+
+	// Process manager
+	pmMgr *pm.Manager // nil if disabled
+
 	planMu sync.Mutex
 	planRuns map[int64]*planRun
 
@@ -382,7 +390,7 @@ type Bridge struct {
 	reviewCache map[int64][]memory.ReviewEntry // last /review result per chat
 }
 
-func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *shellimagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config) *Bridge {
+func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *shellimagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
@@ -403,6 +411,8 @@ func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *plan
 		braveKey:    braveKey,
 		tavilyKey:   tavilyKey,
 		browserCfg:  browserCfg,
+		tunnelMgr:   tunnelMgr,
+		pmMgr:       pmMgr,
 		planRuns:    make(map[int64]*planRun),
 		reviewCache: make(map[int64][]memory.ReviewEntry),
 	}
@@ -588,6 +598,8 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	systemPrompt += b.relaySystemPrompt()
 	systemPrompt += b.searchSystemPrompt()
 	systemPrompt += b.browserSystemPrompt()
+	systemPrompt += b.tunnelSystemPrompt()
+	systemPrompt += b.pmSystemPrompt()
 
 	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt)
 	if err != nil {
@@ -629,6 +641,36 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
 		if err != nil {
 			slog.Warn("browser follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
+	// Handle [pm] directives: start/stop/list/logs background processes
+	response, pmResults := b.parsePMDirectives(ctx, response)
+	if pmResults != "" {
+		followUp := pmResults + "\n\nReport the process manager status above to the user."
+		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
+		if err != nil {
+			slog.Warn("pm follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
+	// Handle [tunnel] directives: start/stop/list tunnels, re-prompt Claude with results
+	response, tunnelResults := b.parseTunnelDirectives(ctx, response)
+	if tunnelResults != "" {
+		followUp := tunnelResults + "\n\nReport the tunnel status above to the user."
+		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
+		if err != nil {
+			slog.Warn("tunnel follow-up failed", "error", err)
 		} else {
 			response = strings.TrimSpace(followUpResult.Text)
 			if followUpResult.SessionID != "" {
@@ -771,6 +813,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	systemPrompt += b.relaySystemPrompt()
 	systemPrompt += b.searchSystemPrompt()
 	systemPrompt += b.browserSystemPrompt()
+	systemPrompt += b.tunnelSystemPrompt()
+	systemPrompt += b.pmSystemPrompt()
 
 	// Send to Claude with streaming
 	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt, onUpdate)
@@ -819,6 +863,42 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
 		if err != nil {
 			slog.Warn("browser follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
+	// Handle [pm] directives: start/stop/list/logs background processes (streaming)
+	response, pmResults := b.parsePMDirectives(ctx, response)
+	if pmResults != "" {
+		if onUpdate != nil {
+			onUpdate("\n\n_Managing processes..._\n\n")
+		}
+		followUp := pmResults + "\n\nReport the process manager status above to the user."
+		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
+		if err != nil {
+			slog.Warn("pm follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
+	// Handle [tunnel] directives: start/stop/list tunnels, re-prompt Claude with results (streaming)
+	response, tunnelResults := b.parseTunnelDirectives(ctx, response)
+	if tunnelResults != "" {
+		if onUpdate != nil {
+			onUpdate("\n\n_Managing tunnel..._\n\n")
+		}
+		followUp := tunnelResults + "\n\nReport the tunnel status above to the user."
+		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
+		if err != nil {
+			slog.Warn("tunnel follow-up failed", "error", err)
 		} else {
 			response = strings.TrimSpace(followUpResult.Text)
 			if followUpResult.SessionID != "" {
@@ -909,6 +989,10 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.Heartbeat(ctx, chatID, args)
 	case "task":
 		return b.Task(ctx, chatID, args)
+	case "pm":
+		return b.PM(ctx, chatID, args)
+	case "tunnel":
+		return b.Tunnel(ctx, chatID, args)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -1032,6 +1116,24 @@ func (b *Bridge) Help() string {
 			"- `/task list` — Show pending tasks\n" +
 			"- `/task done <id>` — Mark a task as completed\n" +
 			"- `/task delete <id>` — Remove a task\n"
+	}
+
+	if b.pmMgr != nil {
+		help += "\n### Process Manager\n\n" +
+			"Manage background processes (web servers, watchers, etc.).\n\n" +
+			"- `/pm` or `/pm list` — List managed processes\n" +
+			"- `/pm start <name> <command> [--dir <dir>]` — Start a background process\n" +
+			"- `/pm logs <name>` — View process logs\n" +
+			"- `/pm stop <name>` — Stop a process\n" +
+			"- `/pm remove <name>` — Remove a stopped process\n"
+	}
+
+	if b.tunnelMgr != nil {
+		help += "\n### HTTP Tunnels\n\n" +
+			"Expose local ports via Cloudflare quick tunnels.\n\n" +
+			"- `/tunnel` or `/tunnel list` — List active tunnels\n" +
+			"- `/tunnel start <port>` or `/tunnel <port>` — Start a tunnel\n" +
+			"- `/tunnel stop <port>` — Stop a tunnel\n"
 	}
 
 	if b.imagen != nil {
@@ -1572,6 +1674,136 @@ func (b *Bridge) taskDelete(chatID int64, idStr string) (string, error) {
 	return fmt.Sprintf("Task #%d deleted.", id), nil
 }
 
+// PM manages background processes via user commands.
+func (b *Bridge) PM(ctx context.Context, chatID int64, args string) (string, error) {
+	if b.pmMgr == nil {
+		return "Process manager is not enabled.", nil
+	}
+
+	args = strings.TrimSpace(args)
+	if args == "" {
+		// Default: list
+		return pm.Execute(ctx, b.pmMgr, pm.Directive{Action: "list"}), nil
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	sub := parts[0]
+	rest := ""
+	if len(parts) > 1 {
+		rest = strings.TrimSpace(parts[1])
+	}
+
+	switch sub {
+	case "list":
+		return pm.Execute(ctx, b.pmMgr, pm.Directive{Action: "list"}), nil
+
+	case "start":
+		// /pm start <name> <command> [--dir <dir>]
+		if rest == "" {
+			return "Usage: /pm start <name> <command> [--dir <dir>]", nil
+		}
+		name, cmd, dir := parsePMStartArgs(rest)
+		if name == "" || cmd == "" {
+			return "Usage: /pm start <name> <command> [--dir <dir>]", nil
+		}
+		return pm.Execute(ctx, b.pmMgr, pm.Directive{Action: "start", Name: name, Command: cmd, Dir: dir}), nil
+
+	case "stop":
+		if rest == "" {
+			return "Usage: /pm stop <name>", nil
+		}
+		return pm.Execute(ctx, b.pmMgr, pm.Directive{Action: "stop", Name: rest}), nil
+
+	case "logs":
+		if rest == "" {
+			return "Usage: /pm logs <name>", nil
+		}
+		return pm.Execute(ctx, b.pmMgr, pm.Directive{Action: "logs", Name: rest}), nil
+
+	case "remove":
+		if rest == "" {
+			return "Usage: /pm remove <name>", nil
+		}
+		return pm.Execute(ctx, b.pmMgr, pm.Directive{Action: "remove", Name: rest}), nil
+
+	default:
+		return "Usage: /pm list|start|stop|logs|remove\n\n" +
+			"Examples:\n" +
+			"  /pm list\n" +
+			"  /pm start myserver node server.js --dir /path/to/app\n" +
+			"  /pm logs myserver\n" +
+			"  /pm stop myserver\n" +
+			"  /pm remove myserver", nil
+	}
+}
+
+// Tunnel manages HTTP tunnels via user commands.
+func (b *Bridge) Tunnel(ctx context.Context, chatID int64, args string) (string, error) {
+	if b.tunnelMgr == nil {
+		return "Tunnel is not enabled.", nil
+	}
+
+	args = strings.TrimSpace(args)
+	if args == "" {
+		// Default: list
+		return tunnel.Execute(ctx, b.tunnelMgr, tunnel.Directive{Action: "list"}), nil
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	sub := parts[0]
+	rest := ""
+	if len(parts) > 1 {
+		rest = strings.TrimSpace(parts[1])
+	}
+
+	switch sub {
+	case "list":
+		return tunnel.Execute(ctx, b.tunnelMgr, tunnel.Directive{Action: "list"}), nil
+	case "start":
+		if rest == "" {
+			return "Usage: /tunnel start <port> [--protocol https]", nil
+		}
+		port, protocol := parseTunnelStartArgs(rest)
+		return tunnel.Execute(ctx, b.tunnelMgr, tunnel.Directive{Action: "start", Port: port, Protocol: protocol}), nil
+	case "stop":
+		if rest == "" {
+			return "Usage: /tunnel stop <port>", nil
+		}
+		return tunnel.Execute(ctx, b.tunnelMgr, tunnel.Directive{Action: "stop", Port: rest}), nil
+	default:
+		// Treat as port number for quick start: /tunnel 8080
+		return tunnel.Execute(ctx, b.tunnelMgr, tunnel.Directive{Action: "start", Port: sub}), nil
+	}
+}
+
+// parseTunnelStartArgs parses "<port> [--protocol <proto>]" from /tunnel start args.
+func parseTunnelStartArgs(args string) (port, protocol string) {
+	if idx := strings.Index(args, "--protocol "); idx >= 0 {
+		after := args[idx+11:]
+		protoParts := strings.SplitN(after, " ", 2)
+		protocol = protoParts[0]
+		args = strings.TrimSpace(args[:idx])
+	}
+	return strings.TrimSpace(args), protocol
+}
+
+// parsePMStartArgs parses "<name> <command> [--dir <dir>]" from /pm start args.
+func parsePMStartArgs(args string) (name, cmd, dir string) {
+	// Extract --dir flag if present.
+	if idx := strings.Index(args, "--dir "); idx >= 0 {
+		after := args[idx+6:]
+		dirParts := strings.SplitN(after, " ", 2)
+		dir = dirParts[0]
+		args = strings.TrimSpace(args[:idx])
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	if len(parts) < 2 {
+		return "", "", ""
+	}
+	return parts[0], parts[1], dir
+}
+
 // parseGenerateImageDirectives extracts [generate-image prompt="..."] directives
 // from Claude's response, generates images, and sends them via Telegram.
 func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, chatID int64, response string) string {
@@ -1737,6 +1969,42 @@ func (b *Bridge) browserSystemPrompt() string {
 		"Screenshots are sent as photos to the chat.\n"
 }
 
+func (b *Bridge) tunnelSystemPrompt() string {
+	if b.tunnelMgr == nil {
+		return ""
+	}
+	return "\n\n## HTTP Tunnels\n\n" +
+		"You can expose local ports to the internet using the `[tunnel]` directive (powered by Cloudflare quick tunnels).\n\n" +
+		"```\n[tunnel port=\"8080\"]\n[tunnel action=\"stop\" port=\"8080\"]\n[tunnel action=\"list\"]\n```\n\n" +
+		"**Attributes:**\n" +
+		"- `port` — local port to expose (required for start/stop)\n" +
+		"- `action` — `start` (default), `stop`, or `list`\n" +
+		"- `protocol` — `http` (default) or `https`\n\n" +
+		"The bridge handles the tunnel — do NOT use Bash for cloudflared.\n"
+}
+
+func (b *Bridge) pmSystemPrompt() string {
+	if b.pmMgr == nil {
+		return ""
+	}
+	return "\n\n## Process Manager\n\n" +
+		"Use the `[pm]` directive to manage background processes (web servers, watchers, etc.).\n" +
+		"**CRITICAL:** NEVER run long-running processes (servers, watchers) directly via Bash — it will block your session. " +
+		"Always use `[pm]` to start them in the background.\n\n" +
+		"**Start a process:**\n```\n[pm name=\"myserver\" cmd=\"node server.js\" dir=\"/path/to/app\"]\n```\n\n" +
+		"**Other actions:**\n```\n[pm action=\"list\"]\n[pm action=\"logs\" name=\"myserver\"]\n[pm action=\"stop\" name=\"myserver\"]\n[pm action=\"remove\" name=\"myserver\"]\n```\n\n" +
+		"**Attributes:**\n" +
+		"- `name` — unique name for the process (required for start/stop/logs/remove)\n" +
+		"- `cmd` — shell command to run (required for start)\n" +
+		"- `dir` — working directory (optional)\n" +
+		"- `action` — `start` (default when cmd provided), `stop`, `list`, `logs`, `remove`\n\n" +
+		"**Correct web app workflow:**\n" +
+		"1. Write app files\n" +
+		"2. `[pm name=\"web\" cmd=\"node server.js\" dir=\"/path/to/app\"]` — starts in background\n" +
+		"3. `[tunnel port=\"8080\"]` — expose via public URL\n\n" +
+		"The bridge manages processes and captures logs — do NOT use `nohup`, `&`, or Bash for background processes.\n"
+}
+
 // parseBrowserDirectives finds [browser url="..."]...[/browser] blocks in Claude's response,
 // runs the browser actions, and returns the cleaned response + formatted results for follow-up.
 func (b *Bridge) parseBrowserDirectives(ctx context.Context, chatID int64, response string) (string, string) {
@@ -1775,6 +2043,62 @@ func (b *Bridge) parseBrowserDirectives(ctx context.Context, chatID int64, respo
 
 	// Strip directives from response
 	cleaned := browser.BrowserRe.ReplaceAllString(response, "")
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned, results.String()
+}
+
+// parseTunnelDirectives finds [tunnel ...] blocks in Claude's response,
+// executes tunnel actions (start/stop/list), and returns the cleaned response + results.
+func (b *Bridge) parseTunnelDirectives(ctx context.Context, response string) (string, string) {
+	if b.tunnelMgr == nil {
+		return response, ""
+	}
+
+	matches := tunnel.TunnelRe.FindAllStringIndex(response, -1)
+	if len(matches) == 0 {
+		return response, ""
+	}
+
+	var results strings.Builder
+	for _, m := range matches {
+		match := response[m[0]:m[1]]
+		d := tunnel.ParseDirective(match)
+		slog.Info("tunnel directive", "action", d.Action, "port", d.Port)
+		result := tunnel.Execute(ctx, b.tunnelMgr, d)
+		results.WriteString(result)
+		results.WriteString("\n")
+	}
+
+	cleaned := tunnel.TunnelRe.ReplaceAllString(response, "")
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned, results.String()
+}
+
+// parsePMDirectives finds [pm ...] blocks in Claude's response,
+// executes process management actions, and returns the cleaned response + results.
+func (b *Bridge) parsePMDirectives(ctx context.Context, response string) (string, string) {
+	if b.pmMgr == nil {
+		return response, ""
+	}
+
+	matches := pm.PMRe.FindAllStringIndex(response, -1)
+	if len(matches) == 0 {
+		return response, ""
+	}
+
+	var results strings.Builder
+	for _, m := range matches {
+		match := response[m[0]:m[1]]
+		d := pm.ParseDirective(match)
+		slog.Info("pm directive", "action", d.Action, "name", d.Name)
+		result := pm.Execute(ctx, b.pmMgr, d)
+		results.WriteString(result)
+		results.WriteString("\n")
+	}
+
+	cleaned := pm.PMRe.ReplaceAllString(response, "")
 	cleaned = strings.TrimSpace(cleaned)
 
 	return cleaned, results.String()

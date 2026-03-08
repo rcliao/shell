@@ -24,6 +24,21 @@ type Config struct {
 	Google    GoogleConfig    `json:"google"`
 	Secrets   SecretsConfig   `json:"secrets"`
 	Browser   BrowserConfig   `json:"browser"`
+	Tunnel    TunnelConfig    `json:"tunnel"`
+	PM        PMConfig        `json:"pm"`
+}
+
+type PMConfig struct {
+	Enabled  bool `json:"enabled"`
+	MaxProcs int  `json:"max_procs"` // max concurrent processes, default 10
+	LogLines int  `json:"log_lines"` // tail lines to keep per process, default 50
+}
+
+type TunnelConfig struct {
+	Enabled         bool   `json:"enabled"`
+	CloudflaredBin  string `json:"cloudflared_bin"`  // path to cloudflared binary, default "cloudflared"
+	MaxTunnels      int    `json:"max_tunnels"`      // max concurrent tunnels, default 5
+	DefaultProtocol string `json:"default_protocol"` // "http" or "https", default "http"
 }
 
 type BrowserConfig struct {
@@ -75,13 +90,14 @@ func (t *TelegramConfig) UnmarshalJSON(data []byte) error {
 }
 
 type ClaudeConfig struct {
-	Binary       string        `json:"binary"`
-	Model        string        `json:"model"`
-	Timeout      time.Duration `json:"timeout"`
-	MaxSessions  int           `json:"max_sessions"`
-	WorkDir      string        `json:"work_dir"`
-	AllowedTools []string      `json:"allowed_tools"`
-	ExtraArgs    []string      `json:"extra_args"`
+	Binary        string        `json:"binary"`
+	Model         string        `json:"model"`
+	Timeout       time.Duration `json:"timeout"`
+	MaxSessions   int           `json:"max_sessions"`
+	WorkDir       string        `json:"work_dir"`
+	AllowedTools  []string      `json:"allowed_tools"`
+	ExtraArgs     []string      `json:"extra_args"`
+	PlaygroundDir string        `json:"playground_dir"` // writable sandbox dir, auto-approved for Write/Edit/Bash
 }
 
 type StoreConfig struct {

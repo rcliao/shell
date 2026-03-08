@@ -3,14 +3,15 @@ module github.com/rcliao/shell
 go 1.25.0
 
 require (
-	github.com/chromedp/chromedp v0.14.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-telegram/bot v1.19.0
 	github.com/google/uuid v1.6.0
 	github.com/rcliao/ghost v0.0.0
 	github.com/rcliao/shell-browser v0.0.0
 	github.com/rcliao/shell-imagen v0.0.0
+	github.com/rcliao/shell-pm v0.0.0
 	github.com/rcliao/shell-secrets v0.0.0
+	github.com/rcliao/shell-tunnel v0.0.0
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.46.1
 )
@@ -20,6 +21,7 @@ require (
 	cloud.google.com/go/auth v0.9.3 // indirect
 	cloud.google.com/go/compute/metadata v0.5.0 // indirect
 	github.com/chromedp/cdproto v0.0.0-20250724212937-08a3db8b4327 // indirect
+	github.com/chromedp/chromedp v0.14.2 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-json-experiment/json v0.0.0-20250725192818-e39067aee2d2 // indirect
@@ -41,7 +43,7 @@ require (
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.37.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
 	google.golang.org/genai v1.49.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
@@ -59,3 +61,7 @@ replace github.com/rcliao/shell-imagen => ../shell-imagen
 replace github.com/rcliao/shell-browser => ../shell-browser
 
 replace github.com/rcliao/shell-secrets => ../shell-secrets
+
+replace github.com/rcliao/shell-pm => ../shell-pm
+
+replace github.com/rcliao/shell-tunnel => ../shell-tunnel
