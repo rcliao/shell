@@ -13,15 +13,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rcliao/teeny-relay/internal/browser"
-	"github.com/rcliao/teeny-relay/internal/config"
-	"github.com/rcliao/teeny-relay/internal/imagen"
-	"github.com/rcliao/teeny-relay/internal/memory"
-	"github.com/rcliao/teeny-relay/internal/planner"
-	"github.com/rcliao/teeny-relay/internal/process"
-	"github.com/rcliao/teeny-relay/internal/search"
-	"github.com/rcliao/teeny-relay/internal/store"
-	"github.com/rcliao/teeny-relay/internal/worktree"
+	"github.com/rcliao/shell/internal/browser"
+	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/imagen"
+	"github.com/rcliao/shell/internal/memory"
+	"github.com/rcliao/shell/internal/planner"
+	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/search"
+	"github.com/rcliao/shell/internal/store"
+	"github.com/rcliao/shell/internal/worktree"
 )
 
 // ImageInfo holds a downloaded image file path together with optional metadata
@@ -355,8 +355,8 @@ type Bridge struct {
 
 	reactionMap map[string]string // emoji → action (e.g. "👍":"go")
 
-	// Self-restart: when a plan modifies the relay's own source
-	selfSourceDir string // resolved path to relay's source dir (empty = disabled)
+	// Self-restart: when a plan modifies shell's own source
+	selfSourceDir string // resolved path to shell's source dir (empty = disabled)
 	onSelfRestart func() // called when self-modification detected after merge
 
 	// Search API keys (resolved from secrets/env at startup)
@@ -428,7 +428,7 @@ func (b *Bridge) SetNotifier(fn NotifyFunc) {
 	b.notify = fn
 }
 
-// SetSelfRestart configures auto-restart when a plan modifies the relay's own source.
+// SetSelfRestart configures auto-restart when a plan modifies shell's own source.
 func (b *Bridge) SetSelfRestart(sourceDir string, fn func()) {
 	b.selfSourceDir = sourceDir
 	b.onSelfRestart = fn
@@ -920,7 +920,7 @@ func (b *Bridge) Start(ctx context.Context, chatID int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "Welcome to teeny-relay! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/review — Review all memories with summary\n/correct <n> <text> — Correct a memory by number\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
+	return "Welcome to shell! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/review — Review all memories with summary\n/correct <n> <text> — Correct a memory by number\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
 }
 
 // Reset kills the current session and creates a fresh one.
@@ -974,7 +974,7 @@ func (b *Bridge) Status(chatID int64) (string, error) {
 }
 
 func (b *Bridge) Help() string {
-	help := "## teeny-relay\n\n" +
+	help := "## shell\n\n" +
 		"Telegram ↔ Claude Code bridge\n\n" +
 		"Send any message to chat with Claude Code.\n\n" +
 		"---\n\n" +
@@ -2651,7 +2651,7 @@ func (b *Bridge) cleanupWorktree(run *planRun, chatID int64) {
 	}
 }
 
-// isSelfRepo checks if repoDir matches the relay's own source directory.
+// isSelfRepo checks if repoDir matches shell's own source directory.
 func (b *Bridge) isSelfRepo(repoDir string) bool {
 	if b.selfSourceDir == "" || repoDir == "" {
 		return false
@@ -2671,7 +2671,7 @@ func (b *Bridge) triggerSelfRestart(run *planRun, chatID int64) {
 		return
 	}
 	slog.Info("self-modification detected after plan merge, scheduling rebuild+restart")
-	run.progress = append(run.progress, "Changes affect relay itself — rebuilding and restarting...")
+	run.progress = append(run.progress, "Changes affect shell itself — rebuilding and restarting...")
 	// Give a short delay so the notification can be sent before restart.
 	notify := b.notify
 	go func() {

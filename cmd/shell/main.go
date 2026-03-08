@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rcliao/teeny-relay/internal/config"
-	"github.com/rcliao/teeny-relay/internal/daemon"
-	"github.com/rcliao/teeny-relay/internal/process"
-	"github.com/rcliao/teeny-relay/internal/search"
-	"github.com/rcliao/teeny-relay/internal/store"
+	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/daemon"
+	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/search"
+	"github.com/rcliao/shell/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +26,7 @@ func main() {
 	var verbose bool
 
 	rootCmd := &cobra.Command{
-		Use:   "relay",
+		Use:   "shell",
 		Short: "Telegram Bot to Claude Code CLI bridge",
 	}
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
@@ -54,7 +54,7 @@ func main() {
 			fmt.Println("1. Create a Telegram bot via @BotFather")
 			fmt.Println("2. Set TELEGRAM_BOT_TOKEN environment variable")
 			fmt.Println("3. Add your Telegram user ID to allowed_users in config.json")
-			fmt.Println("4. Run: relay daemon")
+			fmt.Println("4. Run: shell daemon")
 			return nil
 		},
 	}

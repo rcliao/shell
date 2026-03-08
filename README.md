@@ -1,4 +1,4 @@
-# teeny-relay
+# shell
 
 Telegram Bot to Claude Code CLI bridge. Chat with Claude Code from Telegram.
 
@@ -7,13 +7,13 @@ Telegram Bot to Claude Code CLI bridge. Chat with Claude Code from Telegram.
 1. Create a Telegram bot via [@BotFather](https://t.me/BotFather)
 2. Initialize config:
    ```bash
-   relay init
+   shell init
    ```
 3. Set your bot token:
    ```bash
    export TELEGRAM_BOT_TOKEN="your-token-here"
    ```
-4. Edit `~/.teeny-relay/config.json` — add your Telegram user ID to `allowed_users`:
+4. Edit `~/.shell/config.json` — add your Telegram user ID to `allowed_users`:
    ```json
    {
      "telegram": {
@@ -25,18 +25,18 @@ Telegram Bot to Claude Code CLI bridge. Chat with Claude Code from Telegram.
    (Find your user ID by messaging [@userinfobot](https://t.me/userinfobot))
 5. Start the daemon:
    ```bash
-   relay daemon
+   shell daemon
    ```
 
 ## Commands
 
 ### CLI
-- `relay init` — Create config directory and default config
-- `relay daemon [-v]` — Start the Telegram bot daemon
-- `relay send "message"` — One-shot test without Telegram
-- `relay status` — Show active sessions
-- `relay session list` — List all sessions
-- `relay session kill <chat-id>` — Kill a session
+- `shell init` — Create config directory and default config
+- `shell daemon [-v]` — Start the Telegram bot daemon
+- `shell send "message"` — One-shot test without Telegram
+- `shell status` — Show active sessions
+- `shell session list` — List all sessions
+- `shell session kill <chat-id>` — Kill a session
 
 ### Telegram Bot
 - `/start` — Initialize and show welcome message

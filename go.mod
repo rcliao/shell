@@ -1,4 +1,4 @@
-module github.com/rcliao/teeny-relay
+module github.com/rcliao/shell
 
 go 1.25.0
 
@@ -7,8 +7,8 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-telegram/bot v1.19.0
 	github.com/google/uuid v1.6.0
-	github.com/rcliao/agent-memory v0.0.0
-	github.com/rcliao/teeny-secrets v0.0.0
+	github.com/rcliao/ghost v0.0.0
+	github.com/rcliao/shell-secrets v0.0.0
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/genai v1.49.0
 	modernc.org/sqlite v1.46.1
@@ -50,6 +50,6 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/rcliao/agent-memory => ../agent-memory
+replace github.com/rcliao/ghost => ../ghost
 
-replace github.com/rcliao/teeny-secrets => ../teeny-secrets
+replace github.com/rcliao/shell-secrets => ../shell-secrets

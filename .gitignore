@@ -1,4 +1,5 @@
 # Binaries
+/shell
 /teeny-relay
 /relay
 *.exe

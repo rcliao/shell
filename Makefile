@@ -1,7 +1,7 @@
 .PHONY: build run test vet clean watch
 
-BINARY := relay
-PKG := ./cmd/relay
+BINARY := shell
+PKG := ./cmd/shell
 
 build:
 	go build -o $(BINARY) $(PKG)

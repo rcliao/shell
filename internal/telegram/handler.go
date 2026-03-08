@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/rcliao/teeny-relay/internal/bridge"
+	"github.com/rcliao/shell/internal/bridge"
 )
 
 const streamEditInterval = time.Second // minimum interval between Telegram message edits

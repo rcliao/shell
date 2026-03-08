@@ -3,7 +3,7 @@ package scheduler
 import (
 	"time"
 
-	"github.com/rcliao/teeny-relay/internal/store"
+	"github.com/rcliao/shell/internal/store"
 )
 
 // StoreAdapter wraps *store.Store to satisfy ScheduleStore.

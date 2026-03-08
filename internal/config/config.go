@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	secrets "github.com/rcliao/teeny-secrets"
+	secrets "github.com/rcliao/shell-secrets"
 )
 
 type Config struct {
@@ -35,7 +35,7 @@ type BrowserConfig struct {
 
 type SecretsConfig struct {
 	Enabled   bool   `json:"enabled"`
-	StorePath string `json:"store_path"` // default: ~/.teeny-secrets/secrets.enc
+	StorePath string `json:"store_path"` // default: ~/.shell-secrets/secrets.enc
 }
 
 var globalSecretStore secrets.Store
@@ -218,7 +218,7 @@ func (t TelegramConfig) ReactionAction(emoji string) string {
 
 func DefaultConfigDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".teeny-relay")
+	return filepath.Join(home, ".shell")
 }
 
 func Default() Config {
@@ -239,10 +239,10 @@ func Default() Config {
 			ExtraArgs:    []string{},
 		},
 		Store: StoreConfig{
-			DBPath: filepath.Join(configDir, "relay.db"),
+			DBPath: filepath.Join(configDir, "shell.db"),
 		},
 		Daemon: DaemonConfig{
-			PIDFile: filepath.Join(configDir, "relay.pid"),
+			PIDFile: filepath.Join(configDir, "shell.pid"),
 		},
 		Memory: MemoryConfig{
 			DBPath:           filepath.Join(configDir, "memory.db"),

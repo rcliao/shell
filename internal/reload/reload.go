@@ -38,7 +38,7 @@ type Watcher struct {
 type Config struct {
 	SourceDir  string
 	BinaryPath string        // path to current binary (default: os.Executable())
-	BuildPkg   string        // build target (default: "./cmd/relay")
+	BuildPkg   string        // build target (default: "./cmd/shell")
 	Debounce   time.Duration // debounce interval (default: 500ms)
 	OnShutdown func()        // called before exec to let daemon clean up
 }
@@ -56,7 +56,7 @@ func New(cfg Config) (*Watcher, error) {
 		cfg.BinaryPath = exe
 	}
 	if cfg.BuildPkg == "" {
-		cfg.BuildPkg = "./cmd/relay"
+		cfg.BuildPkg = "./cmd/shell"
 	}
 	if cfg.Debounce == 0 {
 		cfg.Debounce = 500 * time.Millisecond

@@ -10,6 +10,21 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+// Realistic Chrome user agent string.
+const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+
+// JS snippet to remove automation indicators after page load.
+const stealthJS = `
+// Remove webdriver flag
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+// Fake plugins
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+// Fake languages
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+// Spoof chrome runtime
+window.chrome = {runtime: {}};
+`
+
 // Config holds browser automation settings.
 type Config struct {
 	Enabled        bool   `json:"enabled"`
@@ -43,10 +58,26 @@ func Execute(ctx context.Context, cfg Config, d Directive) *Result {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Build chromedp options.
-	opts := chromedp.DefaultExecAllocatorOptions[:]
+	// Build chromedp options with anti-detection measures.
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		// Anti-detection: remove automation indicators
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("exclude-switches", "enable-automation"),
+		chromedp.Flag("disable-features", "AutomationControlled"),
+
+		// Realistic user agent
+		chromedp.UserAgent(defaultUserAgent),
+
+		// Realistic window size
+		chromedp.WindowSize(1920, 1080),
+
+		// Disable automation-related infobars
+		chromedp.Flag("disable-infobars", true),
+		chromedp.Flag("disable-extensions", true),
+	)
 	if cfg.Headless {
-		opts = append(opts, chromedp.Headless)
+		// Use new headless mode which is harder to detect
+		opts = append(opts, chromedp.Flag("headless", "new"))
 	}
 	if cfg.ChromePath != "" {
 		opts = append(opts, chromedp.ExecPath(cfg.ChromePath))
@@ -59,6 +90,11 @@ func Execute(ctx context.Context, cfg Config, d Directive) *Result {
 	defer browserCancel()
 
 	result := &Result{URL: d.URL}
+
+	// Inject stealth JS before navigation to patch navigator properties.
+	if err := chromedp.Run(browserCtx, chromedp.Evaluate(stealthJS, nil)); err != nil {
+		slog.Warn("browser: stealth injection failed (non-fatal)", "error", err)
+	}
 
 	// Always navigate first.
 	slog.Info("browser: navigating", "url", d.URL)
@@ -75,6 +111,9 @@ func Execute(ctx context.Context, cfg Config, d Directive) *Result {
 		Description: fmt.Sprintf("navigate %q", d.URL),
 		Output:      "OK",
 	})
+
+	// Re-inject stealth after navigation (page load resets JS state).
+	_ = chromedp.Run(browserCtx, chromedp.Evaluate(stealthJS, nil))
 
 	// Execute each action.
 	for i, action := range d.Actions {

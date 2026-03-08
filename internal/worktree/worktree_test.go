@@ -65,16 +65,16 @@ func TestResolveRepoDir_NestedMatch(t *testing.T) {
 
 	// Parent is also a git repo (mono-repo), with nested repos.
 	initGitRepo(t, tmp)
-	initGitRepo(t, filepath.Join(tmp, "teeny-relay"))
-	initGitRepo(t, filepath.Join(tmp, "agent-memory"))
+	initGitRepo(t, filepath.Join(tmp, "shell"))
+	initGitRepo(t, filepath.Join(tmp, "ghost"))
 
-	// Intent mentioning "teeny-relay" should pick the nested repo, not the parent.
-	resolved, err := ResolveRepoDir(tmp, "add sticker support to teeny-relay")
+	// Intent mentioning "shell" should pick the nested repo, not the parent.
+	resolved, err := ResolveRepoDir(tmp, "add sticker support to shell")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected := filepath.Join(tmp, "teeny-relay")
+	expected := filepath.Join(tmp, "shell")
 	if filepath.Clean(resolved) != filepath.Clean(expected) {
 		t.Errorf("expected %s, got %s", expected, resolved)
 	}

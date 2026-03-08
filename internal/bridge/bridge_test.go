@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcliao/teeny-relay/internal/browser"
-	"github.com/rcliao/teeny-relay/internal/memory"
-	"github.com/rcliao/teeny-relay/internal/process"
-	"github.com/rcliao/teeny-relay/internal/store"
+	"github.com/rcliao/shell/internal/browser"
+	"github.com/rcliao/shell/internal/memory"
+	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/store"
 )
 
 func testBridge(t *testing.T) *Bridge {

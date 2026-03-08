@@ -1,4 +1,4 @@
-// Package memory wraps the agent-memory library for use in teeny-relay.
+// Package memory wraps the ghost library for use in shell.
 package memory
 
 import (
@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	agentmemory "github.com/rcliao/agent-memory"
+	agentmemory "github.com/rcliao/ghost"
 )
 
 // ProfileConfig configures memory behavior for a specific agent profile.
@@ -28,7 +28,7 @@ type ProfileConfig struct {
 	DirectiveNS      string // target NS for [remember] blocks
 }
 
-// Memory wraps an agent-memory store for relay use.
+// Memory wraps a ghost store for shell use.
 type Memory struct {
 	store            agentmemory.Store
 	budget           int
@@ -138,7 +138,7 @@ func (m *Memory) SystemPrompt(ctx context.Context, chatID int64) string {
 
 // namespace returns the per-chat namespace.
 func namespace(chatID int64) string {
-	return fmt.Sprintf("relay:chat:%d", chatID)
+	return fmt.Sprintf("shell:chat:%d", chatID)
 }
 
 // InjectContext fetches relevant memories and prepends them to the user message.
@@ -487,7 +487,7 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 
 // heartbeatNamespace returns the per-chat heartbeat learning namespace.
 func heartbeatNamespace(chatID int64) string {
-	return fmt.Sprintf("relay:heartbeat:%d", chatID)
+	return fmt.Sprintf("shell:heartbeat:%d", chatID)
 }
 
 // RecentExchanges returns the last N episodic exchanges for a chat.

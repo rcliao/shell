@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/rcliao/teeny-relay/internal/bridge"
+	"github.com/rcliao/shell/internal/bridge"
 )
 
 type Bot struct {

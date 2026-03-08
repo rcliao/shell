@@ -10,17 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rcliao/teeny-relay/internal/bridge"
-	"github.com/rcliao/teeny-relay/internal/browser"
-	"github.com/rcliao/teeny-relay/internal/config"
-	"github.com/rcliao/teeny-relay/internal/imagen"
-	"github.com/rcliao/teeny-relay/internal/memory"
-	"github.com/rcliao/teeny-relay/internal/planner"
-	"github.com/rcliao/teeny-relay/internal/process"
-	"github.com/rcliao/teeny-relay/internal/reload"
-	"github.com/rcliao/teeny-relay/internal/scheduler"
-	"github.com/rcliao/teeny-relay/internal/store"
-	"github.com/rcliao/teeny-relay/internal/telegram"
+	"github.com/rcliao/shell/internal/bridge"
+	"github.com/rcliao/shell/internal/browser"
+	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/imagen"
+	"github.com/rcliao/shell/internal/memory"
+	"github.com/rcliao/shell/internal/planner"
+	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/reload"
+	"github.com/rcliao/shell/internal/scheduler"
+	"github.com/rcliao/shell/internal/store"
+	"github.com/rcliao/shell/internal/telegram"
 )
 
 type Daemon struct {
@@ -62,10 +62,10 @@ func New(cfg config.Config) (*Daemon, error) {
 		ExtraArgs:    cfg.Claude.ExtraArgs,
 	})
 
-	// If scheduler is enabled, inject relay:capabilities into system namespaces
+	// If scheduler is enabled, inject shell:capabilities into system namespaces
 	// so schedule docs are always visible in the system prompt.
 	if cfg.Scheduler.Enabled {
-		capNS := "relay:capabilities"
+		capNS := "shell:capabilities"
 		if !containsStr(cfg.Memory.SystemNamespaces, capNS) {
 			cfg.Memory.SystemNamespaces = append(cfg.Memory.SystemNamespaces, capNS)
 		}
@@ -179,7 +179,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		bot.SendPhoto(chatID, imageData, caption)
 	})
 
-	// Wire chat action sender: upload_photo indicators for relay image generation
+	// Wire chat action sender: upload_photo indicators for shell image generation
 	br.SetChatAction(func(chatID int64, action string) {
 		bot.SendChatAction(chatID, action)
 	})
@@ -220,13 +220,13 @@ func New(cfg config.Config) (*Daemon, error) {
 
 		// Seed schedule docs into memory so they're always visible in system prompt.
 		if mem != nil {
-			if err := mem.SeedNamespace(context.Background(), "relay:capabilities", "scheduling",
+			if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "scheduling",
 				"Schedule capabilities: Use [schedule at=\"...\"] for one-shot or [schedule cron=\"...\"] for recurring reminders. "+
 					"Commands: /schedule add|list|delete|enable|pause. Supports @daily, @hourly, @weekly, @monthly aliases. "+
 					"Use --tz flag for per-schedule timezone override."); err != nil {
 				slog.Warn("failed to seed schedule docs", "error", err)
 			}
-			if err := mem.SeedNamespace(context.Background(), "relay:capabilities", "heartbeat-learning",
+			if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "heartbeat-learning",
 				"Heartbeat self-improvement: During [Heartbeat] check-ins, recent conversations and previous "+
 					"insights are provided. Use [heartbeat-learning]...[/heartbeat-learning] to store reusable "+
 					"patterns discovered during heartbeats."); err != nil {
@@ -278,12 +278,12 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
-	// Wire self-restart: when a plan modifies relay source, rebuild and restart.
+	// Wire self-restart: when a plan modifies shell source, rebuild and restart.
 	if sourceDir != "" {
 		binaryPath, _ := os.Executable()
 		br.SetSelfRestart(sourceDir, func() {
-			slog.Info("self-restart: rebuilding relay...")
-			if err := reload.RebuildAndRestart(binaryPath, "./cmd/relay", d.Shutdown); err != nil {
+			slog.Info("self-restart: rebuilding shell...")
+			if err := reload.RebuildAndRestart(binaryPath, "./cmd/shell", d.Shutdown); err != nil {
 				slog.Error("self-restart: failed", "error", err)
 			}
 		})
