@@ -85,6 +85,22 @@ Actions: `navigate`, `click`, `type`, `wait`, `screenshot`, `extract`, `js`, `sl
 Screenshots are sent as photos to the chat. Extracted text and JS results are fed back for reasoning.
 Requires `"browser": {"enabled": true}` in config.
 
+## HTTP Tunnels
+
+Expose local ports to the internet via Cloudflare quick tunnels using the `[tunnel]` directive.
+
+```
+[tunnel port="8080"]
+[tunnel action="stop" port="8080"]
+[tunnel action="list"]
+```
+
+- `port` — local port to expose (required for start/stop)
+- `action` — `start` (default), `stop`, or `list`
+- `protocol` — `http` (default) or `https`
+
+Requires `"tunnel": {"enabled": true}` in config and `cloudflared` installed (`brew install cloudflared`).
+
 ## Available CLI Tools
 
 See `TOOLS.md` for the full reference of CLI tools available via Bash. Read it when users request:

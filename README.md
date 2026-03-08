@@ -1,6 +1,8 @@
 # shell
 
-Telegram Bot to Claude Code CLI bridge. Chat with Claude Code from Telegram.
+Claude Code CLI orchestration layer. Telegram bridge, scheduling, planning, memory, and browser automation.
+
+Part of the [Ghost in the Shell](https://github.com/rcliao?tab=repositories&q=shell-) ecosystem.
 
 ## Setup
 
@@ -28,33 +30,75 @@ Telegram Bot to Claude Code CLI bridge. Chat with Claude Code from Telegram.
    shell daemon
    ```
 
+## Features
+
+- **Telegram bridge** — Each chat gets its own persistent Claude Code session
+- **Memory** — Semantic memory via [ghost](https://github.com/rcliao/ghost) with per-chat profiles and context injection
+- **Scheduling** — Cron and one-shot schedules with quiet hours and heartbeat check-ins
+- **Planning** — Execute-test-review loop with git worktree isolation
+- **Browser** — Headless Chrome automation via [shell-browser](https://github.com/rcliao/shell-browser)
+- **Image generation** — AI image creation via [shell-imagen](https://github.com/rcliao/shell-imagen)
+- **Web search** — Built-in Brave/Tavily/DuckDuckGo search
+- **Tunnels** — Expose local ports via [shell-tunnel](https://github.com/rcliao/shell-tunnel)
+- **Secrets** — Encrypted secret store via [shell-secrets](https://github.com/rcliao/shell-secrets)
+- **Streaming** — Live message edits as Claude responds
+- **Albums** — Multi-photo support with 500ms debounce
+- **Reactions** — Emoji-triggered actions (go, stop, cancel, status, retry)
+
 ## Commands
 
 ### CLI
 - `shell init` — Create config directory and default config
-- `shell daemon [-v]` — Start the Telegram bot daemon
+- `shell daemon [--watch]` — Start the Telegram bot daemon
 - `shell send "message"` — One-shot test without Telegram
 - `shell status` — Show active sessions
-- `shell session list` — List all sessions
-- `shell session kill <chat-id>` — Kill a session
+- `shell session list|kill <chat-id>` — Session management
+- `shell restart` — Send SIGHUP to running daemon
+- `shell stop` — Send SIGTERM to running daemon
+- `shell search "query"` — Web search from CLI
 
 ### Telegram Bot
 - `/start` — Initialize and show welcome message
 - `/new` — Reset session, start fresh conversation
 - `/status` — Show current session info
 - `/help` — Show available commands
+- `/plan` — Start a plan execution
+- `/schedule add|list|delete|enable|pause` — Manage schedules
+- `/heartbeat <interval> <message>` — Set up periodic check-ins
+- `/imagine <prompt>` — Generate an image
 
 ## Build
 
 ```bash
-make build
+make build    # Build binary
+make test     # Run tests
+make vet      # Run go vet
+make watch    # Build and run with --watch for live reload
 ```
 
-## How it works
+## How It Works
 
 Each Telegram chat gets its own Claude Code session. Messages are forwarded to:
 ```
-claude -p "message" --continue --session-id <sid> --output-format text
+claude -p "message" --resume <session-id> --output-format stream-json
 ```
 
-Sessions persist across restarts via SQLite. The `--session-id` flag maintains conversation context.
+Claude's responses are parsed for directives (`[search]`, `[browser]`, `[tunnel]`, `[generate-image]`, `[schedule]`, `[relay]`) which are executed and fed back for follow-up reasoning.
+
+Sessions persist across restarts via SQLite. Memory context is injected via `--append-system-prompt`.
+
+## Ecosystem
+
+| Repo | Role |
+|------|------|
+| [ghost](https://github.com/rcliao/ghost) | Persistent agent memory (the "ghost" — consciousness/personality) |
+| **shell** | Main orchestration app (the "shell" — vessel/runtime) |
+| [shell-browser](https://github.com/rcliao/shell-browser) | Headless Chrome automation |
+| [shell-imagen](https://github.com/rcliao/shell-imagen) | Image generation via Gemini |
+| [shell-search](https://github.com/rcliao/shell-search) | Web search CLI |
+| [shell-secrets](https://github.com/rcliao/shell-secrets) | Encrypted secret store |
+| [shell-tunnel](https://github.com/rcliao/shell-tunnel) | HTTP tunnels via cloudflared |
+
+## License
+
+MIT
