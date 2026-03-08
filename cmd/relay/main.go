@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/rcliao/teeny-relay/internal/config"
 	"github.com/rcliao/teeny-relay/internal/daemon"
 	"github.com/rcliao/teeny-relay/internal/process"
+	"github.com/rcliao/teeny-relay/internal/search"
 	"github.com/rcliao/teeny-relay/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -305,8 +307,59 @@ func main() {
 		},
 	}
 
+	// search command — web search for use by Claude via Bash
+	var (
+		searchCount     int
+		searchFreshness string
+		searchCountry   string
+		searchJSON      bool
+	)
+	searchCmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Web search (Brave/Tavily/DuckDuckGo)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			query := strings.Join(args, " ")
+
+			cfg := loadConfig()
+			config.OpenSecretStore(cfg.Secrets)
+			defer config.CloseSecretStore()
+
+			braveKey := cfg.Secret("BRAVE_SEARCH_API_KEY")
+			tavilyKey := cfg.Secret("TAVILY_API_KEY")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			resp, err := search.Search(ctx, braveKey, tavilyKey, search.Options{
+				Query:     query,
+				Count:     searchCount,
+				Freshness: searchFreshness,
+				Country:   searchCountry,
+			})
+			if err != nil {
+				return err
+			}
+
+			if searchJSON {
+				data, err := json.MarshalIndent(resp, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Println(string(data))
+			} else {
+				fmt.Print(search.Markdown(resp))
+			}
+			return nil
+		},
+	}
+	searchCmd.Flags().IntVarP(&searchCount, "num", "n", 5, "Number of results")
+	searchCmd.Flags().StringVarP(&searchFreshness, "freshness", "f", "", "Time filter: pd (24h), pw (7d), pm (31d), py (1yr)")
+	searchCmd.Flags().StringVar(&searchCountry, "country", "", "Country code (e.g. us, jp)")
+	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output as JSON")
+
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd)
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

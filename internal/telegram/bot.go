@@ -148,6 +148,15 @@ func (b *Bot) SendPhoto(chatID int64, imageData []byte, caption string) {
 	}
 }
 
+// SendChatAction sends a chat action (e.g. "upload_photo", "typing") to a chat.
+func (b *Bot) SendChatAction(chatID int64, action string) {
+	ctx := context.Background()
+	b.bot.SendChatAction(ctx, &bot.SendChatActionParams{
+		ChatID: chatID,
+		Action: models.ChatAction(action),
+	})
+}
+
 func (b *Bot) imagineHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return

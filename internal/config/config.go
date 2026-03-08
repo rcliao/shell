@@ -3,10 +3,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
+
+	secrets "github.com/rcliao/teeny-secrets"
 )
 
 type Config struct {
@@ -19,7 +22,23 @@ type Config struct {
 	Scheduler SchedulerConfig `json:"scheduler"`
 	Reload    ReloadConfig    `json:"reload"`
 	Google    GoogleConfig    `json:"google"`
+	Secrets   SecretsConfig   `json:"secrets"`
+	Browser   BrowserConfig   `json:"browser"`
 }
+
+type BrowserConfig struct {
+	Enabled        bool   `json:"enabled"`
+	Headless       bool   `json:"headless"`
+	TimeoutSeconds int    `json:"timeout_seconds"` // default: 30
+	ChromePath     string `json:"chrome_path"`     // optional custom Chrome binary
+}
+
+type SecretsConfig struct {
+	Enabled   bool   `json:"enabled"`
+	StorePath string `json:"store_path"` // default: ~/.teeny-secrets/secrets.enc
+}
+
+var globalSecretStore secrets.Store
 
 type TelegramConfig struct {
 	TokenEnv     string            `json:"token_env"`
@@ -112,8 +131,10 @@ func (m MemoryConfig) ChatProfileMap() map[int64]string {
 }
 
 type SchedulerConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Timezone string `json:"timezone"` // default: "UTC"
+	Enabled        bool   `json:"enabled"`
+	Timezone       string `json:"timezone"`        // default: "UTC"
+	QuietHourStart int    `json:"quiet_hour_start"` // hour (0-23) when quiet hours begin, default: 22
+	QuietHourEnd   int    `json:"quiet_hour_end"`   // hour (0-23) when quiet hours end, default: 7
 }
 
 type ReloadConfig struct {
@@ -239,8 +260,10 @@ func Default() Config {
 			AutoApproveThreshold: 80,
 		},
 		Scheduler: SchedulerConfig{
-			Enabled:  false,
-			Timezone: "UTC",
+			Enabled:        false,
+			Timezone:       "UTC",
+			QuietHourStart: 22,
+			QuietHourEnd:   7,
 		},
 		Reload: ReloadConfig{
 			Enabled:   false,
@@ -251,6 +274,11 @@ func Default() Config {
 			APIKeyEnv: "GEMINI_API_KEY",
 			Model:     "gemini-3.1-flash-image-preview",
 			Timeout:   2 * time.Minute,
+		},
+		Browser: BrowserConfig{
+			Enabled:        false,
+			Headless:       true,
+			TimeoutSeconds: 30,
 		},
 	}
 }
@@ -282,11 +310,53 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) TelegramToken() string {
+	if globalSecretStore != nil {
+		if val, err := globalSecretStore.Get(c.Telegram.TokenEnv); err == nil {
+			return val
+		}
+	}
 	return os.Getenv(c.Telegram.TokenEnv)
 }
 
 func (c Config) GoogleAPIKey() string {
+	if globalSecretStore != nil {
+		if val, err := globalSecretStore.Get(c.Google.APIKeyEnv); err == nil {
+			return val
+		}
+	}
 	return os.Getenv(c.Google.APIKeyEnv)
+}
+
+// Secret retrieves a named secret, trying the secret store first, then env var.
+func (c Config) Secret(name string) string {
+	if globalSecretStore != nil {
+		if val, err := globalSecretStore.Get(name); err == nil {
+			return val
+		}
+	}
+	return os.Getenv(name)
+}
+
+// OpenSecretStore initializes the encrypted secret store if enabled.
+func OpenSecretStore(cfg SecretsConfig) {
+	if !cfg.Enabled {
+		return
+	}
+	store, err := secrets.NewStore(cfg.StorePath)
+	if err != nil {
+		slog.Warn("secrets: failed to open store, falling back to env vars", "error", err)
+		return
+	}
+	globalSecretStore = store
+	slog.Info("secrets: store opened", "path", cfg.StorePath)
+}
+
+// CloseSecretStore closes the secret store if open.
+func CloseSecretStore() {
+	if globalSecretStore != nil {
+		globalSecretStore.Close()
+		globalSecretStore = nil
+	}
 }
 
 // MarshalJSON implements custom JSON marshaling for duration fields.

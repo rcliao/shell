@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentmemory "github.com/rcliao/agent-memory"
 )
@@ -160,12 +161,13 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 		}
 	}
 
-	// Layer 2: per-chat conversation memories
+	// Layer 2: per-chat conversation memories (with tier-aware pinning)
 	ns := namespace(chatID)
 	result, err := m.store.Context(ctx, agentmemory.ContextParams{
-		NS:     ns + "*",
-		Query:  userMsg,
-		Budget: prof.Budget,
+		NS:       ns + "*",
+		Query:    userMsg,
+		Budget:   prof.Budget,
+		PinTiers: []string{"identity", "ltm"}, // always inject important long-term memories first
 	})
 	if err != nil {
 		slog.Warn("memory context fetch failed", "error", err)
@@ -243,12 +245,12 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 	}
 
 	summary := userMsg
-	if len(summary) > maxUser {
-		summary = summary[:maxUser] + "..."
+	if utf8.RuneCountInString(summary) > maxUser {
+		summary = string([]rune(summary)[:maxUser]) + "..."
 	}
 	respSummary := response
-	if len(respSummary) > maxReply {
-		respSummary = respSummary[:maxReply] + "..."
+	if utf8.RuneCountInString(respSummary) > maxReply {
+		respSummary = string([]rune(respSummary)[:maxReply]) + "..."
 	}
 
 	ttl := prof.ExchangeTTL
@@ -259,11 +261,12 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 	content := fmt.Sprintf("User: %s\nAssistant: %s", summary, respSummary)
 
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:      ns,
-		Key:     fmt.Sprintf("exchange-%d", time.Now().UnixMilli()),
-		Content: content,
-		Kind:    "episodic",
-		TTL:     ttl,
+		NS:         ns,
+		Key:        fmt.Sprintf("exchange-%d", time.Now().UnixMilli()),
+		Content:    content,
+		Kind:       "episodic",
+		TTL:        ttl,
+		Importance: 0.3, // ephemeral exchanges — low importance, will decay naturally
 	})
 	if err != nil {
 		slog.Warn("failed to log exchange to memory", "error", err)
@@ -276,11 +279,13 @@ func (m *Memory) Remember(ctx context.Context, chatID int64, content string) err
 	// Use a key derived from content prefix to allow multiple memories
 	key := sanitizeKey(content)
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:       ns,
-		Key:      key,
-		Content:  content,
-		Kind:     "semantic",
-		Priority: "high",
+		NS:         ns,
+		Key:        key,
+		Content:    content,
+		Kind:       "semantic",
+		Priority:   "high",
+		Importance: 0.8, // user-remembered facts are high importance
+		Tier:       "ltm", // explicitly saved by user — skip stm
 	})
 	return err
 }
@@ -294,29 +299,145 @@ func (m *Memory) Forget(ctx context.Context, chatID int64, key string) error {
 	})
 }
 
-// ListMemories returns a formatted list of memories for a chat.
+// ListMemories returns a formatted debug view of all memories across related namespaces.
 func (m *Memory) ListMemories(ctx context.Context, chatID int64) (string, error) {
-	ns := namespace(chatID)
-	memories, err := m.store.List(ctx, agentmemory.ListParams{
-		NS:    ns,
-		Kind:  "semantic",
-		Limit: 20,
-	})
-	if err != nil {
-		return "", err
+	prof := m.profileFor(chatID)
+	chatNS := namespace(chatID)
+	hbNS := heartbeatNamespace(chatID)
+
+	// Collect all namespaces to query
+	type nsGroup struct {
+		label string
+		ns    string
+	}
+	groups := []nsGroup{
+		{"Chat (semantic)", chatNS},
+		{"Chat (episodic)", chatNS},
+		{"Heartbeat", hbNS},
 	}
 
-	if len(memories) == 0 {
-		return "No memories stored. Use /remember <text> to save one.", nil
+	// Add system namespaces from profile
+	for _, ns := range prof.SystemNamespaces {
+		groups = append(groups, nsGroup{"System: " + ns, ns})
+	}
+	// Add global namespaces from profile
+	for _, ns := range prof.GlobalNamespaces {
+		groups = append(groups, nsGroup{"Global: " + ns, ns})
+	}
+	// Add directive namespace if configured
+	if prof.DirectiveNS != "" {
+		groups = append(groups, nsGroup{"Directives: " + prof.DirectiveNS, prof.DirectiveNS})
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Memories\n\n")
-	for i, mem := range memories {
-		sb.WriteString(fmt.Sprintf("%d. **%s** — %s\n", i+1, mem.Key, mem.Content))
+	totalCount := 0
+
+	// Peek for tier overview
+	peek, err := m.store.Peek(ctx, chatNS+"*")
+	if err == nil && len(peek.MemoryCounts) > 0 {
+		sb.WriteString("## Memory Overview\n\n")
+		for tier, count := range peek.MemoryCounts {
+			tokens := peek.TotalEstTokens[tier]
+			sb.WriteString(fmt.Sprintf("- **%s**: %d memories (~%d tokens)\n", tier, count, tokens))
+		}
+		if peek.IdentitySummary != "" {
+			sb.WriteString(fmt.Sprintf("\nIdentity: %s\n", peek.IdentitySummary))
+		}
+		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("\n---\n\n*%d memories stored*", len(memories)))
+
+	// Chat semantic memories
+	semantic, _ := m.store.List(ctx, agentmemory.ListParams{NS: chatNS, Kind: "semantic", Limit: 50})
+	if len(semantic) > 0 {
+		sb.WriteString("## Saved Memories\n\n")
+		for _, mem := range semantic {
+			sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f, acc=%d] — %s\n",
+				mem.Key, mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
+			totalCount++
+		}
+		sb.WriteString("\n")
+	}
+
+	// Chat episodic memories
+	episodic, _ := m.store.List(ctx, agentmemory.ListParams{NS: chatNS, Kind: "episodic", Limit: 10})
+	if len(episodic) > 0 {
+		sb.WriteString("## Recent Exchanges\n\n")
+		for _, mem := range episodic {
+			sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
+				mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 100)))
+			totalCount++
+		}
+		sb.WriteString("\n")
+	}
+
+	// Heartbeat learnings
+	hbMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: hbNS, Kind: "semantic", Limit: 20})
+	if len(hbMems) > 0 {
+		sb.WriteString("## Heartbeat Learnings\n\n")
+		for _, mem := range hbMems {
+			sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
+				mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
+			totalCount++
+		}
+		sb.WriteString("\n")
+	}
+
+	// System namespace memories
+	for _, ns := range prof.SystemNamespaces {
+		sysMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: ns, Limit: 20})
+		if len(sysMems) > 0 {
+			sb.WriteString(fmt.Sprintf("## System: %s\n\n", ns))
+			for _, mem := range sysMems {
+				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
+					mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+				totalCount++
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Global namespace memories
+	for _, ns := range prof.GlobalNamespaces {
+		globalMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: ns, Limit: 20})
+		if len(globalMems) > 0 {
+			sb.WriteString(fmt.Sprintf("## Global: %s\n\n", ns))
+			for _, mem := range globalMems {
+				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
+					mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+				totalCount++
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Directive namespace memories
+	if prof.DirectiveNS != "" {
+		dirMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: prof.DirectiveNS, Limit: 20})
+		if len(dirMems) > 0 {
+			sb.WriteString(fmt.Sprintf("## Directives: %s\n\n", prof.DirectiveNS))
+			for _, mem := range dirMems {
+				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
+					mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+				totalCount++
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	if totalCount == 0 {
+		return "No memories found across any namespace.\nUse /remember <text> to save one.", nil
+	}
+
+	sb.WriteString(fmt.Sprintf("---\n\n*%d total memories across all namespaces*", totalCount))
 	return sb.String(), nil
+}
+
+func truncateStr(s string, maxRunes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes]) + "..."
 }
 
 // directiveRe matches [remember kind=procedural]...[/remember] blocks.
@@ -348,10 +469,11 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 
 		// Store the directive
 		_, err := m.store.Put(ctx, agentmemory.PutParams{
-			NS:      prof.DirectiveNS,
-			Key:     fmt.Sprintf("learning-%d", time.Now().UnixMilli()),
-			Content: content,
-			Kind:    kind,
+			NS:         prof.DirectiveNS,
+			Key:        fmt.Sprintf("learning-%d", time.Now().UnixMilli()),
+			Content:    content,
+			Kind:       kind,
+			Importance: 0.7, // agent-discovered learnings
 		})
 		if err != nil {
 			slog.Warn("failed to store memory directive", "ns", prof.DirectiveNS, "error", err)
@@ -397,11 +519,12 @@ const maxHeartbeatLearnings = 20
 func (m *Memory) StoreHeartbeatLearning(ctx context.Context, chatID int64, content string) error {
 	ns := heartbeatNamespace(chatID)
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:       ns,
-		Key:      fmt.Sprintf("hb-%d", time.Now().UnixMilli()),
-		Content:  content,
-		Kind:     "semantic",
-		Priority: "high",
+		NS:         ns,
+		Key:        fmt.Sprintf("hb-%d", time.Now().UnixMilli()),
+		Content:    content,
+		Kind:       "semantic",
+		Priority:   "high",
+		Importance: 0.7, // heartbeat learnings — moderately important, self-discovered
 	})
 	if err != nil {
 		return err
@@ -487,11 +610,12 @@ func (m *Memory) ReviewerContext(ctx context.Context, namespace, query string, b
 // No TTL — critical flow knowledge shouldn't expire.
 func (m *Memory) StoreReviewerLearning(ctx context.Context, namespace, content string) error {
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:       namespace,
-		Key:      fmt.Sprintf("reviewer-%d", time.Now().UnixMilli()),
-		Content:  content,
-		Kind:     "semantic",
-		Priority: "high",
+		NS:         namespace,
+		Key:        fmt.Sprintf("reviewer-%d", time.Now().UnixMilli()),
+		Content:    content,
+		Kind:       "semantic",
+		Priority:   "high",
+		Importance: 0.75, // critical flow knowledge
 	})
 	return err
 }
@@ -549,8 +673,8 @@ func (m *Memory) ReviewMemories(ctx context.Context, chatID int64) (string, []Re
 		for _, mem := range episodic {
 			// Truncate long episodic entries for summary
 			content := mem.Content
-			if len(content) > 120 {
-				content = content[:120] + "..."
+			if utf8.RuneCountInString(content) > 120 {
+				content = string([]rune(content)[:120]) + "..."
 			}
 			sb.WriteString(fmt.Sprintf("`%d.` %s\n\n", idx, content))
 			entries = append(entries, ReviewEntry{NS: ns, Key: mem.Key})
@@ -596,13 +720,35 @@ func (m *Memory) CorrectMemory(ctx context.Context, ns, key, newContent string) 
 // Uses Put with the same NS+key, so repeated calls are idempotent (upserts).
 func (m *Memory) SeedNamespace(ctx context.Context, ns, key, content string) error {
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:       ns,
-		Key:      key,
-		Content:  content,
-		Kind:     "semantic",
-		Priority: "high",
+		NS:         ns,
+		Key:        key,
+		Content:    content,
+		Kind:       "semantic",
+		Priority:   "high",
+		Importance: 0.9, // system capabilities — near-identity level
+		Tier:       "ltm", // system/identity content should never start as stm
 	})
 	return err
+}
+
+// RunReflect runs the memory reflect cycle to promote, decay, and prune memories.
+// Should be called periodically (e.g., after heartbeat processing).
+func (m *Memory) RunReflect(ctx context.Context) {
+	result, err := m.store.Reflect(ctx, agentmemory.ReflectParams{})
+	if err != nil {
+		slog.Warn("memory reflect failed", "error", err)
+		return
+	}
+	if result.Promoted+result.Decayed+result.Demoted+result.Deleted+result.Archived > 0 {
+		slog.Info("memory reflect complete",
+			"evaluated", result.MemoriesEvaluated,
+			"promoted", result.Promoted,
+			"decayed", result.Decayed,
+			"demoted", result.Demoted,
+			"deleted", result.Deleted,
+			"archived", result.Archived,
+		)
+	}
 }
 
 // Close closes the underlying store.
@@ -614,8 +760,8 @@ func (m *Memory) Close() error {
 func sanitizeKey(content string) string {
 	// Take first ~40 chars, lowercase, replace spaces with dashes
 	key := strings.ToLower(content)
-	if len(key) > 40 {
-		key = key[:40]
+	if utf8.RuneCountInString(key) > 40 {
+		key = string([]rune(key)[:40])
 	}
 	key = strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {

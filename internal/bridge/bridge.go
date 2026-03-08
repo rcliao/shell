@@ -13,11 +13,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rcliao/teeny-relay/internal/browser"
 	"github.com/rcliao/teeny-relay/internal/config"
 	"github.com/rcliao/teeny-relay/internal/imagen"
 	"github.com/rcliao/teeny-relay/internal/memory"
 	"github.com/rcliao/teeny-relay/internal/planner"
 	"github.com/rcliao/teeny-relay/internal/process"
+	"github.com/rcliao/teeny-relay/internal/search"
 	"github.com/rcliao/teeny-relay/internal/store"
 	"github.com/rcliao/teeny-relay/internal/worktree"
 )
@@ -55,8 +57,14 @@ var scheduleAttrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
 // heartbeatLearningRe matches [heartbeat-learning]...[/heartbeat-learning] blocks.
 var heartbeatLearningRe = regexp.MustCompile(`(?s)\[heartbeat-learning\]\s*(.*?)\s*\[/heartbeat-learning\]`)
 
+// taskCompleteRe matches [task-complete id=<N>] directives in heartbeat responses.
+var taskCompleteRe = regexp.MustCompile(`\[task-complete id=(\d+)\]`)
+
 // generateImageRe matches [generate-image prompt="..."] directives in Claude's response.
 var generateImageRe = regexp.MustCompile(`\[generate-image prompt="([^"]+)"\]`)
+
+// searchRe matches [search query="..." (optional: count="N" freshness="pw")] directives.
+var searchRe = regexp.MustCompile(`\[search query="([^"]+)"(?:\s+count="(\d+)")?(?:\s+freshness="([^"]*)")?\]`)
 
 // ImageSendFunc sends an image to a chat. Used by the bridge to send generated images.
 type ImageSendFunc func(chatID int64, imageData []byte, caption string)
@@ -90,13 +98,63 @@ func parseRelayDirectives(response string) (string, []relayDirective) {
 }
 
 // sendRelays dispatches relay messages via the notify function.
-func (b *Bridge) sendRelays(relays []relayDirective) {
+// If a relay message contains [generate-image] directives, images are generated
+// and sent to the target chat with an upload_photo loading indicator.
+func (b *Bridge) sendRelays(ctx context.Context, relays []relayDirective) {
 	if b.notify == nil {
 		return
 	}
 	for _, r := range relays {
 		slog.Info("relaying message", "to_chat_id", r.ChatID, "len", len(r.Message))
-		b.notify(r.ChatID, r.Message)
+
+		// Process any [generate-image] directives embedded in the relay message.
+		msg := r.Message
+		if b.imagen != nil && b.imageSend != nil {
+			imageMatches := generateImageRe.FindAllStringSubmatchIndex(msg, -1)
+			if len(imageMatches) > 0 {
+				// Send upload_photo action to target chat during generation.
+				actionCtx, actionCancel := context.WithCancel(ctx)
+				go b.sendUploadPhotoLoop(actionCtx, r.ChatID)
+
+				clean := msg
+				for i := len(imageMatches) - 1; i >= 0; i-- {
+					m := imageMatches[i]
+					prompt := msg[m[2]:m[3]]
+					imageData, err := b.imagen.Generate(ctx, prompt)
+					if err != nil {
+						slog.Error("relay image generation failed", "prompt", prompt, "to_chat_id", r.ChatID, "error", err)
+						clean = clean[:m[0]] + "(image generation failed: " + err.Error() + ")" + clean[m[1]:]
+						continue
+					}
+					b.imageSend(r.ChatID, imageData, prompt)
+					clean = clean[:m[0]] + clean[m[1]:]
+				}
+				actionCancel()
+				msg = strings.TrimSpace(clean)
+			}
+		}
+
+		if msg != "" {
+			b.notify(r.ChatID, msg)
+		}
+	}
+}
+
+// sendUploadPhotoLoop sends upload_photo chat action every 4s until ctx is cancelled.
+func (b *Bridge) sendUploadPhotoLoop(ctx context.Context, chatID int64) {
+	if b.chatAction == nil {
+		return
+	}
+	b.chatAction(chatID, "upload_photo")
+	ticker := time.NewTicker(4 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.chatAction(chatID, "upload_photo")
+		}
 	}
 }
 
@@ -126,17 +184,53 @@ func (b *Bridge) parseHeartbeatLearnings(ctx context.Context, chatID int64, resp
 	return strings.TrimSpace(clean)
 }
 
+// parseTaskCompletes extracts [task-complete id=N] directives from the response,
+// marks the tasks as completed, and returns the cleaned response.
+func (b *Bridge) parseTaskCompletes(chatID int64, response string) string {
+	matches := taskCompleteRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response
+	}
+
+	clean := response
+	for i := len(matches) - 1; i >= 0; i-- {
+		loc := matches[i]
+		idStr := response[loc[2]:loc[3]]
+		clean = clean[:loc[0]] + clean[loc[1]:]
+
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		if err := b.store.CompleteTask(id); err != nil {
+			slog.Warn("failed to complete task", "id", id, "error", err)
+		} else {
+			slog.Info("heartbeat completed task", "chat_id", chatID, "task_id", id)
+		}
+	}
+	return strings.TrimSpace(clean)
+}
+
 // enrichHeartbeatPrompt augments a heartbeat message with recent conversation
-// history and previous heartbeat insights for self-improvement reflection.
+// history, previous heartbeat insights, memory context, and pending background
+// tasks for self-improvement reflection and proactive work.
 // Returns the original message unchanged if there's nothing to reflect on.
 func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg string) string {
 	// Fetch context up front to decide whether enrichment is worthwhile
 	exchanges := b.memory.RecentExchanges(ctx, chatID, 10)
 	insights := b.memory.HeartbeatContext(ctx, chatID, 500)
 
-	// Skip enrichment if there's no history and no prior learnings
-	if len(exchanges) == 0 && insights == "" {
-		slog.Debug("heartbeat: skipping enrichment, no history or insights", "chat_id", chatID)
+	// Fetch pending background tasks
+	pendingTasks, _ := b.store.PendingTasks(chatID)
+
+	// Fetch general memory context for reflection
+	memoryCtx := b.memory.SystemPrompt(ctx, chatID)
+
+	hasContent := len(exchanges) > 0 || insights != "" || len(pendingTasks) > 0
+
+	// Skip enrichment if there's no history, learnings, or tasks
+	if !hasContent {
+		slog.Debug("heartbeat: skipping enrichment, no history, insights, or tasks", "chat_id", chatID)
 		return msg
 	}
 
@@ -158,15 +252,39 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("\n[End of previous insights]\n\n")
 	}
 
+	// Include memory context so heartbeat can reflect on stored knowledge
+	if memoryCtx != "" {
+		truncated := memoryCtx
+		if len(truncated) > 1000 {
+			truncated = truncated[:1000] + "\n... (truncated)"
+		}
+		sb.WriteString("[Memory context for reflection]\n")
+		sb.WriteString(truncated)
+		sb.WriteString("\n[End of memory context]\n\n")
+	}
+
+	// Include pending background tasks
+	if len(pendingTasks) > 0 {
+		sb.WriteString("[Pending background tasks]\n")
+		for _, t := range pendingTasks {
+			sb.WriteString(fmt.Sprintf("- Task #%d: %s (queued %s)\n", t.ID, t.Description, t.CreatedAt.Format("Jan 2 15:04")))
+		}
+		sb.WriteString("[End of pending tasks]\n\n")
+		sb.WriteString("If you can complete any pending tasks above, do so and emit:\n")
+		sb.WriteString("[task-complete id=<task_id>]\n\n")
+	}
+
 	sb.WriteString(msg)
 
-	// Only add reflection instructions if there are recent exchanges to reflect on
-	if len(exchanges) > 0 {
-		sb.WriteString("\n\n---\nAfter completing the task above, briefly reflect on the recent conversations.\n")
-		sb.WriteString("If you notice reusable patterns, user preferences, or useful corrections, emit:\n")
-		sb.WriteString("[heartbeat-learning]<specific, actionable insight>[/heartbeat-learning]\n")
-		sb.WriteString("Only emit learnings that are genuinely new or refine previous ones. Keep each to 1-2 sentences.")
-	}
+	sb.WriteString("\n\n---\n")
+	sb.WriteString("Instructions for this heartbeat:\n")
+	sb.WriteString("1. Proactively check for anything that needs attention (files, PRs, notifications, scheduled items).\n")
+	sb.WriteString("2. If pending background tasks are listed, try to complete them.\n")
+	sb.WriteString("3. Reflect on recent conversations and memory for patterns or corrections.\n")
+	sb.WriteString("4. If you notice reusable patterns, user preferences, or useful corrections, emit:\n")
+	sb.WriteString("   [heartbeat-learning]<specific, actionable insight>[/heartbeat-learning]\n")
+	sb.WriteString("5. If there is genuinely nothing to report, respond with just: [noop]\n")
+	sb.WriteString("6. Keep responses concise and actionable.\n")
 
 	return sb.String()
 }
@@ -241,22 +359,30 @@ type Bridge struct {
 	selfSourceDir string // resolved path to relay's source dir (empty = disabled)
 	onSelfRestart func() // called when self-modification detected after merge
 
+	// Search API keys (resolved from secrets/env at startup)
+	braveKey  string
+	tavilyKey string
+
 	// Scheduler
 	schedulerEnabled bool
 	schedulerTZ      string // default timezone for schedules
 
 	// Image generation
-	imagen    *imagen.Generator // nil if not configured
-	imageSend ImageSendFunc     // sends generated images to Telegram
+	imagen     *imagen.Generator // nil if not configured
+	imageSend  ImageSendFunc     // sends generated images to Telegram
+	chatAction ChatActionFunc    // sends chat actions (e.g. upload_photo) to Telegram
 
-	planMu   sync.Mutex
+	// Browser automation
+	browserCfg browser.Config
+
+	planMu sync.Mutex
 	planRuns map[int64]*planRun
 
 	reviewMu    sync.Mutex
 	reviewCache map[int64][]memory.ReviewEntry // last /review result per chat
 }
 
-func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *imagen.Generator) *Bridge {
+func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *imagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
@@ -274,6 +400,9 @@ func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *plan
 		worktreeDir: wtDir,
 		reactionMap: reactionMap,
 		imagen:      ig,
+		braveKey:    braveKey,
+		tavilyKey:   tavilyKey,
+		browserCfg:  browserCfg,
 		planRuns:    make(map[int64]*planRun),
 		reviewCache: make(map[int64][]memory.ReviewEntry),
 	}
@@ -282,6 +411,11 @@ func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *plan
 // SetImageSender sets the function used to send generated images to Telegram.
 func (b *Bridge) SetImageSender(fn ImageSendFunc) {
 	b.imageSend = fn
+}
+
+// SetChatAction sets the function used to send chat actions (e.g. upload_photo) to Telegram.
+func (b *Bridge) SetChatAction(fn ChatActionFunc) {
+	b.chatAction = fn
 }
 
 // Imagen returns the image generator, or nil if not configured.
@@ -451,6 +585,9 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	}
 	systemPrompt += b.scheduleSystemPrompt()
 	systemPrompt += b.imagenSystemPrompt()
+	systemPrompt += b.relaySystemPrompt()
+	systemPrompt += b.searchSystemPrompt()
+	systemPrompt += b.browserSystemPrompt()
 
 	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt)
 	if err != nil {
@@ -470,13 +607,48 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 
 	response := strings.TrimSpace(result.Text)
 
+	// Handle [search] directives: run search, re-prompt Claude with results
+	response, searchResults := b.parseSearchDirectives(ctx, response)
+	if searchResults != "" {
+		followUp := "[Search results]\n" + searchResults + "[End of search results]\n\nNow answer the user's original question using the search results above."
+		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
+		if err != nil {
+			slog.Warn("search follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
+	// Handle [browser] directives: run browser automation, re-prompt Claude with results
+	response, browserResults := b.parseBrowserDirectives(ctx, chatID, response)
+	if browserResults != "" {
+		followUp := browserResults + "\n\nNow answer the user's original question using the browser results above."
+		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
+		if err != nil {
+			slog.Warn("browser follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
 	// Extract and send relay directives (messages to other chats)
 	response, relays := parseRelayDirectives(response)
-	b.sendRelays(relays)
+	b.sendRelays(ctx, relays)
 
-	// Parse heartbeat learning directives
-	if isHeartbeat && b.memory != nil {
-		response = b.parseHeartbeatLearnings(ctx, chatID, response)
+	// Parse heartbeat learning and task-complete directives
+	if isHeartbeat {
+		if b.memory != nil {
+			response = b.parseHeartbeatLearnings(ctx, chatID, response)
+			// Run reflect cycle after heartbeat to promote/decay/prune memories
+			b.memory.RunReflect(ctx)
+		}
+		response = b.parseTaskCompletes(chatID, response)
 	}
 
 	// Parse memory directives ([remember]...[/remember])
@@ -596,6 +768,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	}
 	systemPrompt += b.scheduleSystemPrompt()
 	systemPrompt += b.imagenSystemPrompt()
+	systemPrompt += b.relaySystemPrompt()
+	systemPrompt += b.searchSystemPrompt()
+	systemPrompt += b.browserSystemPrompt()
 
 	// Send to Claude with streaming
 	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt, onUpdate)
@@ -616,13 +791,54 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 
 	response := strings.TrimSpace(result.Text)
 
+	// Handle [search] directives: run search, re-prompt Claude with results (streaming)
+	response, searchResults := b.parseSearchDirectives(ctx, response)
+	if searchResults != "" {
+		if onUpdate != nil {
+			onUpdate("\n\n_Searching..._\n\n")
+		}
+		followUp := "[Search results]\n" + searchResults + "[End of search results]\n\nNow answer the user's original question using the search results above."
+		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
+		if err != nil {
+			slog.Warn("search follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
+	// Handle [browser] directives: run browser automation, re-prompt Claude with results (streaming)
+	response, browserResults := b.parseBrowserDirectives(ctx, chatID, response)
+	if browserResults != "" {
+		if onUpdate != nil {
+			onUpdate("\n\n_Browsing..._\n\n")
+		}
+		followUp := browserResults + "\n\nNow answer the user's original question using the browser results above."
+		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
+		if err != nil {
+			slog.Warn("browser follow-up failed", "error", err)
+		} else {
+			response = strings.TrimSpace(followUpResult.Text)
+			if followUpResult.SessionID != "" {
+				result.SessionID = followUpResult.SessionID
+			}
+		}
+	}
+
 	// Extract and send relay directives (messages to other chats)
 	response, relays := parseRelayDirectives(response)
-	b.sendRelays(relays)
+	b.sendRelays(ctx, relays)
 
-	// Parse heartbeat learning directives
-	if isHeartbeat && b.memory != nil {
-		response = b.parseHeartbeatLearnings(ctx, chatID, response)
+	// Parse heartbeat learning and task-complete directives
+	if isHeartbeat {
+		if b.memory != nil {
+			response = b.parseHeartbeatLearnings(ctx, chatID, response)
+			// Run reflect cycle after heartbeat to promote/decay/prune memories
+			b.memory.RunReflect(ctx)
+		}
+		response = b.parseTaskCompletes(chatID, response)
 	}
 
 	// Parse memory directives ([remember]...[/remember])
@@ -691,6 +907,8 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.Schedule(ctx, chatID, args)
 	case "heartbeat":
 		return b.Heartbeat(ctx, chatID, args)
+	case "task":
+		return b.Task(ctx, chatID, args)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -807,7 +1025,13 @@ func (b *Bridge) Help() string {
 			"Periodic check-in that routes through Claude with session context (like cron but conversational).\n\n" +
 			"- `/heartbeat 30m Check inbox and calendar` — Set heartbeat (one per chat)\n" +
 			"- `/heartbeat` or `/heartbeat status` — Show current heartbeat\n" +
-			"- `/heartbeat stop` — Stop the heartbeat\n"
+			"- `/heartbeat stop` — Stop the heartbeat\n" +
+			"\n### Background Tasks\n\n" +
+			"Queue tasks for heartbeat to pick up during its next check-in.\n\n" +
+			"- `/task add <description>` — Add a background task\n" +
+			"- `/task list` — Show pending tasks\n" +
+			"- `/task done <id>` — Mark a task as completed\n" +
+			"- `/task delete <id>` — Remove a task\n"
 	}
 
 	if b.imagen != nil {
@@ -863,10 +1087,12 @@ func (b *Bridge) scheduleSystemPrompt() string {
 		"Always include the `tz` attribute explicitly. Compute exact dates/times based on the current time shown above.\n\n" +
 		"### Heartbeat\n" +
 		"Messages prefixed with `[Heartbeat]` are periodic check-ins routed through you with full session context.\n" +
-		"Recent conversation history and previous heartbeat insights are included for your reflection.\n" +
+		"Recent conversation history, previous heartbeat insights, memory context, and pending background tasks are included.\n" +
 		"Respond naturally as a proactive assistant — summarize what you checked, report findings, and suggest actions.\n" +
 		"If you notice patterns, user preferences, or useful corrections, emit:\n" +
 		"`[heartbeat-learning]<specific actionable insight>[/heartbeat-learning]`\n" +
+		"If you complete a background task, emit: `[task-complete id=<task_id>]`\n" +
+		"If there is genuinely nothing to report, respond with just: `[noop]`\n" +
 		"Keep heartbeat responses concise and actionable.\n"
 }
 
@@ -1264,6 +1490,88 @@ func (b *Bridge) heartbeatStatus(chatID int64) (string, error) {
 		hb.NextRunAt.Format("2006-01-02 15:04 UTC"), lastRun), nil
 }
 
+// Task manages the background task queue for a chat.
+func (b *Bridge) Task(ctx context.Context, chatID int64, args string) (string, error) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return b.taskList(chatID)
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	sub := parts[0]
+
+	switch sub {
+	case "list":
+		return b.taskList(chatID)
+	case "add":
+		if len(parts) < 2 {
+			return "Usage: /task add <description>", nil
+		}
+		return b.taskAdd(chatID, strings.TrimSpace(parts[1]))
+	case "done":
+		if len(parts) < 2 {
+			return "Usage: /task done <id>", nil
+		}
+		return b.taskDone(chatID, strings.TrimSpace(parts[1]))
+	case "delete":
+		if len(parts) < 2 {
+			return "Usage: /task delete <id>", nil
+		}
+		return b.taskDelete(chatID, strings.TrimSpace(parts[1]))
+	default:
+		// Treat the whole args as a task description for convenience
+		return b.taskAdd(chatID, args)
+	}
+}
+
+func (b *Bridge) taskList(chatID int64) (string, error) {
+	tasks, err := b.store.PendingTasks(chatID)
+	if err != nil {
+		return "", fmt.Errorf("list tasks: %w", err)
+	}
+	if len(tasks) == 0 {
+		return "No pending tasks.\n\nUsage: /task add <description>", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("**Pending Tasks:**\n")
+	for _, t := range tasks {
+		sb.WriteString(fmt.Sprintf("- #%d: %s (%s)\n", t.ID, t.Description, t.CreatedAt.Format("Jan 2 15:04")))
+	}
+	sb.WriteString("\nTasks are picked up by heartbeat automatically.")
+	return sb.String(), nil
+}
+
+func (b *Bridge) taskAdd(chatID int64, description string) (string, error) {
+	id, err := b.store.AddTask(chatID, description)
+	if err != nil {
+		return "", fmt.Errorf("add task: %w", err)
+	}
+	return fmt.Sprintf("Task #%d added: %s\nIt will be picked up by the next heartbeat.", id, description), nil
+}
+
+func (b *Bridge) taskDone(chatID int64, idStr string) (string, error) {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return "Invalid task ID.", nil
+	}
+	if err := b.store.CompleteTask(id); err != nil {
+		return "", fmt.Errorf("complete task: %w", err)
+	}
+	return fmt.Sprintf("Task #%d completed.", id), nil
+}
+
+func (b *Bridge) taskDelete(chatID int64, idStr string) (string, error) {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return "Invalid task ID.", nil
+	}
+	if err := b.store.DeleteTask(chatID, id); err != nil {
+		return "", fmt.Errorf("delete task: %w", err)
+	}
+	return fmt.Sprintf("Task #%d deleted.", id), nil
+}
+
 // parseGenerateImageDirectives extracts [generate-image prompt="..."] directives
 // from Claude's response, generates images, and sends them via Telegram.
 func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, chatID int64, response string) string {
@@ -1317,6 +1625,159 @@ func (b *Bridge) imagenSystemPrompt() string {
 		"The directive will be replaced with the generated image sent as a photo.\n" +
 		"You can include multiple directives in one response for multiple images.\n" +
 		"Use this proactively when the user's request would benefit from a visual.\n"
+}
+
+// relaySystemPrompt returns the system prompt addition that documents
+// the [relay] directive for Claude.
+func (b *Bridge) relaySystemPrompt() string {
+	return "\n\n## Message Relay\n\n" +
+		"You can send messages to other Telegram chats using the [relay] directive.\n" +
+		"Use this when the user asks you to forward, send, or share something with another user or chat.\n\n" +
+		"```\n[relay to=CHAT_ID]\nMessage content here\n[/relay]\n```\n\n" +
+		"Replace CHAT_ID with the numeric Telegram chat ID of the target.\n" +
+		"You can include [generate-image] directives inside a relay block to generate and send images to the target chat:\n\n" +
+		"```\n[relay to=CHAT_ID]\nHere's the image you requested!\n[generate-image prompt=\"a detailed description\"]\n[/relay]\n```\n\n" +
+		"You can include multiple relay blocks in one response.\n"
+}
+
+// searchSystemPrompt returns the system prompt addition that tells Claude
+// to use the [search] directive for web search.
+func (b *Bridge) searchSystemPrompt() string {
+	if b.braveKey == "" && b.tavilyKey == "" {
+		return ""
+	}
+	return "\n\n## Web Search\n\n" +
+		"You can search the web using the [search] directive. Use this instead of the built-in WebSearch tool.\n" +
+		"It uses the Brave Search API and returns richer, more detailed results.\n\n" +
+		"```\n[search query=\"your search query\"]\n```\n\n" +
+		"Optional attributes:\n" +
+		"- `count=\"N\"` — number of results (default 5)\n" +
+		"- `freshness=\"pd|pw|pm|py\"` — time filter (24h, 7d, 31d, 1yr)\n\n" +
+		"Example: `[search query=\"golang error handling best practices\" count=\"5\"]`\n\n" +
+		"The directive will be replaced with search results, and you will be re-prompted to answer using those results.\n" +
+		"Always prefer the [search] directive over WebSearch or ddgr.\n"
+}
+
+// parseSearchDirectives finds [search query="..."] directives in Claude's response,
+// runs the search, and returns the query + results for a follow-up turn.
+// Returns the cleaned response and search results (empty if no directives found).
+func (b *Bridge) parseSearchDirectives(ctx context.Context, response string) (string, string) {
+	if b.braveKey == "" && b.tavilyKey == "" {
+		return response, ""
+	}
+
+	matches := searchRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response, ""
+	}
+
+	var results strings.Builder
+	for _, m := range matches {
+		query := response[m[2]:m[3]]
+		count := 5
+		if m[4] >= 0 {
+			if n, err := strconv.Atoi(response[m[4]:m[5]]); err == nil {
+				count = n
+			}
+		}
+		freshness := ""
+		if m[6] >= 0 {
+			freshness = response[m[6]:m[7]]
+		}
+
+		slog.Info("search directive", "query", query, "count", count, "freshness", freshness)
+
+		searchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		resp, err := search.Search(searchCtx, b.braveKey, b.tavilyKey, search.Options{
+			Query:     query,
+			Count:     count,
+			Freshness: freshness,
+		})
+		cancel()
+
+		if err != nil {
+			slog.Warn("search failed", "query", query, "error", err)
+			results.WriteString(fmt.Sprintf("[Search for %q failed: %s]\n\n", query, err))
+			continue
+		}
+		results.WriteString(search.Markdown(resp))
+		results.WriteString("\n")
+	}
+
+	// Strip directives from response
+	cleaned := searchRe.ReplaceAllString(response, "")
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned, results.String()
+}
+
+// browserSystemPrompt returns the system prompt addition that tells Claude
+// how to use the [browser] directive for browser automation.
+func (b *Bridge) browserSystemPrompt() string {
+	if !b.browserCfg.Enabled {
+		return ""
+	}
+	return "\n\n## Browser Automation\n\n" +
+		"You can automate a headless Chrome browser using the `[browser]` directive.\n" +
+		"Use this for tasks that require interacting with web pages: navigating, clicking, typing, extracting content, or taking screenshots.\n\n" +
+		"```\n[browser url=\"https://example.com\"]\nscreenshot\n[/browser]\n```\n\n" +
+		"**Available actions (one per line):**\n" +
+		"- `navigate` — navigate to the URL (implicit, always happens first)\n" +
+		"- `click \"<selector>\"` — click an element by CSS selector\n" +
+		"- `type \"<selector>\" \"<value>\"` — clear and type into an input\n" +
+		"- `wait \"<selector>\"` — wait for element to appear (up to 10s)\n" +
+		"- `screenshot` — capture full page screenshot (sent as photo)\n" +
+		"- `extract \"<selector>\"` — extract text content of element(s)\n" +
+		"- `js \"<expression>\"` — evaluate JavaScript and return result\n" +
+		"- `sleep \"<duration>\"` — wait (e.g., `sleep \"2s\"`)\n\n" +
+		"**Example — multi-step login and extract:**\n```\n[browser url=\"https://example.com/login\"]\n" +
+		"type \"#email\" \"user@example.com\"\ntype \"#password\" \"secret\"\nclick \"#submit\"\n" +
+		"wait \"#dashboard\"\nscreenshot\nextract \"#welcome-message\"\njs \"document.title\"\n[/browser]\n```\n\n" +
+		"The directive will be replaced with results, and you will be re-prompted to answer using those results.\n" +
+		"Screenshots are sent as photos to the chat.\n"
+}
+
+// parseBrowserDirectives finds [browser url="..."]...[/browser] blocks in Claude's response,
+// runs the browser actions, and returns the cleaned response + formatted results for follow-up.
+func (b *Bridge) parseBrowserDirectives(ctx context.Context, chatID int64, response string) (string, string) {
+	if !b.browserCfg.Enabled {
+		return response, ""
+	}
+
+	matches := browser.BrowserRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response, ""
+	}
+
+	var results strings.Builder
+	for _, m := range matches {
+		url := response[m[2]:m[3]]
+		body := response[m[4]:m[5]]
+
+		slog.Info("browser directive", "url", url)
+
+		d := browser.ParseDirective(url, body)
+		r := browser.Execute(ctx, b.browserCfg, d)
+
+		// Send screenshots via imageSend
+		for _, step := range r.Steps {
+			if step.Screenshot != nil && b.imageSend != nil {
+				if b.chatAction != nil {
+					b.chatAction(chatID, "upload_photo")
+				}
+				b.imageSend(chatID, step.Screenshot, "")
+			}
+		}
+
+		results.WriteString(browser.FormatResults(r))
+		results.WriteString("\n")
+	}
+
+	// Strip directives from response
+	cleaned := browser.BrowserRe.ReplaceAllString(response, "")
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned, results.String()
 }
 
 func (b *Bridge) parseScheduleDirectives(chatID int64, response string) string {

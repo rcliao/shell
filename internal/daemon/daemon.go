@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rcliao/teeny-relay/internal/bridge"
+	"github.com/rcliao/teeny-relay/internal/browser"
 	"github.com/rcliao/teeny-relay/internal/config"
 	"github.com/rcliao/teeny-relay/internal/imagen"
 	"github.com/rcliao/teeny-relay/internal/memory"
@@ -34,6 +35,16 @@ type Daemon struct {
 }
 
 func New(cfg config.Config) (*Daemon, error) {
+	// Open encrypted secret store (if enabled) before anything reads tokens.
+	config.OpenSecretStore(cfg.Secrets)
+
+	// Export search API keys into env so child processes (Claude → Bash → search) inherit them.
+	for _, key := range []string{"BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY"} {
+		if val := cfg.Secret(key); val != "" && os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+
 	// Open store
 	st, err := store.Open(cfg.Store.DBPath)
 	if err != nil {
@@ -134,7 +145,20 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	// Create bridge
-	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig)
+	braveKey := cfg.Secret("BRAVE_SEARCH_API_KEY")
+	tavilyKey := cfg.Secret("TAVILY_API_KEY")
+	browserCfg := browser.Config{
+		Enabled:        cfg.Browser.Enabled,
+		Headless:       cfg.Browser.Headless,
+		TimeoutSeconds: cfg.Browser.TimeoutSeconds,
+		ChromePath:     cfg.Browser.ChromePath,
+	}
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig, braveKey, tavilyKey, browserCfg)
+	if braveKey != "" {
+		slog.Info("search initialized", "provider", "brave")
+	} else if tavilyKey != "" {
+		slog.Info("search initialized", "provider", "tavily")
+	}
 
 	// Create auth
 	auth := telegram.NewAuth(cfg.Telegram.AllowedUsers)
@@ -153,6 +177,11 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Wire image sender: generate-image directive → Telegram photo
 	br.SetImageSender(func(chatID int64, imageData []byte, caption string) {
 		bot.SendPhoto(chatID, imageData, caption)
+	})
+
+	// Wire chat action sender: upload_photo indicators for relay image generation
+	br.SetChatAction(func(chatID int64, action string) {
+		bot.SendChatAction(chatID, action)
 	})
 
 	// Wire async notifications: plan progress → Telegram
@@ -182,8 +211,12 @@ func New(cfg config.Config) (*Daemon, error) {
 			bot.SendText(chatID, resp)
 		}
 		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
+		sched.SetQuietHours(cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd)
+		sched.SetHeartbeatPrompt(func(chatID int64, msg string) (string, error) {
+			return br.HandleMessageStreaming(context.Background(), chatID, msg, "heartbeat", nil, nil, nil)
+		})
 		br.SetSchedulerConfig(true, cfg.Scheduler.Timezone)
-		slog.Info("scheduler initialized", "timezone", cfg.Scheduler.Timezone)
+		slog.Info("scheduler initialized", "timezone", cfg.Scheduler.Timezone, "quiet_hours", fmt.Sprintf("%d:00-%d:00", cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd))
 
 		// Seed schedule docs into memory so they're always visible in system prompt.
 		if mem != nil {
@@ -310,6 +343,7 @@ func (d *Daemon) Shutdown() {
 	if d.memory != nil {
 		d.memory.Close()
 	}
+	config.CloseSecretStore()
 	removePID(d.cfg.Daemon.PIDFile)
 	slog.Info("daemon stopped")
 }

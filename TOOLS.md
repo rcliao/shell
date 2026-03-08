@@ -144,38 +144,27 @@ gog forms responses list <formId> --json
 
 ---
 
-## Web Search — `search`
+## Web Search — `[search]` directive
 
-Agent-friendly web search CLI (Brave Search API by default, falls back to DuckDuckGo).
-Returns results as markdown (default) or JSON. Prefer `search` over `ddgr` for better results.
+Built-in web search (Brave Search API, falls back to DuckDuckGo).
+Use the `[search]` directive — the bridge runs the search and feeds results back automatically.
+No Bash command or external tool needed. Prefer this over built-in WebSearch or ddgr.
 
-```bash
-# Search (markdown output, agent-friendly)
-search "search query" -n 5
-
-# JSON output
-search "search query" --json -n 5
-
-# Filter by freshness: pd (24h), pw (7d), pm (31d), py (1yr)
-search "recent topic" -f pw -n 5
-
-# Use a specific provider
-search "query" -p brave -n 5
-search "query" -p tavily -n 5
-search "query" -p ddgr -n 5
-
-# Filter by country
-search "query" --country us -n 5
 ```
+[search query="search query"]
+[search query="recent topic" count="10" freshness="pw"]
+```
+
+Optional attributes:
+- `count="N"` — number of results (default 5)
+- `freshness="pd|pw|pm|py"` — time filter (24h, 7d, 31d, 1yr)
 
 ### Legacy: `ddgr`
 
-DuckDuckGo search (used as fallback when no API keys are set).
+DuckDuckGo search via Bash (fallback when no API keys are set).
 
 ```bash
 ddgr --json -n 5 "search query"
-ddgr --json -n 5 -w example.com "query"
-ddgr --json -n 5 -t m "recent topic"
 ```
 
 ---
@@ -220,39 +209,45 @@ curl -sL "https://example.com" | $(go env GOPATH)/bin/pup 'table json{}'
 
 ---
 
-## Browser Automation — `shot-scraper`
+## Browser Automation — `[browser]` directive
 
-Headless browser for screenshots, JavaScript execution, and page interaction.
+Built-in headless Chrome automation. Prefer the `[browser]` directive over Bash tools — the bridge
+handles execution and feeds results back automatically. Screenshots are sent as photos to the chat.
+
+```
+[browser url="https://example.com"]
+screenshot
+[/browser]
+```
+
+**Available actions (one per line):**
+- `navigate` — navigate to the URL (implicit, always happens first)
+- `click "<selector>"` — click an element by CSS selector
+- `type "<selector>" "<value>"` — clear and type into an input
+- `wait "<selector>"` — wait for element to appear (up to 10s)
+- `screenshot` — capture full page screenshot (sent as photo)
+- `extract "<selector>"` — extract text content of element(s)
+- `js "<expression>"` — evaluate JavaScript and return result
+- `sleep "<duration>"` — wait (e.g., `sleep "2s"`)
+
+**Example — multi-step flow:**
+```
+[browser url="https://news.ycombinator.com"]
+extract ".titleline > a"
+screenshot
+js "document.title"
+[/browser]
+```
+
+### Legacy: `shot-scraper`
+
+Fallback headless browser tool (Python/Playwright).
 Binary: `/Users/pikamini/Library/Python/3.9/bin/shot-scraper`
 
 ```bash
 SHOT=/Users/pikamini/Library/Python/3.9/bin/shot-scraper
-
-# Take a screenshot of a page
 $SHOT "https://example.com" -o screenshot.png
-
-# Take a screenshot of a specific element
-$SHOT "https://example.com" -s "#main-content" -o element.png
-
-# Execute JavaScript on a page and get the result
 $SHOT javascript "https://example.com" "document.title"
-
-# Execute JS that returns structured data
-$SHOT javascript "https://example.com" "
-  JSON.stringify(Array.from(document.querySelectorAll('h2')).map(h => h.textContent))
-"
-
-# Wait for an element before screenshot
-$SHOT "https://example.com" --wait-for "#loaded" -o screenshot.png
-
-# Full-page screenshot
-$SHOT "https://example.com" --full-page -o full.png
-
-# Set viewport size
-$SHOT "https://example.com" --width 1280 --height 720 -o screenshot.png
-
-# Use a specific browser (chromium is default)
-$SHOT "https://example.com" --browser firefox -o screenshot.png
 ```
 
 ---

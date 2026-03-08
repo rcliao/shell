@@ -50,7 +50,40 @@ make watch    # Build and run with --watch
 - Emoji reactions map to actions (go, stop, cancel, status, regenerate, remember, forget, retry)
 - Scheduler: `/schedule add|list|delete|enable|pause` commands + `[schedule]` response directive for Claude-initiated scheduling
 - Heartbeat: `/heartbeat <interval> <message>` — periodic check-in routed through Claude with session context (one per chat)
-- Scheduler config: `{"scheduler": {"enabled": true, "timezone": "UTC"}}` in config.json
+  - Quiet hours: heartbeats suppressed during configurable window (default 10 PM - 7 AM in scheduler timezone)
+  - Proactive checks: heartbeat prompts Claude to check for anything needing attention
+  - Memory reflection: includes memory context for heartbeat to reflect on stored knowledge
+  - Background tasks: `/task add|list|done|delete` — queue tasks for heartbeat to pick up
+  - Noop suppression: heartbeat responses with nothing to report are not sent to chat
+  - Check-in messages: every ~4 heartbeats, a friendly check-in hint is included
+- Scheduler config: `{"scheduler": {"enabled": true, "timezone": "UTC", "quiet_hour_start": 22, "quiet_hour_end": 7}}` in config.json
+
+## Web Search
+
+Web search is built-in via the `[search]` directive. The bridge handles it automatically —
+no Bash or external tools needed. Results are fetched and fed back for you to use.
+
+```
+[search query="your search query"]
+[search query="recent topic" count="5" freshness="pw"]
+```
+
+## Browser Automation
+
+Built-in browser automation via the `[browser]` directive. The bridge launches a headless Chrome
+instance, executes the actions, and feeds results back for you to use.
+
+```
+[browser url="https://example.com"]
+click "#btn"
+screenshot
+extract ".content"
+[/browser]
+```
+
+Actions: `navigate`, `click`, `type`, `wait`, `screenshot`, `extract`, `js`, `sleep`.
+Screenshots are sent as photos to the chat. Extracted text and JS results are fed back for reasoning.
+Requires `"browser": {"enabled": true}` in config.
 
 ## Available CLI Tools
 
