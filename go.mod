@@ -8,9 +8,10 @@ require (
 	github.com/go-telegram/bot v1.19.0
 	github.com/google/uuid v1.6.0
 	github.com/rcliao/ghost v0.0.0
+	github.com/rcliao/shell-browser v0.0.0
+	github.com/rcliao/shell-imagen v0.0.0
 	github.com/rcliao/shell-secrets v0.0.0
 	github.com/spf13/cobra v1.10.2
-	google.golang.org/genai v1.49.0
 	modernc.org/sqlite v1.46.1
 )
 
@@ -42,6 +43,7 @@ require (
 	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/sys v0.37.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
+	google.golang.org/genai v1.49.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/grpc v1.66.2 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
@@ -51,5 +53,9 @@ require (
 )
 
 replace github.com/rcliao/ghost => ../ghost
+
+replace github.com/rcliao/shell-imagen => ../shell-imagen
+
+replace github.com/rcliao/shell-browser => ../shell-browser
 
 replace github.com/rcliao/shell-secrets => ../shell-secrets

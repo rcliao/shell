@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/rcliao/shell/internal/bridge"
-	"github.com/rcliao/shell/internal/browser"
+	browser "github.com/rcliao/shell-browser"
 	"github.com/rcliao/shell/internal/config"
-	"github.com/rcliao/shell/internal/imagen"
+	shellimagen "github.com/rcliao/shell-imagen"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
@@ -133,10 +133,10 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	// Initialize image generator if Google API key is configured.
-	var ig *imagen.Generator
+	var ig *shellimagen.Generator
 	if apiKey := cfg.GoogleAPIKey(); apiKey != "" {
 		var err error
-		ig, err = imagen.New(apiKey, cfg.Google.Model, cfg.Google.Timeout)
+		ig, err = shellimagen.New(apiKey, cfg.Google.Model, cfg.Google.Timeout)
 		if err != nil {
 			slog.Warn("imagen: failed to initialize", "error", err)
 		} else {

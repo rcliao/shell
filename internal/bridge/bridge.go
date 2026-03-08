@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rcliao/shell/internal/browser"
+	browser "github.com/rcliao/shell-browser"
 	"github.com/rcliao/shell/internal/config"
-	"github.com/rcliao/shell/internal/imagen"
+	shellimagen "github.com/rcliao/shell-imagen"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
@@ -368,7 +368,7 @@ type Bridge struct {
 	schedulerTZ      string // default timezone for schedules
 
 	// Image generation
-	imagen     *imagen.Generator // nil if not configured
+	imagen     *shellimagen.Generator // nil if not configured
 	imageSend  ImageSendFunc     // sends generated images to Telegram
 	chatAction ChatActionFunc    // sends chat actions (e.g. upload_photo) to Telegram
 
@@ -382,7 +382,7 @@ type Bridge struct {
 	reviewCache map[int64][]memory.ReviewEntry // last /review result per chat
 }
 
-func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *imagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config) *Bridge {
+func New(proc *process.Manager, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *shellimagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
@@ -419,7 +419,7 @@ func (b *Bridge) SetChatAction(fn ChatActionFunc) {
 }
 
 // Imagen returns the image generator, or nil if not configured.
-func (b *Bridge) Imagen() *imagen.Generator {
+func (b *Bridge) Imagen() *shellimagen.Generator {
 	return b.imagen
 }
 

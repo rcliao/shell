@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcliao/shell/internal/browser"
+	browser "github.com/rcliao/shell-browser"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/store"
