@@ -387,8 +387,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 
-	// Start stale session cleanup ticker
-	go d.cleanupLoop(ctx)
+	// Start stale session cleanup ticker — register as pm-managed if available.
+	if d.pmMgr != nil {
+		d.pmMgr.StartFunc(ctx, "cleanup", func(fctx context.Context) error {
+			d.cleanupLoop(fctx)
+			return nil
+		}, "stale session cleanup", pm.WithTags(map[string]string{"type": "system"}), pm.WithRestart(pm.RestartAlways))
+	} else {
+		go d.cleanupLoop(ctx)
+	}
 
 	// Restore active sessions from store
 	d.restoreSessions()

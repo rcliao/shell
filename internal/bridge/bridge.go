@@ -418,6 +418,19 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 	}
 }
 
+// runBackground runs fn as a pm-managed process (if pm is available) or as a raw goroutine.
+// name must be unique across active processes. tags are optional metadata for filtering.
+func (b *Bridge) runBackground(ctx context.Context, name, description string, tags map[string]string, fn func(context.Context) error) {
+	if b.pmMgr != nil {
+		if _, err := b.pmMgr.StartFunc(ctx, name, fn, description, pm.WithTags(tags)); err != nil {
+			slog.Warn("pm.StartFunc failed, falling back to goroutine", "name", name, "error", err)
+			go func() { fn(ctx) }()
+		}
+	} else {
+		go func() { fn(ctx) }()
+	}
+}
+
 // SetImageSender sets the function used to send generated images to Telegram.
 func (b *Bridge) SetImageSender(fn ImageSendFunc) {
 	b.imageSend = fn
@@ -2580,65 +2593,68 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 		}
 	}
 
-	go func() {
-		defer cancel()
-		progress(fmt.Sprintf("Retrying task %d/%d with guidance: %s", failedIdx+1, len(tasks), failedTask))
+	b.runBackground(planCtx, fmt.Sprintf("plan-%d-retry", chatID), "plan retry with guidance",
+		map[string]string{"type": "plan", "chat": fmt.Sprint(chatID)},
+		func(ctx context.Context) error {
+			defer cancel()
+			progress(fmt.Sprintf("Retrying task %d/%d with guidance: %s", failedIdx+1, len(tasks), failedTask))
 
-		result := execPlan.RunTaskWithGuidance(planCtx, failedTask, userMsg, completedCtx, progress)
+			result := execPlan.RunTaskWithGuidance(ctx, failedTask, userMsg, completedCtx, progress)
 
-		b.planMu.Lock()
-		// Replace the failed result with the new one.
-		run.results[failedIdx] = result
-		b.planMu.Unlock()
-
-		if result.Verdict != planner.VerdictDone {
 			b.planMu.Lock()
-			run.state = planStateBlocked
+			// Replace the failed result with the new one.
+			run.results[failedIdx] = result
 			b.planMu.Unlock()
+
+			if result.Verdict != planner.VerdictDone {
+				b.planMu.Lock()
+				run.state = planStateBlocked
+				b.planMu.Unlock()
+				if b.notify != nil {
+					b.notify(chatID, b.formatPlanSummary(run))
+				}
+				return nil
+			}
+
+			execPlan.GitCheckpoint(ctx, failedTask)
+			updatedCtx := completedCtx + fmt.Sprintf("- %s: %s\n", failedTask, result.Summary)
+
+			// Continue with remaining tasks.
+			if isMultiRepo && failedIdx+1 < len(repoTasks) {
+				// Multi-repo: continue with remaining repo tasks.
+				remaining := repoTasks[failedIdx+1:]
+				b.executeMultiRepoFrom(ctx, chatID, run, remaining, updatedCtx, progress)
+			} else if failedIdx+1 < len(tasks) {
+				remaining := execPlan.RunPlanFrom(ctx, planText, failedIdx+1, updatedCtx, progress)
+
+				b.planMu.Lock()
+				run.results = append(run.results, remaining...)
+
+				lastIdx := len(remaining) - 1
+				if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
+					run.state = planStateBlocked
+					run.failedTaskIdx = failedIdx + 1 + lastIdx
+					run.done = false
+				} else {
+					run.state = planStateDone
+					run.done = true
+				}
+				b.planMu.Unlock()
+			} else {
+				b.planMu.Lock()
+				run.state = planStateDone
+				run.done = true
+				b.planMu.Unlock()
+			}
+
+			b.storeReviewerLearnings(ctx, run)
+			b.cleanupWorktree(run, chatID)
+
 			if b.notify != nil {
 				b.notify(chatID, b.formatPlanSummary(run))
 			}
-			return
-		}
-
-		execPlan.GitCheckpoint(planCtx, failedTask)
-		updatedCtx := completedCtx + fmt.Sprintf("- %s: %s\n", failedTask, result.Summary)
-
-		// Continue with remaining tasks.
-		if isMultiRepo && failedIdx+1 < len(repoTasks) {
-			// Multi-repo: continue with remaining repo tasks.
-			remaining := repoTasks[failedIdx+1:]
-			b.executeMultiRepoFrom(planCtx, chatID, run, remaining, updatedCtx, progress)
-		} else if failedIdx+1 < len(tasks) {
-			remaining := execPlan.RunPlanFrom(planCtx, planText, failedIdx+1, updatedCtx, progress)
-
-			b.planMu.Lock()
-			run.results = append(run.results, remaining...)
-
-			lastIdx := len(remaining) - 1
-			if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
-				run.state = planStateBlocked
-				run.failedTaskIdx = failedIdx + 1 + lastIdx
-				run.done = false
-			} else {
-				run.state = planStateDone
-				run.done = true
-			}
-			b.planMu.Unlock()
-		} else {
-			b.planMu.Lock()
-			run.state = planStateDone
-			run.done = true
-			b.planMu.Unlock()
-		}
-
-		b.storeReviewerLearnings(planCtx, run)
-		b.cleanupWorktree(run, chatID)
-
-		if b.notify != nil {
-			b.notify(chatID, b.formatPlanSummary(run))
-		}
-	}()
+			return nil
+		})
 
 	return fmt.Sprintf("Retrying task %d with your guidance. Use /planstatus to check progress.", failedIdx+1), nil
 }
@@ -2749,10 +2765,13 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 	}
 
 	if isMultiRepo {
-		go func() {
-			defer cancel()
-			b.executeMultiRepo(planCtx, chatID, run, repoTasks, progress)
-		}()
+		b.runBackground(planCtx, fmt.Sprintf("plan-%d", chatID), "plan execution (multi-repo)",
+			map[string]string{"type": "plan", "chat": fmt.Sprint(chatID)},
+			func(ctx context.Context) error {
+				defer cancel()
+				b.executeMultiRepo(ctx, chatID, run, repoTasks, progress)
+				return nil
+			})
 
 		var branches []string
 		for repo, rw := range run.repoWorktrees {
@@ -2768,30 +2787,33 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 	}
 
 	// Legacy flat plan execution
-	go func() {
-		defer cancel()
-		results := run.execPlanner.RunPlan(planCtx, planText, progress)
+	b.runBackground(planCtx, fmt.Sprintf("plan-%d", chatID), "plan execution",
+		map[string]string{"type": "plan", "chat": fmt.Sprint(chatID)},
+		func(ctx context.Context) error {
+			defer cancel()
+			results := run.execPlanner.RunPlan(ctx, planText, progress)
 
-		b.planMu.Lock()
-		run.results = results
-		lastIdx := len(results) - 1
-		if lastIdx >= 0 && results[lastIdx].Verdict == planner.VerdictNeedsHuman {
-			run.state = planStateBlocked
-			run.failedTaskIdx = lastIdx
-			run.done = false
-		} else {
-			run.state = planStateDone
-			run.done = true
-		}
-		b.planMu.Unlock()
+			b.planMu.Lock()
+			run.results = results
+			lastIdx := len(results) - 1
+			if lastIdx >= 0 && results[lastIdx].Verdict == planner.VerdictNeedsHuman {
+				run.state = planStateBlocked
+				run.failedTaskIdx = lastIdx
+				run.done = false
+			} else {
+				run.state = planStateDone
+				run.done = true
+			}
+			b.planMu.Unlock()
 
-		b.storeReviewerLearnings(planCtx, run)
-		b.cleanupWorktree(run, chatID)
+			b.storeReviewerLearnings(ctx, run)
+			b.cleanupWorktree(run, chatID)
 
-		if b.notify != nil {
-			b.notify(chatID, b.formatPlanSummary(run))
-		}
-	}()
+			if b.notify != nil {
+				b.notify(chatID, b.formatPlanSummary(run))
+			}
+			return nil
+		})
 
 	extra := ""
 	if run.worktreeBranch != "" {
@@ -3370,44 +3392,47 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 		}
 	}
 
-	go func() {
-		defer cancel()
-		progress(fmt.Sprintf("Skipped task %d, continuing from task %d.", failedIdx+1, failedIdx+2))
+	b.runBackground(planCtx, fmt.Sprintf("plan-%d-skip", chatID), "plan skip and continue",
+		map[string]string{"type": "plan", "chat": fmt.Sprint(chatID)},
+		func(ctx context.Context) error {
+			defer cancel()
+			progress(fmt.Sprintf("Skipped task %d, continuing from task %d.", failedIdx+1, failedIdx+2))
 
-		if isMultiRepo {
-			remaining := repoTasks[failedIdx+1:]
-			b.executeMultiRepoFrom(planCtx, chatID, run, remaining, completedCtx, progress)
+			if isMultiRepo {
+				remaining := repoTasks[failedIdx+1:]
+				b.executeMultiRepoFrom(ctx, chatID, run, remaining, completedCtx, progress)
 
-			// Check if executeMultiRepoFrom left us in done state.
-			b.planMu.Lock()
-			if run.state != planStateBlocked {
-				run.state = planStateDone
-				run.done = true
-			}
-			b.planMu.Unlock()
-		} else {
-			remaining := execPlan.RunPlanFrom(planCtx, planText, failedIdx+1, completedCtx, progress)
-
-			b.planMu.Lock()
-			run.results = append(run.results, remaining...)
-			lastIdx := len(remaining) - 1
-			if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
-				run.state = planStateBlocked
-				run.failedTaskIdx = failedIdx + 1 + lastIdx
-				run.done = false
+				// Check if executeMultiRepoFrom left us in done state.
+				b.planMu.Lock()
+				if run.state != planStateBlocked {
+					run.state = planStateDone
+					run.done = true
+				}
+				b.planMu.Unlock()
 			} else {
-				run.state = planStateDone
-				run.done = true
+				remaining := execPlan.RunPlanFrom(ctx, planText, failedIdx+1, completedCtx, progress)
+
+				b.planMu.Lock()
+				run.results = append(run.results, remaining...)
+				lastIdx := len(remaining) - 1
+				if lastIdx >= 0 && remaining[lastIdx].Verdict == planner.VerdictNeedsHuman {
+					run.state = planStateBlocked
+					run.failedTaskIdx = failedIdx + 1 + lastIdx
+					run.done = false
+				} else {
+					run.state = planStateDone
+					run.done = true
+				}
+				b.planMu.Unlock()
 			}
-			b.planMu.Unlock()
-		}
 
-		b.cleanupWorktree(run, chatID)
+			b.cleanupWorktree(run, chatID)
 
-		if b.notify != nil {
-			b.notify(chatID, b.formatPlanSummary(run))
-		}
-	}()
+			if b.notify != nil {
+				b.notify(chatID, b.formatPlanSummary(run))
+			}
+			return nil
+		})
 
 	return fmt.Sprintf("Skipping task %d, continuing from task %d. Use /planstatus to check progress.", failedIdx+1, failedIdx+2), nil
 }
