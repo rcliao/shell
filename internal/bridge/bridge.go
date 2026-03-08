@@ -383,11 +383,15 @@ type Bridge struct {
 	// Process manager
 	pmMgr *pm.Manager // nil if disabled
 
-	planMu sync.Mutex
+	planMu   sync.Mutex
 	planRuns map[int64]*planRun
 
 	reviewMu    sync.Mutex
 	reviewCache map[int64][]memory.ReviewEntry // last /review result per chat
+
+	// Preemption: user messages can cancel running system (heartbeat/scheduler) sessions.
+	systemCancelMu sync.Mutex
+	systemCancel   map[int64]context.CancelFunc
 }
 
 func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *shellimagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager) *Bridge {
@@ -413,8 +417,9 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		browserCfg:  browserCfg,
 		tunnelMgr:   tunnelMgr,
 		pmMgr:       pmMgr,
-		planRuns:    make(map[int64]*planRun),
-		reviewCache: make(map[int64][]memory.ReviewEntry),
+		planRuns:     make(map[int64]*planRun),
+		reviewCache:  make(map[int64][]memory.ReviewEntry),
+		systemCancel: make(map[int64]context.CancelFunc),
 	}
 }
 
@@ -429,6 +434,179 @@ func (b *Bridge) runBackground(ctx context.Context, name, description string, ta
 	} else {
 		go func() { fn(ctx) }()
 	}
+}
+
+// trackSession registers the current Claude session as a pm-managed process for visibility.
+// Returns a cleanup function that should be deferred. No-op if pm is disabled.
+func (b *Bridge) trackSession(ctx context.Context, chatID int64, sender string) func() {
+	if b.pmMgr == nil {
+		return func() {}
+	}
+	name := fmt.Sprintf("session-%d", chatID)
+	// Clean up any previous stopped entry for this chat.
+	b.pmMgr.Remove(name)
+
+	done := make(chan struct{})
+	_, err := b.pmMgr.StartFunc(ctx, name, func(fctx context.Context) error {
+		select {
+		case <-done:
+		case <-fctx.Done():
+		}
+		return nil
+	}, fmt.Sprintf("%s session (chat %d)", sender, chatID),
+		pm.WithTags(map[string]string{"type": "session", "chat": fmt.Sprint(chatID), "sender": sender}))
+	if err != nil {
+		slog.Debug("trackSession: pm registration failed", "error", err)
+		return func() {}
+	}
+	return func() { close(done) }
+}
+
+// isSystemSender returns true if the sender is a system process (heartbeat, scheduler).
+func isSystemSender(sender string) bool {
+	return sender == "heartbeat" || sender == "scheduler"
+}
+
+// preemptSystemSession cancels any running system (heartbeat/scheduler) session for the chat
+// and waits briefly for it to release. Called before user messages to prevent busy conflicts.
+func (b *Bridge) preemptSystemSession(chatID int64) {
+	b.systemCancelMu.Lock()
+	cancel, ok := b.systemCancel[chatID]
+	b.systemCancelMu.Unlock()
+	if !ok {
+		return
+	}
+	slog.Info("preempting system session for user message", "chat_id", chatID)
+	cancel()
+
+	// Wait for the system session to release (up to 3 seconds).
+	for i := 0; i < 30; i++ {
+		sess, exists := b.proc.Get(chatID)
+		if !exists || sess.Status != process.StatusBusy {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	slog.Warn("preempt: system session did not release in time", "chat_id", chatID)
+}
+
+// registerSystemCancel stores a cancel function for the current system session,
+// allowing user messages to preempt it. Returns a cleanup function.
+func (b *Bridge) registerSystemCancel(chatID int64, cancel context.CancelFunc) func() {
+	b.systemCancelMu.Lock()
+	b.systemCancel[chatID] = cancel
+	b.systemCancelMu.Unlock()
+	return func() {
+		b.systemCancelMu.Lock()
+		delete(b.systemCancel, chatID)
+		b.systemCancelMu.Unlock()
+	}
+}
+
+// directiveResult holds the output from a single directive type execution.
+type directiveResult struct {
+	label   string
+	content string
+}
+
+// executeDirectivesParallel runs all directive actions concurrently, collecting results.
+// Returns the cleaned response and a combined follow-up string (empty if no directives).
+func (b *Bridge) executeDirectivesParallel(ctx context.Context, chatID int64, response string) (string, string) {
+	// 1. Extract matches and strip all directive patterns (fast, sequential).
+	type pendingDirective struct {
+		label string
+		exec  func() string
+	}
+	var pending []pendingDirective
+
+	// Search
+	if b.braveKey != "" || b.tavilyKey != "" {
+		if searchRe.MatchString(response) {
+			snapshot := response
+			pending = append(pending, pendingDirective{
+				label: "Search results",
+				exec: func() string {
+					_, results := b.parseSearchDirectives(ctx, snapshot)
+					return results
+				},
+			})
+			response = searchRe.ReplaceAllString(response, "")
+		}
+	}
+
+	// Browser
+	if b.browserCfg.Enabled {
+		if browser.BrowserRe.MatchString(response) {
+			snapshot := response
+			pending = append(pending, pendingDirective{
+				label: "Browser results",
+				exec: func() string {
+					_, results := b.parseBrowserDirectives(ctx, chatID, snapshot)
+					return results
+				},
+			})
+			response = browser.BrowserRe.ReplaceAllString(response, "")
+		}
+	}
+
+	// PM
+	if b.pmMgr != nil {
+		if pm.PMRe.MatchString(response) {
+			snapshot := response
+			pending = append(pending, pendingDirective{
+				label: "Process manager",
+				exec: func() string {
+					_, results := b.parsePMDirectives(ctx, snapshot)
+					return results
+				},
+			})
+			response = pm.PMRe.ReplaceAllString(response, "")
+		}
+	}
+
+	// Tunnel
+	if b.tunnelMgr != nil {
+		if tunnel.TunnelRe.MatchString(response) {
+			snapshot := response
+			pending = append(pending, pendingDirective{
+				label: "Tunnel",
+				exec: func() string {
+					_, results := b.parseTunnelDirectives(ctx, snapshot)
+					return results
+				},
+			})
+			response = tunnel.TunnelRe.ReplaceAllString(response, "")
+		}
+	}
+
+	response = strings.TrimSpace(response)
+
+	if len(pending) == 0 {
+		return response, ""
+	}
+
+	// 2. Execute all directive actions in parallel.
+	results := make([]directiveResult, len(pending))
+	var wg sync.WaitGroup
+	for i, p := range pending {
+		wg.Add(1)
+		go func(idx int, pd pendingDirective) {
+			defer wg.Done()
+			content := pd.exec()
+			results[idx] = directiveResult{label: pd.label, content: content}
+		}(i, p)
+	}
+	wg.Wait()
+
+	// 3. Combine non-empty results.
+	var combined strings.Builder
+	for _, r := range results {
+		if r.content != "" {
+			combined.WriteString(fmt.Sprintf("[%s]\n%s\n\n", r.label, strings.TrimSpace(r.content)))
+		}
+	}
+
+	return response, combined.String()
 }
 
 // SetImageSender sets the function used to send generated images to Telegram.
@@ -594,6 +772,20 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	// Inject current time when scheduler is enabled so Claude can compute relative times
 	augmentedMsg = b.injectCurrentTime(augmentedMsg)
 
+	// Preempt any running system session (heartbeat/scheduler) for user messages.
+	if !isSystemSender(senderName) {
+		b.preemptSystemSession(chatID)
+	}
+
+	// For system senders, register a cancellable context so user messages can preempt.
+	if isSystemSender(senderName) {
+		sysCtx, sysCancel := context.WithCancel(ctx)
+		defer sysCancel()
+		cleanupCancel := b.registerSystemCancel(chatID, sysCancel)
+		defer cleanupCancel()
+		ctx = sysCtx
+	}
+
 	// Determine claude session ID for --resume
 	procSess, _ := b.proc.Get(chatID)
 	claudeSessionID := ""
@@ -614,6 +806,10 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	systemPrompt += b.tunnelSystemPrompt()
 	systemPrompt += b.pmSystemPrompt()
 
+	// Track session in pm for /pm list visibility.
+	endTrack := b.trackSession(ctx, chatID, senderName)
+	defer endTrack()
+
 	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt)
 	if err != nil {
 		return "", fmt.Errorf("claude: %w", err)
@@ -632,58 +828,13 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 
 	response := strings.TrimSpace(result.Text)
 
-	// Handle [search] directives: run search, re-prompt Claude with results
-	response, searchResults := b.parseSearchDirectives(ctx, response)
-	if searchResults != "" {
-		followUp := "[Search results]\n" + searchResults + "[End of search results]\n\nNow answer the user's original question using the search results above."
+	// Execute all directives (search, browser, pm, tunnel) in parallel, single follow-up.
+	response, directiveResults := b.executeDirectivesParallel(ctx, chatID, response)
+	if directiveResults != "" {
+		followUp := directiveResults + "\nUse the results above to respond to the user."
 		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
 		if err != nil {
-			slog.Warn("search follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-
-	// Handle [browser] directives: run browser automation, re-prompt Claude with results
-	response, browserResults := b.parseBrowserDirectives(ctx, chatID, response)
-	if browserResults != "" {
-		followUp := browserResults + "\n\nNow answer the user's original question using the browser results above."
-		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
-		if err != nil {
-			slog.Warn("browser follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-
-	// Handle [pm] directives: start/stop/list/logs background processes
-	response, pmResults := b.parsePMDirectives(ctx, response)
-	if pmResults != "" {
-		followUp := pmResults + "\n\nReport the process manager status above to the user."
-		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
-		if err != nil {
-			slog.Warn("pm follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-
-	// Handle [tunnel] directives: start/stop/list tunnels, re-prompt Claude with results
-	response, tunnelResults := b.parseTunnelDirectives(ctx, response)
-	if tunnelResults != "" {
-		followUp := tunnelResults + "\n\nReport the tunnel status above to the user."
-		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
-		if err != nil {
-			slog.Warn("tunnel follow-up failed", "error", err)
+			slog.Warn("directive follow-up failed", "error", err)
 		} else {
 			response = strings.TrimSpace(followUpResult.Text)
 			if followUpResult.SessionID != "" {
@@ -809,6 +960,20 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		augmentedMsg = sb.String() + augmentedMsg
 	}
 
+	// Preempt any running system session (heartbeat/scheduler) for user messages.
+	if !isSystemSender(senderName) {
+		b.preemptSystemSession(chatID)
+	}
+
+	// For system senders, register a cancellable context so user messages can preempt.
+	if isSystemSender(senderName) {
+		sysCtx, sysCancel := context.WithCancel(ctx)
+		defer sysCancel()
+		cleanupCancel := b.registerSystemCancel(chatID, sysCancel)
+		defer cleanupCancel()
+		ctx = sysCtx
+	}
+
 	// Determine claude session ID for --resume
 	procSess, _ := b.proc.Get(chatID)
 	claudeSessionID := ""
@@ -829,6 +994,10 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	systemPrompt += b.tunnelSystemPrompt()
 	systemPrompt += b.pmSystemPrompt()
 
+	// Track session in pm for /pm list visibility.
+	endTrack := b.trackSession(ctx, chatID, senderName)
+	defer endTrack()
+
 	// Send to Claude with streaming
 	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt, onUpdate)
 	if err != nil {
@@ -848,70 +1017,16 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 
 	response := strings.TrimSpace(result.Text)
 
-	// Handle [search] directives: run search, re-prompt Claude with results (streaming)
-	response, searchResults := b.parseSearchDirectives(ctx, response)
-	if searchResults != "" {
+	// Execute all directives (search, browser, pm, tunnel) in parallel, single follow-up.
+	response, directiveResults := b.executeDirectivesParallel(ctx, chatID, response)
+	if directiveResults != "" {
 		if onUpdate != nil {
-			onUpdate("\n\n_Searching..._\n\n")
+			onUpdate("\n\n_Processing directives..._\n\n")
 		}
-		followUp := "[Search results]\n" + searchResults + "[End of search results]\n\nNow answer the user's original question using the search results above."
+		followUp := directiveResults + "\nUse the results above to respond to the user."
 		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
 		if err != nil {
-			slog.Warn("search follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-
-	// Handle [browser] directives: run browser automation, re-prompt Claude with results (streaming)
-	response, browserResults := b.parseBrowserDirectives(ctx, chatID, response)
-	if browserResults != "" {
-		if onUpdate != nil {
-			onUpdate("\n\n_Browsing..._\n\n")
-		}
-		followUp := browserResults + "\n\nNow answer the user's original question using the browser results above."
-		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
-		if err != nil {
-			slog.Warn("browser follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-
-	// Handle [pm] directives: start/stop/list/logs background processes (streaming)
-	response, pmResults := b.parsePMDirectives(ctx, response)
-	if pmResults != "" {
-		if onUpdate != nil {
-			onUpdate("\n\n_Managing processes..._\n\n")
-		}
-		followUp := pmResults + "\n\nReport the process manager status above to the user."
-		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
-		if err != nil {
-			slog.Warn("pm follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-
-	// Handle [tunnel] directives: start/stop/list tunnels, re-prompt Claude with results (streaming)
-	response, tunnelResults := b.parseTunnelDirectives(ctx, response)
-	if tunnelResults != "" {
-		if onUpdate != nil {
-			onUpdate("\n\n_Managing tunnel..._\n\n")
-		}
-		followUp := tunnelResults + "\n\nReport the tunnel status above to the user."
-		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
-		if err != nil {
-			slog.Warn("tunnel follow-up failed", "error", err)
+			slog.Warn("directive follow-up failed", "error", err)
 		} else {
 			response = strings.TrimSpace(followUpResult.Text)
 			if followUpResult.SessionID != "" {
