@@ -56,9 +56,12 @@ type SecretsConfig struct {
 var globalSecretStore secrets.Store
 
 type TelegramConfig struct {
-	TokenEnv     string            `json:"token_env"`
-	AllowedUsers []int64           `json:"allowed_users"`
-	ReactionMap  map[string]string `json:"reaction_map"` // emoji → action (e.g. "👍":"go", "👎":"stop")
+	TokenEnv          string            `json:"token_env"`
+	AllowedUsers      []int64           `json:"allowed_users"`
+	DMPolicy          string            `json:"dm_policy"`           // "pairing", "allowlist", or "disabled" (default: "allowlist")
+	GroupPolicy       string            `json:"group_policy"`        // "pairing", "allowlist", or "disabled" (default: "disabled")
+	GroupAllowedUsers []int64           `json:"group_allowed_users"` // separate allowlist for group chats
+	ReactionMap       map[string]string `json:"reaction_map"`        // emoji → action (e.g. "👍":"go", "👎":"stop")
 }
 
 // UnmarshalJSON replaces (rather than merges) the ReactionMap when the user

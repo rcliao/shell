@@ -898,6 +898,68 @@ func NewHandler(auth *Auth, br *bridge.Bridge) *Handler {
 	}
 }
 
+// checkAuth performs policy-based authorization for a message.
+// Returns true if the sender is allowed to proceed.
+func (h *Handler) checkAuth(ctx context.Context, b *bot.Bot, msg *models.Message) bool {
+	isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+	sender := SenderInfo{
+		UserID:    msg.From.ID,
+		Username:  msg.From.Username,
+		FirstName: msg.From.FirstName,
+		LastName:  msg.From.LastName,
+		ChatID:    msg.Chat.ID,
+		IsGroup:   isGroup,
+	}
+
+	result := h.auth.Check(sender)
+	switch result {
+	case AuthAllowed:
+		return true
+	case AuthPairing:
+		if h.auth.Pairing == nil {
+			return false
+		}
+		code, err := h.auth.Pairing.RequestPairing(sender.UserID, sender.Username, sender.FirstName, sender.LastName, sender.ChatID)
+		if err != nil {
+			slog.Error("pairing request failed", "error", err, "user_id", sender.UserID)
+			return false
+		}
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   fmt.Sprintf("🔐 Pairing required.\n\nYour code: %s\n\nAsk the admin to run:\n  shell pairing approve %s", code, code),
+		})
+		return false
+	case AuthRateLimited:
+		// Silent drop.
+		return false
+	case AuthDenied:
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    msg.Chat.ID,
+			Text:      formatErrorForMarkdownV2("Unauthorized."),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		return false
+	}
+	return false
+}
+
+// checkReactionAuth performs policy-based authorization for a reaction.
+func (h *Handler) checkReactionAuth(reaction *models.MessageReactionUpdated) bool {
+	if reaction.User == nil {
+		return false
+	}
+	isGroup := reaction.Chat.Type == "group" || reaction.Chat.Type == "supergroup"
+	sender := SenderInfo{
+		UserID:    reaction.User.ID,
+		Username:  reaction.User.Username,
+		FirstName: reaction.User.FirstName,
+		LastName:  reaction.User.LastName,
+		ChatID:    reaction.Chat.ID,
+		IsGroup:   isGroup,
+	}
+	return h.auth.Check(sender) == AuthAllowed
+}
+
 // getChatLock returns the per-chat mutex, creating one if needed.
 func (h *Handler) getChatLock(chatID int64) *sync.Mutex {
 	h.chatLocksMu.Lock()
@@ -943,8 +1005,7 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 	)
 
 	// Auth check: only process reactions from allowed users.
-	if reaction.User != nil && !h.auth.IsAllowed(reaction.User.ID) {
-		slog.Warn("unauthorized reaction", "user_id", reaction.User.ID)
+	if !h.checkReactionAuth(reaction) {
 		return
 	}
 
@@ -1149,13 +1210,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	if msg.From == nil {
 		return
 	}
-	if !h.auth.IsAllowed(msg.From.ID) {
-		slog.Warn("unauthorized user", "user_id", msg.From.ID, "username", msg.From.Username)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    msg.Chat.ID,
-			Text:      formatErrorForMarkdownV2("Unauthorized. Your user ID is not in the allowlist."),
-			ParseMode: models.ParseModeMarkdown,
-		})
+	if !h.checkAuth(ctx, b, msg) {
 		return
 	}
 
@@ -1564,13 +1619,7 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 	if first.From == nil {
 		return
 	}
-	if !h.auth.IsAllowed(first.From.ID) {
-		slog.Warn("unauthorized user (album)", "user_id", first.From.ID)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    first.Chat.ID,
-			Text:      formatErrorForMarkdownV2("Unauthorized. Your user ID is not in the allowlist."),
-			ParseMode: models.ParseModeMarkdown,
-		})
+	if !h.checkAuth(ctx, b, first) {
 		return
 	}
 
@@ -1816,8 +1865,7 @@ func (h *Handler) HandleImagine(ctx context.Context, b *bot.Bot, msg *models.Mes
 	if msg.From == nil {
 		return
 	}
-	if !h.auth.IsAllowed(msg.From.ID) {
-		slog.Warn("unauthorized user /imagine", "user_id", msg.From.ID)
+	if !h.checkAuth(ctx, b, msg) {
 		return
 	}
 
@@ -1899,13 +1947,7 @@ func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Mes
 	if msg.From == nil {
 		return
 	}
-	if !h.auth.IsAllowed(msg.From.ID) {
-		slog.Warn("unauthorized user command", "user_id", msg.From.ID)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    msg.Chat.ID,
-			Text:      formatErrorForMarkdownV2("Unauthorized."),
-			ParseMode: models.ParseModeMarkdown,
-		})
+	if !h.checkAuth(ctx, b, msg) {
 		return
 	}
 

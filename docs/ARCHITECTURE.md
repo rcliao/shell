@@ -31,10 +31,10 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 
 | Package | Path | Purpose |
 |---------|------|---------|
-| **main** | `cmd/shell/main.go` | Cobra CLI: daemon, send, status, session, restart, stop, init, search |
+| **main** | `cmd/shell/main.go` | Cobra CLI: daemon, send, status, session, pairing, restart, stop, init, search |
 | **bridge** | `internal/bridge/` | Core routing: Telegram ↔ Claude. Directive parsing, command handling, reaction routing |
 | **process** | `internal/process/` | Claude CLI subprocess lifecycle. Agent interface, session management, streaming |
-| **telegram** | `internal/telegram/` | Bot wrapper, handlers, auth, photo/PDF download, MarkdownV2 formatting |
+| **telegram** | `internal/telegram/` | Bot wrapper, handlers, policy-based auth, pairing, rate limiting, allowlist, photo/PDF download, MarkdownV2 formatting |
 | **store** | `internal/store/` | SQLite persistence: sessions, messages, message_map, schedules, tasks |
 | **config** | `internal/config/` | JSON config from `~/.shell/config.json` with all feature flags |
 | **daemon** | `internal/daemon/` | Initialization chain, PID file, signal handling, component wiring |
@@ -81,6 +81,78 @@ Telegram Bot
   │ SendText (split + MarkdownV2) / SendPhoto
   ▼
 User (Telegram)
+```
+
+## Security & Access Control
+
+Multi-layered auth inspired by OpenClaw's pairing model. Fail-closed by default.
+
+### DM Policy (`dm_policy` in config)
+
+| Policy | Behavior |
+|--------|----------|
+| `allowlist` (default) | Only config `allowed_users` + dynamic allowlist |
+| `pairing` | Unknown senders get an 8-char code; admin approves via CLI |
+| `disabled` | All DMs denied (except config users) |
+
+### Group Policy (`group_policy` in config)
+
+| Policy | Behavior |
+|--------|----------|
+| `disabled` (default) | All group messages denied (except config users) |
+| `allowlist` | Only `group_allowed_users` + dynamic allowlist |
+| `pairing` | Unknown group senders get a pairing code; admin approves via CLI |
+
+### Auth Decision Flow
+
+```
+Incoming message
+  │
+  ├─ Config user (allowed_users)? → ALLOW
+  │
+  ├─ Group message?
+  │   ├─ group_policy=disabled → DENY
+  │   ├─ In group_allowed_users? → ALLOW
+  │   ├─ In dynamic allowlist? → ALLOW
+  │   ├─ Rate limited? → SILENT DROP
+  │   ├─ group_policy=pairing → PAIRING (send code)
+  │   └─ → DENY
+  │
+  └─ DM message?
+      ├─ dm_policy=disabled → DENY
+      ├─ In dynamic allowlist? → ALLOW
+      ├─ Rate limited? → SILENT DROP
+      ├─ dm_policy=pairing → PAIRING (send code)
+      └─ dm_policy=allowlist → DENY
+```
+
+### Pairing Flow
+
+1. Unknown user messages bot → receives 8-char code (crypto-random, no ambiguous chars)
+2. Admin runs `shell pairing approve <CODE>` → user added to `~/.shell/allowlist.json`
+3. User's next message is authorized via dynamic allowlist
+4. Codes expire after 10 minutes; max 20 pending requests
+
+### Rate Limiting
+
+In-memory sliding window: 5 attempts per 60 seconds per sender. Only applies to denied/pairing users. Rate-limited messages are silently dropped.
+
+### Persistence
+
+| File | Purpose |
+|------|---------|
+| `~/.shell/allowlist.json` | Pairing-approved users (file-locked) |
+| `~/.shell/pairing.json` | Pending pairing requests (file-locked, cross-process) |
+| `config.json:allowed_users` | Static super-admin list |
+| `config.json:group_allowed_users` | Static group allowlist |
+
+### CLI Commands
+
+```
+shell pairing list       # Show pending pairing requests
+shell pairing approve X  # Approve a pairing code
+shell pairing allowlist  # List dynamically approved users
+shell pairing revoke ID  # Revoke a user from dynamic allowlist
 ```
 
 ## Agent Interface

@@ -26,6 +26,7 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 - `shellsend "msg"` — One-shot test without Telegram
 - `shellstatus` — Show active sessions
 - `shellsession list|kill <chat-id>` — Session management
+- `shellpairing list|approve|allowlist|revoke` — Pairing and allowlist management
 
 ## Build & Test
 

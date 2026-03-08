@@ -19,6 +19,7 @@ import (
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/search"
 	"github.com/rcliao/shell/internal/store"
+	"github.com/rcliao/shell/internal/telegram"
 	"github.com/spf13/cobra"
 )
 
@@ -358,8 +359,128 @@ func main() {
 	searchCmd.Flags().StringVar(&searchCountry, "country", "", "Country code (e.g. us, jp)")
 	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output as JSON")
 
+	// pairing command group
+	pairingCmd := &cobra.Command{
+		Use:   "pairing",
+		Short: "Manage pairing requests and allowlist",
+	}
+
+	pairingListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List pending pairing requests",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configDir := config.DefaultConfigDir()
+			pairingPath := filepath.Join(configDir, "pairing.json")
+
+			requests, err := telegram.LoadPendingFromFile(pairingPath)
+			if err != nil {
+				return fmt.Errorf("load pending requests: %w", err)
+			}
+
+			if len(requests) == 0 {
+				fmt.Println("No pending pairing requests.")
+				return nil
+			}
+
+			fmt.Printf("Pending pairing requests: %d\n\n", len(requests))
+			for _, req := range requests {
+				name := req.FirstName
+				if req.LastName != "" {
+					name += " " + req.LastName
+				}
+				username := ""
+				if req.Username != "" {
+					username = " (@" + req.Username + ")"
+				}
+				fmt.Printf("  Code: %s\n  User: %s%s (ID: %d)\n  Chat: %d\n  Created: %s\n\n",
+					req.Code, name, username, req.UserID, req.ChatID, req.CreatedAt)
+			}
+			return nil
+		},
+	}
+
+	pairingApproveCmd := &cobra.Command{
+		Use:   "approve <code>",
+		Short: "Approve a pending pairing request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configDir := config.DefaultConfigDir()
+			pairingPath := filepath.Join(configDir, "pairing.json")
+			allowlistStore := telegram.NewAllowlistStore(filepath.Join(configDir, "allowlist.json"))
+
+			code := strings.ToUpper(strings.TrimSpace(args[0]))
+			req, err := telegram.ApproveFromFile(pairingPath, allowlistStore, code)
+			if err != nil {
+				return err
+			}
+
+			name := req.FirstName
+			if req.LastName != "" {
+				name += " " + req.LastName
+			}
+			username := ""
+			if req.Username != "" {
+				username = " (@" + req.Username + ")"
+			}
+			fmt.Printf("Approved: %s%s (ID: %d)\n", name, username, req.UserID)
+			return nil
+		},
+	}
+
+	pairingAllowlistCmd := &cobra.Command{
+		Use:   "allowlist",
+		Short: "List approved users from the dynamic allowlist",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configDir := config.DefaultConfigDir()
+			allowlistStore := telegram.NewAllowlistStore(filepath.Join(configDir, "allowlist.json"))
+
+			users, err := allowlistStore.ListApproved()
+			if err != nil {
+				return fmt.Errorf("load allowlist: %w", err)
+			}
+
+			if len(users) == 0 {
+				fmt.Println("No approved users in dynamic allowlist.")
+				return nil
+			}
+
+			fmt.Printf("Approved users: %d\n\n", len(users))
+			for _, u := range users {
+				username := ""
+				if u.Username != "" {
+					username = " (@" + u.Username + ")"
+				}
+				fmt.Printf("  %s%s (ID: %d) — approved %s\n",
+					u.FirstName, username, u.UserID, u.ApprovedAt)
+			}
+			return nil
+		},
+	}
+
+	pairingRevokeCmd := &cobra.Command{
+		Use:   "revoke <user-id>",
+		Short: "Revoke a user from the dynamic allowlist",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configDir := config.DefaultConfigDir()
+			allowlistStore := telegram.NewAllowlistStore(filepath.Join(configDir, "allowlist.json"))
+
+			var userID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &userID); err != nil {
+				return fmt.Errorf("invalid user ID: %s", args[0])
+			}
+
+			if err := allowlistStore.Remove(userID); err != nil {
+				return err
+			}
+			fmt.Printf("Revoked user ID %d\n", userID)
+			return nil
+		},
+	}
+
+	pairingCmd.AddCommand(pairingListCmd, pairingApproveCmd, pairingAllowlistCmd, pairingRevokeCmd)
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd)
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

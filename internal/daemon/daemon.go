@@ -197,8 +197,21 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("search initialized", "provider", "tavily")
 	}
 
-	// Create auth
-	auth := telegram.NewAuth(cfg.Telegram.AllowedUsers)
+	// Create auth with policy engine
+	configDir := config.DefaultConfigDir()
+	allowlistStore := telegram.NewAllowlistStore(filepath.Join(configDir, "allowlist.json"))
+	pairingMgr := telegram.NewPairingManager(allowlistStore, filepath.Join(configDir, "pairing.json"), 10*time.Minute)
+	limiter := telegram.NewRateLimiter(5, 60*time.Second)
+
+	auth := telegram.NewAuth(telegram.AuthOptions{
+		DMPolicy:          telegram.DMPolicy(cfg.Telegram.DMPolicy),
+		GroupPolicy:       telegram.GroupPolicy(cfg.Telegram.GroupPolicy),
+		ConfigUsers:       cfg.Telegram.AllowedUsers,
+		GroupAllowedUsers: cfg.Telegram.GroupAllowedUsers,
+		AllowlistStore:    allowlistStore,
+		Pairing:           pairingMgr,
+		Limiter:           limiter,
+	})
 
 	// Create telegram bot
 	token := cfg.TelegramToken()
