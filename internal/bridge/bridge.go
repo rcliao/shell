@@ -853,6 +853,12 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 			response = b.parseHeartbeatLearnings(ctx, chatID, response)
 			// Run reflect cycle after heartbeat to promote/decay/prune memories
 			b.memory.RunReflect(ctx)
+			// Summarize old exchanges during heartbeat maintenance
+			if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
+				slog.Warn("exchange summarization failed", "error", err)
+			} else if n > 0 {
+				slog.Info("heartbeat summarized exchanges", "chat_id", chatID, "count", n)
+			}
 		}
 		response = b.parseTaskCompletes(chatID, response)
 	}
@@ -1045,6 +1051,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 			response = b.parseHeartbeatLearnings(ctx, chatID, response)
 			// Run reflect cycle after heartbeat to promote/decay/prune memories
 			b.memory.RunReflect(ctx)
+			// Summarize old exchanges during heartbeat maintenance
+			if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
+				slog.Warn("exchange summarization failed", "error", err)
+			} else if n > 0 {
+				slog.Info("heartbeat summarized exchanges", "chat_id", chatID, "count", n)
+			}
 		}
 		response = b.parseTaskCompletes(chatID, response)
 	}

@@ -731,6 +731,71 @@ func (m *Memory) SeedNamespace(ctx context.Context, ns, key, content string) err
 	return err
 }
 
+// exchangeSummarizeThreshold is the number of episodic exchanges before summarization kicks in.
+const exchangeSummarizeThreshold = 10
+
+// SummarizeExchanges consolidates old episodic exchanges into a single semantic summary.
+// Keeps the most recent exchanges intact and merges older ones.
+// Returns the number of exchanges consolidated, or 0 if no summarization was needed.
+func (m *Memory) SummarizeExchanges(ctx context.Context, chatID int64) (int, error) {
+	ns := namespace(chatID)
+
+	// List all episodic exchanges (newest first)
+	exchanges, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:    ns,
+		Kind:  "episodic",
+		Limit: 100,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("list exchanges: %w", err)
+	}
+
+	if len(exchanges) <= exchangeSummarizeThreshold {
+		return 0, nil
+	}
+
+	// Keep the most recent 5 exchanges, summarize the rest
+	keepRecent := 5
+	toSummarize := exchanges[keepRecent:]
+
+	// Build summary from oldest exchanges
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Consolidated summary of %d conversations:\n", len(toSummarize)))
+	for _, ex := range toSummarize {
+		// Each exchange is "User: ...\nAssistant: ..."
+		// Extract just the topic/gist
+		line := strings.ReplaceAll(ex.Content, "\n", " | ")
+		if utf8.RuneCountInString(line) > 120 {
+			line = string([]rune(line)[:120]) + "..."
+		}
+		sb.WriteString("- ")
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+
+	// Store the consolidated summary
+	_, err = m.store.Put(ctx, agentmemory.PutParams{
+		NS:         ns,
+		Key:        fmt.Sprintf("exchange-summary-%d", time.Now().UnixMilli()),
+		Content:    sb.String(),
+		Kind:       "semantic",
+		Importance: 0.5,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("store summary: %w", err)
+	}
+
+	// Delete the individual exchanges that were summarized
+	for _, ex := range toSummarize {
+		if rmErr := m.store.Rm(ctx, agentmemory.RmParams{NS: ns, Key: ex.Key}); rmErr != nil {
+			slog.Warn("failed to remove summarized exchange", "key", ex.Key, "error", rmErr)
+		}
+	}
+
+	slog.Info("summarized exchanges", "chat_id", chatID, "consolidated", len(toSummarize))
+	return len(toSummarize), nil
+}
+
 // RunReflect runs the memory reflect cycle to promote, decay, and prune memories.
 // Should be called periodically (e.g., after heartbeat processing).
 func (m *Memory) RunReflect(ctx context.Context) {
