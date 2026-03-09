@@ -112,16 +112,17 @@ type DaemonConfig struct {
 }
 
 type Profile struct {
-	SystemNamespaces []string `json:"system_namespaces"`
+	AgentNS          string   `json:"agent_ns"`           // agent namespace (e.g. "agent:pikamini")
+	SystemNamespaces []string `json:"system_namespaces"`  // deprecated: use agent_ns + pinned memories
 	SystemBudget     int      `json:"system_budget"`
-	GlobalNamespaces []string `json:"global_namespaces"`
+	GlobalNamespaces []string `json:"global_namespaces"`  // deprecated: use agent_ns + tag filtering
 	GlobalBudget     int      `json:"global_budget"`
 	Budget           int      `json:"budget"`
 	ExchangeTTL      string   `json:"exchange_ttl"`       // "7d", "30d"
 	ExchangeMaxUser  int      `json:"exchange_max_user"`  // 0 = default 200
 	ExchangeMaxReply int      `json:"exchange_max_reply"` // 0 = default 300
 	MemoryDirectives bool     `json:"memory_directives"`
-	DirectiveNS      string   `json:"directive_ns"` // target NS for [remember] blocks
+	DirectiveNS      string   `json:"directive_ns"` // deprecated: use agent_ns + "learning" tag
 }
 
 type MemoryConfig struct {

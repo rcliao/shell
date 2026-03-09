@@ -16,16 +16,17 @@ import (
 
 // ProfileConfig configures memory behavior for a specific agent profile.
 type ProfileConfig struct {
-	SystemNamespaces []string
+	AgentNS          string   // agent namespace (e.g. "agent:pikamini")
+	SystemNamespaces []string // deprecated: kept for backward compat, use AgentNS + pinned
 	SystemBudget     int
-	GlobalNamespaces []string
+	GlobalNamespaces []string // deprecated: kept for backward compat, use AgentNS + tags
 	GlobalBudget     int
 	Budget           int
 	ExchangeTTL      string // "7d", "30d"
 	ExchangeMaxUser  int    // 0 = default 200
 	ExchangeMaxReply int    // 0 = default 300
 	MemoryDirectives bool
-	DirectiveNS      string // target NS for [remember] blocks
+	DirectiveNS      string // deprecated: use AgentNS + "learning" tag
 }
 
 // Memory wraps a ghost store for shell use.
@@ -87,10 +88,53 @@ func (m *Memory) profileFor(chatID int64) ProfileConfig {
 	}
 }
 
-// SystemPrompt returns always-on context loaded via List() (no search).
-// Uses the profile for the given chatID to determine namespaces and budget.
+// SystemPrompt returns always-on context for the system prompt.
+// When AgentNS is set, loads pinned memories from the agent namespace via Context().
+// Falls back to the legacy List()-per-namespace approach when AgentNS is empty.
 func (m *Memory) SystemPrompt(ctx context.Context, chatID int64) string {
 	prof := m.profileFor(chatID)
+
+	// New path: load pinned memories from agent namespace
+	if prof.AgentNS != "" {
+		return m.systemPromptFromAgent(ctx, prof)
+	}
+
+	// Legacy path: list from system namespaces
+	return m.systemPromptFromNamespaces(ctx, prof)
+}
+
+// systemPromptFromAgent loads pinned memories from the agent namespace via Context().
+func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) string {
+	budget := prof.SystemBudget
+	if budget <= 0 {
+		budget = 3000
+	}
+
+	// Context() Phase 1 loads pinned memories automatically
+	result, err := m.store.Context(ctx, agentmemory.ContextParams{
+		NS:     prof.AgentNS,
+		Query:  "", // empty query = pinned memories only
+		Budget: budget,
+	})
+	if err != nil {
+		slog.Warn("system prompt context failed", "ns", prof.AgentNS, "error", err)
+		return ""
+	}
+	if len(result.Memories) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, mem := range result.Memories {
+		sb.WriteString("- ")
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// systemPromptFromNamespaces is the legacy path: List() per system namespace.
+func (m *Memory) systemPromptFromNamespaces(ctx context.Context, prof ProfileConfig) string {
 	if len(prof.SystemNamespaces) == 0 {
 		return ""
 	}
@@ -100,8 +144,6 @@ func (m *Memory) SystemPrompt(ctx context.Context, chatID int64) string {
 	used := 0
 
 	for _, ns := range prof.SystemNamespaces {
-		// Derive a section heading from the last segment of the namespace.
-		// e.g. "openclaw:identity" → "Identity"
 		heading := ns
 		if idx := strings.LastIndex(ns, ":"); idx >= 0 && idx+1 < len(ns) {
 			heading = ns[idx+1:]
@@ -136,49 +178,74 @@ func (m *Memory) SystemPrompt(ctx context.Context, chatID int64) string {
 	return strings.TrimSpace(sb.String())
 }
 
-// namespace returns the per-chat namespace.
-func namespace(chatID int64) string {
+// chatTag returns the tag for a chat ID.
+func chatTag(chatID int64) string {
+	return fmt.Sprintf("chat:%d", chatID)
+}
+
+// legacyNamespace returns the legacy per-chat namespace (for backward compat).
+func legacyNamespace(chatID int64) string {
 	return fmt.Sprintf("shell:chat:%d", chatID)
 }
 
 // InjectContext fetches relevant memories and prepends them to the user message.
-// It queries two layers: global background context and per-chat conversation memories.
+// When AgentNS is set, queries the agent namespace with chat tag filtering.
+// Falls back to the legacy namespace-per-chat approach when AgentNS is empty.
 func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string) string {
 	prof := m.profileFor(chatID)
 	var sb strings.Builder
 
-	// Layer 1: global background context
-	if len(prof.GlobalNamespaces) > 0 && prof.GlobalBudget > 0 {
-		globalMems := m.fetchGlobalContextFor(ctx, userMsg, prof.GlobalNamespaces, prof.GlobalBudget)
-		if len(globalMems) > 0 {
-			sb.WriteString("[Background context]\n")
-			for _, mem := range globalMems {
+	if prof.AgentNS != "" {
+		// New path: query agent namespace with chat tag
+		result, err := m.store.Context(ctx, agentmemory.ContextParams{
+			NS:     prof.AgentNS,
+			Query:  userMsg,
+			Tags:   []string{chatTag(chatID)},
+			Budget: prof.Budget,
+		})
+		if err != nil {
+			slog.Warn("memory context fetch failed", "error", err)
+		} else if len(result.Memories) > 0 {
+			sb.WriteString("[Relevant memories from previous conversations]\n")
+			for _, mem := range result.Memories {
 				sb.WriteString("- ")
 				sb.WriteString(mem.Content)
 				sb.WriteString("\n")
 			}
-			sb.WriteString("[End of background context]\n\n")
+			sb.WriteString("[End of memories]\n\n")
 		}
-	}
+	} else {
+		// Legacy path: global namespaces + legacy namespace-per-chat
+		if len(prof.GlobalNamespaces) > 0 && prof.GlobalBudget > 0 {
+			globalMems := m.fetchGlobalContextFor(ctx, userMsg, prof.GlobalNamespaces, prof.GlobalBudget)
+			if len(globalMems) > 0 {
+				sb.WriteString("[Background context]\n")
+				for _, mem := range globalMems {
+					sb.WriteString("- ")
+					sb.WriteString(mem.Content)
+					sb.WriteString("\n")
+				}
+				sb.WriteString("[End of background context]\n\n")
+			}
+		}
 
-	// Layer 2: per-chat conversation memories (with tier-aware pinning)
-	ns := namespace(chatID)
-	result, err := m.store.Context(ctx, agentmemory.ContextParams{
-		NS:       ns + "*",
-		Query:    userMsg,
-		Budget:   prof.Budget,
-		PinTiers: []string{"identity", "ltm"}, // always inject important long-term memories first
-	})
-	if err != nil {
-		slog.Warn("memory context fetch failed", "error", err)
-	} else if len(result.Memories) > 0 {
-		sb.WriteString("[Relevant memories from previous conversations]\n")
-		for _, mem := range result.Memories {
-			sb.WriteString("- ")
-			sb.WriteString(mem.Content)
-			sb.WriteString("\n")
+		ns := legacyNamespace(chatID)
+		result, err := m.store.Context(ctx, agentmemory.ContextParams{
+			NS:     ns + "*",
+			Query:  userMsg,
+			Budget: prof.Budget,
+		})
+		if err != nil {
+			slog.Warn("memory context fetch failed", "error", err)
+		} else if len(result.Memories) > 0 {
+			sb.WriteString("[Relevant memories from previous conversations]\n")
+			for _, mem := range result.Memories {
+				sb.WriteString("- ")
+				sb.WriteString(mem.Content)
+				sb.WriteString("\n")
+			}
+			sb.WriteString("[End of memories]\n\n")
 		}
-		sb.WriteString("[End of memories]\n\n")
 	}
 
 	if sb.Len() == 0 {
@@ -233,7 +300,6 @@ func (m *Memory) fetchGlobalContextFor(ctx context.Context, query string, namesp
 // LogExchange stores a summary of the user/assistant exchange as episodic memory.
 func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, response string) {
 	prof := m.profileFor(chatID)
-	ns := namespace(chatID)
 
 	maxUser := prof.ExchangeMaxUser
 	if maxUser <= 0 {
@@ -260,11 +326,21 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 
 	content := fmt.Sprintf("User: %s\nAssistant: %s", summary, respSummary)
 
+	ns := prof.AgentNS
+	var tags []string
+	if ns != "" {
+		tags = []string{chatTag(chatID)}
+	} else {
+		ns = legacyNamespace(chatID)
+	}
+
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
 		NS:         ns,
 		Key:        fmt.Sprintf("exchange-%d", time.Now().UnixMilli()),
 		Content:    content,
 		Kind:       "episodic",
+		Tags:       tags,
+		Tier:       "sensory", // raw observations — promoted to stm if accessed
 		TTL:        ttl,
 		Importance: 0.3, // ephemeral exchanges — low importance, will decay naturally
 	})
@@ -275,14 +351,22 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 
 // Remember stores a user-provided memory as semantic memory.
 func (m *Memory) Remember(ctx context.Context, chatID int64, content string) error {
-	ns := namespace(chatID)
-	// Use a key derived from content prefix to allow multiple memories
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	var tags []string
+	if ns != "" {
+		tags = []string{chatTag(chatID)}
+	} else {
+		ns = legacyNamespace(chatID)
+	}
+
 	key := sanitizeKey(content)
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
 		NS:         ns,
 		Key:        key,
 		Content:    content,
 		Kind:       "semantic",
+		Tags:       tags,
 		Priority:   "high",
 		Importance: 0.8, // user-remembered facts are high importance
 		Tier:       "ltm", // explicitly saved by user — skip stm
@@ -292,7 +376,11 @@ func (m *Memory) Remember(ctx context.Context, chatID int64, content string) err
 
 // Forget removes a memory by key.
 func (m *Memory) Forget(ctx context.Context, chatID int64, key string) error {
-	ns := namespace(chatID)
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	if ns == "" {
+		ns = legacyNamespace(chatID)
+	}
 	return m.store.Rm(ctx, agentmemory.RmParams{
 		NS:  ns,
 		Key: key,
@@ -302,125 +390,165 @@ func (m *Memory) Forget(ctx context.Context, chatID int64, key string) error {
 // ListMemories returns a formatted debug view of all memories across related namespaces.
 func (m *Memory) ListMemories(ctx context.Context, chatID int64) (string, error) {
 	prof := m.profileFor(chatID)
-	chatNS := namespace(chatID)
-	hbNS := heartbeatNamespace(chatID)
-
-	// Collect all namespaces to query
-	type nsGroup struct {
-		label string
-		ns    string
-	}
-	groups := []nsGroup{
-		{"Chat (semantic)", chatNS},
-		{"Chat (episodic)", chatNS},
-		{"Heartbeat", hbNS},
-	}
-
-	// Add system namespaces from profile
-	for _, ns := range prof.SystemNamespaces {
-		groups = append(groups, nsGroup{"System: " + ns, ns})
-	}
-	// Add global namespaces from profile
-	for _, ns := range prof.GlobalNamespaces {
-		groups = append(groups, nsGroup{"Global: " + ns, ns})
-	}
-	// Add directive namespace if configured
-	if prof.DirectiveNS != "" {
-		groups = append(groups, nsGroup{"Directives: " + prof.DirectiveNS, prof.DirectiveNS})
-	}
 
 	var sb strings.Builder
 	totalCount := 0
 
-	// Peek for tier overview
-	peek, err := m.store.Peek(ctx, chatNS+"*")
-	if err == nil && len(peek.MemoryCounts) > 0 {
-		sb.WriteString("## Memory Overview\n\n")
-		for tier, count := range peek.MemoryCounts {
-			tokens := peek.TotalEstTokens[tier]
-			sb.WriteString(fmt.Sprintf("- **%s**: %d memories (~%d tokens)\n", tier, count, tokens))
-		}
-		if peek.IdentitySummary != "" {
-			sb.WriteString(fmt.Sprintf("\nIdentity: %s\n", peek.IdentitySummary))
-		}
-		sb.WriteString("\n")
-	}
+	if prof.AgentNS != "" {
+		// New path: list from agent namespace with tag filtering
+		agentNS := prof.AgentNS
+		tag := chatTag(chatID)
 
-	// Chat semantic memories
-	semantic, _ := m.store.List(ctx, agentmemory.ListParams{NS: chatNS, Kind: "semantic", Limit: 50})
-	if len(semantic) > 0 {
-		sb.WriteString("## Saved Memories\n\n")
-		for _, mem := range semantic {
-			sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f, acc=%d] — %s\n",
-				mem.Key, mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
-			totalCount++
+		// Peek for tier overview
+		peek, err := m.store.Peek(ctx, agentNS)
+		if err == nil && len(peek.MemoryCounts) > 0 {
+			sb.WriteString("## Memory Overview\n\n")
+			for tier, count := range peek.MemoryCounts {
+				tokens := peek.TotalEstTokens[tier]
+				sb.WriteString(fmt.Sprintf("- **%s**: %d memories (~%d tokens)\n", tier, count, tokens))
+			}
+			if peek.PinnedSummary != "" {
+				sb.WriteString(fmt.Sprintf("\nPinned: %s\n", peek.PinnedSummary))
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
-	}
 
-	// Chat episodic memories
-	episodic, _ := m.store.List(ctx, agentmemory.ListParams{NS: chatNS, Kind: "episodic", Limit: 10})
-	if len(episodic) > 0 {
-		sb.WriteString("## Recent Exchanges\n\n")
-		for _, mem := range episodic {
-			sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
-				mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 100)))
-			totalCount++
+		// Chat semantic memories (tagged with chat ID)
+		semantic, _ := m.store.List(ctx, agentmemory.ListParams{NS: agentNS, Kind: "semantic", Tags: []string{tag}, Limit: 50})
+		if len(semantic) > 0 {
+			sb.WriteString("## Saved Memories\n\n")
+			for _, mem := range semantic {
+				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f, acc=%d] — %s\n",
+					mem.Key, mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
+				totalCount++
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
-	}
 
-	// Heartbeat learnings
-	hbMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: hbNS, Kind: "semantic", Limit: 20})
-	if len(hbMems) > 0 {
-		sb.WriteString("## Heartbeat Learnings\n\n")
-		for _, mem := range hbMems {
-			sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
-				mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
-			totalCount++
+		// Chat episodic memories (tagged with chat ID)
+		episodic, _ := m.store.List(ctx, agentmemory.ListParams{NS: agentNS, Kind: "episodic", Tags: []string{tag}, Limit: 10})
+		if len(episodic) > 0 {
+			sb.WriteString("## Recent Exchanges\n\n")
+			for _, mem := range episodic {
+				sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
+					mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 100)))
+				totalCount++
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
-	}
 
-	// System namespace memories
-	for _, ns := range prof.SystemNamespaces {
-		sysMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: ns, Limit: 20})
-		if len(sysMems) > 0 {
-			sb.WriteString(fmt.Sprintf("## System: %s\n\n", ns))
-			for _, mem := range sysMems {
+		// Heartbeat learnings (tagged with heartbeat + chat ID)
+		hbMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: agentNS, Tags: []string{"heartbeat", tag}, Limit: 20})
+		if len(hbMems) > 0 {
+			sb.WriteString("## Heartbeat Learnings\n\n")
+			for _, mem := range hbMems {
+				sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
+					mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
+				totalCount++
+			}
+			sb.WriteString("\n")
+		}
+
+		// Learnings (tagged with learning)
+		learnings, _ := m.store.List(ctx, agentmemory.ListParams{NS: agentNS, Tags: []string{"learning"}, Limit: 20})
+		if len(learnings) > 0 {
+			sb.WriteString("## Learnings\n\n")
+			for _, mem := range learnings {
 				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
 					mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
 				totalCount++
 			}
 			sb.WriteString("\n")
 		}
-	}
+	} else {
+		// Legacy path
+		chatNS := legacyNamespace(chatID)
+		hbNS := legacyHeartbeatNamespace(chatID)
 
-	// Global namespace memories
-	for _, ns := range prof.GlobalNamespaces {
-		globalMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: ns, Limit: 20})
-		if len(globalMems) > 0 {
-			sb.WriteString(fmt.Sprintf("## Global: %s\n\n", ns))
-			for _, mem := range globalMems {
-				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
-					mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+		// Peek for tier overview
+		peek, err := m.store.Peek(ctx, chatNS+"*")
+		if err == nil && len(peek.MemoryCounts) > 0 {
+			sb.WriteString("## Memory Overview\n\n")
+			for tier, count := range peek.MemoryCounts {
+				tokens := peek.TotalEstTokens[tier]
+				sb.WriteString(fmt.Sprintf("- **%s**: %d memories (~%d tokens)\n", tier, count, tokens))
+			}
+			if peek.PinnedSummary != "" {
+				sb.WriteString(fmt.Sprintf("\nPinned: %s\n", peek.PinnedSummary))
+			}
+			sb.WriteString("\n")
+		}
+
+		semantic, _ := m.store.List(ctx, agentmemory.ListParams{NS: chatNS, Kind: "semantic", Limit: 50})
+		if len(semantic) > 0 {
+			sb.WriteString("## Saved Memories\n\n")
+			for _, mem := range semantic {
+				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f, acc=%d] — %s\n",
+					mem.Key, mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
 				totalCount++
 			}
 			sb.WriteString("\n")
 		}
-	}
 
-	// Directive namespace memories
-	if prof.DirectiveNS != "" {
-		dirMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: prof.DirectiveNS, Limit: 20})
-		if len(dirMems) > 0 {
-			sb.WriteString(fmt.Sprintf("## Directives: %s\n\n", prof.DirectiveNS))
-			for _, mem := range dirMems {
-				sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
-					mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+		episodic, _ := m.store.List(ctx, agentmemory.ListParams{NS: chatNS, Kind: "episodic", Limit: 10})
+		if len(episodic) > 0 {
+			sb.WriteString("## Recent Exchanges\n\n")
+			for _, mem := range episodic {
+				sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
+					mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 100)))
 				totalCount++
 			}
 			sb.WriteString("\n")
+		}
+
+		hbMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: hbNS, Kind: "episodic", Limit: 20})
+		if len(hbMems) > 0 {
+			sb.WriteString("## Heartbeat Learnings\n\n")
+			for _, mem := range hbMems {
+				sb.WriteString(fmt.Sprintf("- [%s, imp=%.1f, acc=%d] %s\n",
+					mem.Tier, mem.Importance, mem.AccessCount, truncateStr(mem.Content, 120)))
+				totalCount++
+			}
+			sb.WriteString("\n")
+		}
+
+		for _, ns := range prof.SystemNamespaces {
+			sysMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: ns, Limit: 20})
+			if len(sysMems) > 0 {
+				sb.WriteString(fmt.Sprintf("## System: %s\n\n", ns))
+				for _, mem := range sysMems {
+					sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
+						mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+					totalCount++
+				}
+				sb.WriteString("\n")
+			}
+		}
+
+		for _, ns := range prof.GlobalNamespaces {
+			globalMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: ns, Limit: 20})
+			if len(globalMems) > 0 {
+				sb.WriteString(fmt.Sprintf("## Global: %s\n\n", ns))
+				for _, mem := range globalMems {
+					sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
+						mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+					totalCount++
+				}
+				sb.WriteString("\n")
+			}
+		}
+
+		if prof.DirectiveNS != "" {
+			dirMems, _ := m.store.List(ctx, agentmemory.ListParams{NS: prof.DirectiveNS, Limit: 20})
+			if len(dirMems) > 0 {
+				sb.WriteString(fmt.Sprintf("## Directives: %s\n\n", prof.DirectiveNS))
+				for _, mem := range dirMems {
+					sb.WriteString(fmt.Sprintf("- **%s** [%s, imp=%.1f] — %s\n",
+						mem.Key, mem.Tier, mem.Importance, truncateStr(mem.Content, 80)))
+					totalCount++
+				}
+				sb.WriteString("\n")
+			}
 		}
 	}
 
@@ -448,7 +576,18 @@ var directiveRe = regexp.MustCompile(`(?s)\[remember(?:\s+kind=(\w+))?\]\s*(.*?)
 // Only active when the chat's profile has MemoryDirectives enabled.
 func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, response string) string {
 	prof := m.profileFor(chatID)
-	if !prof.MemoryDirectives || prof.DirectiveNS == "" {
+	if !prof.MemoryDirectives {
+		return response
+	}
+
+	// Determine target namespace and tags
+	ns := prof.DirectiveNS
+	var tags []string
+	if prof.AgentNS != "" {
+		ns = prof.AgentNS
+		tags = []string{"learning"}
+	}
+	if ns == "" {
 		return response
 	}
 
@@ -467,26 +606,26 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 		content := strings.TrimSpace(response[loc[4]:loc[5]])
 		clean = clean[:loc[0]] + clean[loc[1]:]
 
-		// Store the directive
 		_, err := m.store.Put(ctx, agentmemory.PutParams{
-			NS:         prof.DirectiveNS,
+			NS:         ns,
 			Key:        fmt.Sprintf("learning-%d", time.Now().UnixMilli()),
 			Content:    content,
 			Kind:       kind,
+			Tags:       tags,
 			Importance: 0.7, // agent-discovered learnings
 		})
 		if err != nil {
-			slog.Warn("failed to store memory directive", "ns", prof.DirectiveNS, "error", err)
+			slog.Warn("failed to store memory directive", "ns", ns, "error", err)
 		} else {
-			slog.Info("stored memory directive", "ns", prof.DirectiveNS, "kind", kind, "len", len(content))
+			slog.Info("stored memory directive", "ns", ns, "kind", kind, "len", len(content))
 		}
 	}
 
 	return strings.TrimSpace(clean)
 }
 
-// heartbeatNamespace returns the per-chat heartbeat learning namespace.
-func heartbeatNamespace(chatID int64) string {
+// legacyHeartbeatNamespace returns the legacy per-chat heartbeat learning namespace.
+func legacyHeartbeatNamespace(chatID int64) string {
 	return fmt.Sprintf("shell:heartbeat:%d", chatID)
 }
 
@@ -495,11 +634,23 @@ func (m *Memory) RecentExchanges(ctx context.Context, chatID int64, limit int) [
 	if limit <= 0 {
 		limit = 10
 	}
-	memories, err := m.store.List(ctx, agentmemory.ListParams{
-		NS:    namespace(chatID),
-		Kind:  "episodic",
-		Limit: limit,
-	})
+	prof := m.profileFor(chatID)
+	var memories []agentmemory.Memory
+	var err error
+	if prof.AgentNS != "" {
+		memories, err = m.store.List(ctx, agentmemory.ListParams{
+			NS:    prof.AgentNS,
+			Kind:  "episodic",
+			Tags:  []string{chatTag(chatID)},
+			Limit: limit,
+		})
+	} else {
+		memories, err = m.store.List(ctx, agentmemory.ListParams{
+			NS:    legacyNamespace(chatID),
+			Kind:  "episodic",
+			Limit: limit,
+		})
+	}
 	if err != nil {
 		slog.Warn("recent exchanges fetch failed", "error", err)
 		return nil
@@ -514,15 +665,25 @@ func (m *Memory) RecentExchanges(ctx context.Context, chatID int64, limit int) [
 // maxHeartbeatLearnings is the cap on stored heartbeat learnings per chat.
 const maxHeartbeatLearnings = 20
 
-// StoreHeartbeatLearning stores a heartbeat learning as semantic/high-priority memory.
+// StoreHeartbeatLearning stores a heartbeat learning as episodic memory.
+// Starts as stm — will be promoted to ltm if accessed frequently.
 // Prunes oldest entries beyond maxHeartbeatLearnings.
 func (m *Memory) StoreHeartbeatLearning(ctx context.Context, chatID int64, content string) error {
-	ns := heartbeatNamespace(chatID)
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	var tags []string
+	if ns != "" {
+		tags = []string{"heartbeat", chatTag(chatID)}
+	} else {
+		ns = legacyHeartbeatNamespace(chatID)
+	}
+
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
 		NS:         ns,
 		Key:        fmt.Sprintf("hb-%d", time.Now().UnixMilli()),
 		Content:    content,
-		Kind:       "semantic",
+		Kind:       "episodic",
+		Tags:       tags,
 		Priority:   "high",
 		Importance: 0.7, // heartbeat learnings — moderately important, self-discovered
 	})
@@ -531,17 +692,26 @@ func (m *Memory) StoreHeartbeatLearning(ctx context.Context, chatID int64, conte
 	}
 
 	// Prune oldest learnings beyond cap
-	all, listErr := m.store.List(ctx, agentmemory.ListParams{
-		NS:    ns,
-		Kind:  "semantic",
-		Limit: maxHeartbeatLearnings + 20, // fetch extra to find ones to delete
-	})
+	var all []agentmemory.Memory
+	var listErr error
+	if prof.AgentNS != "" {
+		all, listErr = m.store.List(ctx, agentmemory.ListParams{
+			NS:    ns,
+			Tags:  []string{"heartbeat", chatTag(chatID)},
+			Limit: maxHeartbeatLearnings + 20,
+		})
+	} else {
+		all, listErr = m.store.List(ctx, agentmemory.ListParams{
+			NS:    ns,
+			Kind:  "episodic",
+			Limit: maxHeartbeatLearnings + 20,
+		})
+	}
 	if listErr != nil {
 		slog.Warn("heartbeat learning prune list failed", "error", listErr)
 		return nil
 	}
 	if len(all) > maxHeartbeatLearnings {
-		// List returns newest first; delete from the end
 		for _, mem := range all[maxHeartbeatLearnings:] {
 			if rmErr := m.store.Rm(ctx, agentmemory.RmParams{NS: ns, Key: mem.Key}); rmErr != nil {
 				slog.Warn("heartbeat learning prune failed", "key", mem.Key, "error", rmErr)
@@ -557,11 +727,23 @@ func (m *Memory) HeartbeatContext(ctx context.Context, chatID int64, budget int)
 	if budget <= 0 {
 		budget = 500
 	}
-	result, err := m.store.Context(ctx, agentmemory.ContextParams{
-		NS:     heartbeatNamespace(chatID) + "*",
-		Query:  "heartbeat patterns insights",
-		Budget: budget,
-	})
+	prof := m.profileFor(chatID)
+	var result *agentmemory.ContextResult
+	var err error
+	if prof.AgentNS != "" {
+		result, err = m.store.Context(ctx, agentmemory.ContextParams{
+			NS:     prof.AgentNS,
+			Query:  "heartbeat patterns insights",
+			Tags:   []string{"heartbeat", chatTag(chatID)},
+			Budget: budget,
+		})
+	} else {
+		result, err = m.store.Context(ctx, agentmemory.ContextParams{
+			NS:     legacyHeartbeatNamespace(chatID) + "*",
+			Query:  "heartbeat patterns insights",
+			Budget: budget,
+		})
+	}
 	if err != nil {
 		slog.Warn("heartbeat context fetch failed", "error", err)
 		return ""
@@ -606,14 +788,15 @@ func (m *Memory) ReviewerContext(ctx context.Context, namespace, query string, b
 	return strings.TrimSpace(sb.String())
 }
 
-// StoreReviewerLearning stores a reviewer learning as semantic/high-priority memory.
+// StoreReviewerLearning stores a reviewer learning as procedural memory.
+// Flow knowledge is how-to knowledge — procedural by nature.
 // No TTL — critical flow knowledge shouldn't expire.
 func (m *Memory) StoreReviewerLearning(ctx context.Context, namespace, content string) error {
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
 		NS:         namespace,
 		Key:        fmt.Sprintf("reviewer-%d", time.Now().UnixMilli()),
 		Content:    content,
-		Kind:       "semantic",
+		Kind:       "procedural",
 		Priority:   "high",
 		Importance: 0.75, // critical flow knowledge
 	})
@@ -629,22 +812,29 @@ type ReviewEntry struct {
 // ReviewMemories returns a formatted summary of all memories (semantic + episodic)
 // and a lookup slice for correction by index.
 func (m *Memory) ReviewMemories(ctx context.Context, chatID int64) (string, []ReviewEntry, error) {
-	ns := namespace(chatID)
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	var tags []string
+	if ns != "" {
+		tags = []string{chatTag(chatID)}
+	} else {
+		ns = legacyNamespace(chatID)
+	}
 
-	// Fetch semantic memories
 	semantic, err := m.store.List(ctx, agentmemory.ListParams{
 		NS:    ns,
 		Kind:  "semantic",
+		Tags:  tags,
 		Limit: 50,
 	})
 	if err != nil {
 		return "", nil, err
 	}
 
-	// Fetch episodic memories
 	episodic, err := m.store.List(ctx, agentmemory.ListParams{
 		NS:    ns,
 		Kind:  "episodic",
+		Tags:  tags,
 		Limit: 20,
 	})
 	if err != nil {
@@ -671,7 +861,6 @@ func (m *Memory) ReviewMemories(ctx context.Context, chatID int64) (string, []Re
 	if len(episodic) > 0 {
 		sb.WriteString("## Recent Conversations\n\n")
 		for _, mem := range episodic {
-			// Truncate long episodic entries for summary
 			content := mem.Content
 			if utf8.RuneCountInString(content) > 120 {
 				content = string([]rune(content)[:120]) + "..."
@@ -716,17 +905,51 @@ func (m *Memory) CorrectMemory(ctx context.Context, ns, key, newContent string) 
 	return err
 }
 
-// SeedNamespace stores a high-priority semantic memory in the given namespace.
+// SeedCapability stores a capability doc as a pinned procedural memory.
 // Uses Put with the same NS+key, so repeated calls are idempotent (upserts).
+// When agentNS is provided, stores in that namespace with "capabilities" tag and pinned=true.
+// Falls back to the provided namespace with legacy tier for backward compat.
+func (m *Memory) SeedCapability(ctx context.Context, agentNS, key, content string) error {
+	if agentNS != "" {
+		_, err := m.store.Put(ctx, agentmemory.PutParams{
+			NS:         agentNS,
+			Key:        key,
+			Content:    content,
+			Kind:       "procedural",
+			Tags:       []string{"capabilities"},
+			Priority:   "high",
+			Importance: 0.9,
+			Tier:       "ltm",
+			Pinned:     true,
+		})
+		return err
+	}
+	// Legacy fallback
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:         "shell:capabilities",
+		Key:        key,
+		Content:    content,
+		Kind:       "procedural",
+		Priority:   "high",
+		Importance: 0.9,
+		Tier:       "ltm",
+		Pinned:     true,
+	})
+	return err
+}
+
+// SeedNamespace is deprecated — use SeedCapability instead.
+// Kept for backward compatibility.
 func (m *Memory) SeedNamespace(ctx context.Context, ns, key, content string) error {
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
 		NS:         ns,
 		Key:        key,
 		Content:    content,
-		Kind:       "semantic",
+		Kind:       "procedural",
 		Priority:   "high",
-		Importance: 0.9, // system capabilities — near-identity level
-		Tier:       "ltm", // system/identity content should never start as stm
+		Importance: 0.9,
+		Tier:       "ltm",
+		Pinned:     true,
 	})
 	return err
 }
@@ -738,12 +961,20 @@ const exchangeSummarizeThreshold = 10
 // Keeps the most recent exchanges intact and merges older ones.
 // Returns the number of exchanges consolidated, or 0 if no summarization was needed.
 func (m *Memory) SummarizeExchanges(ctx context.Context, chatID int64) (int, error) {
-	ns := namespace(chatID)
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	var tags []string
+	if ns != "" {
+		tags = []string{chatTag(chatID)}
+	} else {
+		ns = legacyNamespace(chatID)
+	}
 
 	// List all episodic exchanges (newest first)
 	exchanges, err := m.store.List(ctx, agentmemory.ListParams{
 		NS:    ns,
 		Kind:  "episodic",
+		Tags:  tags,
 		Limit: 100,
 	})
 	if err != nil {
@@ -779,6 +1010,7 @@ func (m *Memory) SummarizeExchanges(ctx context.Context, chatID int64) (int, err
 		Key:        fmt.Sprintf("exchange-summary-%d", time.Now().UnixMilli()),
 		Content:    sb.String(),
 		Kind:       "semantic",
+		Tags:       tags,
 		Importance: 0.5,
 	})
 	if err != nil {

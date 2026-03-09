@@ -75,15 +75,15 @@ func New(cfg config.Config) (*Daemon, error) {
 		ExtraArgs:    cfg.Claude.ExtraArgs,
 	})
 
-	// If scheduler is enabled, inject shell:capabilities into system namespaces
-	// so schedule docs are always visible in the system prompt.
+	// Legacy: inject shell:capabilities into system namespaces for profiles without AgentNS.
+	// Profiles with AgentNS use pinned memories instead (capabilities are seeded as pinned).
 	if cfg.Scheduler.Enabled {
 		capNS := "shell:capabilities"
 		if !containsStr(cfg.Memory.SystemNamespaces, capNS) {
 			cfg.Memory.SystemNamespaces = append(cfg.Memory.SystemNamespaces, capNS)
 		}
 		for name, p := range cfg.Memory.Profiles {
-			if !containsStr(p.SystemNamespaces, capNS) {
+			if p.AgentNS == "" && !containsStr(p.SystemNamespaces, capNS) {
 				p.SystemNamespaces = append(p.SystemNamespaces, capNS)
 				cfg.Memory.Profiles[name] = p
 			}
@@ -97,6 +97,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		profiles := make(map[string]memory.ProfileConfig, len(cfg.Memory.Profiles))
 		for name, p := range cfg.Memory.Profiles {
 			profiles[name] = memory.ProfileConfig{
+				AgentNS:          p.AgentNS,
 				SystemNamespaces: p.SystemNamespaces,
 				SystemBudget:     p.SystemBudget,
 				GlobalNamespaces: p.GlobalNamespaces,
@@ -270,13 +271,13 @@ func New(cfg config.Config) (*Daemon, error) {
 
 		// Seed schedule docs into memory so they're always visible in system prompt.
 		if mem != nil {
-			if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "scheduling",
+			if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "scheduling",
 				"Schedule capabilities: Use [schedule at=\"...\"] for one-shot or [schedule cron=\"...\"] for recurring reminders. "+
 					"Commands: /schedule add|list|delete|enable|pause. Supports @daily, @hourly, @weekly, @monthly aliases. "+
 					"Use --tz flag for per-schedule timezone override."); err != nil {
 				slog.Warn("failed to seed schedule docs", "error", err)
 			}
-			if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "heartbeat-learning",
+			if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "heartbeat-learning",
 				"Heartbeat self-improvement: During [Heartbeat] check-ins, recent conversations and previous "+
 					"insights are provided. Use [heartbeat-learning]...[/heartbeat-learning] to store reusable "+
 					"patterns discovered during heartbeats."); err != nil {
@@ -285,9 +286,15 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
+	// Always set timezone on bridge so the agent knows current time,
+	// even when the scheduler is disabled.
+	if !cfg.Scheduler.Enabled && cfg.Scheduler.Timezone != "" {
+		br.SetTimezone(cfg.Scheduler.Timezone)
+	}
+
 	// Seed playground docs into memory if configured.
 	if cfg.Claude.PlaygroundDir != "" && mem != nil {
-		if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "playground",
+		if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "playground",
 			fmt.Sprintf("Playground directory: %s — You have full write access to this directory. "+
 				"Create project subdirectories here (e.g. %s/my-app/) for web apps, experiments, and prototypes. "+
 				"Files here can be written and edited without permission prompts. "+
@@ -301,7 +308,7 @@ func New(cfg config.Config) (*Daemon, error) {
 
 	// Seed tunnel docs into memory if tunnels are enabled.
 	if tunnelMgr != nil && mem != nil {
-		if err := mem.SeedNamespace(context.Background(), "shell:capabilities", "tunnel",
+		if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "tunnel",
 			"HTTP tunnel capabilities: Use [tunnel port=\"...\"] to expose a local port via Cloudflare quick tunnel. "+
 				"Use [tunnel action=\"stop\" port=\"...\"] to stop a tunnel, or [tunnel action=\"list\"] to list active tunnels. "+
 				"Optional protocol attribute: protocol=\"https\". Tunnels provide public URLs for local web apps. "+
@@ -521,4 +528,14 @@ func containsStr(ss []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// resolveAgentNS returns the first AgentNS found in config profiles, or "" for legacy mode.
+func resolveAgentNS(cfg config.Config) string {
+	for _, p := range cfg.Memory.Profiles {
+		if p.AgentNS != "" {
+			return p.AgentNS
+		}
+	}
+	return ""
 }
