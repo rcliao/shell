@@ -798,6 +798,7 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	if b.memory != nil {
 		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
 	}
+	systemPrompt += b.timestampSystemPrompt()
 	systemPrompt += b.scheduleSystemPrompt()
 	systemPrompt += b.imagenSystemPrompt()
 	systemPrompt += b.relaySystemPrompt()
@@ -992,6 +993,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	if b.memory != nil {
 		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
 	}
+	systemPrompt += b.timestampSystemPrompt()
 	systemPrompt += b.scheduleSystemPrompt()
 	systemPrompt += b.imagenSystemPrompt()
 	systemPrompt += b.relaySystemPrompt()
@@ -1288,6 +1290,23 @@ func (b *Bridge) Help() string {
 	return help
 }
 
+// timestampSystemPrompt returns the current timestamp so the agent always
+// knows what time it is, regardless of whether the scheduler is enabled.
+func (b *Bridge) timestampSystemPrompt() string {
+	tz := b.schedulerTZ
+	if tz == "" {
+		tz = "UTC"
+	}
+	loc, _ := time.LoadLocation(tz)
+	if loc == nil {
+		loc = time.UTC
+	}
+	now := time.Now().In(loc)
+	return "\n\n## Current Time\n\n" +
+		"**Now:** " + now.Format("Monday, 2006-01-02 15:04:05") + " (" + tz + ")\n" +
+		"Use this as the authoritative current time. Ignore any other date references that may conflict.\n"
+}
+
 // scheduleSystemPrompt returns the system prompt addition that documents
 // the [schedule] directive for Claude. Empty if scheduler is disabled.
 func (b *Bridge) scheduleSystemPrompt() string {
@@ -1304,8 +1323,6 @@ func (b *Bridge) scheduleSystemPrompt() string {
 	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
 
 	return "\n\n## Scheduling\n\n" +
-		"**Current time:** " + nowStr + " (" + b.schedulerTZ + ")\n" +
-		"**User timezone:** " + b.schedulerTZ + "\n\n" +
 		"You can create scheduled reminders and prompts using the [schedule] directive in your responses.\n" +
 		"Use this when the user asks to be reminded about something or wants recurring notifications.\n\n" +
 		"### Natural language mapping:\n" +
@@ -1351,6 +1368,13 @@ func (b *Bridge) injectCurrentTime(msg string) string {
 	}
 	now := time.Now().In(loc)
 	return fmt.Sprintf("[Current time: %s (%s)]\n%s", now.Format("2006-01-02T15:04:05"), b.schedulerTZ, msg)
+}
+
+// SetTimezone sets the default timezone without enabling the scheduler.
+func (b *Bridge) SetTimezone(tz string) {
+	if tz != "" {
+		b.schedulerTZ = tz
+	}
 }
 
 // SetSchedulerConfig enables schedule commands and sets the default timezone.
