@@ -22,6 +22,7 @@ import (
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/search"
+	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/worktree"
 )
@@ -64,6 +65,9 @@ var taskCompleteRe = regexp.MustCompile(`\[task-complete id=(\d+)\]`)
 
 // generateImageRe matches [generate-image prompt="..."] directives in Claude's response.
 var generateImageRe = regexp.MustCompile(`\[generate-image prompt="([^"]+)"\]`)
+
+// artifactRe matches [artifact type="..." path="..." caption="..."] markers from skill scripts.
+var artifactRe = regexp.MustCompile(`\[artifact\s+type="([^"]+)"\s+path="([^"]+)"(?:\s+caption="([^"]*)")?\]`)
 
 // searchRe matches [search query="..." (optional: count="N" freshness="pw")] directives.
 var searchRe = regexp.MustCompile(`\[search query="([^"]+)"(?:\s+count="(\d+)")?(?:\s+freshness="([^"]*)")?\]`)
@@ -383,6 +387,9 @@ type Bridge struct {
 	// Process manager
 	pmMgr *pm.Manager // nil if disabled
 
+	// Skills
+	skills *skill.Registry // nil if disabled
+
 	planMu   sync.Mutex
 	planRuns map[int64]*planRun
 
@@ -394,7 +401,7 @@ type Bridge struct {
 	systemCancel   map[int64]context.CancelFunc
 }
 
-func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *shellimagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager) *Bridge {
+func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *shellimagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
@@ -417,6 +424,7 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		browserCfg:  browserCfg,
 		tunnelMgr:   tunnelMgr,
 		pmMgr:       pmMgr,
+		skills:      skills,
 		planRuns:     make(map[int64]*planRun),
 		reviewCache:  make(map[int64][]memory.ReviewEntry),
 		systemCancel: make(map[int64]context.CancelFunc),
@@ -696,7 +704,8 @@ func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, messageID int
 	case "retry":
 		return b.PlanRetry(ctx, chatID)
 	case "regenerate":
-		return b.Regenerate(ctx, chatID, rc)
+		resp, err := b.Regenerate(ctx, chatID, rc)
+		return resp.Text, err
 	case "remember":
 		return b.RememberResponse(ctx, chatID, rc)
 	case "forget":
@@ -730,21 +739,23 @@ func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, messageID int
 
 // HandleMessage processes an incoming user message and returns Claude's response.
 // senderName identifies who sent the message (e.g. Telegram first name).
-func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, senderName string) (string, error) {
+func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, senderName string) (AgentResponse, error) {
 	// Check for active plan draft — intercept the message.
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
 	b.planMu.Unlock()
 	if hasPlan && run.state == planStateDrafting {
-		return b.handlePlanDraft(ctx, chatID, userMsg)
+		text, err := b.handlePlanDraft(ctx, chatID, userMsg)
+		return AgentResponse{Text: text}, err
 	}
 	if hasPlan && run.state == planStateBlocked {
-		return b.handlePlanBlocked(ctx, chatID, userMsg)
+		text, err := b.handlePlanBlocked(ctx, chatID, userMsg)
+		return AgentResponse{Text: text}, err
 	}
 
 	sess, err := b.ensureSession(ctx, chatID)
 	if err != nil {
-		return "", fmt.Errorf("ensure session: %w", err)
+		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
 	}
 
 	// Log user message
@@ -806,14 +817,20 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	systemPrompt += b.browserSystemPrompt()
 	systemPrompt += b.tunnelSystemPrompt()
 	systemPrompt += b.pmSystemPrompt()
+	systemPrompt += b.skillsSystemPrompt()
 
 	// Track session in pm for /pm list visibility.
 	endTrack := b.trackSession(ctx, chatID, senderName)
 	defer endTrack()
 
-	result, err := b.proc.Send(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt)
+	result, err := b.proc.Send(ctx, process.AgentRequest{
+		ChatID:       chatID,
+		SessionID:    claudeSessionID,
+		Text:         augmentedMsg,
+		SystemPrompt: systemPrompt,
+	})
 	if err != nil {
-		return "", fmt.Errorf("claude: %w", err)
+		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}
 
 	// Track session ID and mark as having history
@@ -827,70 +844,7 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 		procSess.HasHistory = true
 	}
 
-	response := strings.TrimSpace(result.Text)
-
-	// Execute all directives (search, browser, pm, tunnel) in parallel, single follow-up.
-	response, directiveResults := b.executeDirectivesParallel(ctx, chatID, response)
-	if directiveResults != "" {
-		followUp := directiveResults + "\nUse the results above to respond to the user."
-		followUpResult, err := b.proc.Send(ctx, chatID, result.SessionID, followUp, systemPrompt)
-		if err != nil {
-			slog.Warn("directive follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-
-	// Extract and send relay directives (messages to other chats)
-	response, relays := parseRelayDirectives(response)
-	b.sendRelays(ctx, relays)
-
-	// Parse heartbeat learning and task-complete directives
-	if isHeartbeat {
-		if b.memory != nil {
-			response = b.parseHeartbeatLearnings(ctx, chatID, response)
-			// Run reflect cycle after heartbeat to promote/decay/prune memories
-			b.memory.RunReflect(ctx)
-			// Summarize old exchanges during heartbeat maintenance
-			if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
-				slog.Warn("exchange summarization failed", "error", err)
-			} else if n > 0 {
-				slog.Info("heartbeat summarized exchanges", "chat_id", chatID, "count", n)
-			}
-		}
-		response = b.parseTaskCompletes(chatID, response)
-	}
-
-	// Parse memory directives ([remember]...[/remember])
-	if b.memory != nil {
-		response = b.memory.ParseMemoryDirectives(ctx, chatID, response)
-	}
-
-	// Parse schedule directives ([schedule ...]...[/schedule])
-	response = b.parseScheduleDirectives(chatID, response)
-
-	// Parse generate-image directives
-	response = b.parseGenerateImageDirectives(ctx, chatID, response)
-
-	// Log assistant response
-	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
-		slog.Warn("failed to log assistant message", "error", err)
-	}
-
-	// Log exchange to memory
-	if b.memory != nil {
-		b.memory.LogExchange(ctx, chatID, userMsg, response)
-	}
-
-	// Update session timestamp
-	if err := b.store.UpdateSessionStatus(chatID, "active"); err != nil {
-		slog.Warn("failed to update session", "error", err)
-	}
-
-	return response, nil
+	return b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result), nil
 }
 
 // HandleMessageStreaming is like HandleMessage but calls onUpdate with partial text as Claude generates it.
@@ -899,21 +853,23 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 // included in the message sent to Claude (e.g. downloaded Telegram photos).
 // pdfs optionally contains downloaded PDF metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram documents).
-func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (string, error) {
+func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (AgentResponse, error) {
 	// Check for active plan draft — intercept the message (no streaming needed).
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
 	b.planMu.Unlock()
 	if hasPlan && run.state == planStateDrafting {
-		return b.handlePlanDraft(ctx, chatID, userMsg)
+		text, err := b.handlePlanDraft(ctx, chatID, userMsg)
+		return AgentResponse{Text: text}, err
 	}
 	if hasPlan && run.state == planStateBlocked {
-		return b.handlePlanBlocked(ctx, chatID, userMsg)
+		text, err := b.handlePlanBlocked(ctx, chatID, userMsg)
+		return AgentResponse{Text: text}, err
 	}
 
 	sess, err := b.ensureSession(ctx, chatID)
 	if err != nil {
-		return "", fmt.Errorf("ensure session: %w", err)
+		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
 	}
 
 	// Log user message
@@ -941,30 +897,22 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	// Inject current time when scheduler is enabled so Claude can compute relative times
 	augmentedMsg = b.injectCurrentTime(augmentedMsg)
 
-	// Prepend attachment metadata so Claude can read the attached files.
-	if len(images) > 0 || len(pdfs) > 0 {
-		var sb strings.Builder
-		for _, img := range images {
-			fmt.Fprintf(&sb, "[Attached image: %s", img.Path)
-			if img.Width > 0 && img.Height > 0 {
-				fmt.Fprintf(&sb, " | %dx%d", img.Width, img.Height)
-			}
-			if img.Size > 0 {
-				fmt.Fprintf(&sb, " | %s", formatFileSize(img.Size))
-			}
-			sb.WriteString("]\n")
-		}
-		for _, pdf := range pdfs {
-			fmt.Fprintf(&sb, "[Attached PDF: %s", pdf.Path)
-			if pages := countPDFPages(pdf.Path); pages > 0 {
-				fmt.Fprintf(&sb, " | %d pages", pages)
-			}
-			if pdf.Size > 0 {
-				fmt.Fprintf(&sb, " | %s", formatFileSize(pdf.Size))
-			}
-			sb.WriteString("]\n")
-		}
-		augmentedMsg = sb.String() + augmentedMsg
+	// Convert image/PDF attachments to typed structs.
+	var imgAttachments []process.ImageAttachment
+	for _, img := range images {
+		imgAttachments = append(imgAttachments, process.ImageAttachment{
+			Path:   img.Path,
+			Width:  img.Width,
+			Height: img.Height,
+			Size:   img.Size,
+		})
+	}
+	var pdfAttachments []process.PDFAttachment
+	for _, pdf := range pdfs {
+		pdfAttachments = append(pdfAttachments, process.PDFAttachment{
+			Path: pdf.Path,
+			Size: pdf.Size,
+		})
 	}
 
 	// Preempt any running system session (heartbeat/scheduler) for user messages.
@@ -1001,15 +949,23 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	systemPrompt += b.browserSystemPrompt()
 	systemPrompt += b.tunnelSystemPrompt()
 	systemPrompt += b.pmSystemPrompt()
+	systemPrompt += b.skillsSystemPrompt()
 
 	// Track session in pm for /pm list visibility.
 	endTrack := b.trackSession(ctx, chatID, senderName)
 	defer endTrack()
 
 	// Send to Claude with streaming
-	result, err := b.proc.SendStreaming(ctx, chatID, claudeSessionID, augmentedMsg, systemPrompt, onUpdate)
+	result, err := b.proc.SendStreaming(ctx, process.AgentRequest{
+		ChatID:       chatID,
+		SessionID:    claudeSessionID,
+		Text:         augmentedMsg,
+		Images:       imgAttachments,
+		PDFs:         pdfAttachments,
+		SystemPrompt: systemPrompt,
+	}, onUpdate)
 	if err != nil {
-		return "", fmt.Errorf("claude: %w", err)
+		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}
 
 	// Track session ID and mark as having history
@@ -1023,16 +979,20 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		procSess.HasHistory = true
 	}
 
+	// Directive follow-up: search, browser, pm, tunnel
 	response := strings.TrimSpace(result.Text)
-
-	// Execute all directives (search, browser, pm, tunnel) in parallel, single follow-up.
 	response, directiveResults := b.executeDirectivesParallel(ctx, chatID, response)
 	if directiveResults != "" {
 		if onUpdate != nil {
 			onUpdate("\n\n_Processing directives..._\n\n")
 		}
 		followUp := directiveResults + "\nUse the results above to respond to the user."
-		followUpResult, err := b.proc.SendStreaming(ctx, chatID, result.SessionID, followUp, systemPrompt, onUpdate)
+		followUpResult, err := b.proc.SendStreaming(ctx, process.AgentRequest{
+			ChatID:       chatID,
+			SessionID:    result.SessionID,
+			Text:         followUp,
+			SystemPrompt: systemPrompt,
+		}, onUpdate)
 		if err != nil {
 			slog.Warn("directive follow-up failed", "error", err)
 		} else {
@@ -1042,18 +1002,29 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 			}
 		}
 	}
+	result.Text = response
 
-	// Extract and send relay directives (messages to other chats)
+	return b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result), nil
+}
+
+// processResponse is the shared post-processing pipeline for both HandleMessage
+// and HandleMessageStreaming. It parses all response directives (relay, heartbeat,
+// memory, schedule, generate-image, artifacts), logs the exchange, and returns
+// a typed AgentResponse with collected photos.
+func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult) AgentResponse {
+	response := strings.TrimSpace(result.Text)
+
+	// Extract and send relay directives (messages to other chats).
 	response, relays := parseRelayDirectives(response)
 	b.sendRelays(ctx, relays)
 
-	// Parse heartbeat learning and task-complete directives
+	// Parse heartbeat learning and task-complete directives.
 	if isHeartbeat {
 		if b.memory != nil {
 			response = b.parseHeartbeatLearnings(ctx, chatID, response)
-			// Run reflect cycle after heartbeat to promote/decay/prune memories
+			// Run reflect cycle after heartbeat to promote/decay/prune memories.
 			b.memory.RunReflect(ctx)
-			// Summarize old exchanges during heartbeat maintenance
+			// Summarize old exchanges during heartbeat maintenance.
 			if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
 				slog.Warn("exchange summarization failed", "error", err)
 			} else if n > 0 {
@@ -1063,33 +1034,35 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		response = b.parseTaskCompletes(chatID, response)
 	}
 
-	// Parse memory directives ([remember]...[/remember])
+	// Parse memory directives ([remember]...[/remember]).
 	if b.memory != nil {
 		response = b.memory.ParseMemoryDirectives(ctx, chatID, response)
 	}
 
-	// Parse schedule directives ([schedule ...]...[/schedule])
+	// Parse schedule directives ([schedule ...]...[/schedule]).
 	response = b.parseScheduleDirectives(chatID, response)
 
-	// Parse generate-image directives
-	response = b.parseGenerateImageDirectives(ctx, chatID, response)
+	// Collect photos from generate-image directives and artifact markers.
+	var photos []Photo
+	response = b.parseGenerateImageDirectives(ctx, response, &photos)
+	response = b.parseArtifacts(response, &photos)
 
-	// Log assistant response
-	if err := b.store.LogMessage(sess.ID, "assistant", response); err != nil {
+	// Log assistant response.
+	if err := b.store.LogMessage(sessID, "assistant", response); err != nil {
 		slog.Warn("failed to log assistant message", "error", err)
 	}
 
-	// Log exchange to memory
+	// Log exchange to memory.
 	if b.memory != nil {
 		b.memory.LogExchange(ctx, chatID, userMsg, response)
 	}
 
-	// Update session timestamp
+	// Update session timestamp.
 	if err := b.store.UpdateSessionStatus(chatID, "active"); err != nil {
 		slog.Warn("failed to update session", "error", err)
 	}
 
-	return response, nil
+	return AgentResponse{Text: response, Photos: photos}
 }
 
 // HandleCommand processes a bot command.
@@ -1288,6 +1261,20 @@ func (b *Bridge) Help() string {
 		"`/reactions` — Show emoji→action mappings\n" +
 		"`/help` — Show this help message"
 	return help
+}
+
+// skillsSystemPrompt returns the compact skills listing for the system prompt.
+func (b *Bridge) skillsSystemPrompt() string {
+	if b.skills == nil {
+		return ""
+	}
+	return b.skills.SystemPrompt()
+}
+
+// skillOverrides returns true if a skill with the given name is loaded,
+// meaning the built-in directive should be suppressed in favor of the skill.
+func (b *Bridge) skillOverrides(name string) bool {
+	return b.skills != nil && b.skills.Has(name)
 }
 
 // timestampSystemPrompt returns the current timestamp so the agent always
@@ -1970,8 +1957,8 @@ func parsePMStartArgs(args string) (name, cmd, dir string) {
 
 // parseGenerateImageDirectives extracts [generate-image prompt="..."] directives
 // from Claude's response, generates images, and sends them via Telegram.
-func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, chatID int64, response string) string {
-	if b.imagen == nil || b.imageSend == nil {
+func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, response string, photos *[]Photo) string {
+	if b.imagen == nil || b.skillOverrides("generate-image") {
 		return response
 	}
 
@@ -1992,7 +1979,46 @@ func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, chatID int64,
 			continue
 		}
 
-		b.imageSend(chatID, imageData, prompt)
+		*photos = append(*photos, Photo{Data: imageData, Caption: prompt})
+		clean = clean[:m[0]] + clean[m[1]:]
+	}
+
+	return strings.TrimSpace(clean)
+}
+
+// parseArtifacts extracts [artifact type="..." path="..." caption="..."] markers
+// from the response, collects image artifacts into photos, and returns the
+// cleaned response text.
+func (b *Bridge) parseArtifacts(response string, photos *[]Photo) string {
+	matches := artifactRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response
+	}
+
+	clean := response
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		artifactType := response[m[2]:m[3]]
+		path := response[m[4]:m[5]]
+		caption := ""
+		if m[6] >= 0 {
+			caption = response[m[6]:m[7]]
+		}
+
+		switch artifactType {
+		case "image":
+			data, err := os.ReadFile(path)
+			if err != nil {
+				slog.Error("artifact: failed to read image", "path", path, "error", err)
+				clean = clean[:m[0]] + "(failed to read image)" + clean[m[1]:]
+				continue
+			}
+			*photos = append(*photos, Photo{Data: data, Caption: caption})
+			os.Remove(path)
+		default:
+			slog.Warn("artifact: unknown type", "type", artifactType, "path", path)
+		}
+
 		clean = clean[:m[0]] + clean[m[1]:]
 	}
 
@@ -2011,6 +2037,9 @@ func (b *Bridge) HandleImagine(ctx context.Context, prompt string) ([]byte, erro
 // the [generate-image] directive for Claude. Empty if imagen is not configured.
 func (b *Bridge) imagenSystemPrompt() string {
 	if b.imagen == nil {
+		return ""
+	}
+	if b.skillOverrides("generate-image") {
 		return ""
 	}
 	return "\n\n## Image Generation\n\n" +
@@ -2042,6 +2071,9 @@ func (b *Bridge) searchSystemPrompt() string {
 	if b.braveKey == "" && b.tavilyKey == "" {
 		return ""
 	}
+	if b.skillOverrides("web-search") {
+		return ""
+	}
 	return "\n\n## Web Search\n\n" +
 		"You can search the web using the [search] directive. Use this instead of the built-in WebSearch tool.\n" +
 		"It uses the Brave Search API and returns richer, more detailed results.\n\n" +
@@ -2058,7 +2090,7 @@ func (b *Bridge) searchSystemPrompt() string {
 // runs the search, and returns the query + results for a follow-up turn.
 // Returns the cleaned response and search results (empty if no directives found).
 func (b *Bridge) parseSearchDirectives(ctx context.Context, response string) (string, string) {
-	if b.braveKey == "" && b.tavilyKey == "" {
+	if (b.braveKey == "" && b.tavilyKey == "") || b.skillOverrides("web-search") {
 		return response, ""
 	}
 
@@ -2508,16 +2540,16 @@ func (b *Bridge) unmappedReactionHint(emoji string) string {
 }
 
 // Regenerate re-sends the original user message to get a fresh response from Claude.
-func (b *Bridge) Regenerate(ctx context.Context, chatID int64, rc *ReactionContext) (string, error) {
+func (b *Bridge) Regenerate(ctx context.Context, chatID int64, rc *ReactionContext) (AgentResponse, error) {
 	if rc == nil || rc.UserMessage == "" {
-		return "Cannot regenerate: message not found.", nil
+		return AgentResponse{Text: "Cannot regenerate: message not found."}, nil
 	}
 	// Don't regenerate during an active plan.
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
 	b.planMu.Unlock()
 	if hasPlan && run.state != planStateDone {
-		return "Cannot regenerate while a plan is active.", nil
+		return AgentResponse{Text: "Cannot regenerate while a plan is active."}, nil
 	}
 	return b.HandleMessage(ctx, chatID, rc.UserMessage, "")
 }
@@ -2525,10 +2557,10 @@ func (b *Bridge) Regenerate(ctx context.Context, chatID int64, rc *ReactionConte
 // RegenerateStreaming re-sends the original user message with streaming support.
 // It looks up the exchange by botMessageID, checks plan state, and streams the
 // new response via onUpdate. On success it updates the stored message map entry.
-func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessageID int, onUpdate process.StreamFunc) (string, error) {
+func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessageID int, onUpdate process.StreamFunc) (AgentResponse, error) {
 	msgMap, err := b.store.GetMessageMapByBotMsg(chatID, botMessageID)
 	if err != nil || msgMap == nil || msgMap.UserMessage == "" {
-		return "Cannot regenerate: message not found.", nil
+		return AgentResponse{Text: "Cannot regenerate: message not found."}, nil
 	}
 
 	// Don't regenerate during an active plan.
@@ -2536,20 +2568,20 @@ func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessa
 	run, hasPlan := b.planRuns[chatID]
 	b.planMu.Unlock()
 	if hasPlan && run.state != planStateDone {
-		return "Cannot regenerate while a plan is active.", nil
+		return AgentResponse{Text: "Cannot regenerate while a plan is active."}, nil
 	}
 
-	response, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", nil, nil, onUpdate)
+	resp, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", nil, nil, onUpdate)
 	if err != nil {
-		return "", err
+		return AgentResponse{}, err
 	}
 
 	// Update the stored bot response so subsequent reactions see the new text.
-	if err := b.store.UpdateMessageMapResponse(msgMap.ID, response); err != nil {
+	if err := b.store.UpdateMessageMapResponse(msgMap.ID, resp.Text); err != nil {
 		slog.Warn("failed to update message map response", "error", err)
 	}
 
-	return response, nil
+	return resp, nil
 }
 
 // RememberResponse saves the bot response (with user question context) to long-term memory.
@@ -3181,32 +3213,6 @@ func (b *Bridge) triggerSelfRestart(run *planRun, chatID int64) {
 			notify(chatID, msg)
 		}
 	}()
-}
-
-// pdfPagePattern matches "/Type /Page" but not "/Type /Pages".
-var pdfPagePattern = regexp.MustCompile(`/Type\s*/Page[^s]`)
-
-// countPDFPages returns the number of pages in a PDF file by counting
-// "/Type /Page" object references (excluding "/Type /Pages" which is the
-// page tree root). Returns 0 if the file cannot be read or parsed.
-func countPDFPages(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	return len(pdfPagePattern.FindAllIndex(data, -1))
-}
-
-// formatFileSize returns a human-readable file size string.
-func formatFileSize(bytes int64) string {
-	switch {
-	case bytes >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1<<20))
-	case bytes >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(1<<10))
-	default:
-		return fmt.Sprintf("%d B", bytes)
-	}
 }
 
 func formatDraftResponse(draft string) string {

@@ -26,6 +26,12 @@ type Config struct {
 	Browser   BrowserConfig   `json:"browser"`
 	Tunnel    TunnelConfig    `json:"tunnel"`
 	PM        PMConfig        `json:"pm"`
+	Skills    SkillsConfig    `json:"skills"`
+}
+
+type SkillsConfig struct {
+	Enabled bool   `json:"enabled"`
+	Dir     string `json:"dir"` // override global dir (default: ~/.shell/skills)
 }
 
 type PMConfig struct {
@@ -93,14 +99,16 @@ func (t *TelegramConfig) UnmarshalJSON(data []byte) error {
 }
 
 type ClaudeConfig struct {
-	Binary        string        `json:"binary"`
-	Model         string        `json:"model"`
-	Timeout       time.Duration `json:"timeout"`
-	MaxSessions   int           `json:"max_sessions"`
-	WorkDir       string        `json:"work_dir"`
-	AllowedTools  []string      `json:"allowed_tools"`
-	ExtraArgs     []string      `json:"extra_args"`
-	PlaygroundDir string        `json:"playground_dir"` // writable sandbox dir, auto-approved for Write/Edit/Bash
+	Binary         string        `json:"binary"`
+	Model          string        `json:"model"`
+	Timeout        time.Duration `json:"timeout"`
+	MaxSessions    int           `json:"max_sessions"`
+	WorkDir        string        `json:"work_dir"`
+	AllowedTools   []string      `json:"allowed_tools"`
+	ExtraArgs      []string      `json:"extra_args"`
+	PlaygroundDir  string        `json:"playground_dir"`  // writable sandbox dir, auto-approved for Write/Edit/Bash
+	Bidirectional  bool          `json:"bidirectional"`   // use stream-json stdin (bidirectional protocol)
+	SettingSources []string      `json:"setting_sources"` // e.g. ["user", "project"] for --setting-sources
 }
 
 type StoreConfig struct {
@@ -369,6 +377,33 @@ func OpenSecretStore(cfg SecretsConfig) {
 	}
 	globalSecretStore = store
 	slog.Info("secrets: store opened", "path", cfg.StorePath)
+}
+
+// ExportSecrets exports all secrets from the secret store into environment
+// variables so child processes (e.g. skill scripts) inherit them.
+// Existing env vars are not overwritten.
+func ExportSecrets() int {
+	if globalSecretStore == nil {
+		return 0
+	}
+	keys, err := globalSecretStore.List()
+	if err != nil {
+		slog.Warn("secrets: failed to list keys for export", "error", err)
+		return 0
+	}
+	exported := 0
+	for _, key := range keys {
+		if os.Getenv(key) != "" {
+			continue // don't overwrite existing env vars
+		}
+		val, err := globalSecretStore.Get(key)
+		if err != nil {
+			continue
+		}
+		os.Setenv(key, val)
+		exported++
+	}
+	return exported
 }
 
 // CloseSecretStore closes the secret store if open.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -24,7 +23,7 @@ func testBridge(t *testing.T) *Bridge {
 	t.Cleanup(func() { s.Close() })
 
 	proc := process.NewManager(process.ManagerConfig{Binary: "echo"})
-	return New(proc, s, nil, nil, false, "", nil, nil, "", "", browser.Config{}, nil, nil)
+	return New(proc, s, nil, nil, false, "", nil, nil, "", "", browser.Config{}, nil, nil, nil)
 }
 
 func TestHandleReaction_NoPlan(t *testing.T) {
@@ -169,7 +168,7 @@ func TestHandleReaction_CustomReactionMap(t *testing.T) {
 
 	proc := process.NewManager(process.ManagerConfig{Binary: "echo"})
 	customMap := map[string]string{"🚀": "go"}
-	b := New(proc, s, nil, nil, false, "", customMap, nil, "", "", browser.Config{}, nil, nil)
+	b := New(proc, s, nil, nil, false, "", customMap, nil, "", "", browser.Config{}, nil, nil, nil)
 	ctx := context.Background()
 
 	// 🚀 should work like 👍 (mapped to "go")
@@ -276,8 +275,8 @@ func TestRegenerateStreaming_NoMessageMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp != "Cannot regenerate: message not found." {
-		t.Errorf("expected not-found message, got %q", resp)
+	if resp.Text != "Cannot regenerate: message not found." {
+		t.Errorf("expected not-found message, got %q", resp.Text)
 	}
 }
 
@@ -297,8 +296,8 @@ func TestRegenerateStreaming_DuringPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp != "Cannot regenerate while a plan is active." {
-		t.Errorf("expected plan-active message, got %q", resp)
+	if resp.Text != "Cannot regenerate while a plan is active." {
+		t.Errorf("expected plan-active message, got %q", resp.Text)
 	}
 }
 
@@ -320,7 +319,7 @@ func testBridgeWithMemory(t *testing.T) *Bridge {
 	t.Cleanup(func() { mem.Close() })
 
 	proc := process.NewManager(process.ManagerConfig{Binary: "echo"})
-	return New(proc, s, mem, nil, false, "", nil, nil, "", "", browser.Config{}, nil, nil)
+	return New(proc, s, mem, nil, false, "", nil, nil, "", "", browser.Config{}, nil, nil, nil)
 }
 
 func TestHandleReaction_Remember_NoMemory(t *testing.T) {
@@ -424,110 +423,6 @@ func TestHandleReaction_Forget_WithContext(t *testing.T) {
 	}
 }
 
-func TestCountPDFPages(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-		want    int
-	}{
-		{
-			name:    "single page",
-			content: "%PDF-1.4\n/Type /Page\n%%EOF",
-			want:    1,
-		},
-		{
-			name:    "multiple pages",
-			content: "%PDF-1.4\n/Type /Page\n/Type /Page\n/Type /Page\n%%EOF",
-			want:    3,
-		},
-		{
-			name:    "pages tree excluded",
-			content: "%PDF-1.4\n/Type /Pages\n/Type /Page\n%%EOF",
-			want:    1,
-		},
-		{
-			name:    "no pages",
-			content: "%PDF-1.4\n%%EOF",
-			want:    0,
-		},
-		{
-			name:    "nonexistent file",
-			content: "",
-			want:    0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.name == "nonexistent file" {
-				if got := countPDFPages("/nonexistent/file.pdf"); got != 0 {
-					t.Errorf("countPDFPages(nonexistent) = %d, want 0", got)
-				}
-				return
-			}
-			tmp := filepath.Join(t.TempDir(), "test.pdf")
-			if err := os.WriteFile(tmp, []byte(tt.content), 0o644); err != nil {
-				t.Fatalf("write temp pdf: %v", err)
-			}
-			if got := countPDFPages(tmp); got != tt.want {
-				t.Errorf("countPDFPages() = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFormatFileSize(t *testing.T) {
-	tests := []struct {
-		bytes int64
-		want  string
-	}{
-		{0, "0 B"},
-		{512, "512 B"},
-		{1024, "1.0 KB"},
-		{1536, "1.5 KB"},
-		{1048576, "1.0 MB"},
-		{1572864, "1.5 MB"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			if got := formatFileSize(tt.bytes); got != tt.want {
-				t.Errorf("formatFileSize(%d) = %q, want %q", tt.bytes, got, tt.want)
-			}
-		})
-	}
-}
-
-// buildAttachmentPrefix replicates the augmentation logic from
-// HandleMessageStreaming so we can unit-test the formatting without
-// needing the full Bridge/process machinery.
-func buildAttachmentPrefix(images []ImageInfo, pdfs []PDFInfo) string {
-	if len(images) == 0 && len(pdfs) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	for _, img := range images {
-		sb.WriteString("[Attached image: " + img.Path)
-		if img.Width > 0 && img.Height > 0 {
-			sb.WriteString(" | " + strconv.Itoa(img.Width) + "x" + strconv.Itoa(img.Height))
-		}
-		if img.Size > 0 {
-			sb.WriteString(" | " + formatFileSize(img.Size))
-		}
-		sb.WriteString("]\n")
-	}
-	for _, pdf := range pdfs {
-		sb.WriteString("[Attached PDF: " + pdf.Path)
-		if pages := countPDFPages(pdf.Path); pages > 0 {
-			sb.WriteString(" | " + strconv.Itoa(pages) + " pages")
-		}
-		if pdf.Size > 0 {
-			sb.WriteString(" | " + formatFileSize(pdf.Size))
-		}
-		sb.WriteString("]\n")
-	}
-	return sb.String()
-}
-
 func TestAugmentMessage_PDFMetadata(t *testing.T) {
 	// Create a temp PDF with 2 page markers.
 	tmp := filepath.Join(t.TempDir(), "test.pdf")
@@ -537,25 +432,25 @@ func TestAugmentMessage_PDFMetadata(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		images  []ImageInfo
-		pdfs    []PDFInfo
+		images  []process.ImageAttachment
+		pdfs    []process.PDFAttachment
 		want    []string // substrings expected in result
 		notWant []string // substrings that must NOT appear
 	}{
 		{
 			name: "pdf with size and pages",
-			pdfs: []PDFInfo{{Path: tmp, Size: 348160}},
-			want: []string{"[Attached PDF: " + tmp, "2 pages", "340.0 KB", "]\n"},
+			pdfs: []process.PDFAttachment{{Path: tmp, Size: 348160}},
+			want: []string{"[Attached PDF: " + tmp, "2 pages", "340.0 KB", "]"},
 		},
 		{
 			name:   "image and pdf together",
-			images: []ImageInfo{{Path: "/tmp/photo.jpg", Width: 800, Height: 600, Size: 50000}},
-			pdfs:   []PDFInfo{{Path: tmp, Size: 1048576}},
+			images: []process.ImageAttachment{{Path: "/tmp/photo.jpg", Width: 800, Height: 600, Size: 50000}},
+			pdfs:   []process.PDFAttachment{{Path: tmp, Size: 1048576}},
 			want:   []string{"[Attached image:", "800x600", "[Attached PDF:", "1.0 MB"},
 		},
 		{
 			name:    "pdf without size omits size",
-			pdfs:    []PDFInfo{{Path: tmp, Size: 0}},
+			pdfs:    []process.PDFAttachment{{Path: tmp, Size: 0}},
 			want:    []string{"[Attached PDF:", "2 pages"},
 			notWant: []string{"0 B"},
 		},
@@ -566,7 +461,11 @@ func TestAugmentMessage_PDFMetadata(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildAttachmentPrefix(tt.images, tt.pdfs)
+			result := process.FormatMessage(process.AgentRequest{
+				Text:   "",
+				Images: tt.images,
+				PDFs:   tt.pdfs,
+			})
 			for _, w := range tt.want {
 				if !strings.Contains(result, w) {
 					t.Errorf("missing %q in:\n%s", w, result)
@@ -581,5 +480,69 @@ func TestAugmentMessage_PDFMetadata(t *testing.T) {
 				t.Errorf("expected empty, got %q", result)
 			}
 		})
+	}
+}
+
+func TestParseArtifacts(t *testing.T) {
+	b := testBridge(t)
+
+	// Create a temp image file
+	tmpFile := filepath.Join(t.TempDir(), "test-image.png")
+	os.WriteFile(tmpFile, []byte("fake-png-data"), 0644)
+
+	response := `Here's your image!
+[artifact type="image" path="` + tmpFile + `" caption="a cute cat"]
+Hope you like it!`
+
+	var photos []Photo
+	cleaned := b.parseArtifacts(response, &photos)
+
+	// Should strip the artifact marker
+	if strings.Contains(cleaned, "[artifact") {
+		t.Error("artifact marker should be stripped")
+	}
+	if !strings.Contains(cleaned, "Here's your image!") {
+		t.Error("text before artifact should be preserved")
+	}
+	if !strings.Contains(cleaned, "Hope you like it!") {
+		t.Error("text after artifact should be preserved")
+	}
+
+	// Should have collected the image
+	if len(photos) != 1 {
+		t.Fatalf("expected 1 photo, got %d", len(photos))
+	}
+	if string(photos[0].Data) != "fake-png-data" {
+		t.Errorf("data = %q", photos[0].Data)
+	}
+	if photos[0].Caption != "a cute cat" {
+		t.Errorf("caption = %q", photos[0].Caption)
+	}
+}
+
+func TestParseArtifacts_NoMatch(t *testing.T) {
+	b := testBridge(t)
+	response := "just plain text, no artifacts"
+	var photos []Photo
+	cleaned := b.parseArtifacts(response, &photos)
+	if cleaned != response {
+		t.Errorf("should return unchanged, got %q", cleaned)
+	}
+	if len(photos) != 0 {
+		t.Errorf("expected no photos, got %d", len(photos))
+	}
+}
+
+func TestParseArtifacts_MissingFile(t *testing.T) {
+	b := testBridge(t)
+
+	response := `[artifact type="image" path="/nonexistent/file.png" caption="test"]`
+	var photos []Photo
+	cleaned := b.parseArtifacts(response, &photos)
+	if !strings.Contains(cleaned, "failed to read image") {
+		t.Errorf("should contain error message, got %q", cleaned)
+	}
+	if len(photos) != 0 {
+		t.Errorf("expected no photos for missing file, got %d", len(photos))
 	}
 }

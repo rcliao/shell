@@ -21,6 +21,7 @@ import (
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/reload"
 	"github.com/rcliao/shell/internal/scheduler"
+	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/telegram"
 )
@@ -42,11 +43,9 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Open encrypted secret store (if enabled) before anything reads tokens.
 	config.OpenSecretStore(cfg.Secrets)
 
-	// Export search API keys into env so child processes (Claude → Bash → search) inherit them.
-	for _, key := range []string{"BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY"} {
-		if val := cfg.Secret(key); val != "" && os.Getenv(key) == "" {
-			os.Setenv(key, val)
-		}
+	// Export all secrets into env so child processes (Claude → Bash → skill scripts) inherit them.
+	if n := config.ExportSecrets(); n > 0 {
+		slog.Info("secrets: exported to env", "count", n)
 	}
 
 	// Open store
@@ -64,15 +63,51 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
+	// Load skills if enabled.
+	var skillRegistry *skill.Registry
+	if cfg.Skills.Enabled {
+		var allSkills []*skill.Skill
+
+		// Global skills: ~/.shell/skills/
+		globalDir := cfg.Skills.Dir
+		if globalDir == "" {
+			globalDir = filepath.Join(config.DefaultConfigDir(), "skills")
+		}
+		if s, err := skill.LoadDir(globalDir); err == nil {
+			allSkills = append(allSkills, s...)
+		}
+
+		// Project skills: <workdir>/.agent/skills/
+		if cfg.Claude.WorkDir != "" {
+			agentDir := filepath.Join(cfg.Claude.WorkDir, ".agent", "skills")
+			if s, err := skill.LoadDir(agentDir); err == nil {
+				allSkills = append(allSkills, s...)
+			}
+		}
+
+		if len(allSkills) > 0 {
+			skillRegistry = skill.NewRegistry(allSkills)
+			slog.Info("skills loaded", "count", len(allSkills))
+		}
+	}
+
+	// Merge skill allowed-tools with config allowed-tools.
+	allowedTools := cfg.Claude.AllowedTools
+	if skillRegistry != nil {
+		allowedTools = append(allowedTools, skillRegistry.AllowedTools()...)
+	}
+
 	// Create process manager
 	proc := process.NewManager(process.ManagerConfig{
-		Binary:       cfg.Claude.Binary,
-		Model:        cfg.Claude.Model,
-		Timeout:      cfg.Claude.Timeout,
-		MaxSessions:  cfg.Claude.MaxSessions,
-		WorkDir:      cfg.Claude.WorkDir,
-		AllowedTools: cfg.Claude.AllowedTools,
-		ExtraArgs:    cfg.Claude.ExtraArgs,
+		Binary:         cfg.Claude.Binary,
+		Model:          cfg.Claude.Model,
+		Timeout:        cfg.Claude.Timeout,
+		MaxSessions:    cfg.Claude.MaxSessions,
+		WorkDir:        cfg.Claude.WorkDir,
+		AllowedTools:   allowedTools,
+		ExtraArgs:      cfg.Claude.ExtraArgs,
+		Bidirectional:  cfg.Claude.Bidirectional,
+		SettingSources: cfg.Claude.SettingSources,
 	})
 
 	// Legacy: inject shell:capabilities into system namespaces for profiles without AgentNS.
@@ -191,7 +226,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("process manager initialized")
 	}
 
-	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig, braveKey, tavilyKey, browserCfg, tunnelMgr, pmMgr)
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig, braveKey, tavilyKey, browserCfg, tunnelMgr, pmMgr, skillRegistry)
 	if braveKey != "" {
 		slog.Info("search initialized", "provider", "brave")
 	} else if tavilyKey != "" {
@@ -259,12 +294,22 @@ func New(cfg config.Config) (*Daemon, error) {
 				slog.Error("scheduler prompt failed", "chat_id", chatID, "error", err)
 				return
 			}
-			bot.SendText(chatID, resp)
+			for _, photo := range resp.Photos {
+				bot.SendPhoto(chatID, photo.Data, photo.Caption)
+			}
+			bot.SendText(chatID, resp.Text)
 		}
 		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
 		sched.SetQuietHours(cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd)
 		sched.SetHeartbeatPrompt(func(chatID int64, msg string) (string, error) {
-			return br.HandleMessageStreaming(context.Background(), chatID, msg, "heartbeat", nil, nil, nil)
+			resp, err := br.HandleMessageStreaming(context.Background(), chatID, msg, "heartbeat", nil, nil, nil)
+			if err != nil {
+				return "", err
+			}
+			for _, photo := range resp.Photos {
+				bot.SendPhoto(chatID, photo.Data, photo.Caption)
+			}
+			return resp.Text, nil
 		})
 		br.SetSchedulerConfig(true, cfg.Scheduler.Timezone)
 		slog.Info("scheduler initialized", "timezone", cfg.Scheduler.Timezone, "quiet_hours", fmt.Sprintf("%d:00-%d:00", cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd))

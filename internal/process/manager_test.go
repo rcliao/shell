@@ -176,6 +176,76 @@ func TestExtractContentText_Empty(t *testing.T) {
 	}
 }
 
+func TestFormatMessage_TextOnly(t *testing.T) {
+	msg := FormatMessage(AgentRequest{Text: "hello world"})
+	if msg != "hello world" {
+		t.Errorf("expected 'hello world', got %q", msg)
+	}
+}
+
+func TestFormatMessage_WithImages(t *testing.T) {
+	msg := FormatMessage(AgentRequest{
+		Text: "what is this?",
+		Images: []ImageAttachment{
+			{Path: "/tmp/photo.jpg", Width: 800, Height: 600, Size: 50000},
+		},
+	})
+	if !strings.Contains(msg, "[Attached image: /tmp/photo.jpg") {
+		t.Errorf("expected image metadata, got %q", msg)
+	}
+	if !strings.Contains(msg, "800x600") {
+		t.Errorf("expected dimensions, got %q", msg)
+	}
+	if !strings.Contains(msg, "48.8 KB") {
+		t.Errorf("expected size, got %q", msg)
+	}
+	if !strings.HasSuffix(msg, "what is this?") {
+		t.Errorf("expected text at end, got %q", msg)
+	}
+}
+
+func TestFormatMessage_WithPDFs(t *testing.T) {
+	msg := FormatMessage(AgentRequest{
+		Text: "summarize this",
+		PDFs: []PDFAttachment{
+			{Path: "/tmp/doc.pdf", Size: 1048576},
+		},
+	})
+	if !strings.Contains(msg, "[Attached PDF: /tmp/doc.pdf") {
+		t.Errorf("expected PDF metadata, got %q", msg)
+	}
+	if !strings.Contains(msg, "1.0 MB") {
+		t.Errorf("expected size, got %q", msg)
+	}
+}
+
+func TestFormatMessage_NoSizeOrDimensions(t *testing.T) {
+	msg := FormatMessage(AgentRequest{
+		Text:   "check this",
+		Images: []ImageAttachment{{Path: "/tmp/x.png"}},
+	})
+	if msg != "[Attached image: /tmp/x.png]\ncheck this" {
+		t.Errorf("unexpected format: %q", msg)
+	}
+}
+
+func TestFormatFileSize(t *testing.T) {
+	tests := []struct {
+		size int64
+		want string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1048576, "1.0 MB"},
+	}
+	for _, tt := range tests {
+		if got := formatFileSize(tt.size); got != tt.want {
+			t.Errorf("formatFileSize(%d) = %q, want %q", tt.size, got, tt.want)
+		}
+	}
+}
+
 func TestFilterEnv(t *testing.T) {
 	env := []string{"PATH=/usr/bin", "CLAUDECODE=abc", "HOME=/home/user"}
 	filtered := filterEnv(env, "CLAUDECODE")

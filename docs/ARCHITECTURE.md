@@ -43,6 +43,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **scheduler** | `internal/scheduler/` | Cron/one-shot/heartbeat scheduler with quiet hours and noop suppression |
 | **search** | `internal/search/` | Web search cascade: Brave → Tavily → DuckDuckGo |
 | **worktree** | `internal/worktree/` | Git worktree isolation for plan execution |
+| **skill** | `internal/skill/` | Skill registry: loads `.claude/skills/` and generates system prompt |
 | **reload** | `internal/reload/` | Live reload: watch .go files → rebuild → syscall.Exec |
 
 ## Data Flow
@@ -57,12 +58,13 @@ Telegram Bot (long-poll)
 Bridge
   │ inject memory context + system prompt
   │ inject current time, sender identity
+  │ convert ImageInfo/PDFInfo → process.ImageAttachment/PDFAttachment
   ▼
 Process Manager
-  │ spawn: claude -p "..." --resume <sid> --output-format stream-json
+  │ AgentRequest → CLI subprocess
   │ parse stream events → onUpdate callback → live Telegram edits
   ▼
-Bridge (response processing)
+Bridge (response processing — processResponse())
   ├─ [search query="..."]      → search API → re-prompt with results
   ├─ [browser url="..."]       → headless Chrome → re-prompt with results
   ├─ [pm cmd="..."]            → background process → re-prompt with status
@@ -70,17 +72,93 @@ Bridge (response processing)
   ├─ [relay to=CHAT_ID]        → send to another chat
   ├─ [schedule cron="..."]     → save to store
   ├─ [remember]...[/remember]  → store to memory namespace
-  ├─ [generate-image]          → Imagen API → send photo
+  ├─ [generate-image]          → Imagen API → collect Photo
+  ├─ [artifact type="image"]   → read file → collect Photo
   ├─ [noop]                    → suppress heartbeat output
   ├─ [heartbeat-learning]      → store insight to heartbeat NS
   └─ [task-complete id=N]      → mark background task done
   │
   │ log exchange to store + memory
+  │ return AgentResponse{Text, Photos}
   ▼
 Telegram Bot
-  │ SendText (split + MarkdownV2) / SendPhoto
+  │ send Photos → SendPhoto
+  │ send Text → edit/chunk + MarkdownV2
   ▼
 User (Telegram)
+```
+
+## Layer Interfaces
+
+Each layer boundary has typed inputs and outputs. No plain-text encoding crosses a boundary (except one-shot CLI mode, which is legacy).
+
+### Telegram → Bridge
+
+```go
+// Input
+HandleMessageStreaming(
+    ctx        context.Context,
+    chatID     int64,
+    userMsg    string,
+    senderName string,
+    images     []bridge.ImageInfo,  // {Path, Width, Height, Size}
+    pdfs       []bridge.PDFInfo,    // {Path, Size}
+    onUpdate   process.StreamFunc,  // func(delta string)
+)
+
+// Output
+bridge.AgentResponse {
+    Text   string   // final text, all directives stripped
+    Photos []Photo  // collected images {Data []byte, Caption string}
+}
+```
+
+Bridge augments the message (memory context, sender tag, timestamps), builds the system prompt, converts `ImageInfo`/`PDFInfo` → `process.ImageAttachment`/`PDFAttachment`, and runs the response through `processResponse()` which strips directives and collects photos.
+
+### Bridge → Process
+
+```go
+// Input
+Agent.SendStreaming(
+    ctx      context.Context,
+    req      process.AgentRequest,  // {ChatID, SessionID, Text, Images, PDFs, SystemPrompt}
+    onUpdate process.StreamFunc,
+)
+
+// Output
+process.SendResult {
+    Text      string      // raw Claude response (directives still present)
+    SessionID string      // Claude session ID for future --resume
+    ToolCalls []ToolCall   // tool invocations observed (bidirectional mode only)
+}
+```
+
+### Process → Claude CLI
+
+Two modes, selected by `claude.bidirectional` config:
+
+**One-shot mode** (default): Images/PDFs as text metadata via `formatMessage()`.
+```
+claude -p "{text with [Attached image: path | WxH | size]}" \
+    --resume <sid> --output-format stream-json
+```
+
+**Bidirectional mode**: Same text format, but uses stdin/stdout JSON protocol with tool visibility and permission control.
+```
+claude -p --input-format stream-json --output-format stream-json \
+    --permission-mode bypassPermissions [--setting-sources "user,project"]
+
+stdin (SDK → CLI):
+  1. {"type":"control_request", "request":{"subtype":"initialize"}}
+  2. {"type":"user", "message":{"role":"user", "content":"[Attached image: ...]\nwhat is this?"}}
+  3. {"type":"control_response", ...}  (in response to CLI permission checks)
+
+stdout (CLI → SDK):
+  - system/init → session_id
+  - stream_event → text deltas (onUpdate callback)
+  - assistant → tool_use blocks (ToolCall extraction)
+  - control_request → auto-allow (can_use_tool)
+  - result → final text, terminates the event loop
 ```
 
 ## Security & Access Control
@@ -159,20 +237,35 @@ shell pairing revoke ID  # Revoke a user from dynamic allowlist
 
 ```go
 type Agent interface {
-    Send(ctx, chatID, claudeSessionID, message, systemPrompt) → SendResult
-    SendStreaming(ctx, chatID, claudeSessionID, message, systemPrompt, onUpdate) → SendResult
-    Get(chatID) → *Session
-    Register(chatID, claudeSessionID)
-    Kill(chatID)
+    Send(ctx context.Context, req AgentRequest) (SendResult, error)
+    SendStreaming(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error)
+    Get(chatID int64) (*Session, bool)
+    Register(sess *Session)
+    Kill(chatID int64)
     KillAll()
+    ActiveCount() int
+    ListSessions() []Session
+}
+
+type AgentRequest struct {
+    ChatID       int64
+    SessionID    string            // claude session ID for --resume
+    Text         string            // user message text
+    Images       []ImageAttachment // {Path, Width, Height, Size}
+    PDFs         []PDFAttachment   // {Path, Size}
+    SystemPrompt string
+}
+
+type SendResult struct {
+    Text      string
+    SessionID string
+    ToolCalls []ToolCall // tool calls observed (bidirectional mode)
 }
 ```
 
-The process manager implements this interface. Claude CLI is invoked as:
-```
-claude -p "message" --resume <session_id> --output-format stream-json \
-  --append-system-prompt "..." --allowedTools "tool1,tool2" ...
-```
+The process manager implements this interface. Mode selection:
+- **Default**: `claude -p "message" --resume <sid> --output-format stream-json`
+- **Bidirectional** (`claude.bidirectional: true`): `--input-format stream-json` with stdin/stdout JSON protocol, tool call visibility
 
 Auto-retry on resume failure: falls back to fresh session.
 
@@ -279,7 +372,7 @@ Key operations:
 ```json
 {
   "telegram": { "token_env", "allowed_users", "reaction_map" },
-  "claude": { "binary", "model", "timeout", "max_sessions", "work_dir", "allowed_tools" },
+  "claude": { "binary", "model", "timeout", "max_sessions", "work_dir", "allowed_tools", "bidirectional", "setting_sources" },
   "store": { "db_path" },
   "memory": { "enabled", "db_path", "budget", "profiles", "chat_profiles" },
   "planner": { "enabled", "test_cmd", "conventions", "max_retries", "worktree" },

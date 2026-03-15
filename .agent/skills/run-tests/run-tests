@@ -1,0 +1,6 @@
+#!/bin/sh
+pkg="${1:-./...}"
+echo "=== testing $pkg ==="
+go test -cover "$pkg" 2>&1
+echo ""
+echo "exit code: $?"

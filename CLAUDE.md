@@ -15,6 +15,7 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 - `internal/planner/` — Optional plan-execute-review loop
 - `internal/reload/` — Live reload watcher (rebuild + syscall.Exec)
 - `internal/worktree/` — Git worktree isolation for plan execution
+- `internal/skill/` — Skill registry: loads `.claude/skills/` for system prompt
 - `internal/scheduler/` — Cron/one-shot scheduler with SQLite persistence
 
 ## Commands
@@ -39,11 +40,15 @@ make watch    # Build and run with --watch
 
 ## Key Patterns
 
-- Each Telegram message spawns: `claude -p "msg" --resume <sid> --output-format stream-json`
+- Each Telegram message → `bridge.HandleMessageStreaming()` → `process.Agent.SendStreaming(AgentRequest)` → Claude CLI
+- Default mode: `claude -p "msg" --resume <sid> --output-format stream-json`
+- Bidirectional mode (`claude.bidirectional: true`): `--input-format stream-json` with stdin/stdout JSON protocol
+- Typed boundaries: `AgentRequest` (bridge→process), `SendResult` (process→bridge), `AgentResponse` (bridge→telegram)
+- Response processing via `processResponse()`: strips directives, collects `Photo`s, logs exchange
 - Sessions persist across restarts via SQLite
 - Allowlist-based auth by Telegram user ID
 - Streaming responses with live Telegram message edits
-- Photo/image attachments: downloaded to temp files, passed as file path references in prompt
+- Photo/image attachments: downloaded to temp files, sent as typed `ImageAttachment`/`PDFAttachment`
 - Album support: multiple photos buffered with 500ms debounce, sent as single message
 - PID file at `~/.shell/shell.pid` for restart/stop commands
 - SIGHUP triggers graceful restart via syscall.Exec (same pattern as reload.go)

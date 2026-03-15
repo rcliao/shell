@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -58,33 +59,47 @@ type claudeResult struct {
 	SessionID string `json:"session_id"`
 }
 
-// SendResult contains the response text and the Claude session ID.
+// Artifact represents binary output produced by a tool call (image, file, etc.).
+type Artifact struct {
+	Type    string // "image", "file", "audio"
+	Data    []byte // binary content
+	Caption string // optional description
+	Path    string // optional file path (alternative to inline Data)
+}
+
+// SendResult contains the response text, session ID, and any binary artifacts.
 type SendResult struct {
 	Text      string
 	SessionID string
+	Artifacts []Artifact
+	ToolCalls []ToolCall // tool calls observed during execution (bidirectional mode)
 }
 
 type Manager struct {
 	sessions map[int64]*Session
 	mu       sync.RWMutex
 
-	binary       string
-	model        string
-	timeout      time.Duration
-	maxSessions  int
-	workDir      string
-	allowedTools []string
-	extraArgs    []string
+	binary         string
+	model          string
+	timeout        time.Duration
+	maxSessions    int
+	workDir        string
+	allowedTools   []string
+	extraArgs      []string
+	bidirectional  bool
+	settingSources []string
 }
 
 type ManagerConfig struct {
-	Binary       string
-	Model        string
-	Timeout      time.Duration
-	MaxSessions  int
-	WorkDir      string
-	AllowedTools []string
-	ExtraArgs    []string
+	Binary         string
+	Model          string
+	Timeout        time.Duration
+	MaxSessions    int
+	WorkDir        string
+	AllowedTools   []string
+	ExtraArgs      []string
+	Bidirectional  bool
+	SettingSources []string
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -98,28 +113,27 @@ func NewManager(cfg ManagerConfig) *Manager {
 		cfg.MaxSessions = 4
 	}
 	return &Manager{
-		sessions:     make(map[int64]*Session),
-		binary:       cfg.Binary,
-		model:        cfg.Model,
-		timeout:      cfg.Timeout,
-		maxSessions:  cfg.MaxSessions,
-		workDir:      cfg.WorkDir,
-		allowedTools: cfg.AllowedTools,
-		extraArgs:    cfg.ExtraArgs,
+		sessions:       make(map[int64]*Session),
+		binary:         cfg.Binary,
+		model:          cfg.Model,
+		timeout:        cfg.Timeout,
+		maxSessions:    cfg.MaxSessions,
+		workDir:        cfg.WorkDir,
+		allowedTools:   cfg.AllowedTools,
+		extraArgs:      cfg.ExtraArgs,
+		bidirectional:  cfg.Bidirectional,
+		settingSources: cfg.SettingSources,
 	}
 }
 
-// Send sends a message to Claude via the CLI and returns the response.
-// If claudeSessionID is non-empty, uses --resume <id> to resume a specific session.
-// Otherwise starts a fresh session. Returns SendResult with text and session ID.
-// If systemPrompt is non-empty, it is passed via --append-system-prompt.
-func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, message, systemPrompt string) (SendResult, error) {
+// Send sends a prompt and returns the full response.
+func (m *Manager) Send(ctx context.Context, req AgentRequest) (SendResult, error) {
 	m.mu.RLock()
-	sess, exists := m.sessions[chatID]
+	sess, exists := m.sessions[req.ChatID]
 	m.mu.RUnlock()
 
 	if exists && sess.Status == StatusBusy {
-		return SendResult{}, fmt.Errorf("session for chat %d is busy", chatID)
+		return SendResult{}, fmt.Errorf("session for chat %d is busy", req.ChatID)
 	}
 
 	// Check concurrency limit
@@ -152,11 +166,22 @@ func (m *Manager) Send(ctx context.Context, chatID int64, claudeSessionID, messa
 		}
 	}()
 
-	result, err := m.runClaude(ctx, message, claudeSessionID, systemPrompt)
-	if err != nil && claudeSessionID != "" {
-		// If --resume failed, retry as fresh session
-		slog.Warn("resume failed, retrying as fresh session", "chat_id", chatID, "error", err)
-		result, err = m.runClaude(ctx, message, "", systemPrompt)
+	if m.bidirectional {
+		result, err := m.runClaudeBidirectional(ctx, req, nil)
+		if err != nil && req.SessionID != "" {
+			slog.Warn("resume failed, retrying as fresh session (bidirectional)", "chat_id", req.ChatID, "error", err)
+			freshReq := req
+			freshReq.SessionID = ""
+			result, err = m.runClaudeBidirectional(ctx, freshReq, nil)
+		}
+		return result, err
+	}
+
+	message := FormatMessage(req)
+	result, err := m.runClaude(ctx, message, req.SessionID, req.SystemPrompt)
+	if err != nil && req.SessionID != "" {
+		slog.Warn("resume failed, retrying as fresh session", "chat_id", req.ChatID, "error", err)
+		result, err = m.runClaude(ctx, message, "", req.SystemPrompt)
 	}
 	return result, err
 }
@@ -183,7 +208,7 @@ func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID, syste
 	}
 	args = append(args, m.extraArgs...)
 
-	slog.Debug("spawning claude", "resume", claudeSessionID, "binary", m.binary)
+	slog.Info("claude send", "mode", "one-shot", "resume", claudeSessionID != "")
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
 	// Clear CLAUDECODE env var so claude doesn't think it's nested inside another session
@@ -219,16 +244,14 @@ func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID, syste
 	}, nil
 }
 
-// SendStreaming sends a message to Claude and calls onUpdate with accumulated text as it streams.
-// Returns the final SendResult when complete.
-// If systemPrompt is non-empty, it is passed via --append-system-prompt.
-func (m *Manager) SendStreaming(ctx context.Context, chatID int64, claudeSessionID, message, systemPrompt string, onUpdate StreamFunc) (SendResult, error) {
+// SendStreaming sends a prompt and streams text deltas via onUpdate.
+func (m *Manager) SendStreaming(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
 	m.mu.RLock()
-	sess, exists := m.sessions[chatID]
+	sess, exists := m.sessions[req.ChatID]
 	m.mu.RUnlock()
 
 	if exists && sess.Status == StatusBusy {
-		return SendResult{}, fmt.Errorf("session for chat %d is busy", chatID)
+		return SendResult{}, fmt.Errorf("session for chat %d is busy", req.ChatID)
 	}
 
 	// Check concurrency limit
@@ -261,11 +284,22 @@ func (m *Manager) SendStreaming(ctx context.Context, chatID int64, claudeSession
 		}
 	}()
 
-	result, err := m.runClaudeStreaming(ctx, message, claudeSessionID, systemPrompt, onUpdate)
-	if err != nil && claudeSessionID != "" {
-		// If --resume failed, retry as fresh session
-		slog.Warn("resume failed, retrying as fresh session (streaming)", "chat_id", chatID, "error", err)
-		result, err = m.runClaudeStreaming(ctx, message, "", systemPrompt, onUpdate)
+	if m.bidirectional {
+		result, err := m.runClaudeBidirectional(ctx, req, onUpdate)
+		if err != nil && req.SessionID != "" {
+			slog.Warn("resume failed, retrying as fresh session (bidirectional)", "chat_id", req.ChatID, "error", err)
+			freshReq := req
+			freshReq.SessionID = ""
+			result, err = m.runClaudeBidirectional(ctx, freshReq, onUpdate)
+		}
+		return result, err
+	}
+
+	message := FormatMessage(req)
+	result, err := m.runClaudeStreaming(ctx, message, req.SessionID, req.SystemPrompt, onUpdate)
+	if err != nil && req.SessionID != "" {
+		slog.Warn("resume failed, retrying as fresh session (streaming)", "chat_id", req.ChatID, "error", err)
+		result, err = m.runClaudeStreaming(ctx, message, "", req.SystemPrompt, onUpdate)
 	}
 	return result, err
 }
@@ -294,7 +328,7 @@ func (m *Manager) runClaudeStreaming(ctx context.Context, message, claudeSession
 	}
 	args = append(args, m.extraArgs...)
 
-	slog.Debug("spawning claude (streaming)", "resume", claudeSessionID, "binary", m.binary)
+	slog.Info("claude send", "mode", "streaming", "resume", claudeSessionID != "")
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
 	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
@@ -324,6 +358,106 @@ func (m *Manager) runClaudeStreaming(ctx context.Context, message, claudeSession
 			return finalResult, nil
 		}
 		stderrStr := stderr.String()
+		if stderrStr != "" {
+			return SendResult{}, fmt.Errorf("claude process failed: %w\nstderr: %s", err, stderrStr)
+		}
+		return SendResult{}, fmt.Errorf("claude process failed: %w", err)
+	}
+
+	return finalResult, nil
+}
+
+func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+	claudeSessionID := req.SessionID
+	systemPrompt := req.SystemPrompt
+	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+
+	args := []string{
+		"-p",
+		"--output-format", "stream-json",
+		"--input-format", "stream-json",
+		"--verbose",
+		"--include-partial-messages",
+	}
+	if claudeSessionID != "" {
+		args = append(args, "--resume", claudeSessionID)
+	}
+	if m.model != "" {
+		args = append(args, "--model", m.model)
+	}
+	if systemPrompt != "" {
+		args = append(args, "--append-system-prompt", systemPrompt)
+	}
+	if len(m.allowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(m.allowedTools, ","))
+	}
+	if len(m.settingSources) > 0 {
+		args = append(args, "--setting-sources", strings.Join(m.settingSources, ","))
+	}
+	args = append(args, "--permission-mode", "bypassPermissions")
+	args = append(args, m.extraArgs...)
+
+	hasAttachments := len(req.Images) > 0 || len(req.PDFs) > 0
+	slog.Info("claude send", "mode", "bidirectional", "resume", claudeSessionID != "", "multimodal", hasAttachments)
+
+	cmd := exec.CommandContext(procCtx, m.binary, args...)
+	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
+	if m.workDir != "" {
+		cmd.Dir = m.workDir
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return SendResult{}, fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return SendResult{}, fmt.Errorf("stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return SendResult{}, fmt.Errorf("start claude: %w", err)
+	}
+
+	// Phase 1: Send initialize control request (SDK → CLI)
+	if err := writeJSON(stdin, stdinControlRequest{
+		Type:      "control_request",
+		RequestID: initRequestID,
+		Request:   map[string]any{"subtype": "initialize"},
+	}); err != nil {
+		stdin.Close()
+		cmd.Wait()
+		return SendResult{}, fmt.Errorf("send initialize: %w", err)
+	}
+
+	// Phase 2: Send user message immediately after init (SDK → CLI)
+	// The CLI processes messages in order; no need to wait for init response
+	// before sending the user message. parseBidirectionalEvents handles all
+	// event types including control_response.
+	if err := writeJSON(stdin, newUserMessage(req, claudeSessionID)); err != nil {
+		stdin.Close()
+		cmd.Wait()
+		return SendResult{}, fmt.Errorf("send user message: %w", err)
+	}
+
+	// Phase 3: Stream all responses through a single reader
+	finalResult := parseBidirectionalEvents(stdout, stdin, onUpdate)
+
+	// Phase 4: Close stdin, wait for process
+	stdin.Close()
+
+	if err := cmd.Wait(); err != nil {
+		if procCtx.Err() == context.DeadlineExceeded {
+			return SendResult{}, fmt.Errorf("claude process timed out after %s", m.timeout)
+		}
+		if finalResult.Text != "" {
+			return finalResult, nil
+		}
+		stderrStr := stderr.String()
+		slog.Warn("claude process failed", "error", err, "stderr", stderrStr, "resume", claudeSessionID != "")
 		if stderrStr != "" {
 			return SendResult{}, fmt.Errorf("claude process failed: %w\nstderr: %s", err, stderrStr)
 		}
@@ -452,6 +586,64 @@ func (m *Manager) ListSessions() []Session {
 		sessions = append(sessions, *s)
 	}
 	return sessions
+}
+
+// formatMessage builds the prompt string from an AgentRequest, prepending
+// image and PDF attachment metadata so the CLI can read the files.
+func FormatMessage(req AgentRequest) string {
+	if len(req.Images) == 0 && len(req.PDFs) == 0 {
+		return req.Text
+	}
+
+	var sb strings.Builder
+	for _, img := range req.Images {
+		fmt.Fprintf(&sb, "[Attached image: %s", img.Path)
+		if img.Width > 0 && img.Height > 0 {
+			fmt.Fprintf(&sb, " | %dx%d", img.Width, img.Height)
+		}
+		if img.Size > 0 {
+			fmt.Fprintf(&sb, " | %s", formatFileSize(img.Size))
+		}
+		sb.WriteString("]\n")
+	}
+	for _, pdf := range req.PDFs {
+		fmt.Fprintf(&sb, "[Attached PDF: %s", pdf.Path)
+		if pages := countPDFPages(pdf.Path); pages > 0 {
+			fmt.Fprintf(&sb, " | %d pages", pages)
+		}
+		if pdf.Size > 0 {
+			fmt.Fprintf(&sb, " | %s", formatFileSize(pdf.Size))
+		}
+		sb.WriteString("]\n")
+	}
+	sb.WriteString(req.Text)
+	return sb.String()
+}
+
+// formatFileSize returns a human-readable file size string.
+func formatFileSize(size int64) string {
+	switch {
+	case size >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(size)/float64(1<<20))
+	case size >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(size)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", size)
+	}
+}
+
+// pdfPagePattern matches "/Type /Page" but not "/Type /Pages".
+var pdfPagePattern = regexp.MustCompile(`/Type\s*/Page[^s]`)
+
+// countPDFPages returns the number of pages in a PDF file by counting
+// "/Type /Page" object references (excluding "/Type /Pages" which is the
+// page tree root). Returns 0 if the file cannot be read or parsed.
+func countPDFPages(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return len(pdfPagePattern.FindAllIndex(data, -1))
 }
 
 // filterEnv returns env with the named variable removed.

@@ -1,0 +1,19 @@
+#!/bin/sh
+echo "=== go vet ==="
+go vet ./... 2>&1
+
+echo ""
+echo "=== changed files ==="
+if git diff --cached --name-only | grep -q .; then
+    git diff --cached --name-only
+else
+    git diff main...HEAD --name-only 2>/dev/null || echo "(no branch changes)"
+fi
+
+echo ""
+echo "=== TODO/FIXME in changes ==="
+if git diff --cached -U0 | grep -q 'TODO\|FIXME'; then
+    git diff --cached -U0 | grep 'TODO\|FIXME'
+else
+    git diff main...HEAD -U0 2>/dev/null | grep 'TODO\|FIXME' || echo "(none)"
+fi

@@ -989,6 +989,21 @@ func setReaction(ctx context.Context, b *bot.Bot, chatID any, messageID int, emo
 	}
 }
 
+// sendPhoto sends an image to a chat as a Telegram photo message.
+func sendPhoto(ctx context.Context, b *bot.Bot, chatID int64, imageData []byte, caption string) {
+	_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
+		ChatID: chatID,
+		Photo: &models.InputFileUpload{
+			Filename: "image.png",
+			Data:     bytes.NewReader(imageData),
+		},
+		Caption: caption,
+	})
+	if err != nil {
+		slog.Error("failed to send photo", "error", err, "chat_id", chatID)
+	}
+}
+
 // looksLikeClarification checks if a response appears to be asking the user
 // for clarification (i.e. it ends with a question mark).
 func looksLikeClarification(response string) bool {
@@ -1147,7 +1162,7 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64
 		}
 	}
 
-	response, err := h.bridge.RegenerateStreaming(ctx, chatID, botMessageID, onUpdate)
+	resp, err := h.bridge.RegenerateStreaming(ctx, chatID, botMessageID, onUpdate)
 	if err != nil {
 		slog.Error("regenerate failed", "error", err, "chat_id", chatID)
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -1159,6 +1174,12 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64
 		return
 	}
 
+	// Send any collected photos.
+	for _, photo := range resp.Photos {
+		sendPhoto(ctx, b, chatID, photo.Data, photo.Caption)
+	}
+
+	response := resp.Text
 	if response == "" {
 		response = "(empty response)"
 	}
@@ -1459,7 +1480,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 	}
 
-	response, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, pdfs, onUpdate)
+	resp, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, pdfs, onUpdate)
 
 	if err != nil {
 		slog.Error("bridge handle message failed", "error", err, "chat_id", msg.Chat.ID)
@@ -1473,6 +1494,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		return
 	}
 
+	// Send any collected photos (generated images, artifacts).
+	for _, photo := range resp.Photos {
+		sendPhoto(ctx, b, msg.Chat.ID, photo.Data, photo.Caption)
+	}
+
+	response := resp.Text
 	if response == "" {
 		response = "(empty response)"
 	}
@@ -1787,7 +1814,7 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		}
 	}
 
-	response, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, text, senderName, images, nil, onUpdate)
+	resp, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, text, senderName, images, nil, onUpdate)
 	if err != nil {
 		slog.Error("bridge handle message failed (album)", "error", err, "chat_id", first.Chat.ID)
 		setReaction(ctx, b, first.Chat.ID, first.ID, "❌")
@@ -1800,6 +1827,12 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		return
 	}
 
+	// Send any collected photos.
+	for _, photo := range resp.Photos {
+		sendPhoto(ctx, b, first.Chat.ID, photo.Data, photo.Caption)
+	}
+
+	response := resp.Text
 	if response == "" {
 		response = "(empty response)"
 	}
