@@ -39,120 +39,8 @@ type PDFInfo struct {
 	Size int64  // file size in bytes (0 if unknown)
 }
 
-// relayDirective represents a message to send to another chat.
-type relayDirective struct {
-	ChatID  int64
-	Message string
-}
-
-// relayRe matches [relay to=CHAT_ID]message[/relay] blocks in Claude's response.
-var relayRe = regexp.MustCompile(`(?s)\[relay to=(\d+)\]\s*(.*?)\s*\[/relay\]`)
-
-// scheduleRe matches [schedule at="..." tz="..."]message[/schedule] or [schedule cron="..." ...]message[/schedule].
-var scheduleRe = regexp.MustCompile(`(?s)\[schedule\s+(.*?)\](.*?)\[/schedule\]`)
-
-// scheduleAttrRe extracts key="value" pairs from schedule directive attributes.
-var scheduleAttrRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
-
-// heartbeatLearningRe matches [heartbeat-learning]...[/heartbeat-learning] blocks.
-var heartbeatLearningRe = regexp.MustCompile(`(?s)\[heartbeat-learning\]\s*(.*?)\s*\[/heartbeat-learning\]`)
-
-// taskCompleteRe matches [task-complete id=<N>] directives in heartbeat responses.
-var taskCompleteRe = regexp.MustCompile(`\[task-complete id=(\d+)\]`)
-
 // artifactRe matches [artifact type="..." path="..." caption="..."] markers from skill scripts.
 var artifactRe = regexp.MustCompile(`\[artifact\s+type="([^"]+)"\s+path="([^"]+)"(?:\s+caption="([^"]*)")?\]`)
-
-// parseRelayDirectives extracts relay blocks from response text.
-// Returns the cleaned response (relays stripped) and the list of relay messages.
-func parseRelayDirectives(response string) (string, []relayDirective) {
-	matches := relayRe.FindAllStringSubmatchIndex(response, -1)
-	if len(matches) == 0 {
-		return response, nil
-	}
-
-	var relays []relayDirective
-	clean := response
-	// Process in reverse so indices stay valid
-	for i := len(matches) - 1; i >= 0; i-- {
-		m := matches[i]
-		chatIDStr := response[m[2]:m[3]]
-		msg := strings.TrimSpace(response[m[4]:m[5]])
-		chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
-		if err != nil {
-			continue
-		}
-		relays = append(relays, relayDirective{ChatID: chatID, Message: msg})
-		clean = clean[:m[0]] + clean[m[1]:]
-	}
-	return strings.TrimSpace(clean), relays
-}
-
-// sendRelays dispatches relay messages via the notify function.
-func (b *Bridge) sendRelays(ctx context.Context, relays []relayDirective) {
-	if b.notify == nil {
-		return
-	}
-	for _, r := range relays {
-		slog.Info("relaying message", "to_chat_id", r.ChatID, "len", len(r.Message))
-		if r.Message != "" {
-			b.notify(r.ChatID, r.Message)
-		}
-	}
-}
-
-// parseHeartbeatLearnings extracts [heartbeat-learning] blocks from the response,
-// stores them to the heartbeat namespace, and returns the cleaned response.
-func (b *Bridge) parseHeartbeatLearnings(ctx context.Context, chatID int64, response string) string {
-	if b.memory == nil {
-		return response
-	}
-	matches := heartbeatLearningRe.FindAllStringSubmatchIndex(response, -1)
-	if len(matches) == 0 {
-		return response
-	}
-
-	clean := response
-	for i := len(matches) - 1; i >= 0; i-- {
-		loc := matches[i]
-		content := strings.TrimSpace(response[loc[2]:loc[3]])
-		clean = clean[:loc[0]] + clean[loc[1]:]
-
-		if err := b.memory.StoreHeartbeatLearning(ctx, chatID, content); err != nil {
-			slog.Warn("failed to store heartbeat learning", "error", err)
-		} else {
-			slog.Info("stored heartbeat learning", "chat_id", chatID, "len", len(content))
-		}
-	}
-	return strings.TrimSpace(clean)
-}
-
-// parseTaskCompletes extracts [task-complete id=N] directives from the response,
-// marks the tasks as completed, and returns the cleaned response.
-func (b *Bridge) parseTaskCompletes(chatID int64, response string) string {
-	matches := taskCompleteRe.FindAllStringSubmatchIndex(response, -1)
-	if len(matches) == 0 {
-		return response
-	}
-
-	clean := response
-	for i := len(matches) - 1; i >= 0; i-- {
-		loc := matches[i]
-		idStr := response[loc[2]:loc[3]]
-		clean = clean[:loc[0]] + clean[loc[1]:]
-
-		id, err := strconv.ParseInt(idStr, 10, 64)
-		if err != nil {
-			continue
-		}
-		if err := b.store.CompleteTask(id); err != nil {
-			slog.Warn("failed to complete task", "id", id, "error", err)
-		} else {
-			slog.Info("heartbeat completed task", "chat_id", chatID, "task_id", id)
-		}
-	}
-	return strings.TrimSpace(clean)
-}
 
 // enrichHeartbeatPrompt augments a heartbeat message with recent conversation
 // history, previous heartbeat insights, memory context, and pending background
@@ -213,8 +101,8 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 			sb.WriteString(fmt.Sprintf("- Task #%d: %s (queued %s)\n", t.ID, t.Description, t.CreatedAt.Format("Jan 2 15:04")))
 		}
 		sb.WriteString("[End of pending tasks]\n\n")
-		sb.WriteString("If you can complete any pending tasks above, do so and emit:\n")
-		sb.WriteString("[task-complete id=<task_id>]\n\n")
+		sb.WriteString("If you can complete any pending tasks above, do so and run:\n")
+		sb.WriteString("scripts/shell-task complete --id <task_id>\n\n")
 	}
 
 	sb.WriteString(msg)
@@ -224,8 +112,8 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	sb.WriteString("1. Proactively check for anything that needs attention (files, PRs, notifications, scheduled items).\n")
 	sb.WriteString("2. If pending background tasks are listed, try to complete them.\n")
 	sb.WriteString("3. Reflect on recent conversations and memory for patterns or corrections.\n")
-	sb.WriteString("4. If you notice reusable patterns, user preferences, or useful corrections, emit:\n")
-	sb.WriteString("   [heartbeat-learning]<specific, actionable insight>[/heartbeat-learning]\n")
+	sb.WriteString("4. If you notice reusable patterns, user preferences, or useful corrections, store them:\n")
+	sb.WriteString("   scripts/shell-remember --action heartbeat-learning --content \"<specific, actionable insight>\"\n")
 	sb.WriteString("5. If there is genuinely nothing to report, respond with just: [noop]\n")
 	sb.WriteString("6. Keep responses concise and actionable.\n")
 
@@ -432,81 +320,6 @@ func (b *Bridge) registerSystemCancel(chatID int64, cancel context.CancelFunc) f
 	}
 }
 
-// directiveResult holds the output from a single directive type execution.
-type directiveResult struct {
-	label   string
-	content string
-}
-
-// executeDirectivesParallel runs all directive actions concurrently, collecting results.
-// Returns the cleaned response and a combined follow-up string (empty if no directives).
-func (b *Bridge) executeDirectivesParallel(ctx context.Context, chatID int64, response string) (string, string) {
-	// 1. Extract matches and strip all directive patterns (fast, sequential).
-	type pendingDirective struct {
-		label string
-		exec  func() string
-	}
-	var pending []pendingDirective
-
-	// PM
-	if b.pmMgr != nil {
-		if pm.PMRe.MatchString(response) {
-			snapshot := response
-			pending = append(pending, pendingDirective{
-				label: "Process manager",
-				exec: func() string {
-					_, results := b.parsePMDirectives(ctx, snapshot)
-					return results
-				},
-			})
-			response = pm.PMRe.ReplaceAllString(response, "")
-		}
-	}
-
-	// Tunnel
-	if b.tunnelMgr != nil {
-		if tunnel.TunnelRe.MatchString(response) {
-			snapshot := response
-			pending = append(pending, pendingDirective{
-				label: "Tunnel",
-				exec: func() string {
-					_, results := b.parseTunnelDirectives(ctx, snapshot)
-					return results
-				},
-			})
-			response = tunnel.TunnelRe.ReplaceAllString(response, "")
-		}
-	}
-
-	response = strings.TrimSpace(response)
-
-	if len(pending) == 0 {
-		return response, ""
-	}
-
-	// 2. Execute all directive actions in parallel.
-	results := make([]directiveResult, len(pending))
-	var wg sync.WaitGroup
-	for i, p := range pending {
-		wg.Add(1)
-		go func(idx int, pd pendingDirective) {
-			defer wg.Done()
-			content := pd.exec()
-			results[idx] = directiveResult{label: pd.label, content: content}
-		}(i, p)
-	}
-	wg.Wait()
-
-	// 3. Combine non-empty results.
-	var combined strings.Builder
-	for _, r := range results {
-		if r.content != "" {
-			combined.WriteString(fmt.Sprintf("[%s]\n%s\n\n", r.label, strings.TrimSpace(r.content)))
-		}
-	}
-
-	return response, combined.String()
-}
 
 // SetNotifier sets the function used to push async messages (plan progress) to users.
 func (b *Bridge) SetNotifier(fn NotifyFunc) {
@@ -708,10 +521,6 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
 	}
 	systemPrompt += b.timestampSystemPrompt()
-	systemPrompt += b.scheduleSystemPrompt()
-	systemPrompt += b.relaySystemPrompt()
-	systemPrompt += b.tunnelSystemPrompt()
-	systemPrompt += b.pmSystemPrompt()
 	systemPrompt += b.skillsSystemPrompt()
 
 	// Track session in pm for /pm list visibility.
@@ -741,31 +550,6 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		procSess.HasHistory = true
 	}
 
-	// Directive follow-up: search, browser, pm, tunnel
-	response := strings.TrimSpace(result.Text)
-	response, directiveResults := b.executeDirectivesParallel(ctx, chatID, response)
-	if directiveResults != "" {
-		if onUpdate != nil {
-			onUpdate("\n\n_Processing directives..._\n\n")
-		}
-		followUp := directiveResults + "\nUse the results above to respond to the user."
-		followUpResult, err := b.proc.Send(ctx, process.AgentRequest{
-			ChatID:       chatID,
-			SessionID:    result.SessionID,
-			Text:         followUp,
-			SystemPrompt: systemPrompt,
-		}, onUpdate)
-		if err != nil {
-			slog.Warn("directive follow-up failed", "error", err)
-		} else {
-			response = strings.TrimSpace(followUpResult.Text)
-			if followUpResult.SessionID != "" {
-				result.SessionID = followUpResult.SessionID
-			}
-		}
-	}
-	result.Text = response
-
 	return b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result), nil
 }
 
@@ -775,33 +559,17 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult) AgentResponse {
 	response := strings.TrimSpace(result.Text)
 
-	// Extract and send relay directives (messages to other chats).
-	response, relays := parseRelayDirectives(response)
-	b.sendRelays(ctx, relays)
-
-	// Parse heartbeat learning and task-complete directives.
-	if isHeartbeat {
-		if b.memory != nil {
-			response = b.parseHeartbeatLearnings(ctx, chatID, response)
-			// Run reflect cycle after heartbeat to promote/decay/prune memories.
-			b.memory.RunReflect(ctx)
-			// Summarize old exchanges during heartbeat maintenance.
-			if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
-				slog.Warn("exchange summarization failed", "error", err)
-			} else if n > 0 {
-				slog.Info("heartbeat summarized exchanges", "chat_id", chatID, "count", n)
-			}
+	// Run memory maintenance during heartbeats.
+	if isHeartbeat && b.memory != nil {
+		// Run reflect cycle after heartbeat to promote/decay/prune memories.
+		b.memory.RunReflect(ctx)
+		// Summarize old exchanges during heartbeat maintenance.
+		if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
+			slog.Warn("exchange summarization failed", "error", err)
+		} else if n > 0 {
+			slog.Info("heartbeat summarized exchanges", "chat_id", chatID, "count", n)
 		}
-		response = b.parseTaskCompletes(chatID, response)
 	}
-
-	// Parse memory directives ([remember]...[/remember]).
-	if b.memory != nil {
-		response = b.memory.ParseMemoryDirectives(ctx, chatID, response)
-	}
-
-	// Parse schedule directives ([schedule ...]...[/schedule]).
-	response = b.parseScheduleDirectives(chatID, response)
 
 	// Collect photos from artifact markers (skill output).
 	var photos []Photo
@@ -1022,7 +790,17 @@ func (b *Bridge) skillsSystemPrompt() string {
 	if b.skills == nil {
 		return ""
 	}
-	return b.skills.SystemPrompt()
+	prompt := b.skills.SystemPrompt()
+	prompt += "\n\n## Important: Use tools for bridge operations\n\n" +
+		"Do NOT emit text directives like `[pm]`, `[tunnel]`, `[schedule]`, `[relay]`, " +
+		"`[remember]`, `[heartbeat-learning]`, or `[task-complete]` in your response. " +
+		"These are deprecated.\n\n" +
+		"For process management and tunnels, use the `shell_pm` and `shell_tunnel` MCP tools directly.\n" +
+		"For scheduling, memory, relay, and tasks, use the corresponding skill scripts via Bash.\n\n" +
+		"**CRITICAL:** NEVER run long-running processes (servers, watchers) directly via Bash " +
+		"(e.g. `python3 server.py &`, `node app.js &`, `nohup ...`). They will become orphaned. " +
+		"Always use the `shell_pm` tool to start them so they are properly tracked, have logs, and can be stopped.\n"
+	return prompt
 }
 
 // skillOverrides returns true if a skill with the given name is loaded,
@@ -1046,54 +824,6 @@ func (b *Bridge) timestampSystemPrompt() string {
 	return "\n\n## Current Time\n\n" +
 		"**Now:** " + now.Format("Monday, 2006-01-02 15:04:05") + " (" + tz + ")\n" +
 		"Use this as the authoritative current time. Ignore any other date references that may conflict.\n"
-}
-
-// scheduleSystemPrompt returns the system prompt addition that documents
-// the [schedule] directive for Claude. Empty if scheduler is disabled.
-func (b *Bridge) scheduleSystemPrompt() string {
-	if !b.schedulerEnabled {
-		return ""
-	}
-
-	loc, _ := time.LoadLocation(b.schedulerTZ)
-	if loc == nil {
-		loc = time.UTC
-	}
-	now := time.Now().In(loc)
-	nowStr := now.Format("2006-01-02T15:04:05")
-	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
-
-	return "\n\n## Scheduling\n\n" +
-		"You can create scheduled reminders and prompts using the [schedule] directive in your responses.\n" +
-		"Use this when the user asks to be reminded about something or wants recurring notifications.\n\n" +
-		"### Natural language mapping:\n" +
-		"- \"remind me tomorrow at 9am\" → `[schedule at=\"" + tomorrow + "T09:00:00\" tz=\"" + b.schedulerTZ + "\"]...[/schedule]`\n" +
-		"- \"every weekday at 3pm\" → `[schedule cron=\"0 15 * * 1-5\" tz=\"" + b.schedulerTZ + "\"]...[/schedule]`\n" +
-		"- \"daily at 8am\" → `[schedule cron=\"0 8 * * *\" tz=\"" + b.schedulerTZ + "\"]...[/schedule]`\n" +
-		"- \"in 2 hours\" → compute " + nowStr + " + 2h and use `at=` with the result\n" +
-		"- \"every hour\" → `[schedule cron=\"0 * * * *\"]...[/schedule]`\n\n" +
-		"### One-shot (fires once at a specific time):\n" +
-		"```\n[schedule at=\"2026-03-10T09:00:00\" tz=\"America/Los_Angeles\"]Remind me to check deployment[/schedule]\n```\n\n" +
-		"### Recurring (cron expression):\n" +
-		"```\n[schedule cron=\"0 9 * * 1-5\" tz=\"" + b.schedulerTZ + "\"]Weekly standup check[/schedule]\n```\n\n" +
-		"### Cron aliases:\n" +
-		"`@hourly` = `0 * * * *`, `@daily` = `0 0 * * *`, `@weekly` = `0 0 * * 0`, `@monthly` = `0 0 1 * *`\n\n" +
-		"### Attributes:\n" +
-		"- `at` — ISO8601 datetime for one-shot schedules (without timezone suffix, uses `tz`)\n" +
-		"- `cron` — 5-field cron expression (minute hour day-of-month month day-of-week)\n" +
-		"- `tz` — timezone (optional, default: " + b.schedulerTZ + ")\n" +
-		"- `mode` — \"notify\" (default, plain message) or \"prompt\" (routed back through you)\n\n" +
-		"The directive is stripped from your visible response and replaced with a confirmation.\n" +
-		"Always include the `tz` attribute explicitly. Compute exact dates/times based on the current time shown above.\n\n" +
-		"### Heartbeat\n" +
-		"Messages prefixed with `[Heartbeat]` are periodic check-ins routed through you with full session context.\n" +
-		"Recent conversation history, previous heartbeat insights, memory context, and pending background tasks are included.\n" +
-		"Respond naturally as a proactive assistant — summarize what you checked, report findings, and suggest actions.\n" +
-		"If you notice patterns, user preferences, or useful corrections, emit:\n" +
-		"`[heartbeat-learning]<specific actionable insight>[/heartbeat-learning]`\n" +
-		"If you complete a background task, emit: `[task-complete id=<task_id>]`\n" +
-		"If there is genuinely nothing to report, respond with just: `[noop]`\n" +
-		"Keep heartbeat responses concise and actionable.\n"
 }
 
 // injectCurrentTime prepends a precise timestamp to the user message when the
@@ -1748,207 +1478,6 @@ func (b *Bridge) parseArtifacts(response string, photos *[]Photo) string {
 	return strings.TrimSpace(clean)
 }
 
-// relaySystemPrompt returns the system prompt addition that documents
-// the [relay] directive for Claude.
-func (b *Bridge) relaySystemPrompt() string {
-	return "\n\n## Message Relay\n\n" +
-		"You can send messages to other Telegram chats using the [relay] directive.\n" +
-		"Use this when the user asks you to forward, send, or share something with another user or chat.\n\n" +
-		"```\n[relay to=CHAT_ID]\nMessage content here\n[/relay]\n```\n\n" +
-		"Replace CHAT_ID with the numeric Telegram chat ID of the target.\n" +
-		"You can include multiple relay blocks in one response.\n"
-}
-
-func (b *Bridge) tunnelSystemPrompt() string {
-	if b.tunnelMgr == nil {
-		return ""
-	}
-	return "\n\n## HTTP Tunnels\n\n" +
-		"You can expose local ports to the internet using the `[tunnel]` directive (powered by Cloudflare quick tunnels).\n\n" +
-		"```\n[tunnel port=\"8080\"]\n[tunnel action=\"stop\" port=\"8080\"]\n[tunnel action=\"list\"]\n```\n\n" +
-		"**Attributes:**\n" +
-		"- `port` — local port to expose (required for start/stop)\n" +
-		"- `action` — `start` (default), `stop`, or `list`\n" +
-		"- `protocol` — `http` (default) or `https`\n\n" +
-		"The bridge handles the tunnel — do NOT use Bash for cloudflared.\n"
-}
-
-func (b *Bridge) pmSystemPrompt() string {
-	if b.pmMgr == nil {
-		return ""
-	}
-	return "\n\n## Process Manager\n\n" +
-		"Use the `[pm]` directive to manage background processes (web servers, watchers, etc.).\n" +
-		"**CRITICAL:** NEVER run long-running processes (servers, watchers) directly via Bash — it will block your session. " +
-		"Always use `[pm]` to start them in the background.\n\n" +
-		"**Start a process:**\n```\n[pm name=\"myserver\" cmd=\"node server.js\" dir=\"/path/to/app\"]\n```\n\n" +
-		"**Other actions:**\n```\n[pm action=\"list\"]\n[pm action=\"logs\" name=\"myserver\"]\n[pm action=\"stop\" name=\"myserver\"]\n[pm action=\"remove\" name=\"myserver\"]\n```\n\n" +
-		"**Attributes:**\n" +
-		"- `name` — unique name for the process (required for start/stop/logs/remove)\n" +
-		"- `cmd` — shell command to run (required for start)\n" +
-		"- `dir` — working directory (optional)\n" +
-		"- `action` — `start` (default when cmd provided), `stop`, `list`, `logs`, `remove`\n\n" +
-		"**Correct web app workflow:**\n" +
-		"1. Write app files\n" +
-		"2. `[pm name=\"web\" cmd=\"node server.js\" dir=\"/path/to/app\"]` — starts in background\n" +
-		"3. `[tunnel port=\"8080\"]` — expose via public URL\n\n" +
-		"The bridge manages processes and captures logs — do NOT use `nohup`, `&`, or Bash for background processes.\n"
-}
-
-// parseTunnelDirectives finds [tunnel ...] blocks in Claude's response,
-// executes tunnel actions (start/stop/list), and returns the cleaned response + results.
-func (b *Bridge) parseTunnelDirectives(ctx context.Context, response string) (string, string) {
-	if b.tunnelMgr == nil {
-		return response, ""
-	}
-
-	matches := tunnel.TunnelRe.FindAllStringIndex(response, -1)
-	if len(matches) == 0 {
-		return response, ""
-	}
-
-	var results strings.Builder
-	for _, m := range matches {
-		match := response[m[0]:m[1]]
-		d := tunnel.ParseDirective(match)
-		slog.Info("tunnel directive", "action", d.Action, "port", d.Port)
-		result := tunnel.Execute(ctx, b.tunnelMgr, d)
-		results.WriteString(result)
-		results.WriteString("\n")
-	}
-
-	cleaned := tunnel.TunnelRe.ReplaceAllString(response, "")
-	cleaned = strings.TrimSpace(cleaned)
-
-	return cleaned, results.String()
-}
-
-// parsePMDirectives finds [pm ...] blocks in Claude's response,
-// executes process management actions, and returns the cleaned response + results.
-func (b *Bridge) parsePMDirectives(ctx context.Context, response string) (string, string) {
-	if b.pmMgr == nil {
-		return response, ""
-	}
-
-	matches := pm.PMRe.FindAllStringIndex(response, -1)
-	if len(matches) == 0 {
-		return response, ""
-	}
-
-	var results strings.Builder
-	for _, m := range matches {
-		match := response[m[0]:m[1]]
-		d := pm.ParseDirective(match)
-		slog.Info("pm directive", "action", d.Action, "name", d.Name)
-		result := pm.Execute(ctx, b.pmMgr, d)
-		results.WriteString(result)
-		results.WriteString("\n")
-	}
-
-	cleaned := pm.PMRe.ReplaceAllString(response, "")
-	cleaned = strings.TrimSpace(cleaned)
-
-	return cleaned, results.String()
-}
-
-func (b *Bridge) parseScheduleDirectives(chatID int64, response string) string {
-	if !b.schedulerEnabled {
-		return response
-	}
-
-	matches := scheduleRe.FindAllStringSubmatchIndex(response, -1)
-	if len(matches) == 0 {
-		return response
-	}
-
-	var cleaned strings.Builder
-	lastEnd := 0
-
-	for _, match := range matches {
-		cleaned.WriteString(response[lastEnd:match[0]])
-		lastEnd = match[1]
-
-		attrs := response[match[2]:match[3]]
-		msg := strings.TrimSpace(response[match[4]:match[5]])
-
-		// Parse attributes
-		attrMap := make(map[string]string)
-		for _, am := range scheduleAttrRe.FindAllStringSubmatch(attrs, -1) {
-			attrMap[am[1]] = am[2]
-		}
-
-		tz := attrMap["tz"]
-		if tz == "" {
-			tz = b.schedulerTZ
-		}
-		mode := attrMap["mode"]
-		if mode == "" {
-			mode = "notify"
-		}
-
-		sched := &store.Schedule{
-			ChatID:   chatID,
-			Label:    msg,
-			Message:  msg,
-			Timezone: tz,
-			Mode:     mode,
-			Enabled:  true,
-		}
-
-		if at, ok := attrMap["at"]; ok {
-			sched.Schedule = at
-			sched.Type = "once"
-			if t, err := time.Parse(time.RFC3339, at); err == nil {
-				sched.NextRunAt = t.UTC()
-			} else if t, err := time.Parse("2006-01-02T15:04:05", at); err == nil {
-				loc, _ := time.LoadLocation(tz)
-				if loc == nil {
-					loc = time.UTC
-				}
-				sched.NextRunAt = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, loc).UTC()
-			} else {
-				slog.Warn("schedule directive: invalid at time", "at", at)
-				continue
-			}
-		} else if cronStr, ok := attrMap["cron"]; ok {
-			sched.Schedule = cronStr
-			sched.Type = "cron"
-			cronExpr, err := parseScheduleCron(cronStr)
-			if err != nil {
-				slog.Warn("schedule directive: invalid cron", "cron", cronStr, "error", err)
-				continue
-			}
-			loc, _ := time.LoadLocation(tz)
-			if loc == nil {
-				loc = time.UTC
-			}
-			nextRun := cronExpr.Next(time.Now().In(loc)).UTC()
-			if nextRun.IsZero() {
-				continue
-			}
-			sched.NextRunAt = nextRun
-		} else {
-			slog.Warn("schedule directive: missing at or cron attribute")
-			continue
-		}
-
-		id, err := b.store.SaveSchedule(sched)
-		if err != nil {
-			slog.Error("schedule directive: failed to save", "error", err)
-			continue
-		}
-
-		// Append a confirmation to the cleaned output
-		if sched.Type == "once" {
-			cleaned.WriteString(fmt.Sprintf("\n\n📅 Scheduled #%d: %s at %s", id, msg, sched.NextRunAt.Format("2006-01-02 15:04 UTC")))
-		} else {
-			cleaned.WriteString(fmt.Sprintf("\n\n📅 Scheduled #%d: %s (%s) next: %s", id, msg, sched.Schedule, sched.NextRunAt.Format("2006-01-02 15:04 UTC")))
-		}
-	}
-
-	cleaned.WriteString(response[lastEnd:])
-	return strings.TrimSpace(cleaned.String())
-}
 
 // parseScheduleCron is a bridge-level wrapper that calls the scheduler's cron parser.
 func parseScheduleCron(expr string) (interface{ Next(time.Time) time.Time }, error) {

@@ -1,0 +1,45 @@
+#!/bin/sh
+# shell-remember — store memories and heartbeat learnings
+set -e
+
+SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
+URL="http://bridge/memory"
+CHAT_ID="${SHELL_CHAT_ID:-0}"
+
+ACTION="remember"
+CONTENT=""
+KIND="semantic"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --action)  ACTION="$2"; shift 2 ;;
+    --content) CONTENT="$2"; shift 2 ;;
+    --kind)    KIND="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [ -z "$CONTENT" ]; then
+  echo "usage: shell-remember --content <text> [--kind <semantic|episodic|procedural>] [--action <remember|heartbeat-learning>]" >&2
+  exit 1
+fi
+
+BODY=$(python3 -c "
+import json
+d = {
+    'chat_id': int('$CHAT_ID'),
+    'action': '$ACTION',
+    'content': '''$CONTENT''',
+    'kind': '$KIND',
+}
+print(json.dumps(d))
+")
+
+RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$BODY")
+
+if echo "$RESP" | grep -q '"error"'; then
+  echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || echo "$RESP"
+  exit 1
+fi
+
+echo "Memory stored successfully."

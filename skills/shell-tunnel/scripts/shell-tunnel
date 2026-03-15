@@ -1,0 +1,37 @@
+#!/bin/sh
+# shell-tunnel — tunnel skill script
+set -e
+
+SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
+URL="http://bridge/tunnel"
+
+ACTION=""
+PORT=""
+PROTOCOL=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    start|stop|list) ACTION="$1"; shift ;;
+    --port) PORT="$2"; shift 2 ;;
+    --protocol) PROTOCOL="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [ -z "$ACTION" ]; then
+  ACTION="start"
+fi
+
+BODY=$(cat <<EOF
+{"action":"$ACTION","port":"$PORT","protocol":"$PROTOCOL"}
+EOF
+)
+
+RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$BODY")
+
+if echo "$RESP" | grep -q '"error"'; then
+  echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || echo "$RESP"
+  exit 1
+fi
+
+echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null || echo "$RESP"

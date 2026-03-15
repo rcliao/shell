@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/reload"
+	"github.com/rcliao/shell/internal/rpc"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
@@ -35,6 +37,7 @@ type Daemon struct {
 	scheduler *scheduler.Scheduler // nil if disabled
 	tunnelMgr *tunnel.Manager      // nil if disabled
 	pmMgr     *pm.Manager          // nil if disabled
+	rpcServer *rpc.Server          // nil if no RPC endpoints
 }
 
 func New(cfg config.Config) (*Daemon, error) {
@@ -94,6 +97,25 @@ func New(cfg config.Config) (*Daemon, error) {
 	if skillRegistry != nil {
 		allowedTools = append(allowedTools, skillRegistry.AllowedTools()...)
 	}
+	// Auto-approve MCP tools for PM and tunnel.
+	allowedTools = append(allowedTools, "mcp__shell-bridge__shell_pm", "mcp__shell-bridge__shell_tunnel")
+
+	// Write MCP config for Claude CLI so it can call PM/tunnel tools directly.
+	bridgeSockPath := rpc.DefaultSocketPath()
+	shellBinary, _ := os.Executable()
+	mcpConfigPath := filepath.Join(config.DefaultConfigDir(), "mcp.json")
+	mcpConfig := map[string]any{
+		"mcpServers": map[string]any{
+			"shell-bridge": map[string]any{
+				"type":    "stdio",
+				"command": shellBinary,
+				"args":    []string{"mcp"},
+			},
+		},
+	}
+	if mcpData, err := json.MarshalIndent(mcpConfig, "", "  "); err == nil {
+		os.WriteFile(mcpConfigPath, mcpData, 0644)
+	}
 
 	// Create process manager
 	proc := process.NewManager(process.ManagerConfig{
@@ -105,6 +127,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		AllowedTools:   allowedTools,
 		ExtraArgs:      cfg.Claude.ExtraArgs,
 		SettingSources: cfg.Claude.SettingSources,
+		BridgeSockPath: bridgeSockPath,
+		MCPConfigPath:  mcpConfigPath,
 	})
 
 	// Legacy: inject shell:capabilities into system namespaces for profiles without AgentNS.
@@ -235,9 +259,25 @@ func New(cfg config.Config) (*Daemon, error) {
 		bot.SendText(chatID, msg)
 	})
 
-	// Register cron parser for bridge schedule commands/directives.
+	// Register cron parser for bridge schedule commands.
 	bridge.SetCronParser(func(expr string) (interface{ Next(time.Time) time.Time }, error) {
 		return scheduler.ParseCron(expr)
+	})
+
+	// Create RPC server for skill scripts.
+	rpcSrv := rpc.New(rpc.Config{
+		SocketPath: bridgeSockPath,
+		PMMgr:      pmMgr,
+		TunnelMgr:  tunnelMgr,
+		Store:      st,
+		Memory:     mem,
+		Notify: func(chatID int64, msg string) {
+			bot.SendText(chatID, msg)
+		},
+		CronParse: func(expr string) (interface{ Next(time.Time) time.Time }, error) {
+			return scheduler.ParseCron(expr)
+		},
+		Timezone: cfg.Scheduler.Timezone,
 	})
 
 	// Initialize scheduler if enabled.
@@ -277,14 +317,14 @@ func New(cfg config.Config) (*Daemon, error) {
 		// Seed schedule docs into memory so they're always visible in system prompt.
 		if mem != nil {
 			if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "scheduling",
-				"Schedule capabilities: Use [schedule at=\"...\"] for one-shot or [schedule cron=\"...\"] for recurring reminders. "+
+				"Schedule capabilities: Use scripts/shell-schedule for one-shot or recurring reminders. "+
 					"Commands: /schedule add|list|delete|enable|pause. Supports @daily, @hourly, @weekly, @monthly aliases. "+
 					"Use --tz flag for per-schedule timezone override."); err != nil {
 				slog.Warn("failed to seed schedule docs", "error", err)
 			}
 			if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "heartbeat-learning",
 				"Heartbeat self-improvement: During [Heartbeat] check-ins, recent conversations and previous "+
-					"insights are provided. Use [heartbeat-learning]...[/heartbeat-learning] to store reusable "+
+					"insights are provided. Use scripts/shell-remember --action heartbeat-learning to store reusable "+
 					"patterns discovered during heartbeats."); err != nil {
 				slog.Warn("failed to seed heartbeat-learning docs", "error", err)
 			}
@@ -314,11 +354,10 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Seed tunnel docs into memory if tunnels are enabled.
 	if tunnelMgr != nil && mem != nil {
 		if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "tunnel",
-			"HTTP tunnel capabilities: Use [tunnel port=\"...\"] to expose a local port via Cloudflare quick tunnel. "+
-				"Use [tunnel action=\"stop\" port=\"...\"] to stop a tunnel, or [tunnel action=\"list\"] to list active tunnels. "+
-				"Optional protocol attribute: protocol=\"https\". Tunnels provide public URLs for local web apps. "+
-				"WORKFLOW: 1) Write app files, 2) Start server in background (e.g. 'node server.js &'), "+
-				"3) Use [tunnel port=\"...\"] to expose it. The tunnel directive is handled by the bridge, not by Bash."); err != nil {
+			"HTTP tunnel capabilities: Use scripts/shell-tunnel to expose local ports via Cloudflare quick tunnel. "+
+				"Tunnels provide public URLs for local web apps. "+
+				"WORKFLOW: 1) Write app files, 2) Start server via scripts/shell-pm, "+
+				"3) Use scripts/shell-tunnel to expose it."); err != nil {
 			slog.Warn("failed to seed tunnel docs", "error", err)
 		}
 	}
@@ -333,6 +372,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		scheduler: sched,
 		tunnelMgr: tunnelMgr,
 		pmMgr:     pmMgr,
+		rpcServer: rpcSrv,
 	}
 
 	// Resolve source directory for reload and self-restart.
@@ -390,6 +430,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 		slog.Warn("failed to write PID file", "path", d.cfg.Daemon.PIDFile, "error", err)
 	}
 
+	// Start RPC server for skill scripts.
+	if d.rpcServer != nil {
+		go func() {
+			if err := d.rpcServer.Start(); err != nil {
+				slog.Error("rpc server stopped", "error", err)
+			}
+		}()
+	}
+
 	// Start live reloader if enabled.
 	if d.reloader != nil {
 		go func() {
@@ -443,6 +492,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 // Shutdown gracefully stops all components.
 func (d *Daemon) Shutdown() {
 	slog.Info("daemon shutting down")
+	if d.rpcServer != nil {
+		d.rpcServer.Stop()
+	}
 	if d.pmMgr != nil {
 		d.pmMgr.StopAll()
 	}

@@ -44,6 +44,8 @@ type Manager struct {
 	allowedTools   []string
 	extraArgs      []string
 	settingSources []string
+	bridgeSockPath string
+	mcpConfigPath  string
 }
 
 type ManagerConfig struct {
@@ -55,6 +57,8 @@ type ManagerConfig struct {
 	AllowedTools   []string
 	ExtraArgs      []string
 	SettingSources []string
+	BridgeSockPath string
+	MCPConfigPath  string
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -77,6 +81,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		allowedTools:   cfg.AllowedTools,
 		extraArgs:      cfg.ExtraArgs,
 		settingSources: cfg.SettingSources,
+		bridgeSockPath: cfg.BridgeSockPath,
+		mcpConfigPath:  cfg.MCPConfigPath,
 	}
 }
 
@@ -159,13 +165,21 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 		args = append(args, "--setting-sources", strings.Join(m.settingSources, ","))
 	}
 	args = append(args, "--permission-mode", "bypassPermissions")
+	if m.mcpConfigPath != "" {
+		args = append(args, "--mcp-config", m.mcpConfigPath)
+	}
 	args = append(args, m.extraArgs...)
 
 	hasAttachments := len(req.Images) > 0 || len(req.PDFs) > 0
 	slog.Info("claude send", "resume", claudeSessionID != "", "multimodal", hasAttachments)
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
-	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
+	env := filterEnv(os.Environ(), "CLAUDECODE")
+	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
+	if m.bridgeSockPath != "" {
+		env = append(env, "SHELL_BRIDGE_SOCK="+m.bridgeSockPath)
+	}
+	cmd.Env = env
 	if m.workDir != "" {
 		cmd.Dir = m.workDir
 	}

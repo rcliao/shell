@@ -1,0 +1,59 @@
+#!/bin/sh
+# shell-schedule — create scheduled reminders
+set -e
+
+SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
+URL="http://bridge/schedule"
+CHAT_ID="${SHELL_CHAT_ID:-0}"
+
+TYPE=""
+AT=""
+EXPR=""
+MESSAGE=""
+TZ=""
+MODE=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    once|cron) TYPE="$1"; shift ;;
+    --at)      AT="$2"; shift 2 ;;
+    --expr)    EXPR="$2"; shift 2 ;;
+    --message) MESSAGE="$2"; shift 2 ;;
+    --tz)      TZ="$2"; shift 2 ;;
+    --mode)    MODE="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [ -z "$TYPE" ] || [ -z "$MESSAGE" ]; then
+  echo "usage: shell-schedule <once|cron> --message <text> [--at <time>] [--expr <cron>] [--tz <tz>] [--mode <notify|prompt>]" >&2
+  exit 1
+fi
+
+BODY=$(python3 -c "
+import json
+d = {
+    'chat_id': int('$CHAT_ID'),
+    'type': '$TYPE',
+    'message': '''$MESSAGE''',
+}
+if '$AT': d['at'] = '$AT'
+if '$EXPR': d['cron'] = '$EXPR'
+if '$TZ': d['tz'] = '$TZ'
+if '$MODE': d['mode'] = '$MODE'
+print(json.dumps(d))
+")
+
+RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$BODY")
+
+if echo "$RESP" | grep -q '"error"'; then
+  echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || echo "$RESP"
+  exit 1
+fi
+
+# Print confirmation
+python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print(f\"Schedule #{r['id']} created ({r['type']}), next run: {r['next_run']}\")
+" <<< "$RESP" 2>/dev/null || echo "$RESP"

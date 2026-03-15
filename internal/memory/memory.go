@@ -624,6 +624,37 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 	return strings.TrimSpace(clean)
 }
 
+// StoreDirective stores a memory from an RPC call (equivalent to [remember] directive).
+func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind string) error {
+	prof := m.profileFor(chatID)
+	if !prof.MemoryDirectives {
+		return fmt.Errorf("memory directives disabled for chat %d", chatID)
+	}
+
+	ns := prof.DirectiveNS
+	var tags []string
+	if prof.AgentNS != "" {
+		ns = prof.AgentNS
+		tags = []string{"learning"}
+	}
+	if ns == "" {
+		return fmt.Errorf("no target namespace configured for chat %d", chatID)
+	}
+	if kind == "" {
+		kind = "semantic"
+	}
+
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:         ns,
+		Key:        fmt.Sprintf("learning-%d", time.Now().UnixMilli()),
+		Content:    content,
+		Kind:       kind,
+		Tags:       tags,
+		Importance: 0.7,
+	})
+	return err
+}
+
 // legacyHeartbeatNamespace returns the legacy per-chat heartbeat learning namespace.
 func legacyHeartbeatNamespace(chatID int64) string {
 	return fmt.Sprintf("shell:heartbeat:%d", chatID)
@@ -1004,23 +1035,51 @@ func (m *Memory) SummarizeExchanges(ctx context.Context, chatID int64) (int, err
 		sb.WriteString("\n")
 	}
 
-	// Store the consolidated summary
-	_, err = m.store.Put(ctx, agentmemory.PutParams{
-		NS:         ns,
-		Key:        fmt.Sprintf("exchange-summary-%d", time.Now().UnixMilli()),
-		Content:    sb.String(),
-		Kind:       "semantic",
-		Tags:       tags,
-		Importance: 0.5,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("store summary: %w", err)
+	// Consolidate: create summary node with contains edges to source exchanges.
+	// Children are suppressed in context assembly but preserved for drill-down.
+	summaryKey := fmt.Sprintf("exchange-summary-%d", time.Now().UnixMilli())
+	var sourceKeys []string
+	for _, ex := range toSummarize {
+		sourceKeys = append(sourceKeys, ex.Key)
 	}
 
-	// Delete the individual exchanges that were summarized
-	for _, ex := range toSummarize {
-		if rmErr := m.store.Rm(ctx, agentmemory.RmParams{NS: ns, Key: ex.Key}); rmErr != nil {
-			slog.Warn("failed to remove summarized exchange", "key", ex.Key, "error", rmErr)
+	if len(sourceKeys) >= 2 {
+		_, err = m.store.Consolidate(ctx, agentmemory.ConsolidateParams{
+			NS:         ns,
+			SummaryKey: summaryKey,
+			Content:    sb.String(),
+			SourceKeys: sourceKeys,
+			Kind:       "semantic",
+			Importance: 0.5,
+			Tags:       tags,
+		})
+		if err != nil {
+			// Fallback: store as flat summary if consolidation fails
+			slog.Warn("consolidate exchanges failed, falling back to flat summary", "error", err)
+			_, err = m.store.Put(ctx, agentmemory.PutParams{
+				NS:         ns,
+				Key:        summaryKey,
+				Content:    sb.String(),
+				Kind:       "semantic",
+				Tags:       tags,
+				Importance: 0.5,
+			})
+			if err != nil {
+				return 0, fmt.Errorf("store summary: %w", err)
+			}
+		}
+	} else {
+		// Less than 2 keys — can't consolidate, store flat
+		_, err = m.store.Put(ctx, agentmemory.PutParams{
+			NS:         ns,
+			Key:        summaryKey,
+			Content:    sb.String(),
+			Kind:       "semantic",
+			Tags:       tags,
+			Importance: 0.5,
+		})
+		if err != nil {
+			return 0, fmt.Errorf("store summary: %w", err)
 		}
 	}
 

@@ -16,7 +16,9 @@ import (
 
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/daemon"
+	shellmcp "github.com/rcliao/shell/internal/mcp"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/rpc"
 	"github.com/rcliao/shell/internal/search"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/telegram"
@@ -102,13 +104,12 @@ func main() {
 				}
 			}()
 
-			// Ensure clean shutdown on SIGINT/SIGTERM
-			go func() {
-				<-ctx.Done()
-				d.Shutdown()
-			}()
-
-			return d.Run(ctx)
+			// Run blocks until ctx is cancelled (SIGINT/SIGTERM).
+			// Shutdown synchronously after Run returns to avoid
+			// racing context cancellation against pm restart loops.
+			err = d.Run(ctx)
+			d.Shutdown()
+			return err
 		},
 	}
 	daemonCmd.Flags().BoolVarP(&watch, "watch", "w", false, "Enable live reload on source changes")
@@ -478,9 +479,19 @@ func main() {
 		},
 	}
 
+	// mcp command — MCP stdio server for Claude CLI
+	mcpCmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Run MCP server on stdio (used by Claude CLI)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sockPath := rpc.DefaultSocketPath()
+			return shellmcp.Serve(context.Background(), sockPath)
+		},
+	}
+
 	pairingCmd.AddCommand(pairingListCmd, pairingApproveCmd, pairingAllowlistCmd, pairingRevokeCmd)
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd)
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

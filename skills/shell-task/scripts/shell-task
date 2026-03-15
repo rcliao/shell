@@ -1,0 +1,37 @@
+#!/bin/sh
+# shell-task — mark background tasks as completed
+set -e
+
+SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
+URL="http://bridge/task"
+CHAT_ID="${SHELL_CHAT_ID:-0}"
+
+ACTION=""
+ID=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    complete) ACTION="complete"; shift ;;
+    --id)     ID="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [ -z "$ACTION" ] || [ -z "$ID" ]; then
+  echo "usage: shell-task complete --id <task_id>" >&2
+  exit 1
+fi
+
+BODY=$(cat <<EOF
+{"chat_id":$CHAT_ID,"action":"$ACTION","id":$ID}
+EOF
+)
+
+RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$BODY")
+
+if echo "$RESP" | grep -q '"error"'; then
+  echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || echo "$RESP"
+  exit 1
+fi
+
+echo "Task #$ID completed."
