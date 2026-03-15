@@ -84,6 +84,16 @@ const initRequestID = "init_1"
 
 // --- Stdout types (CLI → SDK) ---
 
+type innerEvent struct {
+	Type  string       `json:"type"`
+	Delta *streamDelta `json:"delta,omitempty"`
+}
+
+type streamDelta struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 // stdoutEvent is the union type for all NDJSON lines from the CLI's stdout.
 // Uses json.RawMessage for polymorphic fields to avoid parsing everything upfront.
 type stdoutEvent struct {

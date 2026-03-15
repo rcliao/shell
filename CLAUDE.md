@@ -45,9 +45,8 @@ make install-skills  # Build and install skills to ~/.shell/skills/
 
 ## Key Patterns
 
-- Each Telegram message → `bridge.HandleMessageStreaming()` → `process.Agent.SendStreaming(AgentRequest)` → Claude CLI
-- Default mode: `claude -p "msg" --resume <sid> --output-format stream-json`
-- Bidirectional mode (`claude.bidirectional: true`): `--input-format stream-json` with stdin/stdout JSON protocol
+- Each Telegram message → `bridge.HandleMessageStreaming()` → `process.Agent.Send(AgentRequest, onUpdate)` → Claude CLI
+- Bidirectional protocol: `--input-format stream-json --output-format stream-json` with stdin/stdout JSON control protocol
 - Typed boundaries: `AgentRequest` (bridge→process), `SendResult` (process→bridge), `AgentResponse` (bridge→telegram)
 - Response processing via `processResponse()`: strips directives, collects `Photo`s, logs exchange
 - Sessions persist across restarts via SQLite
@@ -81,23 +80,6 @@ Built-in skills (source in `cmd/shell-*`, definitions in `skills/`):
 
 Skills output `[artifact type="image" path="..." caption="..."]` markers that the bridge
 picks up and sends as Telegram photos.
-
-## Browser Automation
-
-Built-in browser automation via the `[browser]` directive. The bridge launches a headless Chrome
-instance, executes the actions, and feeds results back for you to use.
-
-```
-[browser url="https://example.com"]
-click "#btn"
-screenshot
-extract ".content"
-[/browser]
-```
-
-Actions: `navigate`, `click`, `type`, `wait`, `screenshot`, `extract`, `js`, `sleep`.
-Screenshots are sent as photos to the chat. Extracted text and JS results are fed back for reasoning.
-Requires `"browser": {"enabled": true}` in config.
 
 ## HTTP Tunnels
 

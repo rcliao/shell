@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	browser "github.com/rcliao/shell-browser"
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/config"
@@ -307,9 +306,6 @@ type Bridge struct {
 	schedulerEnabled bool
 	schedulerTZ      string // default timezone for schedules
 
-	// Browser automation
-	browserCfg browser.Config
-
 	// Tunnel manager
 	tunnelMgr *tunnel.Manager // nil if disabled
 
@@ -330,7 +326,7 @@ type Bridge struct {
 	systemCancel   map[int64]context.CancelFunc
 }
 
-func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, browserCfg browser.Config, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
+func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
@@ -347,7 +343,6 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		repoDir:      repoDir,
 		worktreeDir:  wtDir,
 		reactionMap:  reactionMap,
-		browserCfg:   browserCfg,
 		tunnelMgr:    tunnelMgr,
 		pmMgr:        pmMgr,
 		skills:       skills,
@@ -452,21 +447,6 @@ func (b *Bridge) executeDirectivesParallel(ctx context.Context, chatID int64, re
 		exec  func() string
 	}
 	var pending []pendingDirective
-
-	// Browser
-	if b.browserCfg.Enabled {
-		if browser.BrowserRe.MatchString(response) {
-			snapshot := response
-			pending = append(pending, pendingDirective{
-				label: "Browser results",
-				exec: func() string {
-					_, results := b.parseBrowserDirectives(ctx, chatID, snapshot)
-					return results
-				},
-			})
-			response = browser.BrowserRe.ReplaceAllString(response, "")
-		}
-	}
 
 	// PM
 	if b.pmMgr != nil {
@@ -633,115 +613,7 @@ func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, messageID int
 	}
 }
 
-// HandleMessage processes an incoming user message and returns Claude's response.
-// senderName identifies who sent the message (e.g. Telegram first name).
-func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, senderName string) (AgentResponse, error) {
-	// Check for active plan draft — intercept the message.
-	b.planMu.Lock()
-	run, hasPlan := b.planRuns[chatID]
-	b.planMu.Unlock()
-	if hasPlan && run.state == planStateDrafting {
-		text, err := b.handlePlanDraft(ctx, chatID, userMsg)
-		return AgentResponse{Text: text}, err
-	}
-	if hasPlan && run.state == planStateBlocked {
-		text, err := b.handlePlanBlocked(ctx, chatID, userMsg)
-		return AgentResponse{Text: text}, err
-	}
-
-	sess, err := b.ensureSession(ctx, chatID)
-	if err != nil {
-		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
-	}
-
-	// Log user message
-	if err := b.store.LogMessage(sess.ID, "user", userMsg); err != nil {
-		slog.Warn("failed to log user message", "error", err)
-	}
-
-	// Inject memory context if available
-	augmentedMsg := userMsg
-	if b.memory != nil {
-		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
-	}
-
-	// Enrich heartbeat messages with conversation history and previous insights
-	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ")
-	if isHeartbeat && b.memory != nil {
-		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg)
-	}
-
-	// Tag the message with sender identity so Claude knows who is speaking
-	if senderName != "" {
-		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
-	}
-
-	// Inject current time when scheduler is enabled so Claude can compute relative times
-	augmentedMsg = b.injectCurrentTime(augmentedMsg)
-
-	// Preempt any running system session (heartbeat/scheduler) for user messages.
-	if !isSystemSender(senderName) {
-		b.preemptSystemSession(chatID)
-	}
-
-	// For system senders, register a cancellable context so user messages can preempt.
-	if isSystemSender(senderName) {
-		sysCtx, sysCancel := context.WithCancel(ctx)
-		defer sysCancel()
-		cleanupCancel := b.registerSystemCancel(chatID, sysCancel)
-		defer cleanupCancel()
-		ctx = sysCtx
-	}
-
-	// Determine claude session ID for --resume
-	procSess, _ := b.proc.Get(chatID)
-	claudeSessionID := ""
-	if procSess != nil && procSess.HasHistory {
-		claudeSessionID = procSess.ClaudeSessionID
-	}
-
-	// Build system prompt from memory if available.
-	systemPrompt := ""
-	if b.memory != nil {
-		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
-	}
-	systemPrompt += b.timestampSystemPrompt()
-	systemPrompt += b.scheduleSystemPrompt()
-	systemPrompt += b.relaySystemPrompt()
-	systemPrompt += b.browserSystemPrompt()
-	systemPrompt += b.tunnelSystemPrompt()
-	systemPrompt += b.pmSystemPrompt()
-	systemPrompt += b.skillsSystemPrompt()
-
-	// Track session in pm for /pm list visibility.
-	endTrack := b.trackSession(ctx, chatID, senderName)
-	defer endTrack()
-
-	result, err := b.proc.Send(ctx, process.AgentRequest{
-		ChatID:       chatID,
-		SessionID:    claudeSessionID,
-		Text:         augmentedMsg,
-		SystemPrompt: systemPrompt,
-	})
-	if err != nil {
-		return AgentResponse{}, fmt.Errorf("claude: %w", err)
-	}
-
-	// Track session ID and mark as having history
-	if procSess != nil {
-		if result.SessionID != "" {
-			procSess.ClaudeSessionID = result.SessionID
-			if err := b.store.SaveSession(chatID, result.SessionID); err != nil {
-				slog.Warn("failed to update session ID in store", "error", err)
-			}
-		}
-		procSess.HasHistory = true
-	}
-
-	return b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result), nil
-}
-
-// HandleMessageStreaming is like HandleMessage but calls onUpdate with partial text as Claude generates it.
+// HandleMessageStreaming processes an incoming user message and streams text deltas via onUpdate.
 // senderName identifies who sent the message (e.g. Telegram first name).
 // images optionally contains downloaded image metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram photos).
@@ -838,7 +710,6 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	systemPrompt += b.timestampSystemPrompt()
 	systemPrompt += b.scheduleSystemPrompt()
 	systemPrompt += b.relaySystemPrompt()
-	systemPrompt += b.browserSystemPrompt()
 	systemPrompt += b.tunnelSystemPrompt()
 	systemPrompt += b.pmSystemPrompt()
 	systemPrompt += b.skillsSystemPrompt()
@@ -847,8 +718,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	endTrack := b.trackSession(ctx, chatID, senderName)
 	defer endTrack()
 
-	// Send to Claude with streaming
-	result, err := b.proc.SendStreaming(ctx, process.AgentRequest{
+	result, err := b.proc.Send(ctx, process.AgentRequest{
 		ChatID:       chatID,
 		SessionID:    claudeSessionID,
 		Text:         augmentedMsg,
@@ -879,7 +749,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 			onUpdate("\n\n_Processing directives..._\n\n")
 		}
 		followUp := directiveResults + "\nUse the results above to respond to the user."
-		followUpResult, err := b.proc.SendStreaming(ctx, process.AgentRequest{
+		followUpResult, err := b.proc.Send(ctx, process.AgentRequest{
 			ChatID:       chatID,
 			SessionID:    result.SessionID,
 			Text:         followUp,
@@ -899,10 +769,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	return b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result), nil
 }
 
-// processResponse is the shared post-processing pipeline for both HandleMessage
-// and HandleMessageStreaming. It parses all response directives (relay, heartbeat,
-// memory, schedule, generate-image, artifacts), logs the exchange, and returns
-// a typed AgentResponse with collected photos.
+// processResponse is the post-processing pipeline for HandleMessageStreaming.
+// It parses all response directives (relay, heartbeat, memory, schedule, artifacts),
+// logs the exchange, and returns a typed AgentResponse with collected photos.
 func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult) AgentResponse {
 	response := strings.TrimSpace(result.Text)
 
@@ -1890,32 +1759,6 @@ func (b *Bridge) relaySystemPrompt() string {
 		"You can include multiple relay blocks in one response.\n"
 }
 
-// browserSystemPrompt returns the system prompt addition that tells Claude
-// how to use the [browser] directive for browser automation.
-func (b *Bridge) browserSystemPrompt() string {
-	if !b.browserCfg.Enabled {
-		return ""
-	}
-	return "\n\n## Browser Automation\n\n" +
-		"You can automate a headless Chrome browser using the `[browser]` directive.\n" +
-		"Use this for tasks that require interacting with web pages: navigating, clicking, typing, extracting content, or taking screenshots.\n\n" +
-		"```\n[browser url=\"https://example.com\"]\nscreenshot\n[/browser]\n```\n\n" +
-		"**Available actions (one per line):**\n" +
-		"- `navigate` — navigate to the URL (implicit, always happens first)\n" +
-		"- `click \"<selector>\"` — click an element by CSS selector\n" +
-		"- `type \"<selector>\" \"<value>\"` — clear and type into an input\n" +
-		"- `wait \"<selector>\"` — wait for element to appear (up to 10s)\n" +
-		"- `screenshot` — capture full page screenshot (sent as photo)\n" +
-		"- `extract \"<selector>\"` — extract text content of element(s)\n" +
-		"- `js \"<expression>\"` — evaluate JavaScript and return result\n" +
-		"- `sleep \"<duration>\"` — wait (e.g., `sleep \"2s\"`)\n\n" +
-		"**Example — multi-step login and extract:**\n```\n[browser url=\"https://example.com/login\"]\n" +
-		"type \"#email\" \"user@example.com\"\ntype \"#password\" \"secret\"\nclick \"#submit\"\n" +
-		"wait \"#dashboard\"\nscreenshot\nextract \"#welcome-message\"\njs \"document.title\"\n[/browser]\n```\n\n" +
-		"The directive will be replaced with results, and you will be re-prompted to answer using those results.\n" +
-		"Screenshots are sent as photos to the chat.\n"
-}
-
 func (b *Bridge) tunnelSystemPrompt() string {
 	if b.tunnelMgr == nil {
 		return ""
@@ -1950,39 +1793,6 @@ func (b *Bridge) pmSystemPrompt() string {
 		"2. `[pm name=\"web\" cmd=\"node server.js\" dir=\"/path/to/app\"]` — starts in background\n" +
 		"3. `[tunnel port=\"8080\"]` — expose via public URL\n\n" +
 		"The bridge manages processes and captures logs — do NOT use `nohup`, `&`, or Bash for background processes.\n"
-}
-
-// parseBrowserDirectives finds [browser url="..."]...[/browser] blocks in Claude's response,
-// runs the browser actions, and returns the cleaned response + formatted results for follow-up.
-func (b *Bridge) parseBrowserDirectives(ctx context.Context, chatID int64, response string) (string, string) {
-	if !b.browserCfg.Enabled {
-		return response, ""
-	}
-
-	matches := browser.BrowserRe.FindAllStringSubmatchIndex(response, -1)
-	if len(matches) == 0 {
-		return response, ""
-	}
-
-	var results strings.Builder
-	for _, m := range matches {
-		url := response[m[2]:m[3]]
-		body := response[m[4]:m[5]]
-
-		slog.Info("browser directive", "url", url)
-
-		d := browser.ParseDirective(url, body)
-		r := browser.Execute(ctx, b.browserCfg, d)
-
-		results.WriteString(browser.FormatResults(r))
-		results.WriteString("\n")
-	}
-
-	// Strip directives from response
-	cleaned := browser.BrowserRe.ReplaceAllString(response, "")
-	cleaned = strings.TrimSpace(cleaned)
-
-	return cleaned, results.String()
 }
 
 // parseTunnelDirectives finds [tunnel ...] blocks in Claude's response,
@@ -2292,7 +2102,7 @@ func (b *Bridge) Regenerate(ctx context.Context, chatID int64, rc *ReactionConte
 	if hasPlan && run.state != planStateDone {
 		return AgentResponse{Text: "Cannot regenerate while a plan is active."}, nil
 	}
-	return b.HandleMessage(ctx, chatID, rc.UserMessage, "")
+	return b.HandleMessageStreaming(ctx, chatID, rc.UserMessage, "", nil, nil, nil)
 }
 
 // RegenerateStreaming re-sends the original user message with streaming support.

@@ -30,6 +30,7 @@ Thumbs.db
 # Skill binaries (built via make skills)
 skills/web-search/scripts/web-search
 skills/generate-image/scripts/generate-image
+skills/browser/scripts/browser
 
 # Config (contains secrets)
 config.json

@@ -23,8 +23,7 @@ type Config struct {
 	Reload    ReloadConfig    `json:"reload"`
 	Google    GoogleConfig    `json:"google"`
 	Secrets   SecretsConfig   `json:"secrets"`
-	Browser   BrowserConfig   `json:"browser"`
-	Tunnel    TunnelConfig    `json:"tunnel"`
+	Tunnel TunnelConfig `json:"tunnel"`
 	PM        PMConfig        `json:"pm"`
 	Skills    SkillsConfig    `json:"skills"`
 }
@@ -45,13 +44,6 @@ type TunnelConfig struct {
 	CloudflaredBin  string `json:"cloudflared_bin"`  // path to cloudflared binary, default "cloudflared"
 	MaxTunnels      int    `json:"max_tunnels"`      // max concurrent tunnels, default 5
 	DefaultProtocol string `json:"default_protocol"` // "http" or "https", default "http"
-}
-
-type BrowserConfig struct {
-	Enabled        bool   `json:"enabled"`
-	Headless       bool   `json:"headless"`
-	TimeoutSeconds int    `json:"timeout_seconds"` // default: 30
-	ChromePath     string `json:"chrome_path"`     // optional custom Chrome binary
 }
 
 type SecretsConfig struct {
@@ -106,9 +98,8 @@ type ClaudeConfig struct {
 	WorkDir        string        `json:"work_dir"`
 	AllowedTools   []string      `json:"allowed_tools"`
 	ExtraArgs      []string      `json:"extra_args"`
-	PlaygroundDir  string        `json:"playground_dir"`  // writable sandbox dir, auto-approved for Write/Edit/Bash
-	Bidirectional  bool          `json:"bidirectional"`   // use stream-json stdin (bidirectional protocol)
-	SettingSources []string      `json:"setting_sources"` // e.g. ["user", "project"] for --setting-sources
+	PlaygroundDir  string   `json:"playground_dir"`  // writable sandbox dir, auto-approved for Write/Edit/Bash
+	SettingSources []string `json:"setting_sources"` // e.g. ["user", "project"] for --setting-sources
 }
 
 type StoreConfig struct {
@@ -302,11 +293,6 @@ func Default() Config {
 			APIKeyEnv: "GEMINI_API_KEY",
 			Model:     "gemini-3.1-flash-image-preview",
 			Timeout:   2 * time.Minute,
-		},
-		Browser: BrowserConfig{
-			Enabled:        false,
-			Headless:       true,
-			TimeoutSeconds: 30,
 		},
 	}
 }

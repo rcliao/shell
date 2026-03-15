@@ -1,12 +1,9 @@
 package process
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -18,46 +15,6 @@ import (
 
 // StreamFunc is called with a text delta as Claude generates it.
 type StreamFunc func(delta string)
-
-// streamEvent represents a line from --output-format stream-json.
-// The Claude CLI emits several event types:
-//   - {"type":"system", "subtype":"init", "session_id":"..."}
-//   - {"type":"stream_event", "event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
-//   - {"type":"assistant", "message":{"content":[{"type":"text","text":"..."}]}, "session_id":"..."}
-//   - {"type":"result", "result":"final text", "session_id":"..."}
-type streamEvent struct {
-	Type      string         `json:"type"`
-	Subtype   string         `json:"subtype,omitempty"`
-	SessionID string         `json:"session_id,omitempty"`
-	Result    string         `json:"result,omitempty"`
-	Event     *innerEvent    `json:"event,omitempty"`
-	Message   *streamMessage `json:"message,omitempty"`
-}
-
-type innerEvent struct {
-	Type  string       `json:"type"`
-	Delta *streamDelta `json:"delta,omitempty"`
-}
-
-type streamDelta struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type streamMessage struct {
-	Content []streamContent `json:"content"`
-}
-
-type streamContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-// claudeResult is the JSON structure returned by claude --output-format json.
-type claudeResult struct {
-	Result    string `json:"result"`
-	SessionID string `json:"session_id"`
-}
 
 // Artifact represents binary output produced by a tool call (image, file, etc.).
 type Artifact struct {
@@ -72,7 +29,7 @@ type SendResult struct {
 	Text      string
 	SessionID string
 	Artifacts []Artifact
-	ToolCalls []ToolCall // tool calls observed during execution (bidirectional mode)
+	ToolCalls []ToolCall // tool calls observed during execution
 }
 
 type Manager struct {
@@ -86,7 +43,6 @@ type Manager struct {
 	workDir        string
 	allowedTools   []string
 	extraArgs      []string
-	bidirectional  bool
 	settingSources []string
 }
 
@@ -98,7 +54,6 @@ type ManagerConfig struct {
 	WorkDir        string
 	AllowedTools   []string
 	ExtraArgs      []string
-	Bidirectional  bool
 	SettingSources []string
 }
 
@@ -121,13 +76,12 @@ func NewManager(cfg ManagerConfig) *Manager {
 		workDir:        cfg.WorkDir,
 		allowedTools:   cfg.AllowedTools,
 		extraArgs:      cfg.ExtraArgs,
-		bidirectional:  cfg.Bidirectional,
 		settingSources: cfg.SettingSources,
 	}
 }
 
-// Send sends a prompt and returns the full response.
-func (m *Manager) Send(ctx context.Context, req AgentRequest) (SendResult, error) {
+// Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
+func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
 	m.mu.RLock()
 	sess, exists := m.sessions[req.ChatID]
 	m.mu.RUnlock()
@@ -166,205 +120,14 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest) (SendResult, error
 		}
 	}()
 
-	if m.bidirectional {
-		result, err := m.runClaudeBidirectional(ctx, req, nil)
-		if err != nil && req.SessionID != "" {
-			slog.Warn("resume failed, retrying as fresh session (bidirectional)", "chat_id", req.ChatID, "error", err)
-			freshReq := req
-			freshReq.SessionID = ""
-			result, err = m.runClaudeBidirectional(ctx, freshReq, nil)
-		}
-		return result, err
-	}
-
-	message := FormatMessage(req)
-	result, err := m.runClaude(ctx, message, req.SessionID, req.SystemPrompt)
+	result, err := m.runClaudeBidirectional(ctx, req, onUpdate)
 	if err != nil && req.SessionID != "" {
 		slog.Warn("resume failed, retrying as fresh session", "chat_id", req.ChatID, "error", err)
-		result, err = m.runClaude(ctx, message, "", req.SystemPrompt)
+		freshReq := req
+		freshReq.SessionID = ""
+		result, err = m.runClaudeBidirectional(ctx, freshReq, onUpdate)
 	}
 	return result, err
-}
-
-func (m *Manager) runClaude(ctx context.Context, message, claudeSessionID, systemPrompt string) (SendResult, error) {
-	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
-
-	args := []string{
-		"-p", message,
-		"--output-format", "json",
-	}
-	if claudeSessionID != "" {
-		args = append(args, "--resume", claudeSessionID)
-	}
-	if m.model != "" {
-		args = append(args, "--model", m.model)
-	}
-	if systemPrompt != "" {
-		args = append(args, "--append-system-prompt", systemPrompt)
-	}
-	if len(m.allowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(m.allowedTools, ","))
-	}
-	args = append(args, m.extraArgs...)
-
-	slog.Info("claude send", "mode", "one-shot", "resume", claudeSessionID != "")
-
-	cmd := exec.CommandContext(procCtx, m.binary, args...)
-	// Clear CLAUDECODE env var so claude doesn't think it's nested inside another session
-	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
-	if m.workDir != "" {
-		cmd.Dir = m.workDir
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if procCtx.Err() == context.DeadlineExceeded {
-			return SendResult{}, fmt.Errorf("claude process timed out after %s", m.timeout)
-		}
-		stderrStr := stderr.String()
-		if stderrStr != "" {
-			return SendResult{}, fmt.Errorf("claude process failed: %w\nstderr: %s", err, stderrStr)
-		}
-		return SendResult{}, fmt.Errorf("claude process failed: %w", err)
-	}
-
-	var result claudeResult
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		// Fallback: treat as plain text
-		return SendResult{Text: stdout.String()}, nil
-	}
-
-	return SendResult{
-		Text:      result.Result,
-		SessionID: result.SessionID,
-	}, nil
-}
-
-// SendStreaming sends a prompt and streams text deltas via onUpdate.
-func (m *Manager) SendStreaming(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
-	m.mu.RLock()
-	sess, exists := m.sessions[req.ChatID]
-	m.mu.RUnlock()
-
-	if exists && sess.Status == StatusBusy {
-		return SendResult{}, fmt.Errorf("session for chat %d is busy", req.ChatID)
-	}
-
-	// Check concurrency limit
-	m.mu.RLock()
-	busy := 0
-	for _, s := range m.sessions {
-		if s.Status == StatusBusy {
-			busy++
-		}
-	}
-	m.mu.RUnlock()
-	if busy >= m.maxSessions {
-		return SendResult{}, fmt.Errorf("max concurrent sessions (%d) reached", m.maxSessions)
-	}
-
-	// Mark session as busy
-	if exists {
-		m.mu.Lock()
-		sess.Status = StatusBusy
-		sess.UpdatedAt = time.Now()
-		m.mu.Unlock()
-	}
-
-	defer func() {
-		if exists {
-			m.mu.Lock()
-			sess.Status = StatusActive
-			sess.UpdatedAt = time.Now()
-			m.mu.Unlock()
-		}
-	}()
-
-	if m.bidirectional {
-		result, err := m.runClaudeBidirectional(ctx, req, onUpdate)
-		if err != nil && req.SessionID != "" {
-			slog.Warn("resume failed, retrying as fresh session (bidirectional)", "chat_id", req.ChatID, "error", err)
-			freshReq := req
-			freshReq.SessionID = ""
-			result, err = m.runClaudeBidirectional(ctx, freshReq, onUpdate)
-		}
-		return result, err
-	}
-
-	message := FormatMessage(req)
-	result, err := m.runClaudeStreaming(ctx, message, req.SessionID, req.SystemPrompt, onUpdate)
-	if err != nil && req.SessionID != "" {
-		slog.Warn("resume failed, retrying as fresh session (streaming)", "chat_id", req.ChatID, "error", err)
-		result, err = m.runClaudeStreaming(ctx, message, "", req.SystemPrompt, onUpdate)
-	}
-	return result, err
-}
-
-func (m *Manager) runClaudeStreaming(ctx context.Context, message, claudeSessionID, systemPrompt string, onUpdate StreamFunc) (SendResult, error) {
-	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
-
-	args := []string{
-		"-p", message,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--include-partial-messages",
-	}
-	if claudeSessionID != "" {
-		args = append(args, "--resume", claudeSessionID)
-	}
-	if m.model != "" {
-		args = append(args, "--model", m.model)
-	}
-	if systemPrompt != "" {
-		args = append(args, "--append-system-prompt", systemPrompt)
-	}
-	if len(m.allowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(m.allowedTools, ","))
-	}
-	args = append(args, m.extraArgs...)
-
-	slog.Info("claude send", "mode", "streaming", "resume", claudeSessionID != "")
-
-	cmd := exec.CommandContext(procCtx, m.binary, args...)
-	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
-	if m.workDir != "" {
-		cmd.Dir = m.workDir
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return SendResult{}, fmt.Errorf("stdout pipe: %w", err)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		return SendResult{}, fmt.Errorf("start claude: %w", err)
-	}
-
-	finalResult := parseStreamEvents(stdout, onUpdate)
-
-	if err := cmd.Wait(); err != nil {
-		if procCtx.Err() == context.DeadlineExceeded {
-			return SendResult{}, fmt.Errorf("claude process timed out after %s", m.timeout)
-		}
-		// If we already got a result, return it despite exit code
-		if finalResult.Text != "" {
-			return finalResult, nil
-		}
-		stderrStr := stderr.String()
-		if stderrStr != "" {
-			return SendResult{}, fmt.Errorf("claude process failed: %w\nstderr: %s", err, stderrStr)
-		}
-		return SendResult{}, fmt.Errorf("claude process failed: %w", err)
-	}
-
-	return finalResult, nil
 }
 
 func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
@@ -399,7 +162,7 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	args = append(args, m.extraArgs...)
 
 	hasAttachments := len(req.Images) > 0 || len(req.PDFs) > 0
-	slog.Info("claude send", "mode", "bidirectional", "resume", claudeSessionID != "", "multimodal", hasAttachments)
+	slog.Info("claude send", "resume", claudeSessionID != "", "multimodal", hasAttachments)
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
 	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
@@ -467,67 +230,6 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	return finalResult, nil
 }
 
-// parseStreamEvents reads NDJSON lines from r, calling onUpdate for each text delta
-// and returning the final SendResult. This is extracted for testability.
-func parseStreamEvents(r io.Reader, onUpdate StreamFunc) SendResult {
-	var finalResult SendResult
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var event streamEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			continue
-		}
-
-		switch event.Type {
-		case "stream_event":
-			if event.Event != nil && event.Event.Delta != nil && event.Event.Delta.Type == "text_delta" {
-				if event.Event.Delta.Text != "" && onUpdate != nil {
-					onUpdate(event.Event.Delta.Text)
-				}
-			}
-		case "assistant":
-			if event.Message != nil {
-				text := extractContentText(event.Message.Content)
-				if text != "" && onUpdate != nil {
-					onUpdate(text)
-				}
-			}
-			if event.SessionID != "" {
-				finalResult.SessionID = event.SessionID
-			}
-		case "system":
-			if event.SessionID != "" {
-				finalResult.SessionID = event.SessionID
-			}
-		case "result":
-			finalResult.Text = event.Result
-			if event.SessionID != "" {
-				finalResult.SessionID = event.SessionID
-			}
-		}
-	}
-
-	return finalResult
-}
-
-// extractContentText joins all text content blocks from a stream message.
-func extractContentText(content []streamContent) string {
-	var sb strings.Builder
-	for _, c := range content {
-		if c.Type == "text" {
-			sb.WriteString(c.Text)
-		}
-	}
-	return sb.String()
-}
-
 // Register adds or updates a session in the manager.
 func (m *Manager) Register(sess *Session) {
 	m.mu.Lock()
@@ -588,7 +290,7 @@ func (m *Manager) ListSessions() []Session {
 	return sessions
 }
 
-// formatMessage builds the prompt string from an AgentRequest, prepending
+// FormatMessage builds the prompt string from an AgentRequest, prepending
 // image and PDF attachment metadata so the CLI can read the files.
 func FormatMessage(req AgentRequest) string {
 	if len(req.Images) == 0 && len(req.PDFs) == 0 {

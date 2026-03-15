@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/rcliao/shell/internal/bridge"
-	browser "github.com/rcliao/shell-browser"
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/config"
@@ -105,7 +104,6 @@ func New(cfg config.Config) (*Daemon, error) {
 		WorkDir:        cfg.Claude.WorkDir,
 		AllowedTools:   allowedTools,
 		ExtraArgs:      cfg.Claude.ExtraArgs,
-		Bidirectional:  cfg.Claude.Bidirectional,
 		SettingSources: cfg.Claude.SettingSources,
 	})
 
@@ -180,14 +178,6 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("planner initialized", "test_cmd", cfg.Planner.TestCmd, "max_retries", cfg.Planner.MaxRetries)
 	}
 
-	// Create bridge
-	browserCfg := browser.Config{
-		Enabled:        cfg.Browser.Enabled,
-		Headless:       cfg.Browser.Headless,
-		TimeoutSeconds: cfg.Browser.TimeoutSeconds,
-		ChromePath:     cfg.Browser.ChromePath,
-	}
-
 	// Initialize tunnel manager if enabled.
 	var tunnelMgr *tunnel.Manager
 	if cfg.Tunnel.Enabled {
@@ -211,7 +201,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("process manager initialized")
 	}
 
-	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, browserCfg, tunnelMgr, pmMgr, skillRegistry)
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, tunnelMgr, pmMgr, skillRegistry)
 
 	// Create auth with policy engine
 	configDir := config.DefaultConfigDir()

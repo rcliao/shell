@@ -29,10 +29,11 @@ init: build
 skills:
 	go build -o skills/web-search/scripts/web-search ./cmd/shell-search
 	go build -o skills/generate-image/scripts/generate-image ./cmd/shell-imagen
+	go build -o skills/browser/scripts/browser ./cmd/shell-browser
 
 # Install skills to ~/.shell/skills/
 install-skills: skills
-	@for skill in web-search generate-image hello weather summarize; do \
+	@for skill in web-search generate-image browser hello weather summarize; do \
 		mkdir -p $(SKILLS_DIR)/$$skill/scripts; \
 		cp skills/$$skill/SKILL.md $(SKILLS_DIR)/$$skill/; \
 		if [ -d skills/$$skill/scripts ]; then \

@@ -23,7 +23,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 │  schedules, tasks   │  exchange logging         │
 ├─────────────────────┴───────────────────────────┤
 │  Utilities                                      │
-│  search, browser, imagen, tunnel, pm, worktree  │
+│  tunnel, pm, worktree                           │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -65,7 +65,6 @@ Process Manager
   │ parse stream events → onUpdate callback → live Telegram edits
   ▼
 Bridge (response processing — processResponse())
-  ├─ [browser url="..."]       → headless Chrome → re-prompt with results
   ├─ [pm cmd="..."]            → background process → re-prompt with status
   ├─ [tunnel port="..."]       → cloudflared → re-prompt with URL
   ├─ [relay to=CHAT_ID]        → send to another chat
@@ -88,7 +87,7 @@ User (Telegram)
 
 ## Layer Interfaces
 
-Each layer boundary has typed inputs and outputs. No plain-text encoding crosses a boundary (except one-shot CLI mode, which is legacy).
+Each layer boundary has typed inputs and outputs. No plain-text encoding crosses a boundary.
 
 ### Telegram → Bridge
 
@@ -117,31 +116,23 @@ Bridge augments the message (memory context, sender tag, timestamps), builds the
 
 ```go
 // Input
-Agent.SendStreaming(
+Agent.Send(
     ctx      context.Context,
     req      process.AgentRequest,  // {ChatID, SessionID, Text, Images, PDFs, SystemPrompt}
-    onUpdate process.StreamFunc,
+    onUpdate process.StreamFunc,    // nil for no streaming
 )
 
 // Output
 process.SendResult {
     Text      string      // raw Claude response (directives still present)
     SessionID string      // Claude session ID for future --resume
-    ToolCalls []ToolCall   // tool invocations observed (bidirectional mode only)
+    ToolCalls []ToolCall   // tool invocations observed
 }
 ```
 
 ### Process → Claude CLI
 
-Two modes, selected by `claude.bidirectional` config:
-
-**One-shot mode** (default): Images/PDFs as text metadata via `formatMessage()`.
-```
-claude -p "{text with [Attached image: path | WxH | size]}" \
-    --resume <sid> --output-format stream-json
-```
-
-**Bidirectional mode**: Same text format, but uses stdin/stdout JSON protocol with tool visibility and permission control.
+Bidirectional protocol via stdin/stdout JSON:
 ```
 claude -p --input-format stream-json --output-format stream-json \
     --permission-mode bypassPermissions [--setting-sources "user,project"]
@@ -235,8 +226,7 @@ shell pairing revoke ID  # Revoke a user from dynamic allowlist
 
 ```go
 type Agent interface {
-    Send(ctx context.Context, req AgentRequest) (SendResult, error)
-    SendStreaming(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error)
+    Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error)
     Get(chatID int64) (*Session, bool)
     Register(sess *Session)
     Kill(chatID int64)
@@ -257,14 +247,11 @@ type AgentRequest struct {
 type SendResult struct {
     Text      string
     SessionID string
-    ToolCalls []ToolCall // tool calls observed (bidirectional mode)
+    ToolCalls []ToolCall // tool calls observed
 }
 ```
 
-The process manager implements this interface. Mode selection:
-- **Default**: `claude -p "message" --resume <sid> --output-format stream-json`
-- **Bidirectional** (`claude.bidirectional: true`): `--input-format stream-json` with stdin/stdout JSON protocol, tool call visibility
-
+The process manager implements this interface using the bidirectional stdin/stdout JSON protocol.
 Auto-retry on resume failure: falls back to fresh session.
 
 ## SQLite Schema
@@ -370,12 +357,11 @@ Key operations:
 ```json
 {
   "telegram": { "token_env", "allowed_users", "reaction_map" },
-  "claude": { "binary", "model", "timeout", "max_sessions", "work_dir", "allowed_tools", "bidirectional", "setting_sources" },
+  "claude": { "binary", "model", "timeout", "max_sessions", "work_dir", "allowed_tools", "setting_sources" },
   "store": { "db_path" },
   "memory": { "enabled", "db_path", "budget", "profiles", "chat_profiles" },
   "planner": { "enabled", "test_cmd", "conventions", "max_retries", "worktree" },
   "scheduler": { "enabled", "timezone", "quiet_hour_start", "quiet_hour_end" },
-  "browser": { "enabled", "headless", "timeout_seconds" },
   "tunnel": { "enabled", "cloudflared_bin", "max_tunnels" },
   "pm": { "enabled", "max_procs", "log_lines" },
   "reload": { "enabled", "source_dir", "debounce" },
