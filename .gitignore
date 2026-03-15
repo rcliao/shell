@@ -27,5 +27,9 @@ Thumbs.db
 /dist/
 /bin/
 
+# Skill binaries (built via make skills)
+skills/web-search/scripts/web-search
+skills/generate-image/scripts/generate-image
+
 # Config (contains secrets)
 config.json

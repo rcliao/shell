@@ -15,8 +15,11 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 - `internal/planner/` — Optional plan-execute-review loop
 - `internal/reload/` — Live reload watcher (rebuild + syscall.Exec)
 - `internal/worktree/` — Git worktree isolation for plan execution
-- `internal/skill/` — Skill registry: loads `.claude/skills/` for system prompt
+- `internal/skill/` — Skill registry: loads `~/.shell/skills/` and `.agent/skills/` for system prompt
 - `internal/scheduler/` — Cron/one-shot scheduler with SQLite persistence
+- `cmd/shell-search/` — Standalone web search CLI (skill binary)
+- `cmd/shell-imagen/` — Standalone image generation CLI (skill binary)
+- `skills/` — Skill definitions (SKILL.md + scripts)
 
 ## Commands
 
@@ -32,10 +35,12 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 ## Build & Test
 
 ```bash
-make build    # Build binary
-make test     # Run tests
-make vet      # Run go vet
-make watch    # Build and run with --watch
+make build           # Build binary
+make test            # Run tests
+make vet             # Run go vet
+make watch           # Build and run with --watch
+make skills          # Build skill binaries (web-search, generate-image)
+make install-skills  # Build and install skills to ~/.shell/skills/
 ```
 
 ## Key Patterns
@@ -64,15 +69,18 @@ make watch    # Build and run with --watch
   - Check-in messages: every ~4 heartbeats, a friendly check-in hint is included
 - Scheduler config: `{"scheduler": {"enabled": true, "timezone": "UTC", "quiet_hour_start": 22, "quiet_hour_end": 7}}` in config.json
 
-## Web Search
+## Skills
 
-Web search is built-in via the `[search]` directive. The bridge handles it automatically —
-no Bash or external tools needed. Results are fetched and fed back for you to use.
+Skills are pluggable capabilities loaded from `~/.shell/skills/` and `.agent/skills/`.
+Each skill has a `SKILL.md` (frontmatter + instructions) and optional `scripts/` directory.
+Skills inject their instructions into the system prompt and declare allowed tools.
 
-```
-[search query="your search query"]
-[search query="recent topic" count="5" freshness="pw"]
-```
+Built-in skills (source in `cmd/shell-*`, definitions in `skills/`):
+- **web-search** — Web search via Brave/Tavily APIs (`scripts/web-search <query>`)
+- **generate-image** — Image generation via Google Gemini (`scripts/generate-image <prompt>`)
+
+Skills output `[artifact type="image" path="..." caption="..."]` markers that the bridge
+picks up and sends as Telegram photos.
 
 ## Browser Automation
 

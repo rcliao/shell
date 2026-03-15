@@ -65,15 +65,13 @@ Process Manager
   │ parse stream events → onUpdate callback → live Telegram edits
   ▼
 Bridge (response processing — processResponse())
-  ├─ [search query="..."]      → search API → re-prompt with results
   ├─ [browser url="..."]       → headless Chrome → re-prompt with results
   ├─ [pm cmd="..."]            → background process → re-prompt with status
   ├─ [tunnel port="..."]       → cloudflared → re-prompt with URL
   ├─ [relay to=CHAT_ID]        → send to another chat
   ├─ [schedule cron="..."]     → save to store
   ├─ [remember]...[/remember]  → store to memory namespace
-  ├─ [generate-image]          → Imagen API → collect Photo
-  ├─ [artifact type="image"]   → read file → collect Photo
+  ├─ [artifact type="image"]   → read file → collect Photo (skill output)
   ├─ [noop]                    → suppress heartbeat output
   ├─ [heartbeat-learning]      → store insight to heartbeat NS
   └─ [task-complete id=N]      → mark background task done

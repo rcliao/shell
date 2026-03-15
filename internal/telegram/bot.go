@@ -58,8 +58,6 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planretry", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/schedule", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/heartbeat", bot.MatchTypePrefix, b.commandHandler)
-	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/imagine", bot.MatchTypePrefix, b.imagineHandler)
-
 	// Register handler for photo messages.
 	tgBot.RegisterHandlerMatchFunc(
 		func(update *models.Update) bool {
@@ -155,13 +153,6 @@ func (b *Bot) SendChatAction(chatID int64, action string) {
 		ChatID: chatID,
 		Action: models.ChatAction(action),
 	})
-}
-
-func (b *Bot) imagineHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
-	if update.Message == nil {
-		return
-	}
-	b.handler.HandleImagine(ctx, tgBot, update.Message)
 }
 
 func (b *Bot) defaultHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {

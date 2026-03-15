@@ -17,11 +17,9 @@ import (
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/config"
-	shellimagen "github.com/rcliao/shell-imagen"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
-	"github.com/rcliao/shell/internal/search"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/worktree"
@@ -63,20 +61,8 @@ var heartbeatLearningRe = regexp.MustCompile(`(?s)\[heartbeat-learning\]\s*(.*?)
 // taskCompleteRe matches [task-complete id=<N>] directives in heartbeat responses.
 var taskCompleteRe = regexp.MustCompile(`\[task-complete id=(\d+)\]`)
 
-// generateImageRe matches [generate-image prompt="..."] directives in Claude's response.
-var generateImageRe = regexp.MustCompile(`\[generate-image prompt="([^"]+)"\]`)
-
 // artifactRe matches [artifact type="..." path="..." caption="..."] markers from skill scripts.
 var artifactRe = regexp.MustCompile(`\[artifact\s+type="([^"]+)"\s+path="([^"]+)"(?:\s+caption="([^"]*)")?\]`)
-
-// searchRe matches [search query="..." (optional: count="N" freshness="pw")] directives.
-var searchRe = regexp.MustCompile(`\[search query="([^"]+)"(?:\s+count="(\d+)")?(?:\s+freshness="([^"]*)")?\]`)
-
-// ImageSendFunc sends an image to a chat. Used by the bridge to send generated images.
-type ImageSendFunc func(chatID int64, imageData []byte, caption string)
-
-// ChatActionFunc sends a chat action (e.g. "upload_photo") to a chat.
-type ChatActionFunc func(chatID int64, action string)
 
 // parseRelayDirectives extracts relay blocks from response text.
 // Returns the cleaned response (relays stripped) and the list of relay messages.
@@ -104,62 +90,14 @@ func parseRelayDirectives(response string) (string, []relayDirective) {
 }
 
 // sendRelays dispatches relay messages via the notify function.
-// If a relay message contains [generate-image] directives, images are generated
-// and sent to the target chat with an upload_photo loading indicator.
 func (b *Bridge) sendRelays(ctx context.Context, relays []relayDirective) {
 	if b.notify == nil {
 		return
 	}
 	for _, r := range relays {
 		slog.Info("relaying message", "to_chat_id", r.ChatID, "len", len(r.Message))
-
-		// Process any [generate-image] directives embedded in the relay message.
-		msg := r.Message
-		if b.imagen != nil && b.imageSend != nil {
-			imageMatches := generateImageRe.FindAllStringSubmatchIndex(msg, -1)
-			if len(imageMatches) > 0 {
-				// Send upload_photo action to target chat during generation.
-				actionCtx, actionCancel := context.WithCancel(ctx)
-				go b.sendUploadPhotoLoop(actionCtx, r.ChatID)
-
-				clean := msg
-				for i := len(imageMatches) - 1; i >= 0; i-- {
-					m := imageMatches[i]
-					prompt := msg[m[2]:m[3]]
-					imageData, err := b.imagen.Generate(ctx, prompt)
-					if err != nil {
-						slog.Error("relay image generation failed", "prompt", prompt, "to_chat_id", r.ChatID, "error", err)
-						clean = clean[:m[0]] + "(image generation failed: " + err.Error() + ")" + clean[m[1]:]
-						continue
-					}
-					b.imageSend(r.ChatID, imageData, prompt)
-					clean = clean[:m[0]] + clean[m[1]:]
-				}
-				actionCancel()
-				msg = strings.TrimSpace(clean)
-			}
-		}
-
-		if msg != "" {
-			b.notify(r.ChatID, msg)
-		}
-	}
-}
-
-// sendUploadPhotoLoop sends upload_photo chat action every 4s until ctx is cancelled.
-func (b *Bridge) sendUploadPhotoLoop(ctx context.Context, chatID int64) {
-	if b.chatAction == nil {
-		return
-	}
-	b.chatAction(chatID, "upload_photo")
-	ticker := time.NewTicker(4 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			b.chatAction(chatID, "upload_photo")
+		if r.Message != "" {
+			b.notify(r.ChatID, r.Message)
 		}
 	}
 }
@@ -365,18 +303,9 @@ type Bridge struct {
 	selfSourceDir string // resolved path to shell's source dir (empty = disabled)
 	onSelfRestart func() // called when self-modification detected after merge
 
-	// Search API keys (resolved from secrets/env at startup)
-	braveKey  string
-	tavilyKey string
-
 	// Scheduler
 	schedulerEnabled bool
 	schedulerTZ      string // default timezone for schedules
-
-	// Image generation
-	imagen     *shellimagen.Generator // nil if not configured
-	imageSend  ImageSendFunc     // sends generated images to Telegram
-	chatAction ChatActionFunc    // sends chat actions (e.g. upload_photo) to Telegram
 
 	// Browser automation
 	browserCfg browser.Config
@@ -401,7 +330,7 @@ type Bridge struct {
 	systemCancel   map[int64]context.CancelFunc
 }
 
-func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, ig *shellimagen.Generator, braveKey, tavilyKey string, browserCfg browser.Config, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
+func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, browserCfg browser.Config, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
 	wtDir := ""
 	if useWorktree {
 		wtDir = filepath.Join(config.DefaultConfigDir(), "worktrees")
@@ -410,24 +339,21 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		reactionMap = config.DefaultReactionMap()
 	}
 	return &Bridge{
-		proc:        proc,
-		store:       store,
-		memory:      mem,
-		plan:        pl,
-		useWorktree: useWorktree,
-		repoDir:     repoDir,
-		worktreeDir: wtDir,
-		reactionMap: reactionMap,
-		imagen:      ig,
-		braveKey:    braveKey,
-		tavilyKey:   tavilyKey,
-		browserCfg:  browserCfg,
-		tunnelMgr:   tunnelMgr,
-		pmMgr:       pmMgr,
-		skills:      skills,
-		planRuns:     make(map[int64]*planRun),
-		reviewCache:  make(map[int64][]memory.ReviewEntry),
-		systemCancel: make(map[int64]context.CancelFunc),
+		proc:         proc,
+		store:        store,
+		memory:       mem,
+		plan:         pl,
+		useWorktree:  useWorktree,
+		repoDir:      repoDir,
+		worktreeDir:  wtDir,
+		reactionMap:  reactionMap,
+		browserCfg:   browserCfg,
+		tunnelMgr:    tunnelMgr,
+		pmMgr:        pmMgr,
+		skills:       skills,
+		planRuns:      make(map[int64]*planRun),
+		reviewCache:   make(map[int64][]memory.ReviewEntry),
+		systemCancel:  make(map[int64]context.CancelFunc),
 	}
 }
 
@@ -527,21 +453,6 @@ func (b *Bridge) executeDirectivesParallel(ctx context.Context, chatID int64, re
 	}
 	var pending []pendingDirective
 
-	// Search
-	if b.braveKey != "" || b.tavilyKey != "" {
-		if searchRe.MatchString(response) {
-			snapshot := response
-			pending = append(pending, pendingDirective{
-				label: "Search results",
-				exec: func() string {
-					_, results := b.parseSearchDirectives(ctx, snapshot)
-					return results
-				},
-			})
-			response = searchRe.ReplaceAllString(response, "")
-		}
-	}
-
 	// Browser
 	if b.browserCfg.Enabled {
 		if browser.BrowserRe.MatchString(response) {
@@ -615,21 +526,6 @@ func (b *Bridge) executeDirectivesParallel(ctx context.Context, chatID int64, re
 	}
 
 	return response, combined.String()
-}
-
-// SetImageSender sets the function used to send generated images to Telegram.
-func (b *Bridge) SetImageSender(fn ImageSendFunc) {
-	b.imageSend = fn
-}
-
-// SetChatAction sets the function used to send chat actions (e.g. upload_photo) to Telegram.
-func (b *Bridge) SetChatAction(fn ChatActionFunc) {
-	b.chatAction = fn
-}
-
-// Imagen returns the image generator, or nil if not configured.
-func (b *Bridge) Imagen() *shellimagen.Generator {
-	return b.imagen
 }
 
 // SetNotifier sets the function used to push async messages (plan progress) to users.
@@ -811,9 +707,7 @@ func (b *Bridge) HandleMessage(ctx context.Context, chatID int64, userMsg, sende
 	}
 	systemPrompt += b.timestampSystemPrompt()
 	systemPrompt += b.scheduleSystemPrompt()
-	systemPrompt += b.imagenSystemPrompt()
 	systemPrompt += b.relaySystemPrompt()
-	systemPrompt += b.searchSystemPrompt()
 	systemPrompt += b.browserSystemPrompt()
 	systemPrompt += b.tunnelSystemPrompt()
 	systemPrompt += b.pmSystemPrompt()
@@ -943,9 +837,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	}
 	systemPrompt += b.timestampSystemPrompt()
 	systemPrompt += b.scheduleSystemPrompt()
-	systemPrompt += b.imagenSystemPrompt()
 	systemPrompt += b.relaySystemPrompt()
-	systemPrompt += b.searchSystemPrompt()
 	systemPrompt += b.browserSystemPrompt()
 	systemPrompt += b.tunnelSystemPrompt()
 	systemPrompt += b.pmSystemPrompt()
@@ -1042,9 +934,8 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, user
 	// Parse schedule directives ([schedule ...]...[/schedule]).
 	response = b.parseScheduleDirectives(chatID, response)
 
-	// Collect photos from generate-image directives and artifact markers.
+	// Collect photos from artifact markers (skill output).
 	var photos []Photo
-	response = b.parseGenerateImageDirectives(ctx, response, &photos)
 	response = b.parseArtifacts(response, &photos)
 
 	// Log assistant response.
@@ -1249,12 +1140,6 @@ func (b *Bridge) Help() string {
 			"- `/tunnel` or `/tunnel list` — List active tunnels\n" +
 			"- `/tunnel start <port>` or `/tunnel <port>` — Start a tunnel\n" +
 			"- `/tunnel stop <port>` — Stop a tunnel\n"
-	}
-
-	if b.imagen != nil {
-		help += "\n### Image Generation\n\n" +
-			"- `/imagine <prompt>` — Generate an image from a text prompt\n" +
-			"- Claude can also generate images in conversation when appropriate\n"
 	}
 
 	help += "\n---\n\n" +
@@ -1955,37 +1840,6 @@ func parsePMStartArgs(args string) (name, cmd, dir string) {
 	return parts[0], parts[1], dir
 }
 
-// parseGenerateImageDirectives extracts [generate-image prompt="..."] directives
-// from Claude's response, generates images, and sends them via Telegram.
-func (b *Bridge) parseGenerateImageDirectives(ctx context.Context, response string, photos *[]Photo) string {
-	if b.imagen == nil || b.skillOverrides("generate-image") {
-		return response
-	}
-
-	matches := generateImageRe.FindAllStringSubmatchIndex(response, -1)
-	if len(matches) == 0 {
-		return response
-	}
-
-	clean := response
-	for i := len(matches) - 1; i >= 0; i-- {
-		m := matches[i]
-		prompt := response[m[2]:m[3]]
-
-		imageData, err := b.imagen.Generate(ctx, prompt)
-		if err != nil {
-			slog.Error("image generation failed", "prompt", prompt, "error", err)
-			clean = clean[:m[0]] + "(image generation failed: " + err.Error() + ")" + clean[m[1]:]
-			continue
-		}
-
-		*photos = append(*photos, Photo{Data: imageData, Caption: prompt})
-		clean = clean[:m[0]] + clean[m[1]:]
-	}
-
-	return strings.TrimSpace(clean)
-}
-
 // parseArtifacts extracts [artifact type="..." path="..." caption="..."] markers
 // from the response, collects image artifacts into photos, and returns the
 // cleaned response text.
@@ -2025,33 +1879,6 @@ func (b *Bridge) parseArtifacts(response string, photos *[]Photo) string {
 	return strings.TrimSpace(clean)
 }
 
-// HandleImagine generates an image from the given prompt and returns the image bytes.
-func (b *Bridge) HandleImagine(ctx context.Context, prompt string) ([]byte, error) {
-	if b.imagen == nil {
-		return nil, fmt.Errorf("image generation is not configured (set GEMINI_API_KEY)")
-	}
-	return b.imagen.Generate(ctx, prompt)
-}
-
-// imagenSystemPrompt returns the system prompt addition that documents
-// the [generate-image] directive for Claude. Empty if imagen is not configured.
-func (b *Bridge) imagenSystemPrompt() string {
-	if b.imagen == nil {
-		return ""
-	}
-	if b.skillOverrides("generate-image") {
-		return ""
-	}
-	return "\n\n## Image Generation\n\n" +
-		"You can generate images for the user using the [generate-image] directive.\n" +
-		"When the user asks you to create, draw, generate, or visualize an image, include this directive in your response:\n\n" +
-		"```\n[generate-image prompt=\"a detailed description of the image to generate\"]\n```\n\n" +
-		"The prompt should be a detailed, descriptive text that captures what the user wants.\n" +
-		"The directive will be replaced with the generated image sent as a photo.\n" +
-		"You can include multiple directives in one response for multiple images.\n" +
-		"Use this proactively when the user's request would benefit from a visual.\n"
-}
-
 // relaySystemPrompt returns the system prompt addition that documents
 // the [relay] directive for Claude.
 func (b *Bridge) relaySystemPrompt() string {
@@ -2060,83 +1887,7 @@ func (b *Bridge) relaySystemPrompt() string {
 		"Use this when the user asks you to forward, send, or share something with another user or chat.\n\n" +
 		"```\n[relay to=CHAT_ID]\nMessage content here\n[/relay]\n```\n\n" +
 		"Replace CHAT_ID with the numeric Telegram chat ID of the target.\n" +
-		"You can include [generate-image] directives inside a relay block to generate and send images to the target chat:\n\n" +
-		"```\n[relay to=CHAT_ID]\nHere's the image you requested!\n[generate-image prompt=\"a detailed description\"]\n[/relay]\n```\n\n" +
 		"You can include multiple relay blocks in one response.\n"
-}
-
-// searchSystemPrompt returns the system prompt addition that tells Claude
-// to use the [search] directive for web search.
-func (b *Bridge) searchSystemPrompt() string {
-	if b.braveKey == "" && b.tavilyKey == "" {
-		return ""
-	}
-	if b.skillOverrides("web-search") {
-		return ""
-	}
-	return "\n\n## Web Search\n\n" +
-		"You can search the web using the [search] directive. Use this instead of the built-in WebSearch tool.\n" +
-		"It uses the Brave Search API and returns richer, more detailed results.\n\n" +
-		"```\n[search query=\"your search query\"]\n```\n\n" +
-		"Optional attributes:\n" +
-		"- `count=\"N\"` — number of results (default 5)\n" +
-		"- `freshness=\"pd|pw|pm|py\"` — time filter (24h, 7d, 31d, 1yr)\n\n" +
-		"Example: `[search query=\"golang error handling best practices\" count=\"5\"]`\n\n" +
-		"The directive will be replaced with search results, and you will be re-prompted to answer using those results.\n" +
-		"Always prefer the [search] directive over WebSearch or ddgr.\n"
-}
-
-// parseSearchDirectives finds [search query="..."] directives in Claude's response,
-// runs the search, and returns the query + results for a follow-up turn.
-// Returns the cleaned response and search results (empty if no directives found).
-func (b *Bridge) parseSearchDirectives(ctx context.Context, response string) (string, string) {
-	if (b.braveKey == "" && b.tavilyKey == "") || b.skillOverrides("web-search") {
-		return response, ""
-	}
-
-	matches := searchRe.FindAllStringSubmatchIndex(response, -1)
-	if len(matches) == 0 {
-		return response, ""
-	}
-
-	var results strings.Builder
-	for _, m := range matches {
-		query := response[m[2]:m[3]]
-		count := 5
-		if m[4] >= 0 {
-			if n, err := strconv.Atoi(response[m[4]:m[5]]); err == nil {
-				count = n
-			}
-		}
-		freshness := ""
-		if m[6] >= 0 {
-			freshness = response[m[6]:m[7]]
-		}
-
-		slog.Info("search directive", "query", query, "count", count, "freshness", freshness)
-
-		searchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		resp, err := search.Search(searchCtx, b.braveKey, b.tavilyKey, search.Options{
-			Query:     query,
-			Count:     count,
-			Freshness: freshness,
-		})
-		cancel()
-
-		if err != nil {
-			slog.Warn("search failed", "query", query, "error", err)
-			results.WriteString(fmt.Sprintf("[Search for %q failed: %s]\n\n", query, err))
-			continue
-		}
-		results.WriteString(search.Markdown(resp))
-		results.WriteString("\n")
-	}
-
-	// Strip directives from response
-	cleaned := searchRe.ReplaceAllString(response, "")
-	cleaned = strings.TrimSpace(cleaned)
-
-	return cleaned, results.String()
 }
 
 // browserSystemPrompt returns the system prompt addition that tells Claude
@@ -2222,16 +1973,6 @@ func (b *Bridge) parseBrowserDirectives(ctx context.Context, chatID int64, respo
 
 		d := browser.ParseDirective(url, body)
 		r := browser.Execute(ctx, b.browserCfg, d)
-
-		// Send screenshots via imageSend
-		for _, step := range r.Steps {
-			if step.Screenshot != nil && b.imageSend != nil {
-				if b.chatAction != nil {
-					b.chatAction(chatID, "upload_photo")
-				}
-				b.imageSend(chatID, step.Screenshot, "")
-			}
-		}
 
 		results.WriteString(browser.FormatResults(r))
 		results.WriteString("\n")

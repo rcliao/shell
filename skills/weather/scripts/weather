@@ -1,0 +1,3 @@
+#!/bin/sh
+city="${1:-Los Angeles}"
+curl -s "wttr.in/${city}?format=%l:+%C+%t+%h+%w"

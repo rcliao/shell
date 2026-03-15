@@ -15,7 +15,6 @@ import (
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/config"
-	shellimagen "github.com/rcliao/shell-imagen"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
@@ -181,21 +180,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("planner initialized", "test_cmd", cfg.Planner.TestCmd, "max_retries", cfg.Planner.MaxRetries)
 	}
 
-	// Initialize image generator if Google API key is configured.
-	var ig *shellimagen.Generator
-	if apiKey := cfg.GoogleAPIKey(); apiKey != "" {
-		var err error
-		ig, err = shellimagen.New(apiKey, cfg.Google.Model, cfg.Google.Timeout)
-		if err != nil {
-			slog.Warn("imagen: failed to initialize", "error", err)
-		} else {
-			slog.Info("imagen initialized", "model", cfg.Google.Model)
-		}
-	}
-
 	// Create bridge
-	braveKey := cfg.Secret("BRAVE_SEARCH_API_KEY")
-	tavilyKey := cfg.Secret("TAVILY_API_KEY")
 	browserCfg := browser.Config{
 		Enabled:        cfg.Browser.Enabled,
 		Headless:       cfg.Browser.Headless,
@@ -226,12 +211,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("process manager initialized")
 	}
 
-	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, ig, braveKey, tavilyKey, browserCfg, tunnelMgr, pmMgr, skillRegistry)
-	if braveKey != "" {
-		slog.Info("search initialized", "provider", "brave")
-	} else if tavilyKey != "" {
-		slog.Info("search initialized", "provider", "tavily")
-	}
+	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, browserCfg, tunnelMgr, pmMgr, skillRegistry)
 
 	// Create auth with policy engine
 	configDir := config.DefaultConfigDir()
@@ -259,16 +239,6 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 		return nil, err
 	}
-
-	// Wire image sender: generate-image directive → Telegram photo
-	br.SetImageSender(func(chatID int64, imageData []byte, caption string) {
-		bot.SendPhoto(chatID, imageData, caption)
-	})
-
-	// Wire chat action sender: upload_photo indicators for shell image generation
-	br.SetChatAction(func(chatID int64, action string) {
-		bot.SendChatAction(chatID, action)
-	})
 
 	// Wire async notifications: plan progress → Telegram
 	br.SetNotifier(func(chatID int64, msg string) {
