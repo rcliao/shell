@@ -34,15 +34,12 @@ type PDFInfo struct {
 	Size int64  // file size in bytes (0 if unknown)
 }
 
-// NotifyFunc sends a message to a chat. Used for async plan progress reporting.
-type NotifyFunc func(chatID int64, msg string)
-
 type Bridge struct {
-	proc    process.Agent
-	store   *store.Store
-	memory  *memory.Memory   // nil if disabled
-	plan    *planner.Planner // nil if not configured
-	notify  NotifyFunc       // optional: push progress to user
+	proc      process.Agent
+	store     *store.Store
+	memory    *memory.Memory   // nil if disabled
+	plan      *planner.Planner // nil if not configured
+	transport Transport        // optional: push messages/photos to users
 
 	// Worktree isolation for plan execution
 	useWorktree  bool   // whether to create worktrees for plans
@@ -185,9 +182,9 @@ func (b *Bridge) registerSystemCancel(chatID int64, cancel context.CancelFunc) f
 	}
 }
 
-// SetNotifier sets the function used to push async messages (plan progress) to users.
-func (b *Bridge) SetNotifier(fn NotifyFunc) {
-	b.notify = fn
+// SetTransport sets the transport used to push messages/photos to users.
+func (b *Bridge) SetTransport(t Transport) {
+	b.transport = t
 }
 
 // SetSelfRestart configures auto-restart when a plan modifies shell's own source.

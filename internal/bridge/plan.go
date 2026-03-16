@@ -208,8 +208,8 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 		b.planMu.Lock()
 		run.progress = append(run.progress, msg)
 		b.planMu.Unlock()
-		if b.notify != nil {
-			b.notify(chatID, msg)
+		if b.transport != nil {
+			b.transport.Notify(chatID, msg)
 		}
 	}
 
@@ -230,8 +230,8 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 				b.planMu.Lock()
 				run.state = planStateBlocked
 				b.planMu.Unlock()
-				if b.notify != nil {
-					b.notify(chatID, b.formatPlanSummary(run))
+				if b.transport != nil {
+					b.transport.Notify(chatID, b.formatPlanSummary(run))
 				}
 				return nil
 			}
@@ -270,8 +270,8 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 			b.storeReviewerLearnings(ctx, run)
 			b.cleanupWorktree(run, chatID)
 
-			if b.notify != nil {
-				b.notify(chatID, b.formatPlanSummary(run))
+			if b.transport != nil {
+				b.transport.Notify(chatID, b.formatPlanSummary(run))
 			}
 			return nil
 		})
@@ -379,8 +379,8 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 		run.progress = append(run.progress, msg)
 		b.planMu.Unlock()
 
-		if b.notify != nil {
-			b.notify(chatID, msg)
+		if b.transport != nil {
+			b.transport.Notify(chatID, msg)
 		}
 	}
 
@@ -429,8 +429,8 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 			b.storeReviewerLearnings(ctx, run)
 			b.cleanupWorktree(run, chatID)
 
-			if b.notify != nil {
-				b.notify(chatID, b.formatPlanSummary(run))
+			if b.transport != nil {
+				b.transport.Notify(chatID, b.formatPlanSummary(run))
 			}
 			return nil
 		})
@@ -474,8 +474,8 @@ func (b *Bridge) executeMultiRepo(ctx context.Context, chatID int64, run *planRu
 
 			b.storeReviewerLearningsMultiRepo(ctx, run)
 
-			if b.notify != nil {
-				b.notify(chatID, b.formatPlanSummary(run))
+			if b.transport != nil {
+				b.transport.Notify(chatID, b.formatPlanSummary(run))
 			}
 			return
 		}
@@ -497,8 +497,8 @@ func (b *Bridge) executeMultiRepo(ctx context.Context, chatID int64, run *planRu
 	b.storeReviewerLearningsMultiRepo(ctx, run)
 	b.cleanupWorktree(run, chatID)
 
-	if b.notify != nil {
-		b.notify(chatID, b.formatPlanSummary(run))
+	if b.transport != nil {
+		b.transport.Notify(chatID, b.formatPlanSummary(run))
 	}
 }
 
@@ -639,15 +639,15 @@ func (b *Bridge) triggerSelfRestart(run *planRun, chatID int64) {
 	slog.Info("self-modification detected after plan merge, scheduling rebuild+restart")
 	run.progress = append(run.progress, "Changes affect shell itself — rebuilding and restarting...")
 	// Give a short delay so the notification can be sent before restart.
-	notify := b.notify
+	transport := b.transport
 	go func() {
 		time.Sleep(2 * time.Second)
 		b.onSelfRestart()
 		// If we get here, restart failed (exec replaces the process on success).
 		msg := "Self-restart failed. Relay continues running with old code."
 		slog.Error("self-restart: onSelfRestart returned (rebuild likely failed)")
-		if notify != nil && chatID != 0 {
-			notify(chatID, msg)
+		if transport != nil && chatID != 0 {
+			transport.Notify(chatID, msg)
 		}
 	}()
 }
@@ -981,8 +981,8 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 		b.planMu.Lock()
 		run.progress = append(run.progress, msg)
 		b.planMu.Unlock()
-		if b.notify != nil {
-			b.notify(chatID, msg)
+		if b.transport != nil {
+			b.transport.Notify(chatID, msg)
 		}
 	}
 
@@ -1022,8 +1022,8 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 
 			b.cleanupWorktree(run, chatID)
 
-			if b.notify != nil {
-				b.notify(chatID, b.formatPlanSummary(run))
+			if b.transport != nil {
+				b.transport.Notify(chatID, b.formatPlanSummary(run))
 			}
 			return nil
 		})

@@ -254,10 +254,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		return nil, err
 	}
 
-	// Wire async notifications: plan progress → Telegram
-	br.SetNotifier(func(chatID int64, msg string) {
-		bot.SendText(chatID, msg)
-	})
+	// Wire transport: plan progress, relay photos → Telegram
+	br.SetTransport(&telegramTransport{bot: bot})
 
 	// Register cron parser for bridge schedule commands.
 	bridge.SetCronParser(func(expr string) (interface{ Next(time.Time) time.Time }, error) {
@@ -605,6 +603,19 @@ func containsStr(ss []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// telegramTransport implements bridge.Transport for Telegram.
+type telegramTransport struct {
+	bot *telegram.Bot
+}
+
+func (t *telegramTransport) Notify(chatID int64, msg string) {
+	t.bot.SendText(chatID, msg)
+}
+
+func (t *telegramTransport) SendPhoto(chatID int64, data []byte, caption string) {
+	t.bot.SendPhoto(chatID, data, caption)
 }
 
 // resolveAgentNS returns the first AgentNS found in config profiles, or "" for legacy mode.
