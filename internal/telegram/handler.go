@@ -1512,6 +1512,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	resp, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, pdfs, onUpdate)
 
 	// Stop the streaming edit goroutine and wait for it to finish.
+	// Send one final signal so the goroutine flushes any remaining text
+	// before we close the channel.
+	select {
+	case dirty <- struct{}{}:
+	default:
+	}
 	close(dirty)
 	<-editDone
 
