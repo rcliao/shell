@@ -277,6 +277,23 @@ func New(cfg config.Config) (*Daemon, error) {
 		SendPhoto: func(chatID int64, data []byte, caption string) {
 			bot.SendPhoto(chatID, data, caption)
 		},
+		RelayToBridge: func(ctx context.Context, chatID int64, message string) {
+			// Route through bridge so Claude processes the relay and has it
+			// in its session history for the target chat.
+			resp, err := br.HandleMessageStreaming(ctx, chatID, message, "relay", nil, nil, nil)
+			if err != nil {
+				slog.Error("relay via bridge failed", "chat_id", chatID, "error", err)
+				// Fallback to direct send
+				bot.SendText(chatID, message)
+				return
+			}
+			for _, photo := range resp.Photos {
+				bot.SendPhoto(chatID, photo.Data, photo.Caption)
+			}
+			if resp.Text != "" {
+				bot.SendText(chatID, resp.Text)
+			}
+		},
 		CronParse: func(expr string) (interface{ Next(time.Time) time.Time }, error) {
 			return scheduler.ParseCron(expr)
 		},

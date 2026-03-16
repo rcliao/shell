@@ -26,6 +26,10 @@ type NotifyFunc func(chatID int64, msg string)
 // SendPhotoFunc sends a photo to a Telegram chat.
 type SendPhotoFunc func(chatID int64, data []byte, caption string)
 
+// RelayToBridgeFunc routes a relay message through the bridge so Claude
+// processes it and has it in its session history for the target chat.
+type RelayToBridgeFunc func(ctx context.Context, chatID int64, message string)
+
 // CronParser parses a cron expression and returns something with a Next method.
 type CronParser func(expr string) (interface{ Next(time.Time) time.Time }, error)
 
@@ -38,23 +42,25 @@ type Server struct {
 	tunnelMgr *tunnel.Manager
 	store     *store.Store
 	memory    *memory.Memory
-	notify    NotifyFunc
-	sendPhoto SendPhotoFunc
-	cronParse CronParser
-	timezone  string
+	notify         NotifyFunc
+	sendPhoto      SendPhotoFunc
+	relayToBridge  RelayToBridgeFunc
+	cronParse      CronParser
+	timezone       string
 }
 
 // Config holds the dependencies for the RPC server.
 type Config struct {
-	SocketPath string
-	PMMgr      *pm.Manager
-	TunnelMgr  *tunnel.Manager
-	Store      *store.Store
-	Memory     *memory.Memory
-	Notify     NotifyFunc
-	SendPhoto  SendPhotoFunc
-	CronParse  CronParser
-	Timezone   string
+	SocketPath    string
+	PMMgr         *pm.Manager
+	TunnelMgr     *tunnel.Manager
+	Store         *store.Store
+	Memory        *memory.Memory
+	Notify        NotifyFunc
+	SendPhoto     SendPhotoFunc
+	RelayToBridge RelayToBridgeFunc
+	CronParse     CronParser
+	Timezone      string
 }
 
 // DefaultSocketPath returns the default Unix socket path.
@@ -74,9 +80,10 @@ func New(cfg Config) *Server {
 		tunnelMgr: cfg.TunnelMgr,
 		store:     cfg.Store,
 		memory:    cfg.Memory,
-		notify:    cfg.Notify,
-		sendPhoto: cfg.SendPhoto,
-		cronParse: cfg.CronParse,
+		notify:        cfg.Notify,
+		sendPhoto:     cfg.SendPhoto,
+		relayToBridge: cfg.RelayToBridge,
+		cronParse:     cfg.CronParse,
 		timezone:  cfg.Timezone,
 	}
 }
@@ -240,32 +247,26 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Info("rpc: relaying photo", "to_chat_id", req.ChatID, "path", req.ImagePath, "caption_len", len(req.Message))
 		s.sendPhoto(req.ChatID, data, req.Message)
-		s.logRelay(req.ChatID, "[Relayed photo] "+req.Message)
+		// Also route a text description through the bridge so Claude has context.
+		if s.relayToBridge != nil {
+			s.relayToBridge(r.Context(), req.ChatID, "[Relayed photo with caption: "+req.Message+"]")
+		}
 		writeJSON(w, map[string]any{"ok": true, "type": "photo"})
 		return
 	}
 
 	slog.Info("rpc: relaying message", "to_chat_id", req.ChatID, "len", len(req.Message))
-	s.notify(req.ChatID, req.Message)
-	s.logRelay(req.ChatID, req.Message)
+
+	// Route through bridge so Claude's session for the target chat has context.
+	// This sends to Telegram AND adds to Claude's conversation history.
+	if s.relayToBridge != nil {
+		s.relayToBridge(r.Context(), req.ChatID, req.Message)
+	} else {
+		s.notify(req.ChatID, req.Message)
+	}
 	writeJSON(w, map[string]any{"ok": true, "type": "text"})
 }
 
-// logRelay logs a relayed message into the target chat's session so Claude
-// has context when the recipient replies.
-func (s *Server) logRelay(chatID int64, message string) {
-	if s.store == nil {
-		return
-	}
-	sess, err := s.store.GetSession(chatID)
-	if err != nil || sess == nil {
-		return
-	}
-	logMsg := "[Relay message sent to this chat]\n" + message
-	if err := s.store.LogMessage(sess.ID, "assistant", logMsg); err != nil {
-		slog.Warn("rpc: failed to log relay to target session", "chat_id", chatID, "error", err)
-	}
-}
 
 // ScheduleRequest is the JSON body for POST /schedule.
 type ScheduleRequest struct {
