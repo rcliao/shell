@@ -35,6 +35,11 @@ func NewRegistry(skills []*Skill) *Registry {
 	return r
 }
 
+// All returns all loaded skills.
+func (r *Registry) All() []*Skill {
+	return r.skills
+}
+
 // SystemPrompt returns the skills listing for the system prompt.
 // Includes name, description, directory path, and full body so the agent
 // knows how to invoke scripts by absolute path.

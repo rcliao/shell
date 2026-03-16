@@ -24,6 +24,7 @@ import (
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/telegram"
+	"github.com/rcliao/shell/internal/tool"
 )
 
 type Daemon struct {
@@ -92,13 +93,24 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
-	// Merge skill allowed-tools with config allowed-tools.
-	allowedTools := cfg.Claude.AllowedTools
+	// Build unified tool registry from all sources.
+	toolReg := tool.NewRegistry()
+
+	// Register MCP tools (first-class, bridge-internal).
+	toolReg.Register(tool.Tool{Name: "shell_pm", Description: "Process manager", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_pm"}})
+	toolReg.Register(tool.Tool{Name: "shell_tunnel", Description: "HTTP tunnels", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_tunnel"}})
+	toolReg.Register(tool.Tool{Name: "shell_relay", Description: "Message relay", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_relay"}})
+
+	// Register skill scripts.
 	if skillRegistry != nil {
-		allowedTools = append(allowedTools, skillRegistry.AllowedTools()...)
+		for _, s := range skillRegistry.All() {
+			toolReg.Register(tool.Tool{Name: s.Name, Description: s.Description, Kind: tool.KindSkill, AllowedTools: s.AllowedTools})
+		}
 	}
-	// Auto-approve MCP tools for PM and tunnel.
-	allowedTools = append(allowedTools, "mcp__shell-bridge__shell_pm", "mcp__shell-bridge__shell_tunnel", "mcp__shell-bridge__shell_relay")
+
+	// Merge all allowed-tools.
+	allowedTools := cfg.Claude.AllowedTools
+	allowedTools = append(allowedTools, toolReg.AllowedTools()...)
 
 	// Write MCP config for Claude CLI so it can call PM/tunnel tools directly.
 	bridgeSockPath := rpc.DefaultSocketPath()
