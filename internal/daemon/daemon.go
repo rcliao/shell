@@ -288,21 +288,14 @@ func New(cfg config.Config) (*Daemon, error) {
 			bot.SendPhoto(chatID, data, caption)
 		},
 		RelayToBridge: func(ctx context.Context, chatID int64, message string) {
-			// Route through bridge so Claude processes the relay and has it
-			// in its session history for the target chat.
-			resp, err := br.HandleMessageStreaming(ctx, chatID, message, "relay", nil, nil, nil)
-			if err != nil {
-				slog.Error("relay via bridge failed", "chat_id", chatID, "error", err)
-				// Fallback to direct send
-				bot.SendText(chatID, message)
-				return
+			// Log the relay message to the target chat's session so Claude
+			// has context when the recipient replies. Don't run a full Claude
+			// turn — that would block the session and cause "busy" rejections.
+			sess, err := st.GetSession(chatID)
+			if err == nil && sess != nil {
+				st.LogMessage(sess.ID, "assistant", "[Relay message]\n"+message)
 			}
-			for _, photo := range resp.Photos {
-				bot.SendPhoto(chatID, photo.Data, photo.Caption)
-			}
-			if resp.Text != "" {
-				bot.SendText(chatID, resp.Text)
-			}
+			bot.SendText(chatID, message)
 		},
 		CronParse: func(expr string) (interface{ Next(time.Time) time.Time }, error) {
 			return scheduler.ParseCron(expr)
