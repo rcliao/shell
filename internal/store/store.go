@@ -17,7 +17,7 @@ type Store struct {
 type Session struct {
 	ID               int64
 	ChatID           int64
-	ClaudeSessionID  string
+	ProviderSessionID  string
 	Status           string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
@@ -187,7 +187,7 @@ func (s *Store) GetSession(chatID int64) (*Session, error) {
 	`, chatID)
 
 	var sess Session
-	err := row.Scan(&sess.ID, &sess.ChatID, &sess.ClaudeSessionID, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt)
+	err := row.Scan(&sess.ID, &sess.ChatID, &sess.ProviderSessionID, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -357,7 +357,7 @@ func (s *Store) ListActiveSessions() ([]Session, error) {
 	var sessions []Session
 	for rows.Next() {
 		var sess Session
-		if err := rows.Scan(&sess.ID, &sess.ChatID, &sess.ClaudeSessionID, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.ChatID, &sess.ProviderSessionID, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)

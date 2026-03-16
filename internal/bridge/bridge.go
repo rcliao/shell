@@ -279,7 +279,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	procSess, _ := b.proc.Get(chatID)
 	claudeSessionID := ""
 	if procSess != nil && procSess.HasHistory {
-		claudeSessionID = procSess.ClaudeSessionID
+		claudeSessionID = procSess.ProviderSessionID
 	}
 
 	// Build system prompt from memory if available.
@@ -309,7 +309,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	// Track session ID and mark as having history
 	if procSess != nil {
 		if result.SessionID != "" {
-			procSess.ClaudeSessionID = result.SessionID
+			procSess.ProviderSessionID = result.SessionID
 			if err := b.store.SaveSession(chatID, result.SessionID); err != nil {
 				slog.Warn("failed to update session ID in store", "error", err)
 			}
@@ -372,7 +372,7 @@ func (b *Bridge) ensureSession(ctx context.Context, chatID int64) (*store.Sessio
 			procSess := &process.Session{
 				ID:              fmt.Sprintf("%d", sess.ID),
 				ChatID:          chatID,
-				ClaudeSessionID: sess.ClaudeSessionID,
+				ProviderSessionID: sess.ProviderSessionID,
 				Status:          process.StatusActive,
 				HasHistory:      true, // restored from DB = already has history
 				CreatedAt:       sess.CreatedAt,
@@ -387,7 +387,7 @@ func (b *Bridge) ensureSession(ctx context.Context, chatID int64) (*store.Sessio
 	procSess := process.NewSession(chatID)
 	b.proc.Register(procSess)
 
-	if err := b.store.SaveSession(chatID, procSess.ClaudeSessionID); err != nil {
+	if err := b.store.SaveSession(chatID, procSess.ProviderSessionID); err != nil {
 		return nil, fmt.Errorf("save session: %w", err)
 	}
 

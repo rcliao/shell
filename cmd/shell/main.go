@@ -179,7 +179,7 @@ func main() {
 			fmt.Printf("Active sessions: %d\n\n", len(sessions))
 			for _, s := range sessions {
 				fmt.Printf("  Chat ID: %d\n  Session: %s\n  Status: %s\n  Created: %s\n  Updated: %s\n\n",
-					s.ChatID, s.ClaudeSessionID[:12]+"...", s.Status,
+					s.ChatID, s.ProviderSessionID[:12]+"...", s.Status,
 					s.CreatedAt.Format("2006-01-02 15:04:05"),
 					s.UpdatedAt.Format("2006-01-02 15:04:05"),
 				)
@@ -217,7 +217,7 @@ func main() {
 
 			for _, s := range sessions {
 				fmt.Printf("%d\t%s\t%s\t%s\n",
-					s.ChatID, s.ClaudeSessionID[:12], s.Status,
+					s.ChatID, s.ProviderSessionID[:12], s.Status,
 					s.UpdatedAt.Format("2006-01-02 15:04"),
 				)
 			}

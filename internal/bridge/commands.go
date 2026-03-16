@@ -106,7 +106,7 @@ func (b *Bridge) Status(chatID int64) (string, error) {
 			"**Messages:** %d\n"+
 			"**Created:** %s\n"+
 			"**Last active:** %s",
-		sess.ClaudeSessionID[:12]+"...",
+		sess.ProviderSessionID[:12]+"...",
 		status,
 		len(msgs),
 		sess.CreatedAt.Format("2006-01-02 15:04:05"),

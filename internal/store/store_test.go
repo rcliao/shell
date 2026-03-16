@@ -35,8 +35,8 @@ func TestSaveAndGetSession(t *testing.T) {
 	if sess.ChatID != 12345 {
 		t.Errorf("expected chat_id 12345, got %d", sess.ChatID)
 	}
-	if sess.ClaudeSessionID != "claude-sess-abc" {
-		t.Errorf("expected claude-sess-abc, got %s", sess.ClaudeSessionID)
+	if sess.ProviderSessionID != "claude-sess-abc" {
+		t.Errorf("expected claude-sess-abc, got %s", sess.ProviderSessionID)
 	}
 }
 
@@ -62,8 +62,8 @@ func TestSaveSession_Upsert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sess.ClaudeSessionID != "sess-2" {
-		t.Errorf("expected sess-2 after upsert, got %s", sess.ClaudeSessionID)
+	if sess.ProviderSessionID != "sess-2" {
+		t.Errorf("expected sess-2 after upsert, got %s", sess.ProviderSessionID)
 	}
 }
 

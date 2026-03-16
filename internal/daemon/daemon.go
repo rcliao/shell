@@ -551,7 +551,7 @@ func (d *Daemon) restoreSessions() {
 		procSess := &process.Session{
 			ID:              fmt.Sprintf("%d", sess.ID),
 			ChatID:          sess.ChatID,
-			ClaudeSessionID: sess.ClaudeSessionID,
+			ProviderSessionID: sess.ProviderSessionID,
 			Status:          process.StatusActive,
 			HasHistory:      true,
 			CreatedAt:       sess.CreatedAt,
