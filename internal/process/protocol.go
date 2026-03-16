@@ -181,9 +181,16 @@ func writeJSON(w io.Writer, v any) error {
 //   - result         → final result text
 //   - keep_alive     → ignored
 func parseBidirectionalEvents(r io.Reader, stdin io.Writer, onUpdate StreamFunc) SendResult {
-	var result SendResult
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	return parseBidirectionalEventsScanner(scanner, stdin, onUpdate)
+}
+
+// parseBidirectionalEventsScanner is like parseBidirectionalEvents but takes
+// an existing scanner. Used by persistent processes to avoid losing buffered
+// bytes between turns.
+func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, onUpdate StreamFunc) SendResult {
+	var result SendResult
 
 	for scanner.Scan() {
 		line := scanner.Bytes()

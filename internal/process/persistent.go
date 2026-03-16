@@ -22,11 +22,12 @@ type persistentProc struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr bytes.Buffer
+	scanner *bufio.Scanner // persistent scanner across messages — avoids losing buffered bytes
 
 	sessionID string // Claude session ID (from init response)
 	chatID    int64
 
-	mu       sync.Mutex // guards stdin writes
+	mu       sync.Mutex // guards stdin writes and scanner reads
 	cancel   context.CancelFunc
 	idleTimer *time.Timer
 }
@@ -144,13 +145,17 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 		return nil, fmt.Errorf("send initialize: %w", err)
 	}
 
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 	proc := &persistentProc{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: stdout,
-		stderr: stderr,
-		chatID: req.ChatID,
-		cancel: cancel,
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  stdout,
+		stderr:  stderr,
+		scanner: sc,
+		chatID:  req.ChatID,
+		cancel:  cancel,
 	}
 
 	// Set up idle timer to kill the process if no messages arrive.
@@ -176,9 +181,9 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, onUp
 		return SendResult{}, fmt.Errorf("send user message: %w", err)
 	}
 
-	// Read events until we get a result.
-	// We need a per-message reader that stops at the result event.
-	result := parseBidirectionalEvents(p.stdout, p.stdin, onUpdate)
+	// Read events using the persistent scanner (not a new one per message).
+	// This avoids losing buffered bytes between turns.
+	result := parseBidirectionalEventsScanner(p.scanner, p.stdin, onUpdate)
 
 	// Update session ID if we got one.
 	if result.SessionID != "" {

@@ -20,6 +20,26 @@ const streamEditInterval = time.Second // minimum interval between Telegram mess
 
 const maxMessageLength = 4096
 
+// spinner frames for the thinking indicator.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// thinkingPhrases rotate to give the user a sense of progress.
+var thinkingPhrases = []string{
+	"Thinking",
+	"Reasoning",
+	"Working",
+	"Processing",
+	"Analyzing",
+}
+
+// thinkingMessage returns a Claude Code-style animated status for the given tick.
+func thinkingMessage(tick int) string {
+	frame := spinnerFrames[tick%len(spinnerFrames)]
+	phrase := thinkingPhrases[(tick/5)%len(thinkingPhrases)]
+	dots := strings.Repeat(".", (tick%3)+1)
+	return fmt.Sprintf("%s %s%s", frame, phrase, dots)
+}
+
 // albumCollectDelay is how long to wait for additional photos in a media group
 // before processing the album. Telegram delivers album photos as separate
 // messages in quick succession, so a short delay is sufficient.
@@ -1384,8 +1404,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	}
 	msgID := placeholder.ID
 
-	// Update the placeholder with elapsed time until the first chunk arrives.
-	thinkingStart := time.Now()
+	// Update the placeholder with fun messages until the first chunk arrives.
 	firstChunk := make(chan struct{})
 	var firstChunkOnce sync.Once
 	stopThinking := func() { firstChunkOnce.Do(func() { close(firstChunk) }) }
@@ -1393,18 +1412,18 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		tick := 0
 		for {
 			select {
 			case <-firstChunk:
 				return
-			case t := <-ticker.C:
-				elapsed := int(t.Sub(thinkingStart).Seconds())
-				text := fmt.Sprintf("Thinking\\.\\.\\. \\(%ds\\)", elapsed)
+			case <-ticker.C:
+				tick++
+				text := thinkingMessage(tick)
 				b.EditMessageText(ctx, &bot.EditMessageTextParams{
 					ChatID:    msg.Chat.ID,
 					MessageID: msgID,
 					Text:      text,
-					ParseMode: models.ParseModeMarkdown,
 				})
 			}
 		}
@@ -1413,74 +1432,88 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// Set up streaming state: accumulate text and throttle edits.
 	var mu sync.Mutex
 	var accumulated strings.Builder
-	lastEdit := time.Time{}
 	markdownFailed := false   // set when MarkdownV2 is rejected during streaming
 	lastSentContent := ""     // raw text of last successful streaming edit
 	lastUsedMarkdown := false // whether last streaming edit used MarkdownV2
+
+	// Streaming edit loop: a separate goroutine periodically flushes
+	// accumulated text to Telegram. This keeps onUpdate non-blocking
+	// so the stdout scanner isn't stalled by Telegram API latency.
+	dirty := make(chan struct{}, 1) // signal that new text is available
+	editDone := make(chan struct{})
+	go func() {
+		defer close(editDone)
+		for range dirty {
+			// Throttle: wait for the edit interval.
+			time.Sleep(streamEditInterval)
+
+			mu.Lock()
+			current := accumulated.String()
+			failed := markdownFailed
+			mu.Unlock()
+
+			if current == lastSentContent {
+				continue
+			}
+
+			if !failed {
+				formatted, ok := formatForTelegram(current, maxMessageLength)
+				if ok {
+					_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+						ChatID:    msg.Chat.ID,
+						MessageID: msgID,
+						Text:      formatted,
+						ParseMode: models.ParseModeMarkdown,
+					})
+					if editErr == nil {
+						lastSentContent = current
+						lastUsedMarkdown = true
+						continue
+					}
+					slog.Debug("streaming markdown edit failed, disabling for remaining edits", "error", editErr)
+					mu.Lock()
+					markdownFailed = true
+					mu.Unlock()
+				}
+			}
+
+			// Fallback: send without formatting.
+			plain := current
+			if len(plain) > maxMessageLength-3 {
+				plain = "..." + plain[len(plain)-maxMessageLength+3:]
+			}
+			_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    msg.Chat.ID,
+				MessageID: msgID,
+				Text:      plain,
+			})
+			if editErr != nil {
+				slog.Debug("failed to edit streaming message", "error", editErr)
+			} else {
+				lastSentContent = current
+				lastUsedMarkdown = false
+			}
+		}
+	}()
 
 	onUpdate := func(chunk string) {
 		stopThinking()
 		mu.Lock()
 		accumulated.WriteString(chunk)
-		current := accumulated.String()
-		now := time.Now()
-		shouldEdit := now.Sub(lastEdit) >= streamEditInterval
-		if shouldEdit {
-			lastEdit = now
-		}
-		failed := markdownFailed
 		mu.Unlock()
 
-		if !shouldEdit {
-			return
-		}
-
-		if !failed {
-			// Format for MarkdownV2, truncating from the front if the
-			// formatted result would exceed Telegram's message-length limit.
-			formatted, ok := formatForTelegram(current, maxMessageLength)
-			if ok {
-				_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
-					ChatID:    msg.Chat.ID,
-					MessageID: msgID,
-					Text:      formatted,
-					ParseMode: models.ParseModeMarkdown,
-				})
-				if editErr == nil {
-					mu.Lock()
-					lastSentContent = current
-					lastUsedMarkdown = true
-					mu.Unlock()
-					return
-				}
-				slog.Debug("streaming markdown edit failed, disabling for remaining edits", "error", editErr)
-				mu.Lock()
-				markdownFailed = true
-				mu.Unlock()
-			}
-		}
-
-		// Fallback: send without formatting if MarkdownV2 was rejected or unavailable.
-		plain := current
-		if len(plain) > maxMessageLength-3 {
-			plain = "..." + plain[len(plain)-maxMessageLength+3:]
-		}
-		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    msg.Chat.ID,
-			MessageID: msgID,
-			Text:      plain,
-		})
-		if editErr != nil {
-			slog.Debug("failed to edit streaming message", "error", editErr)
-		} else {
-			mu.Lock()
-			lastSentContent = current
-			lastUsedMarkdown = false
-			mu.Unlock()
+		// Signal the edit goroutine (non-blocking).
+		select {
+		case dirty <- struct{}{}:
+		default:
 		}
 	}
 
 	resp, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, pdfs, onUpdate)
+
+	// Stop the streaming edit goroutine and wait for it to finish.
+	close(dirty)
+	<-editDone
 
 	if err != nil {
 		slog.Error("bridge handle message failed", "error", err, "chat_id", msg.Chat.ID)
