@@ -33,8 +33,9 @@ type SendResult struct {
 }
 
 type Manager struct {
-	sessions map[int64]*Session
-	mu       sync.RWMutex
+	sessions   map[int64]*Session
+	persistent map[int64]*persistentProc // long-lived Claude processes per chat
+	mu         sync.RWMutex
 
 	binary         string
 	model          string
@@ -73,6 +74,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	return &Manager{
 		sessions:       make(map[int64]*Session),
+		persistent:     make(map[int64]*persistentProc),
 		binary:         cfg.Binary,
 		model:          cfg.Model,
 		timeout:        cfg.Timeout,
@@ -126,7 +128,15 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 		}
 	}()
 
-	result, err := m.runClaudeBidirectional(ctx, req, onUpdate)
+	// Try persistent process first (keeps process alive between messages).
+	result, err := m.sendPersistent(ctx, req, onUpdate)
+	if err == nil {
+		return result, nil
+	}
+
+	// Fall back to spawn-per-message.
+	slog.Info("falling back to spawn-per-message", "chat_id", req.ChatID, "error", err)
+	result, err = m.runClaudeBidirectional(ctx, req, onUpdate)
 	if err != nil && req.SessionID != "" {
 		slog.Warn("resume failed, retrying as fresh session", "chat_id", req.ChatID, "error", err)
 		freshReq := req
@@ -155,7 +165,9 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	if m.model != "" {
 		args = append(args, "--model", m.model)
 	}
-	if systemPrompt != "" {
+	// Only append system prompt on fresh sessions — resumed sessions
+	// already have the system prompt in their conversation history.
+	if systemPrompt != "" && claudeSessionID == "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
 	}
 	if len(m.allowedTools) > 0 {
@@ -268,6 +280,7 @@ func (m *Manager) Remove(chatID int64) {
 
 // Kill terminates any running process for a chat ID and removes the session.
 func (m *Manager) Kill(chatID int64) {
+	m.killPersistent(chatID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if sess, ok := m.sessions[chatID]; ok {
@@ -278,6 +291,7 @@ func (m *Manager) Kill(chatID int64) {
 
 // KillAll terminates all sessions.
 func (m *Manager) KillAll() {
+	m.killAllPersistent()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, sess := range m.sessions {
