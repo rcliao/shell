@@ -26,6 +26,12 @@ type Config struct {
 	Tunnel TunnelConfig `json:"tunnel"`
 	PM        PMConfig        `json:"pm"`
 	Skills    SkillsConfig    `json:"skills"`
+	Agents    AgentsConfig    `json:"agents"`
+}
+
+// AgentsConfig controls multi-agent manifests.
+type AgentsConfig struct {
+	Dir string `json:"dir"` // directory containing agent manifests (default: ~/.shell/agents)
 }
 
 type SkillsConfig struct {

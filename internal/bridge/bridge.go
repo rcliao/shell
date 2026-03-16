@@ -36,6 +36,7 @@ type PDFInfo struct {
 
 type Bridge struct {
 	proc      process.Agent
+	pool      AgentPool        // optional: multi-agent routing
 	store     *store.Store
 	memory    *memory.Memory   // nil if disabled
 	plan      *planner.Planner // nil if not configured
@@ -187,6 +188,21 @@ func (b *Bridge) SetTransport(t Transport) {
 	b.transport = t
 }
 
+// SetPool enables multi-agent routing. When set, the bridge resolves
+// which Agent handles each chat via the pool instead of using proc directly.
+func (b *Bridge) SetPool(p AgentPool) {
+	b.pool = p
+}
+
+// resolveAgent returns the Agent for a given chatID.
+// Uses the pool if available, otherwise falls back to the single proc.
+func (b *Bridge) resolveAgent(chatID int64) process.Agent {
+	if b.pool != nil {
+		return b.pool.Resolve(chatID)
+	}
+	return b.proc
+}
+
 // SetSelfRestart configures auto-restart when a plan modifies shell's own source.
 func (b *Bridge) SetSelfRestart(sourceDir string, fn func()) {
 	b.selfSourceDir = sourceDir
@@ -275,8 +291,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		ctx = sysCtx
 	}
 
-	// Determine claude session ID for --resume
-	procSess, _ := b.proc.Get(chatID)
+	// Determine session ID for --resume
+	agent := b.resolveAgent(chatID)
+	procSess, _ := agent.Get(chatID)
 	claudeSessionID := ""
 	if procSess != nil && procSess.HasHistory {
 		claudeSessionID = procSess.ProviderSessionID
@@ -294,7 +311,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	endTrack := b.trackSession(ctx, chatID, senderName)
 	defer endTrack()
 
-	result, err := b.proc.Send(ctx, process.AgentRequest{
+	result, err := agent.Send(ctx, process.AgentRequest{
 		ChatID:       chatID,
 		SessionID:    claudeSessionID,
 		Text:         augmentedMsg,

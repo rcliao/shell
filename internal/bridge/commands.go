@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 )
 
 // HandleCommand processes a bot command.
@@ -50,6 +51,8 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.PM(ctx, chatID, args)
 	case "tunnel":
 		return b.Tunnel(ctx, chatID, args)
+	case "agent":
+		return b.SwitchAgent(ctx, chatID, args)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -193,8 +196,52 @@ func (b *Bridge) Help() string {
 			"- `/tunnel stop <port>` — Stop a tunnel\n"
 	}
 
+	if b.pool != nil {
+		help += "\n### Agents\n\n" +
+			"- `/agent` — Show current agent\n" +
+			"- `/agent <name>` — Switch to a different agent\n"
+	}
+
 	help += "\n---\n\n" +
 		"`/reactions` — Show emoji→action mappings\n" +
 		"`/help` — Show this help message"
 	return help
+}
+
+// SwitchAgent handles the /agent command: show current agent or switch.
+func (b *Bridge) SwitchAgent(ctx context.Context, chatID int64, args string) (string, error) {
+	if b.pool == nil {
+		return "Multi-agent not configured.", nil
+	}
+
+	args = strings.TrimSpace(args)
+
+	// No args: show current agent and list available.
+	if args == "" {
+		current := b.pool.CurrentAgent(chatID)
+		names := b.pool.AgentNames()
+		sort.Strings(names)
+		msg := fmt.Sprintf("Current agent: **%s**\n\nAvailable agents:\n", current)
+		for _, name := range names {
+			marker := ""
+			if name == current {
+				marker = " ← current"
+			}
+			msg += fmt.Sprintf("- `%s`%s\n", name, marker)
+		}
+		return msg, nil
+	}
+
+	// Switch agent.
+	if !b.pool.Route(chatID, args) {
+		return fmt.Sprintf("Agent %q not found. Use `/agent` to see available agents.", args), nil
+	}
+
+	// Kill current session so next message starts fresh with the new agent.
+	b.proc.Kill(chatID)
+	if err := b.store.DeleteSession(chatID); err != nil {
+		slog.Warn("failed to delete session on agent switch", "error", err)
+	}
+
+	return fmt.Sprintf("Switched to agent **%s**. Starting fresh session.", args), nil
 }
