@@ -10,20 +10,25 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 │  long-poll, reactions, photos, albums, commands │
 ├─────────────────────────────────────────────────┤
 │  Bridge (routing)                               │
-│  directive parsing, memory injection, callbacks │
-├──────────────┬──────────────────────────────────┤
-│  Process Mgr │  Planner   │  Scheduler          │
-│  sessions,   │  execute → │  cron, once,        │
-│  streaming,  │  test →    │  heartbeat,         │
-│  resume      │  review    │  quiet hours        │
-├──────────────┴────────────┴─────────────────────┤
+│  memory injection, artifact parsing, callbacks  │
+├──────────┬──────────┬───────────────────────────┤
+│ Process  │ Planner  │  Scheduler                │
+│ sessions │ execute→ │  cron, once,              │
+│ streaming│ test→    │  heartbeat,               │
+│ resume   │ review   │  quiet hours              │
+├──────────┴──────────┴───────────────────────────┤
+│  MCP Server        │  RPC Server                │
+│  shell_pm,         │  /pm, /tunnel, /relay,     │
+│  shell_tunnel,     │  /schedule, /memory, /task │
+│  shell_relay       │  (Unix socket)             │
+├────────────────────┴────────────────────────────┤
 │  Store (SQLite)     │  Memory (ghost)           │
 │  sessions, messages │  semantic search,         │
 │  message_map,       │  namespaces, tiers,       │
 │  schedules, tasks   │  exchange logging         │
 ├─────────────────────┴───────────────────────────┤
 │  Utilities                                      │
-│  tunnel, pm, worktree                           │
+│  tunnel, pm, worktree, skills                   │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -31,9 +36,11 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 
 | Package | Path | Purpose |
 |---------|------|---------|
-| **main** | `cmd/shell/main.go` | Cobra CLI: daemon, send, status, session, pairing, restart, stop, init, search |
-| **bridge** | `internal/bridge/` | Core routing: Telegram ↔ Claude. Directive parsing, command handling, reaction routing |
+| **main** | `cmd/shell/main.go` | Cobra CLI: daemon, send, status, session, pairing, restart, stop, init, search, mcp |
+| **bridge** | `internal/bridge/` | Core routing: Telegram ↔ Claude. Command handling, reaction routing, artifact parsing |
 | **process** | `internal/process/` | Claude CLI subprocess lifecycle. Agent interface, session management, streaming |
+| **mcp** | `internal/mcp/` | MCP stdio server exposing `shell_pm`, `shell_tunnel`, `shell_relay` as native Claude tools |
+| **rpc** | `internal/rpc/` | HTTP-over-Unix-socket RPC server for skill scripts and MCP server |
 | **telegram** | `internal/telegram/` | Bot wrapper, handlers, policy-based auth, pairing, rate limiting, allowlist, photo/PDF download, MarkdownV2 formatting |
 | **store** | `internal/store/` | SQLite persistence: sessions, messages, message_map, schedules, tasks |
 | **config** | `internal/config/` | JSON config from `~/.shell/config.json` with all feature flags |
@@ -41,9 +48,9 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **memory** | `internal/memory/` | Semantic memory via ghost library. Namespaces, profiles, exchange logging |
 | **planner** | `internal/planner/` | Plan execution: execute → test → review → decide (done/retry/blocked) |
 | **scheduler** | `internal/scheduler/` | Cron/one-shot/heartbeat scheduler with quiet hours and noop suppression |
+| **skill** | `internal/skill/` | Skill registry: loads `~/.shell/skills/` and generates system prompt |
 | **search** | `internal/search/` | Web search cascade: Brave → Tavily → DuckDuckGo |
 | **worktree** | `internal/worktree/` | Git worktree isolation for plan execution |
-| **skill** | `internal/skill/` | Skill registry: loads `.claude/skills/` and generates system prompt |
 | **reload** | `internal/reload/` | Live reload: watch .go files → rebuild → syscall.Exec |
 
 ## Data Flow
@@ -56,24 +63,19 @@ Telegram Bot (long-poll)
   │ auth check → bridge.HandleMessageStreaming()
   ▼
 Bridge
-  │ inject memory context + system prompt
+  │ inject memory context + system prompt + skill instructions
   │ inject current time, sender identity
   │ convert ImageInfo/PDFInfo → process.ImageAttachment/PDFAttachment
   ▼
 Process Manager
-  │ AgentRequest → CLI subprocess
+  │ AgentRequest → CLI subprocess (--mcp-config for MCP tools)
   │ parse stream events → onUpdate callback → live Telegram edits
+  │ Claude calls MCP tools (shell_pm, shell_tunnel, shell_relay) directly
+  │ Claude calls skill scripts via Bash for schedule/remember/task
   ▼
 Bridge (response processing — processResponse())
-  ├─ [pm cmd="..."]            → background process → re-prompt with status
-  ├─ [tunnel port="..."]       → cloudflared → re-prompt with URL
-  ├─ [relay to=CHAT_ID]        → send to another chat
-  ├─ [schedule cron="..."]     → save to store
-  ├─ [remember]...[/remember]  → store to memory namespace
   ├─ [artifact type="image"]   → read file → collect Photo (skill output)
   ├─ [noop]                    → suppress heartbeat output
-  ├─ [heartbeat-learning]      → store insight to heartbeat NS
-  └─ [task-complete id=N]      → mark background task done
   │
   │ log exchange to store + memory
   │ return AgentResponse{Text, Photos}
@@ -84,6 +86,42 @@ Telegram Bot
   ▼
 User (Telegram)
 ```
+
+## Tool System (Three Layers)
+
+### MCP Tools (first-class, bridge-internal)
+
+Claude CLI connects to `shell mcp` as a stdio MCP server. These tools are called
+natively through the MCP protocol — no Bash intermediary.
+
+```
+Claude CLI ──MCP stdio──► shell mcp ──HTTP──► bridge RPC (Unix socket)
+                                              │
+  shell_pm     → POST /pm     → pmMgr.Start/Stop/List
+  shell_tunnel → POST /tunnel → tunnelMgr.Start/Stop/List
+  shell_relay  → POST /relay  → bot.SendText/SendPhoto + bridge session
+```
+
+MCP tools are auto-approved via `--allowedTools mcp__shell-bridge__shell_*`.
+Config written to `~/.shell/mcp.json` by daemon, passed via `--mcp-config`.
+
+### RPC Server (Unix socket API)
+
+HTTP server on `~/.shell/bridge.sock` for skill scripts and MCP server:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /pm` | Process manager operations |
+| `POST /tunnel` | Tunnel operations |
+| `POST /relay` | Relay messages (routes through bridge for context) |
+| `POST /schedule` | Create schedules |
+| `POST /memory` | Store memories |
+| `POST /task` | Complete tasks |
+
+### Skill Scripts (Bash wrappers)
+
+Loaded from `~/.shell/skills/` and `.agent/skills/`. Each has `SKILL.md` (frontmatter)
+and `scripts/` directory. Claude calls them via Bash tool, they call RPC via curl.
 
 ## Layer Interfaces
 
@@ -97,7 +135,7 @@ HandleMessageStreaming(
     ctx        context.Context,
     chatID     int64,
     userMsg    string,
-    senderName string,
+    senderName string,              // "heartbeat", "scheduler", "relay", "" for user
     images     []bridge.ImageInfo,  // {Path, Width, Height, Size}
     pdfs       []bridge.PDFInfo,    // {Path, Size}
     onUpdate   process.StreamFunc,  // func(delta string)
@@ -105,12 +143,10 @@ HandleMessageStreaming(
 
 // Output
 bridge.AgentResponse {
-    Text   string   // final text, all directives stripped
+    Text   string   // final text, artifacts stripped
     Photos []Photo  // collected images {Data []byte, Caption string}
 }
 ```
-
-Bridge augments the message (memory context, sender tag, timestamps), builds the system prompt, converts `ImageInfo`/`PDFInfo` → `process.ImageAttachment`/`PDFAttachment`, and runs the response through `processResponse()` which strips directives and collects photos.
 
 ### Bridge → Process
 
@@ -124,7 +160,7 @@ Agent.Send(
 
 // Output
 process.SendResult {
-    Text      string      // raw Claude response (directives still present)
+    Text      string      // raw Claude response
     SessionID string      // Claude session ID for future --resume
     ToolCalls []ToolCall   // tool invocations observed
 }
@@ -135,11 +171,12 @@ process.SendResult {
 Bidirectional protocol via stdin/stdout JSON:
 ```
 claude -p --input-format stream-json --output-format stream-json \
-    --permission-mode bypassPermissions [--setting-sources "user,project"]
+    --permission-mode bypassPermissions --mcp-config ~/.shell/mcp.json \
+    [--setting-sources "user,project"]
 
 stdin (SDK → CLI):
   1. {"type":"control_request", "request":{"subtype":"initialize"}}
-  2. {"type":"user", "message":{"role":"user", "content":"[Attached image: ...]\nwhat is this?"}}
+  2. {"type":"user", "message":{"role":"user", "content":"..."}}
   3. {"type":"control_response", ...}  (in response to CLI permission checks)
 
 stdout (CLI → SDK):
@@ -149,6 +186,10 @@ stdout (CLI → SDK):
   - control_request → auto-allow (can_use_tool)
   - result → final text, terminates the event loop
 ```
+
+Environment variables set on Claude subprocess:
+- `SHELL_CHAT_ID` — current Telegram chat ID
+- `SHELL_BRIDGE_SOCK` — path to RPC Unix socket
 
 ## Security & Access Control
 
@@ -204,24 +245,6 @@ Incoming message
 
 In-memory sliding window: 5 attempts per 60 seconds per sender. Only applies to denied/pairing users. Rate-limited messages are silently dropped.
 
-### Persistence
-
-| File | Purpose |
-|------|---------|
-| `~/.shell/allowlist.json` | Pairing-approved users (file-locked) |
-| `~/.shell/pairing.json` | Pending pairing requests (file-locked, cross-process) |
-| `config.json:allowed_users` | Static super-admin list |
-| `config.json:group_allowed_users` | Static group allowlist |
-
-### CLI Commands
-
-```
-shell pairing list       # Show pending pairing requests
-shell pairing approve X  # Approve a pairing code
-shell pairing allowlist  # List dynamically approved users
-shell pairing revoke ID  # Revoke a user from dynamic allowlist
-```
-
 ## Agent Interface
 
 ```go
@@ -263,6 +286,20 @@ Auto-retry on resume failure: falls back to fresh session.
 | `message_map` | telegram_msg_id → session_id, user_content, bot_content | Reaction routing |
 | `schedules` | chat_id, type, cron_expr, message, mode, next_run_at, enabled | Cron/once/heartbeat |
 | `tasks` | chat_id, description, status, created_at | Background task queue |
+
+## File Paths
+
+| Path | Purpose |
+|------|---------|
+| `~/.shell/config.json` | Main configuration |
+| `~/.shell/shell.db` | SQLite database |
+| `~/.shell/shell.pid` | Daemon PID file |
+| `~/.shell/mcp.json` | MCP config (auto-generated) |
+| `~/.shell/bridge.sock` | RPC Unix socket |
+| `~/.shell/pairing.json` | Pending pairing requests |
+| `~/.shell/allowlist.json` | Approved users |
+| `~/.shell/worktrees/` | Git worktree checkouts |
+| `~/.shell/skills/` | Installed skills |
 
 ## Reaction System
 
@@ -315,8 +352,8 @@ Periodic check-ins routed through Claude with full context:
 2. Bridge enriches with: recent exchanges, heartbeat insights, pending tasks, memory
 3. Claude responds with awareness of conversation state
 4. `[noop]` suppresses output when nothing to report
-5. `[heartbeat-learning]` stores insights for future heartbeats
-6. `[task-complete id=N]` marks background tasks done
+5. Claude uses `scripts/shell-remember --action heartbeat-learning` for insights
+6. Claude uses `scripts/shell-task complete --id N` for task completion
 7. Memory reflection runs after each heartbeat cycle
 
 Quiet hours (default 10 PM–7 AM) suppress heartbeat firing.
@@ -347,7 +384,6 @@ Key operations:
 - `InjectContext()` — prepend relevant memories to user message
 - `SystemPrompt()` — load always-on namespaces
 - `LogExchange()` — store conversation for future recall
-- `ParseMemoryDirectives()` — extract `[remember]` blocks from response
 - `RunReflect()` — promote/decay/prune memories post-heartbeat
 
 ## Configuration
@@ -374,20 +410,24 @@ Key operations:
 `daemon.New(config)` wires everything in order:
 
 1. Open secret store (if enabled)
-2. Export search API keys to env
+2. Export secrets to env for child processes
 3. Open SQLite store
-4. Create process manager
-5. Initialize memory store (if enabled)
-6. Initialize planner (if enabled)
-7. Create bridge with all components
-8. Create Telegram bot
-9. Wire async callbacks (image sender, chat action, notifier)
-10. Initialize scheduler (if enabled)
-11. Initialize tunnel manager (if enabled)
-12. Initialize process manager (if enabled)
-13. Start reload watcher (if enabled)
+4. Load skills from `~/.shell/skills/` and `.agent/skills/`
+5. Merge allowed-tools (config + skills + MCP auto-approve)
+6. Write MCP config to `~/.shell/mcp.json`
+7. Create process manager (with MCP config path + bridge socket path)
+8. Initialize memory store (if enabled)
+9. Initialize planner (if enabled)
+10. Initialize tunnel manager (if enabled)
+11. Initialize process manager (if enabled)
+12. Create bridge with all components
+13. Create Telegram bot
+14. Wire async callbacks (notifier, cron parser)
+15. Create RPC server for skill scripts + MCP
+16. Initialize scheduler (if enabled)
+17. Start reload watcher (if enabled)
 
-`daemon.Run(ctx)` starts Telegram long-poll + scheduler tick loop.
+`daemon.Run(ctx)` starts RPC server + Telegram long-poll + scheduler tick loop.
 
 ## CLI Commands
 
@@ -401,3 +441,4 @@ Key operations:
 | `shell status` | Show active sessions |
 | `shell session list\|kill` | Session management |
 | `shell search "query"` | Web search from CLI |
+| `shell mcp` | MCP stdio server (spawned by Claude CLI) |

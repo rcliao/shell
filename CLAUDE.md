@@ -12,6 +12,8 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 - `internal/telegram/` — Bot wrapper, handlers, auth, photo download
 - `internal/daemon/` — Daemon lifecycle, PID file, signal handling
 - `internal/memory/` — Optional memory store integration (ghost)
+- `internal/mcp/` — MCP stdio server: exposes PM, tunnel, relay as native Claude tools
+- `internal/rpc/` — HTTP-over-Unix-socket RPC for skill scripts and MCP server
 - `internal/planner/` — Optional plan-execute-review loop
 - `internal/reload/` — Live reload watcher (rebuild + syscall.Exec)
 - `internal/worktree/` — Git worktree isolation for plan execution
@@ -23,14 +25,15 @@ Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram cha
 
 ## Commands
 
-- `shellinit` — Create config directory and default config
-- `shelldaemon` — Start the bot daemon (`--watch` for live reload)
-- `shellrestart` — Send SIGHUP to running daemon (graceful restart)
-- `shellstop` — Send SIGTERM to running daemon (graceful shutdown)
-- `shellsend "msg"` — One-shot test without Telegram
-- `shellstatus` — Show active sessions
-- `shellsession list|kill <chat-id>` — Session management
-- `shellpairing list|approve|allowlist|revoke` — Pairing and allowlist management
+- `shell init` — Create config directory and default config
+- `shell daemon` — Start the bot daemon (`--watch` for live reload)
+- `shell restart` — Send SIGHUP to running daemon (graceful restart)
+- `shell stop` — Send SIGTERM to running daemon (graceful shutdown)
+- `shell send "msg"` — One-shot test without Telegram
+- `shell status` — Show active sessions
+- `shell session list|kill <chat-id>` — Session management
+- `shell pairing list|approve|allowlist|revoke` — Pairing and allowlist management
+- `shell mcp` — MCP stdio server (spawned by Claude CLI, not run manually)
 
 ## Build & Test
 
@@ -48,7 +51,7 @@ make install-skills  # Build and install skills to ~/.shell/skills/
 - Each Telegram message → `bridge.HandleMessageStreaming()` → `process.Agent.Send(AgentRequest, onUpdate)` → Claude CLI
 - Bidirectional protocol: `--input-format stream-json --output-format stream-json` with stdin/stdout JSON control protocol
 - Typed boundaries: `AgentRequest` (bridge→process), `SendResult` (process→bridge), `AgentResponse` (bridge→telegram)
-- Response processing via `processResponse()`: strips directives, collects `Photo`s, logs exchange
+- Response processing via `processResponse()`: collects `Photo`s from artifacts, logs exchange
 - Sessions persist across restarts via SQLite
 - Allowlist-based auth by Telegram user ID
 - Streaming responses with live Telegram message edits
@@ -58,7 +61,6 @@ make install-skills  # Build and install skills to ~/.shell/skills/
 - SIGHUP triggers graceful restart via syscall.Exec (same pattern as reload.go)
 - Config: `~/.shell/config.json` with `allowed_tools` for auto-approving Claude CLI tools
 - Emoji reactions map to actions (go, stop, cancel, status, regenerate, remember, forget, retry)
-- Scheduler: `/schedule add|list|delete|enable|pause` commands + `[schedule]` response directive for Claude-initiated scheduling
 - Heartbeat: `/heartbeat <interval> <message>` — periodic check-in routed through Claude with session context (one per chat)
   - Quiet hours: heartbeats suppressed during configurable window (default 10 PM - 7 AM in scheduler timezone)
   - Proactive checks: heartbeat prompts Claude to check for anything needing attention
@@ -68,58 +70,49 @@ make install-skills  # Build and install skills to ~/.shell/skills/
   - Check-in messages: every ~4 heartbeats, a friendly check-in hint is included
 - Scheduler config: `{"scheduler": {"enabled": true, "timezone": "UTC", "quiet_hour_start": 22, "quiet_hour_end": 7}}` in config.json
 
-## Skills
+## Tool System (Three Layers)
+
+### MCP Tools (first-class, bridge-internal)
+
+Claude calls these directly as native tools via the MCP protocol — no Bash, no curl.
+The daemon writes `~/.shell/mcp.json` and passes `--mcp-config` to Claude CLI.
+
+| Tool | Description |
+|------|-------------|
+| `shell_pm` | Process manager: start, stop, list, logs, remove background processes |
+| `shell_tunnel` | HTTP tunnels: start, stop, list via Cloudflare quick tunnels |
+| `shell_relay` | Send messages/photos to other Telegram chats |
+
+**NEVER run long-running processes directly via Bash** — always use `shell_pm`.
+
+**Web app workflow:**
+1. Write app files
+2. `shell_pm(action="start", name="web", command="node server.js", dir="/path")` — starts in background
+3. `shell_tunnel(action="start", port="8080")` — expose via public URL
+
+Requires `"pm": {"enabled": true}` and `"tunnel": {"enabled": true}` in config.
+Cloudflared must be installed (`brew install cloudflared`).
+
+### Skill Scripts (Bash via RPC)
 
 Skills are pluggable capabilities loaded from `~/.shell/skills/` and `.agent/skills/`.
 Each skill has a `SKILL.md` (frontmatter + instructions) and optional `scripts/` directory.
 Skills inject their instructions into the system prompt and declare allowed tools.
+Skill scripts call the bridge RPC server on `~/.shell/bridge.sock` via curl.
 
-Built-in skills (source in `cmd/shell-*`, definitions in `skills/`):
-- **web-search** — Web search via Brave/Tavily APIs (`scripts/web-search <query>`)
-- **generate-image** — Image generation via Google Gemini (`scripts/generate-image <prompt>`)
+| Skill | Description |
+|-------|-------------|
+| `shell-schedule` | Create one-shot or cron schedules via RPC |
+| `shell-remember` | Store memories and heartbeat learnings via RPC |
+| `shell-task` | Mark background tasks complete via RPC |
+| `web-search` | Web search via Brave/Tavily APIs |
+| `generate-image` | Image generation via Google Gemini |
+| `browser` | Headless Chrome automation |
+
+### Artifact Markers (text-based, passive)
 
 Skills output `[artifact type="image" path="..." caption="..."]` markers that the bridge
-picks up and sends as Telegram photos.
-
-## HTTP Tunnels
-
-Expose local ports to the internet via Cloudflare quick tunnels using the `[tunnel]` directive.
-
-```
-[tunnel port="8080"]
-[tunnel action="stop" port="8080"]
-[tunnel action="list"]
-```
-
-- `port` — local port to expose (required for start/stop)
-- `action` — `start` (default), `stop`, or `list`
-- `protocol` — `http` (default) or `https`
-
-Requires `"tunnel": {"enabled": true}` in config and `cloudflared` installed (`brew install cloudflared`).
-
-## Process Manager
-
-Use the `[pm]` directive to manage background processes. **NEVER** run long-running processes (servers, watchers) directly via Bash — use `[pm]` instead.
-
-```
-[pm name="myserver" cmd="node server.js" dir="/path/to/app"]
-[pm action="list"]
-[pm action="logs" name="myserver"]
-[pm action="stop" name="myserver"]
-[pm action="remove" name="myserver"]
-```
-
-- `name` — unique process name (required for start/stop/logs/remove)
-- `cmd` — shell command (required for start)
-- `dir` — working directory (optional)
-- `action` — `start` (default when cmd provided), `stop`, `list`, `logs`, `remove`
-
-Requires `"pm": {"enabled": true}` in config.
-
-**Web app workflow:**
-1. Write app files
-2. `[pm name="web" cmd="node server.js" dir="/path/to/app"]` — starts in background
-3. `[tunnel port="8080"]` — expose via public URL
+picks up and sends as Telegram photos. `[noop]` suppresses heartbeat output.
 
 ## Available CLI Tools
 
