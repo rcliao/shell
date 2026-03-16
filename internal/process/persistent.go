@@ -84,7 +84,9 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	if m.model != "" {
 		args = append(args, "--model", m.model)
 	}
-	if req.SystemPrompt != "" {
+	// Only append system prompt on fresh sessions — resumed sessions
+	// already have the system prompt in their conversation history.
+	if req.SystemPrompt != "" && req.SessionID == "" {
 		args = append(args, "--append-system-prompt", req.SystemPrompt)
 	}
 	if len(m.allowedTools) > 0 {
