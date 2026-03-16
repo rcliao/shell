@@ -247,9 +247,11 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Info("rpc: relaying photo", "to_chat_id", req.ChatID, "path", req.ImagePath, "caption_len", len(req.Message))
 		s.sendPhoto(req.ChatID, data, req.Message)
-		// Also route a text description through the bridge so Claude has context.
-		if s.relayToBridge != nil {
-			s.relayToBridge(r.Context(), req.ChatID, "[Relayed photo with caption: "+req.Message+"]")
+		// Log to target chat's store so Claude has context (don't send text to Telegram).
+		if s.store != nil {
+			if sess, err := s.store.GetSession(req.ChatID); err == nil && sess != nil {
+				s.store.LogMessage(sess.ID, "assistant", "[Relayed photo] "+req.Message)
+			}
 		}
 		writeJSON(w, map[string]any{"ok": true, "type": "photo"})
 		return
