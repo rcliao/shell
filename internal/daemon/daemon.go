@@ -98,7 +98,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		allowedTools = append(allowedTools, skillRegistry.AllowedTools()...)
 	}
 	// Auto-approve MCP tools for PM and tunnel.
-	allowedTools = append(allowedTools, "mcp__shell-bridge__shell_pm", "mcp__shell-bridge__shell_tunnel")
+	allowedTools = append(allowedTools, "mcp__shell-bridge__shell_pm", "mcp__shell-bridge__shell_tunnel", "mcp__shell-bridge__shell_relay")
 
 	// Write MCP config for Claude CLI so it can call PM/tunnel tools directly.
 	bridgeSockPath := rpc.DefaultSocketPath()
@@ -273,6 +273,9 @@ func New(cfg config.Config) (*Daemon, error) {
 		Memory:     mem,
 		Notify: func(chatID int64, msg string) {
 			bot.SendText(chatID, msg)
+		},
+		SendPhoto: func(chatID int64, data []byte, caption string) {
+			bot.SendPhoto(chatID, data, caption)
 		},
 		CronParse: func(expr string) (interface{ Next(time.Time) time.Time }, error) {
 			return scheduler.ParseCron(expr)

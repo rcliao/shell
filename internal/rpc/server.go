@@ -23,6 +23,9 @@ import (
 // NotifyFunc sends a text message to a Telegram chat.
 type NotifyFunc func(chatID int64, msg string)
 
+// SendPhotoFunc sends a photo to a Telegram chat.
+type SendPhotoFunc func(chatID int64, data []byte, caption string)
+
 // CronParser parses a cron expression and returns something with a Next method.
 type CronParser func(expr string) (interface{ Next(time.Time) time.Time }, error)
 
@@ -36,6 +39,7 @@ type Server struct {
 	store     *store.Store
 	memory    *memory.Memory
 	notify    NotifyFunc
+	sendPhoto SendPhotoFunc
 	cronParse CronParser
 	timezone  string
 }
@@ -48,6 +52,7 @@ type Config struct {
 	Store      *store.Store
 	Memory     *memory.Memory
 	Notify     NotifyFunc
+	SendPhoto  SendPhotoFunc
 	CronParse  CronParser
 	Timezone   string
 }
@@ -70,6 +75,7 @@ func New(cfg Config) *Server {
 		store:     cfg.Store,
 		memory:    cfg.Memory,
 		notify:    cfg.Notify,
+		sendPhoto: cfg.SendPhoto,
 		cronParse: cfg.CronParse,
 		timezone:  cfg.Timezone,
 	}
@@ -200,8 +206,9 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 // RelayRequest is the JSON body for POST /relay.
 type RelayRequest struct {
-	ChatID  int64  `json:"chat_id"`
-	Message string `json:"message"`
+	ChatID    int64  `json:"chat_id"`
+	Message   string `json:"message"`
+	ImagePath string `json:"image_path"` // optional: send photo from file path
 }
 
 func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
@@ -215,14 +222,49 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if req.ChatID == 0 || req.Message == "" {
-		writeError(w, http.StatusBadRequest, "chat_id and message are required")
+	if req.ChatID == 0 {
+		writeError(w, http.StatusBadRequest, "chat_id is required")
+		return
+	}
+	if req.Message == "" && req.ImagePath == "" {
+		writeError(w, http.StatusBadRequest, "message or image_path is required")
+		return
+	}
+
+	// Send photo if image_path is provided.
+	if req.ImagePath != "" && s.sendPhoto != nil {
+		data, err := os.ReadFile(req.ImagePath)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "failed to read image: "+err.Error())
+			return
+		}
+		slog.Info("rpc: relaying photo", "to_chat_id", req.ChatID, "path", req.ImagePath, "caption_len", len(req.Message))
+		s.sendPhoto(req.ChatID, data, req.Message)
+		s.logRelay(req.ChatID, "[Relayed photo] "+req.Message)
+		writeJSON(w, map[string]any{"ok": true, "type": "photo"})
 		return
 	}
 
 	slog.Info("rpc: relaying message", "to_chat_id", req.ChatID, "len", len(req.Message))
 	s.notify(req.ChatID, req.Message)
-	writeJSON(w, map[string]any{"ok": true})
+	s.logRelay(req.ChatID, req.Message)
+	writeJSON(w, map[string]any{"ok": true, "type": "text"})
+}
+
+// logRelay logs a relayed message into the target chat's session so Claude
+// has context when the recipient replies.
+func (s *Server) logRelay(chatID int64, message string) {
+	if s.store == nil {
+		return
+	}
+	sess, err := s.store.GetSession(chatID)
+	if err != nil || sess == nil {
+		return
+	}
+	logMsg := "[Relay message sent to this chat]\n" + message
+	if err := s.store.LogMessage(sess.ID, "assistant", logMsg); err != nil {
+		slog.Warn("rpc: failed to log relay to target session", "chat_id", chatID, "error", err)
+	}
 }
 
 // ScheduleRequest is the JSON body for POST /schedule.

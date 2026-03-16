@@ -149,6 +149,46 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 		}
 		return textResult(fmt.Sprintf("%v", result["result"])), nil
 	})
+
+	// shell_relay — send messages/photos to other Telegram chats
+	server.AddTool(&gomcp.Tool{
+		Name:        "shell_relay",
+		Description: "Send a message or photo to another Telegram chat. Use this to forward info, send generated images, or communicate with other users.",
+		InputSchema: schema([]string{"chat_id"}, map[string]map[string]any{
+			"chat_id":    prop("integer", "Target Telegram chat ID"),
+			"message":    prop("string", "Text message or photo caption"),
+			"image_path": prop("string", "Path to image file to send as photo (optional)"),
+		}),
+	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		var p struct {
+			ChatID    int64  `json:"chat_id"`
+			Message   string `json:"message"`
+			ImagePath string `json:"image_path"`
+		}
+		if err := unmarshalArgs(req, &p); err != nil {
+			return errResult(err.Error()), nil
+		}
+		if p.ChatID == 0 {
+			return errResult("chat_id is required"), nil
+		}
+		if p.Message == "" && p.ImagePath == "" {
+			return errResult("message or image_path is required"), nil
+		}
+
+		result, err := client.call(ctx, "/relay", map[string]any{
+			"chat_id":    p.ChatID,
+			"message":    p.Message,
+			"image_path": p.ImagePath,
+		})
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		msgType := "text"
+		if t, ok := result["type"].(string); ok {
+			msgType = t
+		}
+		return textResult(fmt.Sprintf("Relayed %s to chat %d", msgType, p.ChatID)), nil
+	})
 }
 
 // --- Helpers ---

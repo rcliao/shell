@@ -205,14 +205,20 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 		})
 		if err != nil {
 			slog.Warn("memory context fetch failed", "error", err)
-		} else if len(result.Memories) > 0 {
-			sb.WriteString("[Relevant memories from previous conversations]\n")
-			for _, mem := range result.Memories {
-				sb.WriteString("- ")
-				sb.WriteString(mem.Content)
-				sb.WriteString("\n")
+		} else {
+			if len(result.Memories) > 0 {
+				sb.WriteString("[Relevant memories from previous conversations]\n")
+				for _, mem := range result.Memories {
+					sb.WriteString("- ")
+					sb.WriteString(mem.Content)
+					sb.WriteString("\n")
+				}
+				sb.WriteString("[End of memories]\n\n")
 			}
-			sb.WriteString("[End of memories]\n\n")
+			if result.CompactionSuggested {
+				slog.Info("memory compaction suggested, triggering background reflect", "ns", prof.AgentNS, "skipped", result.Skipped)
+				go m.RunReflect(ctx)
+			}
 		}
 	} else {
 		// Legacy path: global namespaces + legacy namespace-per-chat
