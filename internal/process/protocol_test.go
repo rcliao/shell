@@ -207,6 +207,56 @@ func TestParseBidirectionalEvents_PlainTextContent(t *testing.T) {
 	}
 }
 
+func TestParseBidirectionalEvents_UsageParsing(t *testing.T) {
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-usage"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]}}`,
+		`{"type":"result","result":"Hello","session_id":"sess-usage","total_cost_usd":0.0123,"num_turns":3,"usage":{"input_tokens":1500,"output_tokens":500,"cache_creation_input_tokens":200,"cache_read_input_tokens":800}}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, nil)
+
+	if result.Text != "Hello" {
+		t.Errorf("expected 'Hello', got %q", result.Text)
+	}
+	if result.Usage == nil {
+		t.Fatal("expected non-nil Usage")
+	}
+	if result.Usage.InputTokens != 1500 {
+		t.Errorf("expected 1500 input tokens, got %d", result.Usage.InputTokens)
+	}
+	if result.Usage.OutputTokens != 500 {
+		t.Errorf("expected 500 output tokens, got %d", result.Usage.OutputTokens)
+	}
+	if result.Usage.CacheCreationInputTokens != 200 {
+		t.Errorf("expected 200 cache creation tokens, got %d", result.Usage.CacheCreationInputTokens)
+	}
+	if result.Usage.CacheReadInputTokens != 800 {
+		t.Errorf("expected 800 cache read tokens, got %d", result.Usage.CacheReadInputTokens)
+	}
+	if result.Usage.CostUSD != 0.0123 {
+		t.Errorf("expected cost 0.0123, got %f", result.Usage.CostUSD)
+	}
+	if result.Usage.NumTurns != 3 {
+		t.Errorf("expected 3 turns, got %d", result.Usage.NumTurns)
+	}
+}
+
+func TestParseBidirectionalEvents_NoUsage(t *testing.T) {
+	// Result without usage fields should have nil Usage
+	input := strings.Join([]string{
+		`{"type":"result","result":"ok","session_id":"s1"}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, nil)
+
+	if result.Usage != nil {
+		t.Errorf("expected nil Usage for result without usage data, got %+v", result.Usage)
+	}
+}
+
 func TestParseBidirectionalEvents_UnhandledTypes(t *testing.T) {
 	// tool_progress, rate_limit_event, etc. should be silently ignored
 	input := strings.Join([]string{

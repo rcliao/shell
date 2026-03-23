@@ -94,18 +94,30 @@ type streamDelta struct {
 	Text string `json:"text"`
 }
 
+// usageData represents the usage object nested inside a result event.
+type usageData struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
 // stdoutEvent is the union type for all NDJSON lines from the CLI's stdout.
 // Uses json.RawMessage for polymorphic fields to avoid parsing everything upfront.
 type stdoutEvent struct {
-	Type      string          `json:"type"`
-	Subtype   string          `json:"subtype,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	Result    string          `json:"result,omitempty"`
-	RequestID string          `json:"request_id,omitempty"`
-	Event     *innerEvent     `json:"event,omitempty"`     // stream_event: content_block_delta etc.
-	Message   *stdoutMessage  `json:"message,omitempty"`   // assistant/user messages
-	Request   json.RawMessage `json:"request,omitempty"`   // control_request body (CLI → SDK)
-	Response  json.RawMessage `json:"response,omitempty"`  // control_response body (CLI → SDK, re: our init)
+	Type         string          `json:"type"`
+	Subtype      string          `json:"subtype,omitempty"`
+	SessionID    string          `json:"session_id,omitempty"`
+	Result       string          `json:"result,omitempty"`
+	RequestID    string          `json:"request_id,omitempty"`
+	TotalCostUSD float64         `json:"total_cost_usd,omitempty"`
+	NumTurns     int             `json:"num_turns,omitempty"`
+	Usage        *usageData      `json:"usage,omitempty"`
+	IsError      bool            `json:"is_error,omitempty"`
+	Event        *innerEvent     `json:"event,omitempty"`     // stream_event: content_block_delta etc.
+	Message      *stdoutMessage  `json:"message,omitempty"`   // assistant/user messages
+	Request      json.RawMessage `json:"request,omitempty"`   // control_request body (CLI → SDK)
+	Response     json.RawMessage `json:"response,omitempty"`  // control_response body (CLI → SDK, re: our init)
 }
 
 // stdoutMessage represents a message in assistant or user events.
@@ -191,6 +203,11 @@ func parseBidirectionalEvents(r io.Reader, stdin io.Writer, onUpdate StreamFunc)
 // bytes between turns.
 func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, onUpdate StreamFunc) SendResult {
 	var result SendResult
+	// Track whether we've received any stream_event text deltas.
+	// When streaming is active, assistant events duplicate the same text
+	// that was already delivered incrementally, so we skip forwarding
+	// assistant text to onUpdate to avoid double-counting.
+	hasStreamedText := false
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -213,6 +230,7 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 		case "stream_event":
 			if event.Event != nil && event.Event.Delta != nil && event.Event.Delta.Type == "text_delta" {
 				if event.Event.Delta.Text != "" && onUpdate != nil {
+					hasStreamedText = true
 					onUpdate(event.Event.Delta.Text)
 				}
 			}
@@ -222,11 +240,13 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 				result.SessionID = event.SessionID
 			}
 			if event.Message != nil {
-				// Array content blocks: text + tool_use
 				for _, block := range event.Message.Content.Blocks {
 					switch block.Type {
 					case "text":
-						if block.Text != "" && onUpdate != nil {
+						// Only forward text if no stream_event deltas were
+						// received — otherwise this is a duplicate of text
+						// already delivered incrementally.
+						if !hasStreamedText && block.Text != "" && onUpdate != nil {
 							onUpdate(block.Text)
 						}
 					case "tool_use":
@@ -238,8 +258,8 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 						slog.Info("tool use", "name", block.Name, "id", block.ID)
 					}
 				}
-				// Plain string content
-				if event.Message.Content.Text != "" && onUpdate != nil {
+				// Plain string content (non-streaming fallback)
+				if !hasStreamedText && event.Message.Content.Text != "" && onUpdate != nil {
 					onUpdate(event.Message.Content.Text)
 				}
 			}
@@ -266,6 +286,19 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 			result.Text = event.Result
 			if event.SessionID != "" {
 				result.SessionID = event.SessionID
+			}
+			if event.Usage != nil || event.TotalCostUSD > 0 || event.NumTurns > 0 {
+				u := &Usage{
+					CostUSD:  event.TotalCostUSD,
+					NumTurns: event.NumTurns,
+				}
+				if event.Usage != nil {
+					u.InputTokens = event.Usage.InputTokens
+					u.OutputTokens = event.Usage.OutputTokens
+					u.CacheCreationInputTokens = event.Usage.CacheCreationInputTokens
+					u.CacheReadInputTokens = event.Usage.CacheReadInputTokens
+				}
+				result.Usage = u
 			}
 			return result
 

@@ -149,6 +149,27 @@ func (s *Store) migrate() error {
 		s.db.Exec(col) // ignore "duplicate column" errors
 	}
 
+	// Token usage tracking per exchange.
+	usageSchema := `
+	CREATE TABLE IF NOT EXISTS usage (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		session_id INTEGER NOT NULL,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		cost_usd REAL NOT NULL DEFAULT 0,
+		num_turns INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_usage_chat_id ON usage(chat_id);
+	CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage(created_at);
+	`
+	if _, err := s.db.Exec(usageSchema); err != nil {
+		return err
+	}
+
 	// Background task queue for heartbeat to pick up.
 	taskSchema := `
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -601,6 +622,90 @@ func (s *Store) CompleteTask(id int64) error {
 func (s *Store) DeleteTask(chatID, id int64) error {
 	_, err := s.db.Exec(`DELETE FROM tasks WHERE id = ? AND chat_id = ?`, id, chatID)
 	return err
+}
+
+// UsageSummary contains aggregated token usage data.
+type UsageSummary struct {
+	TotalInputTokens         int64
+	TotalOutputTokens        int64
+	TotalCacheCreationTokens int64
+	TotalCacheReadTokens     int64
+	TotalCostUSD             float64
+	TotalTurns               int64
+	ExchangeCount            int64
+}
+
+// LogUsage records token usage for a single exchange.
+func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int) error {
+	_, err := s.db.Exec(`
+		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, costUSD, numTurns)
+	return err
+}
+
+// GetUsageSummary returns aggregated usage for a chat, optionally filtered by time.
+// If since is zero, returns all-time usage.
+func (s *Store) GetUsageSummary(chatID int64, since time.Time) (*UsageSummary, error) {
+	var query string
+	var args []any
+	if since.IsZero() {
+		query = `
+			SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+			       COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+			       COALESCE(SUM(cost_usd),0), COALESCE(SUM(num_turns),0), COUNT(*)
+			FROM usage WHERE chat_id = ?`
+		args = []any{chatID}
+	} else {
+		query = `
+			SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+			       COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+			       COALESCE(SUM(cost_usd),0), COALESCE(SUM(num_turns),0), COUNT(*)
+			FROM usage WHERE chat_id = ? AND created_at >= ?`
+		args = []any{chatID, since}
+	}
+
+	var u UsageSummary
+	err := s.db.QueryRow(query, args...).Scan(
+		&u.TotalInputTokens, &u.TotalOutputTokens,
+		&u.TotalCacheCreationTokens, &u.TotalCacheReadTokens,
+		&u.TotalCostUSD, &u.TotalTurns, &u.ExchangeCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// GetUsageAllChats returns aggregated usage across all chats, optionally filtered by time.
+func (s *Store) GetUsageAllChats(since time.Time) (*UsageSummary, error) {
+	var query string
+	var args []any
+	if since.IsZero() {
+		query = `
+			SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+			       COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+			       COALESCE(SUM(cost_usd),0), COALESCE(SUM(num_turns),0), COUNT(*)
+			FROM usage`
+	} else {
+		query = `
+			SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+			       COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+			       COALESCE(SUM(cost_usd),0), COALESCE(SUM(num_turns),0), COUNT(*)
+			FROM usage WHERE created_at >= ?`
+		args = []any{since}
+	}
+
+	var u UsageSummary
+	err := s.db.QueryRow(query, args...).Scan(
+		&u.TotalInputTokens, &u.TotalOutputTokens,
+		&u.TotalCacheCreationTokens, &u.TotalCacheReadTokens,
+		&u.TotalCostUSD, &u.TotalTurns, &u.ExchangeCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 func (s *Store) Close() error {
