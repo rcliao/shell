@@ -103,6 +103,9 @@ func (m *Memory) SystemPrompt(ctx context.Context, chatID int64) string {
 	return m.systemPromptFromNamespaces(ctx, prof)
 }
 
+// ghostSearchInstruction tells the agent to use ghost tools when context is missing.
+const ghostSearchInstruction = `[Memory retrieval] Sessions rotate frequently to save tokens. If the user references something you don't have context for, use ghost_search or ghost_context (with exclude_pinned=true for deeper search) to recall it before saying you don't know.`
+
 // systemPromptFromAgent loads pinned memories from the agent namespace via Context().
 func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) string {
 	budget := prof.SystemBudget
@@ -118,10 +121,10 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 	})
 	if err != nil {
 		slog.Warn("system prompt context failed", "ns", prof.AgentNS, "error", err)
-		return ""
+		return ghostSearchInstruction
 	}
 	if len(result.Memories) == 0 {
-		return ""
+		return ghostSearchInstruction
 	}
 
 	var sb strings.Builder
@@ -130,6 +133,8 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 		sb.WriteString(mem.Content)
 		sb.WriteString("\n")
 	}
+	sb.WriteString("\n")
+	sb.WriteString(ghostSearchInstruction)
 	return strings.TrimSpace(sb.String())
 }
 
@@ -989,6 +994,124 @@ func (m *Memory) SeedNamespace(ctx context.Context, ns, key, content string) err
 		Pinned:     true,
 	})
 	return err
+}
+
+// AgentNS returns the ghost namespace for a chat's profile.
+func (m *Memory) AgentNS(chatID int64) string {
+	return m.profileFor(chatID).AgentNS
+}
+
+// HasIdentity checks whether the agent has any pinned identity memories.
+func (m *Memory) HasIdentity(ctx context.Context, chatID int64) bool {
+	prof := m.profileFor(chatID)
+	if prof.AgentNS == "" {
+		return true // legacy mode: skip onboarding
+	}
+	mems, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:   prof.AgentNS,
+		Tags: []string{"identity"},
+	})
+	if err != nil {
+		slog.Warn("identity check failed", "error", err)
+		return true // fail open: don't block on errors
+	}
+	return len(mems) > 0
+}
+
+// StoreIdentity stores a pinned identity memory for the agent.
+func (m *Memory) StoreIdentity(ctx context.Context, chatID int64, key, content string) error {
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	if ns == "" {
+		return fmt.Errorf("identity storage requires AgentNS")
+	}
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:         ns,
+		Key:        "identity-" + sanitizeKey(key),
+		Content:    content,
+		Kind:       "semantic",
+		Tags:       []string{"identity"},
+		Priority:   "critical",
+		Importance: 1.0,
+		Tier:       "ltm",
+		Pinned:     true,
+	})
+	return err
+}
+
+// ListIdentity returns all identity memories for display.
+func (m *Memory) ListIdentity(ctx context.Context, chatID int64) (string, error) {
+	prof := m.profileFor(chatID)
+	if prof.AgentNS == "" {
+		return "Identity not configured (legacy mode).", nil
+	}
+	mems, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:   prof.AgentNS,
+		Tags: []string{"identity"},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(mems) == 0 {
+		return "No identity defined yet. Send a message to start onboarding.", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Identity\n\n")
+	for _, mem := range mems {
+		sb.WriteString("- ")
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	return sb.String(), nil
+}
+
+// ArchiveIdentity moves all identity memories to an archive namespace and removes them
+// from the active agent namespace, returning the count of archived memories.
+func (m *Memory) ArchiveIdentity(ctx context.Context, chatID int64) (int, error) {
+	prof := m.profileFor(chatID)
+	if prof.AgentNS == "" {
+		return 0, fmt.Errorf("identity archive requires AgentNS")
+	}
+	mems, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:   prof.AgentNS,
+		Tags: []string{"identity"},
+	})
+	if err != nil {
+		return 0, err
+	}
+	if len(mems) == 0 {
+		return 0, nil
+	}
+
+	archiveNS := prof.AgentNS + ":identity-archive"
+	archiveKey := fmt.Sprintf("archive-%d", time.Now().Unix())
+
+	// Consolidate all identity memories into one archive entry.
+	var sb strings.Builder
+	for _, mem := range mems {
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	_, err = m.store.Put(ctx, agentmemory.PutParams{
+		NS:       archiveNS,
+		Key:      archiveKey,
+		Content:  strings.TrimSpace(sb.String()),
+		Kind:     "semantic",
+		Tags:     []string{"identity-archive"},
+		Priority: "low",
+		Tier:     "ltm",
+	})
+	if err != nil {
+		return 0, fmt.Errorf("archiving identity: %w", err)
+	}
+
+	// Remove originals.
+	for _, mem := range mems {
+		m.store.Rm(ctx, agentmemory.RmParams{NS: prof.AgentNS, Key: mem.Key})
+	}
+
+	return len(mems), nil
 }
 
 // exchangeSummarizeThreshold is the number of episodic exchanges before summarization kicks in.

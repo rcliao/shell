@@ -51,8 +51,14 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.PM(ctx, chatID, args)
 	case "tunnel":
 		return b.Tunnel(ctx, chatID, args)
+	case "usage":
+		return b.Usage(ctx, chatID, args)
 	case "agent":
 		return b.SwitchAgent(ctx, chatID, args)
+	case "personality":
+		return b.Personality(ctx, chatID, args)
+	case "skills":
+		return b.Skills(ctx, chatID, args)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -64,7 +70,7 @@ func (b *Bridge) Start(ctx context.Context, chatID int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "Welcome to shell! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/review — Review all memories with summary\n/correct <n> <text> — Correct a memory by number\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
+	return "Welcome to shell! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/usage — Token usage stats\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/review — Review all memories with summary\n/correct <n> <text> — Correct a memory by number\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
 }
 
 // Reset kills the current session and creates a fresh one.
@@ -129,7 +135,14 @@ func (b *Bridge) Help() string {
 		"- `/forget <key>` — Remove a stored memory\n" +
 		"- `/memories` — List all stored memories\n" +
 		"- `/review` — Review all memories with summary\n" +
-		"- `/correct <n> <text>` — Correct a memory by number\n"
+		"- `/correct <n> <text>` — Correct a memory by number\n" +
+		"- `/usage` — Today's token usage\n" +
+		"- `/usage all` — All-time usage\n" +
+		"- `/usage global` — Usage across all chats\n" +
+		"- `/personality` — Show agent identity\n" +
+		"- `/personality reset` — Archive identity and re-onboard\n" +
+		"- `/skills` — List loaded skills\n" +
+		"- `/skills reload` — Hot-reload skills from disk\n"
 
 	if b.plan != nil {
 		help += "\n### Plan execution\n\n" +
@@ -206,6 +219,67 @@ func (b *Bridge) Help() string {
 		"`/reactions` — Show emoji→action mappings\n" +
 		"`/help` — Show this help message"
 	return help
+}
+
+// Skills handles the /skills command: list or reload skills.
+func (b *Bridge) Skills(ctx context.Context, chatID int64, args string) (string, error) {
+	args = strings.TrimSpace(args)
+
+	switch args {
+	case "reload":
+		n, err := b.ReloadSkills()
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Skills reloaded: %d skills loaded.", n), nil
+
+	default:
+		// List current skills.
+		if b.skills == nil {
+			return "No skills loaded.", nil
+		}
+		var sb strings.Builder
+		sb.WriteString("## Skills\n\n")
+		for _, s := range b.skills.All() {
+			sb.WriteString(fmt.Sprintf("- **%s** — %s (`%s`)\n", s.Name, s.Description, s.Dir))
+		}
+		sb.WriteString(fmt.Sprintf("\n%d skills loaded. Use `/skills reload` to hot-reload.", len(b.skills.All())))
+		return sb.String(), nil
+	}
+}
+
+// Personality handles the /personality command: show or reset agent identity.
+func (b *Bridge) Personality(ctx context.Context, chatID int64, args string) (string, error) {
+	if b.memory == nil {
+		return "Memory not enabled.", nil
+	}
+
+	args = strings.TrimSpace(args)
+
+	switch args {
+	case "reset":
+		// Archive current identity and trigger re-onboarding.
+		n, err := b.memory.ArchiveIdentity(ctx, chatID)
+		if err != nil {
+			return "", fmt.Errorf("personality reset: %w", err)
+		}
+		// Kill session so next message starts fresh with onboarding prompt.
+		b.proc.Kill(chatID)
+		if err := b.store.DeleteSession(chatID); err != nil {
+			slog.Warn("failed to delete session on personality reset", "error", err)
+		}
+		// Invalidate cache so next message triggers onboarding.
+		b.invalidateIdentityCache(chatID)
+
+		if n == 0 {
+			return "No identity to reset. Send a message to start onboarding.", nil
+		}
+		return fmt.Sprintf("Identity archived (%d memories backed up). Send a message to start fresh onboarding.", n), nil
+
+	default:
+		// Show current identity.
+		return b.memory.ListIdentity(ctx, chatID)
+	}
 }
 
 // SwitchAgent handles the /agent command: show current agent or switch.

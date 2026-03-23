@@ -24,12 +24,23 @@ type Artifact struct {
 	Path    string // optional file path (alternative to inline Data)
 }
 
+// Usage contains token consumption data from a Claude CLI result event.
+type Usage struct {
+	InputTokens              int
+	OutputTokens             int
+	CacheCreationInputTokens int
+	CacheReadInputTokens     int
+	CostUSD                  float64
+	NumTurns                 int
+}
+
 // SendResult contains the response text, session ID, and any binary artifacts.
 type SendResult struct {
 	Text      string
 	SessionID string
 	Artifacts []Artifact
 	ToolCalls []ToolCall // tool calls observed during execution
+	Usage     *Usage     // token usage from result event (nil if absent)
 }
 
 type Manager struct {
@@ -47,6 +58,8 @@ type Manager struct {
 	settingSources []string
 	bridgeSockPath string
 	mcpConfigPath  string
+	agentNS        string
+	ghostDB        string
 }
 
 type ManagerConfig struct {
@@ -60,6 +73,8 @@ type ManagerConfig struct {
 	SettingSources []string
 	BridgeSockPath string
 	MCPConfigPath  string
+	AgentNS        string // ghost namespace for this agent (e.g. "agent:pikamini")
+	GhostDB        string // ghost database path for this agent
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -85,6 +100,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		settingSources: cfg.SettingSources,
 		bridgeSockPath: cfg.BridgeSockPath,
 		mcpConfigPath:  cfg.MCPConfigPath,
+		agentNS:        cfg.AgentNS,
+		ghostDB:        cfg.GhostDB,
 	}
 }
 
@@ -190,6 +207,12 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
 	if m.bridgeSockPath != "" {
 		env = append(env, "SHELL_BRIDGE_SOCK="+m.bridgeSockPath)
+	}
+	if m.agentNS != "" {
+		env = append(env, "GHOST_NS="+m.agentNS)
+	}
+	if m.ghostDB != "" {
+		env = append(env, "GHOST_DB="+m.ghostDB)
 	}
 	cmd.Env = env
 	if m.workDir != "" {

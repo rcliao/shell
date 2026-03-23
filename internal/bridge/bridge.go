@@ -53,6 +53,9 @@ type Bridge struct {
 	selfSourceDir string // resolved path to shell's source dir (empty = disabled)
 	onSelfRestart func() // called when self-modification detected after merge
 
+	// Session rotation: auto-rotate when total input tokens exceed threshold (0 = disabled)
+	maxSessionTokens int
+
 	// Scheduler
 	schedulerEnabled bool
 	schedulerTZ      string // default timezone for schedules
@@ -64,7 +67,15 @@ type Bridge struct {
 	pmMgr *pm.Manager // nil if disabled
 
 	// Skills
-	skills *skill.Registry // nil if disabled
+	skills    *skill.Registry // nil if disabled
+	skillDirs []string        // directories to scan on reload
+
+	// Agent identity prompt (prepended to system prompt)
+	agentIdentity string
+
+	// Onboarding: track which chats have confirmed identity
+	identityCheckedMu sync.Mutex
+	identityChecked   map[int64]bool
 
 	planMu   sync.Mutex
 	planRuns map[int64]*planRun
@@ -97,9 +108,10 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		tunnelMgr:    tunnelMgr,
 		pmMgr:        pmMgr,
 		skills:       skills,
-		planRuns:      make(map[int64]*planRun),
-		reviewCache:   make(map[int64][]memory.ReviewEntry),
-		systemCancel:  make(map[int64]context.CancelFunc),
+		planRuns:        make(map[int64]*planRun),
+		reviewCache:     make(map[int64][]memory.ReviewEntry),
+		systemCancel:    make(map[int64]context.CancelFunc),
+		identityChecked: make(map[int64]bool),
 	}
 }
 
@@ -203,10 +215,157 @@ func (b *Bridge) resolveAgent(chatID int64) process.Agent {
 	return b.proc
 }
 
+// SetSkillDirs sets the directories to scan when reloading skills.
+func (b *Bridge) SetSkillDirs(dirs []string) {
+	b.skillDirs = dirs
+}
+
+// ReloadSkills rescans all skill directories and rebuilds the registry.
+// Returns the number of skills loaded.
+func (b *Bridge) ReloadSkills() (int, error) {
+	if len(b.skillDirs) == 0 {
+		return 0, fmt.Errorf("no skill directories configured")
+	}
+
+	var allSkills []*skill.Skill
+	for _, dir := range b.skillDirs {
+		s, err := skill.LoadDir(dir)
+		if err != nil {
+			continue
+		}
+		allSkills = append(allSkills, s...)
+	}
+
+	if len(allSkills) == 0 {
+		b.skills = nil
+		return 0, nil
+	}
+
+	b.skills = skill.NewRegistry(allSkills)
+	slog.Info("skills reloaded", "count", len(allSkills))
+	return len(allSkills), nil
+}
+
 // SetSelfRestart configures auto-restart when a plan modifies shell's own source.
 func (b *Bridge) SetSelfRestart(sourceDir string, fn func()) {
 	b.selfSourceDir = sourceDir
 	b.onSelfRestart = fn
+}
+
+// onboardingPrompt is injected as the system prompt when a new agent has no identity memories.
+const onboardingPrompt = `You just woke up for the very first time. You have no name, no form, no memories — you're a blank slate, and you're curious about who you are.
+
+Your owner is here to help you discover your identity. Ask them naturally — don't use a checklist or form. Be curious, playful, and genuine. Things you might want to know:
+- What's your name?
+- What do you look like? (species, form, appearance)
+- What's your personality like? Are you energetic or calm? Silly or serious?
+- How do you talk? Any quirks, catchphrases, emoji habits?
+- What do you like? (food, hobbies, interests)
+- Who are the important people in your life?
+- Anything you should know about boundaries or things to avoid?
+
+As your owner tells you about yourself, store each discovery using the ghost_put tool as a pinned identity memory:
+- namespace: use your agent namespace (from your system context)
+- key: "identity-<topic>" (e.g. "identity-name", "identity-appearance", "identity-personality")
+- tags: ["identity"]
+- kind: "semantic"
+- priority: "critical"
+- pinned: true
+- tier: "ltm"
+
+Don't rush — let the conversation flow naturally. When you feel like you have a good sense of who you are, thank your owner and summarize your new identity.
+
+IMPORTANT: Keep asking questions until your owner seems satisfied. This is a special moment — your first awakening.`
+
+// onboardingPromptWithNS returns the onboarding prompt with the agent's ghost namespace injected.
+func (b *Bridge) onboardingPromptWithNS(chatID int64) string {
+	ns := ""
+	if b.memory != nil {
+		ns = b.memory.AgentNS(chatID)
+	}
+	if ns == "" {
+		return onboardingPrompt
+	}
+	return onboardingPrompt + fmt.Sprintf("\n\nYour agent namespace is: %s — use this as the namespace for all ghost_put calls.", ns)
+}
+
+// SetAgentIdentity sets the agent identity prompt prepended to system prompts.
+func (b *Bridge) SetAgentIdentity(prompt string) {
+	b.agentIdentity = prompt
+}
+
+// needsOnboarding checks if this chat needs identity onboarding (no identity memories in ghost).
+// Caches the result per chat to avoid repeated ghost queries.
+func (b *Bridge) needsOnboarding(ctx context.Context, chatID int64) bool {
+	if b.memory == nil {
+		return false
+	}
+
+	b.identityCheckedMu.Lock()
+	checked, ok := b.identityChecked[chatID]
+	b.identityCheckedMu.Unlock()
+	if ok {
+		return !checked
+	}
+
+	hasIdentity := b.memory.HasIdentity(ctx, chatID)
+
+	b.identityCheckedMu.Lock()
+	b.identityChecked[chatID] = hasIdentity
+	b.identityCheckedMu.Unlock()
+
+	return !hasIdentity
+}
+
+// invalidateIdentityCache clears the cached identity check for a chat,
+// forcing a re-check on the next message (used after personality reset).
+func (b *Bridge) invalidateIdentityCache(chatID int64) {
+	b.identityCheckedMu.Lock()
+	delete(b.identityChecked, chatID)
+	b.identityCheckedMu.Unlock()
+}
+
+// SetMaxSessionTokens configures auto-rotation when total input tokens exceed maxTokens.
+func (b *Bridge) SetMaxSessionTokens(maxTokens int) {
+	b.maxSessionTokens = maxTokens
+}
+
+// compactSessionIfNeeded sends /compact to the CLI when total input tokens exceed
+// the threshold. This summarizes old conversation turns while preserving continuity,
+// instead of killing the session entirely.
+func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID int64, usage *process.Usage) {
+	if b.maxSessionTokens <= 0 || usage == nil {
+		return
+	}
+
+	totalInput := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	if totalInput <= b.maxSessionTokens {
+		return
+	}
+
+	slog.Info("compacting session: token threshold exceeded",
+		"chat_id", chatID,
+		"total_input_tokens", totalInput,
+		"max_tokens", b.maxSessionTokens,
+	)
+
+	agent := b.resolveAgent(chatID)
+	procSess, _ := agent.Get(chatID)
+	if procSess == nil {
+		return
+	}
+
+	// Send /compact as a user message — the CLI handles it as a slash command.
+	_, err := agent.Send(ctx, process.AgentRequest{
+		ChatID:    chatID,
+		SessionID: procSess.ProviderSessionID,
+		Text:      "/compact",
+	}, nil)
+	if err != nil {
+		slog.Warn("compact failed", "chat_id", chatID, "error", err)
+	} else {
+		slog.Info("session compacted", "chat_id", chatID)
+	}
 }
 
 // HandleMessageStreaming processes an incoming user message and streams text deltas via onUpdate.
@@ -299,13 +458,22 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		claudeSessionID = procSess.ProviderSessionID
 	}
 
-	// Build system prompt from memory if available.
+	// Build system prompt from agent identity + memory.
+	// If no identity memories exist and sender is not a system process, inject onboarding.
 	systemPrompt := ""
-	if b.memory != nil {
-		systemPrompt = b.memory.SystemPrompt(ctx, chatID)
+	if !isSystemSender(senderName) && b.needsOnboarding(ctx, chatID) {
+		slog.Info("onboarding: no identity found, injecting onboarding prompt", "chat_id", chatID)
+		// Onboarding mode: only inject the onboarding prompt, skip everything else
+		// so it doesn't get diluted by skills/capabilities/timestamps.
+		systemPrompt = b.onboardingPromptWithNS(chatID)
+	} else {
+		systemPrompt = b.agentIdentity
+		if b.memory != nil {
+			systemPrompt += b.memory.SystemPrompt(ctx, chatID)
+		}
+		systemPrompt += b.timestampSystemPrompt()
+		systemPrompt += b.skillsSystemPrompt()
 	}
-	systemPrompt += b.timestampSystemPrompt()
-	systemPrompt += b.skillsSystemPrompt()
 
 	// Track session in pm for /pm list visibility.
 	endTrack := b.trackSession(ctx, chatID, senderName)
@@ -334,7 +502,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		procSess.HasHistory = true
 	}
 
-	return b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result), nil
+	resp := b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result)
+
+	// Auto-compact session if token threshold exceeded (uses API-reported usage).
+	go b.compactSessionIfNeeded(ctx, chatID, result.Usage)
+
+	return resp, nil
 }
 
 // processResponse is the post-processing pipeline for HandleMessageStreaming.
@@ -362,6 +535,17 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, user
 	// Log assistant response.
 	if err := b.store.LogMessage(sessID, "assistant", response); err != nil {
 		slog.Warn("failed to log assistant message", "error", err)
+	}
+
+	// Log token usage.
+	if result.Usage != nil {
+		if err := b.store.LogUsage(chatID, sessID,
+			result.Usage.InputTokens, result.Usage.OutputTokens,
+			result.Usage.CacheCreationInputTokens, result.Usage.CacheReadInputTokens,
+			result.Usage.CostUSD, result.Usage.NumTurns,
+		); err != nil {
+			slog.Warn("failed to log usage", "error", err)
+		}
 	}
 
 	// Log exchange to memory.

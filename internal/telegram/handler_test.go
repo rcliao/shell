@@ -3,6 +3,9 @@ package telegram
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-telegram/bot/models"
 )
 
 func TestFormatForMarkdownV2(t *testing.T) {
@@ -1255,6 +1258,157 @@ func TestFormatForMarkdownV2_EmptyPrefixes(t *testing.T) {
 				t.Errorf("formatForMarkdownV2(%q)\n  got:  %q\n  want: %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseMentions(t *testing.T) {
+	tests := []struct {
+		text string
+		want []string
+	}{
+		{"hello world", nil},
+		{"@pikamini_bot hello", []string{"pikamini_bot"}},
+		{"hey @umbreonmini_bot how are you", []string{"umbreonmini_bot"}},
+		{"@pikamini_bot @umbreonmini_bot both", []string{"pikamini_bot", "umbreonmini_bot"}},
+		{"no at sign here", nil},
+		{"email@example.com", []string{"example"}}, // not ideal but acceptable
+	}
+	for _, tt := range tests {
+		got := parseMentions(tt.text)
+		if len(got) != len(tt.want) {
+			t.Errorf("parseMentions(%q) = %v, want %v", tt.text, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("parseMentions(%q)[%d] = %q, want %q", tt.text, i, got[i], tt.want[i])
+			}
+		}
+	}
+}
+
+func TestStripMention(t *testing.T) {
+	tests := []struct {
+		text     string
+		username string
+		want     string
+	}{
+		{"@pikamini_bot hello", "pikamini_bot", "hello"},
+		{"hello @pikamini_bot world", "pikamini_bot", "hello  world"},
+		{"@PIKAMINI_BOT hello", "pikamini_bot", "hello"},
+		{"no mention here", "pikamini_bot", "no mention here"},
+	}
+	for _, tt := range tests {
+		got := stripMention(tt.text, tt.username)
+		if got != tt.want {
+			t.Errorf("stripMention(%q, %q) = %q, want %q", tt.text, tt.username, got, tt.want)
+		}
+	}
+}
+
+func TestShouldHandleGroupMessage(t *testing.T) {
+	h := &Handler{
+		botUsername:           "pikamini_bot",
+		broadcastProbability: 1.0,
+		peerBotUsernames:     map[string]bool{"umbreonmini_bot": true},
+		botExchangeCount:     make(map[int64]int),
+		botLastResponse:      make(map[int64]time.Time),
+	}
+
+	tests := []struct {
+		name       string
+		text       string
+		replyFrom  string // username of reply-to message author
+		senderUser string // username of message sender
+		wantHandle bool
+	}{
+		{"mentioned this bot", "@pikamini_bot hello", "", "human", true},
+		{"mentioned peer bot", "@umbreonmini_bot hello", "", "human", false},
+		{"mentioned both", "@pikamini_bot @umbreonmini_bot hello", "", "human", true},
+		{"no mention broadcast=1.0", "hello everyone", "", "human", true},
+		{"reply to this bot", "hello", "pikamini_bot", "human", true},
+		{"reply to peer bot", "hello", "umbreonmini_bot", "human", true}, // broadcast=1.0
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &models.Message{
+				From: &models.User{Username: tt.senderUser},
+				Text: tt.text,
+				Chat: models.Chat{Type: "group"},
+			}
+			if tt.replyFrom != "" {
+				msg.ReplyToMessage = &models.Message{
+					From: &models.User{Username: tt.replyFrom},
+				}
+			}
+			got, _ := h.shouldHandleGroupMessage(msg, tt.text)
+			if got != tt.wantHandle {
+				t.Errorf("shouldHandleGroupMessage(%q, reply=%q) = %v, want %v",
+					tt.text, tt.replyFrom, got, tt.wantHandle)
+			}
+		})
+	}
+
+	// Test with low broadcast probability — should sometimes skip.
+	h2 := &Handler{
+		botUsername:           "pikamini_bot",
+		broadcastProbability: 0.0, // never broadcast
+		peerBotUsernames:     map[string]bool{"umbreonmini_bot": true},
+		botExchangeCount:     make(map[int64]int),
+		botLastResponse:      make(map[int64]time.Time),
+	}
+	msg := &models.Message{
+		From: &models.User{Username: "human"},
+		Text: "hello everyone",
+		Chat: models.Chat{Type: "group"},
+	}
+	got, _ := h2.shouldHandleGroupMessage(msg, "hello everyone")
+	if got {
+		t.Error("expected shouldHandleGroupMessage=false with broadcastProbability=0.0")
+	}
+}
+
+func TestBotExchangeLimit(t *testing.T) {
+	h := &Handler{
+		botUsername:           "pikamini_bot",
+		broadcastProbability: 1.0,
+		peerBotUsernames:     map[string]bool{"umbreonmini_bot": true},
+		botExchangeCount:     make(map[int64]int),
+		botLastResponse:      make(map[int64]time.Time),
+	}
+
+	chatID := int64(12345)
+
+	// Simulate hitting the exchange limit.
+	for i := 0; i < botExchangeLimit; i++ {
+		h.recordBotExchange(chatID)
+	}
+
+	// Peer bot message should be rejected after limit.
+	msg := &models.Message{
+		From: &models.User{Username: "umbreonmini_bot"},
+		Text: "hey there",
+		Chat: models.Chat{ID: chatID, Type: "group"},
+	}
+	got, _ := h.shouldHandleGroupMessage(msg, "hey there")
+	if got {
+		t.Error("expected shouldHandleGroupMessage=false after exchange limit reached")
+	}
+
+	// Human message resets the counter.
+	h.resetBotExchange(chatID)
+	// Wait past cooldown for the test (set last response to past).
+	h.botExchangeMu.Lock()
+	h.botLastResponse[chatID] = time.Now().Add(-botCooldown - time.Second)
+	h.botExchangeMu.Unlock()
+
+	// Now peer bot message should have a chance again (via peerBroadcastProbability).
+	// We can't deterministically test probability, but at least verify it doesn't
+	// hit the limit/cooldown checks.
+	count := h.botExchangeCount[chatID]
+	if count != 0 {
+		t.Errorf("expected exchange count reset to 0, got %d", count)
 	}
 }
 

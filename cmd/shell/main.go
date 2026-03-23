@@ -64,6 +64,7 @@ func main() {
 
 	// daemon command
 	var watch bool
+	var configFlag string
 	daemonCmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Start the Telegram bot daemon",
@@ -72,7 +73,7 @@ func main() {
 				slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			}
 
-			cfg := loadConfig()
+			cfg := loadConfigFrom(configFlag)
 
 			if watch {
 				cfg.Reload.Enabled = true
@@ -113,6 +114,7 @@ func main() {
 		},
 	}
 	daemonCmd.Flags().BoolVarP(&watch, "watch", "w", false, "Enable live reload on source changes")
+	daemonCmd.Flags().StringVar(&configFlag, "config", "", "Path to config file (default: ~/.shell/config.json)")
 
 	// send command — one-shot test without Telegram
 	sendCmd := &cobra.Command{
@@ -491,7 +493,7 @@ func main() {
 
 	pairingCmd.AddCommand(pairingListCmd, pairingApproveCmd, pairingAllowlistCmd, pairingRevokeCmd)
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd)
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -499,8 +501,14 @@ func main() {
 }
 
 func loadConfig() config.Config {
-	configPath := filepath.Join(config.DefaultConfigDir(), "config.json")
-	cfg, err := config.Load(configPath)
+	return loadConfigFrom("")
+}
+
+func loadConfigFrom(path string) config.Config {
+	if path == "" {
+		path = filepath.Join(config.DefaultConfigDir(), "config.json")
+	}
+	cfg, err := config.Load(path)
 	if err != nil {
 		slog.Warn("failed to load config, using defaults", "error", err)
 		cfg = config.Default()

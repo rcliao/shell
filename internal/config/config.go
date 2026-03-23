@@ -26,7 +26,17 @@ type Config struct {
 	Tunnel TunnelConfig `json:"tunnel"`
 	PM        PMConfig        `json:"pm"`
 	Skills    SkillsConfig    `json:"skills"`
+	Agent     AgentIdentity   `json:"agent"`
 	Agents    AgentsConfig    `json:"agents"`
+}
+
+// AgentIdentity configures a bot's identity for multi-agent group chats.
+type AgentIdentity struct {
+	Name                 string   `json:"name"`                  // display name (e.g. "pikamini")
+	BotUsername          string   `json:"bot_username"`           // Telegram bot username without @
+	BroadcastProbability float64  `json:"broadcast_probability"`  // 0.0-1.0, chance to respond when not @mentioned in groups
+	PeerBots             []string `json:"peer_bots"`              // other bot usernames (to detect "not for me")
+	SystemPrompt         string   `json:"system_prompt"`          // personality/identity prompt prepended to all messages
 }
 
 // AgentsConfig controls multi-agent manifests.
@@ -106,6 +116,7 @@ type ClaudeConfig struct {
 	ExtraArgs      []string      `json:"extra_args"`
 	PlaygroundDir  string   `json:"playground_dir"`  // writable sandbox dir, auto-approved for Write/Edit/Bash
 	SettingSources []string `json:"setting_sources"` // e.g. ["user", "project"] for --setting-sources
+	MaxSessionTokens int   `json:"max_session_tokens"` // auto-rotate sessions exceeding this many total input tokens (0 = disabled)
 }
 
 type StoreConfig struct {

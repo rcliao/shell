@@ -18,7 +18,7 @@ type Bot struct {
 	handler *Handler
 }
 
-func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
+func NewBot(token string, auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) (*Bot, error) {
 	if token == "" {
 		return nil, fmt.Errorf("telegram bot token is empty")
 	}
@@ -27,7 +27,7 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 		auth:   auth,
 		bridge: br,
 	}
-	b.handler = NewHandler(auth, br)
+	b.handler = NewHandler(auth, br, agentCfg)
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(b.defaultHandler),
@@ -58,6 +58,8 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge) (*Bot, error) {
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/planretry", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/schedule", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/heartbeat", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/personality", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/skills", bot.MatchTypePrefix, b.commandHandler)
 	// Register handler for photo messages.
 	tgBot.RegisterHandlerMatchFunc(
 		func(update *models.Update) bool {

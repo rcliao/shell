@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"os"
 	"regexp"
 	"strings"
@@ -898,9 +899,29 @@ func formatForTelegram(text string, maxLen int) (string, bool) {
 	return text, false
 }
 
+// botExchangeLimit is the max consecutive bot-to-bot messages before suppressing.
+const botExchangeLimit = 3
+
+// botCooldown is the minimum time between this bot's responses to peer bot messages.
+const botCooldown = 30 * time.Second
+
+// peerBroadcastProbability is a reduced probability for responding to peer bot messages
+// (lower than normal broadcast to keep bot-to-bot exchanges sparse).
+const peerBroadcastProbability = 0.15
+
 type Handler struct {
 	auth   *Auth
 	bridge *bridge.Bridge
+
+	// Multi-agent group chat support
+	botUsername           string
+	broadcastProbability float64
+	peerBotUsernames     map[string]bool
+
+	// Bot-to-bot exchange tracking (per chat)
+	botExchangeMu     sync.Mutex
+	botExchangeCount  map[int64]int       // consecutive bot-to-bot messages per chat
+	botLastResponse   map[int64]time.Time // last time this bot responded to a peer
 
 	albumsMu sync.Mutex
 	albums   map[string]*albumEntry // keyed by MediaGroupID
@@ -909,13 +930,143 @@ type Handler struct {
 	chatLocks   map[int64]*sync.Mutex // per-chat message serialization
 }
 
-func NewHandler(auth *Auth, br *bridge.Bridge) *Handler {
-	return &Handler{
-		auth:      auth,
-		bridge:    br,
-		albums:    make(map[string]*albumEntry),
-		chatLocks: make(map[int64]*sync.Mutex),
+// AgentConfig holds agent identity fields passed to the handler.
+type AgentConfig struct {
+	BotUsername           string
+	BroadcastProbability float64
+	PeerBots             []string
+}
+
+func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
+	peers := make(map[string]bool, len(agentCfg.PeerBots))
+	for _, p := range agentCfg.PeerBots {
+		peers[strings.ToLower(p)] = true
 	}
+	return &Handler{
+		auth:                 auth,
+		bridge:               br,
+		botUsername:           strings.ToLower(agentCfg.BotUsername),
+		broadcastProbability: agentCfg.BroadcastProbability,
+		peerBotUsernames:     peers,
+		botExchangeCount:     make(map[int64]int),
+		botLastResponse:      make(map[int64]time.Time),
+		albums:               make(map[string]*albumEntry),
+		chatLocks:            make(map[int64]*sync.Mutex),
+	}
+}
+
+// mentionRegex matches @username mentions in message text.
+var mentionRegex = regexp.MustCompile(`@(\w+)`)
+
+// parseMentions extracts all @usernames from text (lowercased, without @).
+func parseMentions(text string) []string {
+	matches := mentionRegex.FindAllStringSubmatch(text, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, strings.ToLower(m[1]))
+	}
+	return out
+}
+
+// stripMention removes @username from text and trims whitespace.
+func stripMention(text, username string) string {
+	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(username) + `\b`)
+	return strings.TrimSpace(re.ReplaceAllString(text, ""))
+}
+
+// isPeerBot checks if the message sender is a known peer bot.
+func (h *Handler) isPeerBot(msg *models.Message) bool {
+	if msg.From == nil {
+		return false
+	}
+	return h.peerBotUsernames[strings.ToLower(msg.From.Username)]
+}
+
+// recordBotExchange tracks that this bot responded to a peer bot message.
+func (h *Handler) recordBotExchange(chatID int64) {
+	h.botExchangeMu.Lock()
+	defer h.botExchangeMu.Unlock()
+	h.botExchangeCount[chatID]++
+	h.botLastResponse[chatID] = time.Now()
+}
+
+// resetBotExchange resets the bot-to-bot exchange counter (called when a human messages).
+func (h *Handler) resetBotExchange(chatID int64) {
+	h.botExchangeMu.Lock()
+	defer h.botExchangeMu.Unlock()
+	h.botExchangeCount[chatID] = 0
+}
+
+// shouldHandleGroupMessage decides if this bot should process a group chat message.
+// Returns (should handle, cleaned text).
+func (h *Handler) shouldHandleGroupMessage(msg *models.Message, text string) (bool, string) {
+	// If no bot username configured, always handle (legacy single-bot mode).
+	if h.botUsername == "" {
+		return true, text
+	}
+
+	// Reply-to routing: if replying to this bot's message, always handle.
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		if strings.ToLower(msg.ReplyToMessage.From.Username) == h.botUsername {
+			return true, stripMention(text, h.botUsername)
+		}
+	}
+
+	mentions := parseMentions(text)
+	mentionsMe := false
+	mentionsPeer := false
+	for _, m := range mentions {
+		if m == h.botUsername {
+			mentionsMe = true
+		}
+		if h.peerBotUsernames[m] {
+			mentionsPeer = true
+		}
+	}
+
+	// Explicitly @mentioned this bot → handle it.
+	if mentionsMe {
+		return true, stripMention(text, h.botUsername)
+	}
+
+	// Message explicitly @mentions another bot (not this one) → skip.
+	if mentionsPeer {
+		return false, text
+	}
+
+	// Check if sender is a peer bot — apply stricter rules for bot-to-bot.
+	if h.isPeerBot(msg) {
+		h.botExchangeMu.Lock()
+		count := h.botExchangeCount[msg.Chat.ID]
+		lastResp := h.botLastResponse[msg.Chat.ID]
+		h.botExchangeMu.Unlock()
+
+		// Hit exchange limit → stop responding to bots until a human speaks.
+		if count >= botExchangeLimit {
+			slog.Debug("bot-to-bot exchange limit reached", "chat_id", msg.Chat.ID, "count", count)
+			return false, text
+		}
+
+		// Cooldown: don't respond to peer bots too quickly.
+		if time.Since(lastResp) < botCooldown {
+			slog.Debug("bot-to-bot cooldown active", "chat_id", msg.Chat.ID, "since", time.Since(lastResp))
+			return false, text
+		}
+
+		// Reduced probability for bot-to-bot exchanges.
+		return rand.Float64() < peerBroadcastProbability, text
+	}
+
+	// Human message with no @mention → reset bot exchange counter, roll broadcast.
+	h.resetBotExchange(msg.Chat.ID)
+
+	if h.broadcastProbability <= 0 {
+		return false, text
+	}
+	if h.broadcastProbability >= 1.0 {
+		return true, text
+	}
+	return rand.Float64() < h.broadcastProbability, text
 }
 
 // checkAuth performs policy-based authorization for a message.
@@ -1257,6 +1408,26 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 
 	text := strings.TrimSpace(msg.Text)
 
+	// Group chat @mention filtering and broadcast probability.
+	isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+	senderIsPeerBot := false
+	if isGroup {
+		// Use caption as text source for mention parsing if text is empty (photo/sticker messages).
+		mentionText := text
+		if mentionText == "" {
+			mentionText = strings.TrimSpace(msg.Caption)
+		}
+		shouldHandle, cleaned := h.shouldHandleGroupMessage(msg, mentionText)
+		if !shouldHandle {
+			return
+		}
+		senderIsPeerBot = h.isPeerBot(msg)
+		// If text was cleaned (mention stripped), update it.
+		if text != "" && cleaned != mentionText {
+			text = cleaned
+		}
+	}
+
 	// If this message contains a photo, document image, or PDF,
 	// download it and pass the info to the bridge so it can augment the
 	// Claude message with the file path and metadata.
@@ -1533,6 +1704,11 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		return
 	}
 
+	// Track bot-to-bot exchange if we just responded to a peer bot.
+	if senderIsPeerBot {
+		h.recordBotExchange(msg.Chat.ID)
+	}
+
 	// Send any collected photos (generated images, artifacts).
 	for _, photo := range resp.Photos {
 		sendPhoto(ctx, b, msg.Chat.ID, photo.Data, photo.Caption)
@@ -1585,10 +1761,13 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		botMsgIDs = []int{msgID}
 	} else {
 		// Delete placeholder and send chunked formatted response.
-		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+		_, delErr := b.DeleteMessage(ctx, &bot.DeleteMessageParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
 		})
+		if delErr != nil {
+			slog.Warn("failed to delete placeholder before chunked send", "error", delErr, "chat_id", msg.Chat.ID, "msg_id", msgID)
+		}
 		botMsgIDs = h.sendChunked(ctx, b, msg.Chat.ID, response)
 	}
 
@@ -1910,10 +2089,13 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		})
 		botMsgIDs = []int{msgID}
 	} else {
-		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+		_, delErr := b.DeleteMessage(ctx, &bot.DeleteMessageParams{
 			ChatID:    first.Chat.ID,
 			MessageID: msgID,
 		})
+		if delErr != nil {
+			slog.Warn("failed to delete placeholder before chunked send (album)", "error", delErr, "chat_id", first.Chat.ID, "msg_id", msgID)
+		}
 		botMsgIDs = h.sendChunked(ctx, b, first.Chat.ID, response)
 	}
 

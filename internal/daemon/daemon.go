@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -65,6 +66,13 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
+	// Compute per-agent directory early (used for skills, socket, MCP, etc.).
+	pidDir := filepath.Dir(cfg.Daemon.PIDFile)
+	if pidDir == "" {
+		pidDir = config.DefaultConfigDir()
+	}
+	agentSkillsDir := filepath.Join(pidDir, "skills")
+
 	// Load skills if enabled.
 	var skillRegistry *skill.Registry
 	if cfg.Skills.Enabled {
@@ -84,6 +92,16 @@ func New(cfg config.Config) (*Daemon, error) {
 			agentDir := filepath.Join(cfg.Claude.WorkDir, ".agent", "skills")
 			if s, err := skill.LoadDir(agentDir); err == nil {
 				allSkills = append(allSkills, s...)
+			}
+		}
+
+		// Per-agent skills: ~/.shell/agents/<name>/skills/
+		// Derived from PID file directory (e.g. ~/.shell/agents/umbreonmini/skills/)
+		agentSkillsDir := filepath.Join(pidDir, "skills")
+		if s, err := skill.LoadDir(agentSkillsDir); err == nil {
+			allSkills = append(allSkills, s...)
+			if len(s) > 0 {
+				slog.Info("agent skills loaded", "dir", agentSkillsDir, "count", len(s))
 			}
 		}
 
@@ -112,18 +130,40 @@ func New(cfg config.Config) (*Daemon, error) {
 	allowedTools := cfg.Claude.AllowedTools
 	allowedTools = append(allowedTools, toolReg.AllowedTools()...)
 
-	// Write MCP config for Claude CLI so it can call PM/tunnel tools directly.
-	bridgeSockPath := rpc.DefaultSocketPath()
+	// Derive per-agent socket and MCP config paths from PID file directory.
+	bridgeSockPath := filepath.Join(pidDir, "bridge.sock")
 	shellBinary, _ := os.Executable()
-	mcpConfigPath := filepath.Join(config.DefaultConfigDir(), "mcp.json")
-	mcpConfig := map[string]any{
-		"mcpServers": map[string]any{
-			"shell-bridge": map[string]any{
-				"type":    "stdio",
-				"command": shellBinary,
-				"args":    []string{"mcp"},
-			},
+	mcpConfigPath := filepath.Join(pidDir, "mcp.json")
+	mcpServers := map[string]any{
+		"shell-bridge": map[string]any{
+			"type":    "stdio",
+			"command": shellBinary,
+			"args":    []string{"mcp"},
 		},
+	}
+	// Add ghost MCP server with per-agent env vars so each agent
+	// uses its own ghost namespace and database.
+	agentNS := resolveAgentNS(cfg)
+	if agentNS != "" {
+		ghostEnv := map[string]string{
+			"GHOST_NS": agentNS,
+		}
+		if cfg.Memory.DBPath != "" {
+			ghostEnv["GHOST_DB"] = cfg.Memory.DBPath
+		}
+		ghostBin, err := exec.LookPath("ghost")
+		if err != nil {
+			ghostBin = "ghost" // fallback; will fail at runtime if not found
+		}
+		mcpServers["ghost"] = map[string]any{
+			"type":    "stdio",
+			"command": ghostBin,
+			"args":    []string{"mcp-serve"},
+			"env":     ghostEnv,
+		}
+	}
+	mcpConfig := map[string]any{
+		"mcpServers": mcpServers,
 	}
 	if mcpData, err := json.MarshalIndent(mcpConfig, "", "  "); err == nil {
 		os.WriteFile(mcpConfigPath, mcpData, 0644)
@@ -141,6 +181,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		SettingSources: cfg.Claude.SettingSources,
 		BridgeSockPath: bridgeSockPath,
 		MCPConfigPath:  mcpConfigPath,
+		AgentNS:        resolveAgentNS(cfg),
+		GhostDB:        cfg.Memory.DBPath,
 	})
 
 	// Legacy: inject shell:capabilities into system namespaces for profiles without AgentNS.
@@ -239,6 +281,25 @@ func New(cfg config.Config) (*Daemon, error) {
 
 	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, tunnelMgr, pmMgr, skillRegistry)
 
+	// Track skill directories for hot reload.
+	var skillDirs []string
+	globalSkillDir := cfg.Skills.Dir
+	if globalSkillDir == "" {
+		globalSkillDir = filepath.Join(config.DefaultConfigDir(), "skills")
+	}
+	skillDirs = append(skillDirs, globalSkillDir)
+	if cfg.Claude.WorkDir != "" {
+		skillDirs = append(skillDirs, filepath.Join(cfg.Claude.WorkDir, ".agent", "skills"))
+	}
+	skillDirs = append(skillDirs, agentSkillsDir)
+	br.SetSkillDirs(skillDirs)
+
+	// Configure session auto-rotation by token count.
+	if cfg.Claude.MaxSessionTokens > 0 {
+		br.SetMaxSessionTokens(cfg.Claude.MaxSessionTokens)
+		slog.Info("session rotation enabled", "max_tokens", cfg.Claude.MaxSessionTokens)
+	}
+
 	// Create auth with policy engine
 	configDir := config.DefaultConfigDir()
 	allowlistStore := telegram.NewAllowlistStore(filepath.Join(configDir, "allowlist.json"))
@@ -255,9 +316,19 @@ func New(cfg config.Config) (*Daemon, error) {
 		Limiter:           limiter,
 	})
 
-	// Create telegram bot
+	// Set agent identity prompt on bridge.
+	if cfg.Agent.SystemPrompt != "" {
+		br.SetAgentIdentity(cfg.Agent.SystemPrompt)
+	}
+
+	// Create telegram bot with agent identity for group chat routing.
 	token := cfg.TelegramToken()
-	bot, err := telegram.NewBot(token, auth, br)
+	agentCfg := telegram.AgentConfig{
+		BotUsername:           cfg.Agent.BotUsername,
+		BroadcastProbability: cfg.Agent.BroadcastProbability,
+		PeerBots:             cfg.Agent.PeerBots,
+	}
+	bot, err := telegram.NewBot(token, auth, br, agentCfg)
 	if err != nil {
 		st.Close()
 		if mem != nil {
@@ -351,6 +422,22 @@ func New(cfg config.Config) (*Daemon, error) {
 					"patterns discovered during heartbeats."); err != nil {
 				slog.Warn("failed to seed heartbeat-learning docs", "error", err)
 			}
+		}
+	}
+
+	// Seed skill-authoring docs if skills are enabled.
+	if cfg.Skills.Enabled && mem != nil {
+		if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "skill-authoring",
+			fmt.Sprintf("Skill authoring: You can create new skills to expand your capabilities. "+
+				"To create a skill, write a SKILL.md file and optional scripts/ directory to your agent skills directory: %s/. "+
+				"SKILL.md format: frontmatter (--- delimited) with name, description, allowed-tools fields, "+
+				"followed by markdown instructions. Scripts must be executable (chmod +x). "+
+				"After creating a skill, tell the user to run /skills reload (or run it yourself via the bridge) "+
+				"to hot-load it. The skill will then appear in your system prompt on the next message. "+
+				"Use this when you notice a recurring need that could be automated — "+
+				"e.g., API integrations, data processing, custom workflows.",
+				agentSkillsDir)); err != nil {
+			slog.Warn("failed to seed skill-authoring docs", "error", err)
 		}
 	}
 
