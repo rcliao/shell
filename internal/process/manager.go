@@ -47,6 +47,7 @@ type Manager struct {
 	sessions   map[int64]*Session
 	persistent map[int64]*persistentProc // long-lived Claude processes per chat
 	mu         sync.RWMutex
+	readyCond  *sync.Cond // signaled when any session transitions out of busy/compacting
 
 	binary         string
 	model          string
@@ -87,7 +88,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 4
 	}
-	return &Manager{
+	mgr := &Manager{
 		sessions:       make(map[int64]*Session),
 		persistent:     make(map[int64]*persistentProc),
 		binary:         cfg.Binary,
@@ -103,38 +104,67 @@ func NewManager(cfg ManagerConfig) *Manager {
 		agentNS:        cfg.AgentNS,
 		ghostDB:        cfg.GhostDB,
 	}
+	mgr.readyCond = sync.NewCond(&mgr.mu)
+	return mgr
 }
 
 // Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
+// If the session is busy due to compaction, waits for compaction to finish before proceeding.
 func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
-	m.mu.RLock()
+	m.mu.Lock()
 	sess, exists := m.sessions[req.ChatID]
-	m.mu.RUnlock()
+
+	// If session is busy due to compaction, wait for it to finish.
+	if exists && sess.Status == StatusBusy && sess.Compacting {
+		slog.Info("session compacting, waiting for completion", "chat_id", req.ChatID)
+		waitDone := make(chan struct{})
+		go func() {
+			m.mu.Lock()
+			for sess.Status == StatusBusy && sess.Compacting {
+				m.readyCond.Wait()
+			}
+			m.mu.Unlock()
+			close(waitDone)
+		}()
+		m.mu.Unlock()
+
+		select {
+		case <-waitDone:
+			slog.Info("compaction finished, proceeding with message", "chat_id", req.ChatID)
+		case <-ctx.Done():
+			return SendResult{}, ctx.Err()
+		case <-time.After(2 * time.Minute):
+			return SendResult{}, fmt.Errorf("timed out waiting for compaction to finish for chat %d", req.ChatID)
+		}
+
+		// Re-acquire and re-check status after wait.
+		m.mu.Lock()
+		sess, exists = m.sessions[req.ChatID]
+	}
 
 	if exists && sess.Status == StatusBusy {
+		m.mu.Unlock()
 		return SendResult{}, fmt.Errorf("session for chat %d is busy", req.ChatID)
 	}
 
 	// Check concurrency limit
-	m.mu.RLock()
 	busy := 0
 	for _, s := range m.sessions {
 		if s.Status == StatusBusy {
 			busy++
 		}
 	}
-	m.mu.RUnlock()
 	if busy >= m.maxSessions {
+		m.mu.Unlock()
 		return SendResult{}, fmt.Errorf("max concurrent sessions (%d) reached", m.maxSessions)
 	}
 
 	// Mark session as busy
 	if exists {
-		m.mu.Lock()
 		sess.Status = StatusBusy
 		sess.UpdatedAt = time.Now()
-		m.mu.Unlock()
 	}
+	m.mu.Unlock()
 
 	defer func() {
 		if exists {
@@ -142,6 +172,7 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 			sess.Status = StatusActive
 			sess.UpdatedAt = time.Now()
 			m.mu.Unlock()
+			m.readyCond.Broadcast()
 		}
 	}()
 
@@ -292,6 +323,17 @@ func (m *Manager) Get(chatID int64) (*Session, bool) {
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[chatID]
 	return s, ok
+}
+
+// SetCompacting marks whether a session is being compacted.
+// When compacting is true, incoming messages will wait instead of getting "busy".
+func (m *Manager) SetCompacting(chatID int64, compacting bool) {
+	m.mu.Lock()
+	if sess, ok := m.sessions[chatID]; ok {
+		sess.Compacting = compacting
+		sess.UpdatedAt = time.Now()
+	}
+	m.mu.Unlock()
 }
 
 // Remove removes a session from the manager.

@@ -15,13 +15,14 @@ const (
 )
 
 type Session struct {
-	ID               string
-	ChatID           int64
-	ProviderSessionID  string
-	Status           SessionStatus
-	HasHistory       bool // true after first successful exchange
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                string
+	ChatID            int64
+	ProviderSessionID string
+	Status            SessionStatus
+	Compacting        bool // true while session is being compacted (messages should wait)
+	HasHistory        bool // true after first successful exchange
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 func NewSession(chatID int64) *Session {

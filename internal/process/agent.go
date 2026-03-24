@@ -38,6 +38,10 @@ type Agent interface {
 	// Register adds or updates a session.
 	Register(sess *Session)
 
+	// SetCompacting marks whether a session is being compacted.
+	// When compacting, incoming messages wait instead of getting "busy".
+	SetCompacting(chatID int64, compacting bool)
+
 	// Kill terminates a session and removes it.
 	Kill(chatID int64)
 
