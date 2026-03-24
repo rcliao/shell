@@ -170,6 +170,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Add source column to usage table (idempotent for existing databases).
+	s.db.Exec("ALTER TABLE usage ADD COLUMN source TEXT NOT NULL DEFAULT 'interactive'")
+
 	// Background task queue for heartbeat to pick up.
 	taskSchema := `
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -636,11 +639,15 @@ type UsageSummary struct {
 }
 
 // LogUsage records token usage for a single exchange.
-func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int) error {
+// source identifies the origin: "interactive", "heartbeat", or "scheduler".
+func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source string) error {
+	if source == "" {
+		source = "interactive"
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, costUSD, numTurns)
+		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, costUSD, numTurns, source)
 	return err
 }
 
@@ -706,6 +713,94 @@ func (s *Store) GetUsageAllChats(since time.Time) (*UsageSummary, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+// CleanupOldMessages deletes messages older than the given duration.
+func (s *Store) CleanupOldMessages(olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	result, err := s.db.Exec(`DELETE FROM messages WHERE created_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// CleanupCompletedTasks deletes completed tasks older than the given duration.
+func (s *Store) CleanupCompletedTasks(olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	result, err := s.db.Exec(`DELETE FROM tasks WHERE status = 'completed' AND completed_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// CleanupDisabledSchedules deletes disabled one-shot schedules.
+func (s *Store) CleanupDisabledSchedules() (int64, error) {
+	result, err := s.db.Exec(`DELETE FROM schedules WHERE enabled = 0 AND type = 'once'`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// GetMessageCount returns the number of messages for a chat since the given time.
+func (s *Store) GetMessageCount(chatID int64, since time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM messages m
+		JOIN sessions s ON m.session_id = s.id
+		WHERE s.chat_id = ? AND m.created_at >= ?
+	`, chatID, since).Scan(&count)
+	return count, err
+}
+
+// GetSessionRotations returns the number of distinct sessions with usage since the given time.
+func (s *Store) GetSessionRotations(chatID int64, since time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(DISTINCT session_id) FROM usage
+		WHERE chat_id = ? AND created_at >= ?
+	`, chatID, since).Scan(&count)
+	return count, err
+}
+
+// GetUsageSummaryBySource returns usage grouped by source (interactive, heartbeat, scheduler).
+func (s *Store) GetUsageSummaryBySource(chatID int64, since time.Time) (map[string]*UsageSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT COALESCE(source, 'interactive'),
+		       COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		       COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+		       COALESCE(SUM(cost_usd),0), COALESCE(SUM(num_turns),0), COUNT(*)
+		FROM usage WHERE chat_id = ? AND created_at >= ?
+		GROUP BY COALESCE(source, 'interactive')
+	`, chatID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]*UsageSummary)
+	for rows.Next() {
+		var source string
+		var u UsageSummary
+		if err := rows.Scan(&source,
+			&u.TotalInputTokens, &u.TotalOutputTokens,
+			&u.TotalCacheCreationTokens, &u.TotalCacheReadTokens,
+			&u.TotalCostUSD, &u.TotalTurns, &u.ExchangeCount,
+		); err != nil {
+			return nil, err
+		}
+		result[source] = &u
+	}
+	return result, nil
+}
+
+// GetActiveScheduleCount returns the number of enabled schedules for a chat.
+func (s *Store) GetActiveScheduleCount(chatID int64) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM schedules WHERE chat_id = ? AND enabled = 1`, chatID).Scan(&count)
+	return count, err
 }
 
 func (s *Store) Close() error {
