@@ -83,7 +83,7 @@ Each Telegram chat gets its own Claude Code session. Messages are forwarded to:
 claude -p "message" --resume <session-id> --output-format stream-json
 ```
 
-Claude's responses are parsed for directives (`[search]`, `[browser]`, `[tunnel]`, `[generate-image]`, `[schedule]`, `[relay]`) which are executed and fed back for follow-up reasoning.
+Claude's responses are parsed for artifact markers and `[noop]` directives. Bridge operations (pm, tunnel, schedule, relay, browser) use MCP tools or skill scripts invoked via Bash.
 
 Sessions persist across restarts via SQLite. Memory context is injected via `--append-system-prompt`.
 

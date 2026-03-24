@@ -209,46 +209,33 @@ curl -sL "https://example.com" | $(go env GOPATH)/bin/pup 'table json{}'
 
 ---
 
-## Browser Automation — `[browser]` directive
+## Browser Automation — `browser` skill
 
-Built-in headless Chrome automation. Prefer the `[browser]` directive over Bash tools — the bridge
-handles execution and feeds results back automatically. Screenshots are sent as photos to the chat.
+Headless Chrome automation via the `browser` skill script. Use Bash to invoke it.
 
-```
-[browser url="https://example.com"]
-screenshot
-[/browser]
+```bash
+scripts/browser <url> [action...]
 ```
 
-**Available actions (one per line):**
-- `navigate` — navigate to the URL (implicit, always happens first)
+**Available actions (each a separate argument):**
+- `screenshot` — capture full page screenshot (output as artifact marker)
 - `click "<selector>"` — click an element by CSS selector
 - `type "<selector>" "<value>"` — clear and type into an input
 - `wait "<selector>"` — wait for element to appear (up to 10s)
-- `screenshot` — capture full page screenshot (sent as photo)
 - `extract "<selector>"` — extract text content of element(s)
 - `js "<expression>"` — evaluate JavaScript and return result
 - `sleep "<duration>"` — wait (e.g., `sleep "2s"`)
 
 **Example — multi-step flow:**
-```
-[browser url="https://news.ycombinator.com"]
-extract ".titleline > a"
-screenshot
-js "document.title"
-[/browser]
-```
-
-### Legacy: `shot-scraper`
-
-Fallback headless browser tool (Python/Playwright).
-Binary: `/Users/pikamini/Library/Python/3.9/bin/shot-scraper`
-
 ```bash
-SHOT=/Users/pikamini/Library/Python/3.9/bin/shot-scraper
-$SHOT "https://example.com" -o screenshot.png
-$SHOT javascript "https://example.com" "document.title"
+scripts/browser "https://news.ycombinator.com" \
+  'extract ".titleline > a"' \
+  screenshot \
+  'js "document.title"'
 ```
+
+**Do NOT use the `[browser]` directive syntax** — it is not handled by the bridge.
+Always invoke via Bash as shown above.
 
 ---
 
