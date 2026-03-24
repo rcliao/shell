@@ -71,6 +71,80 @@ func formatUsage(title string, u *store.UsageSummary) string {
 	)
 }
 
+// Digest handles the /digest command — comprehensive daily digest with per-source breakdown.
+func (b *Bridge) Digest(ctx context.Context, chatID int64, args string) (string, error) {
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// Per-source usage breakdown
+	bySource, err := b.store.GetUsageSummaryBySource(chatID, todayStart)
+	if err != nil {
+		return "", fmt.Errorf("get usage by source: %w", err)
+	}
+
+	// Message count
+	msgCount, _ := b.store.GetMessageCount(chatID, todayStart)
+
+	// Session rotations
+	sessCount, _ := b.store.GetSessionRotations(chatID, todayStart)
+
+	// Active schedules
+	schedCount, _ := b.store.GetActiveScheduleCount(chatID)
+
+	// Aggregate totals
+	var totalCost float64
+	var totalExchanges int64
+	var totalTurns int64
+	var totalInput int64
+	var totalOutput int64
+	for _, u := range bySource {
+		totalCost += u.TotalCostUSD
+		totalExchanges += u.ExchangeCount
+		totalTurns += u.TotalTurns
+		totalInput += u.TotalInputTokens
+		totalOutput += u.TotalOutputTokens
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Daily Digest\n\n")
+	sb.WriteString(fmt.Sprintf("**Date:** %s\n", now.Format("Monday, 2006-01-02")))
+	sb.WriteString(fmt.Sprintf("**Messages:** %s\n", commaInt(int64(msgCount))))
+	sb.WriteString(fmt.Sprintf("**Sessions:** %d\n", sessCount))
+	sb.WriteString(fmt.Sprintf("**Active schedules:** %d\n", schedCount))
+	sb.WriteString(fmt.Sprintf("**Total cost:** $%.4f\n\n", totalCost))
+
+	if len(bySource) > 0 {
+		sb.WriteString("### Usage by source\n\n")
+		sb.WriteString("| Source | Exchanges | Turns | Input | Output | Cost |\n")
+		sb.WriteString("|--------|-----------|-------|-------|--------|------|\n")
+		for _, src := range []string{"interactive", "heartbeat", "scheduler"} {
+			u, ok := bySource[src]
+			if !ok {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | $%.4f |\n",
+				src,
+				commaInt(u.ExchangeCount),
+				commaInt(u.TotalTurns),
+				commaInt(u.TotalInputTokens),
+				commaInt(u.TotalOutputTokens),
+				u.TotalCostUSD,
+			))
+		}
+		sb.WriteString(fmt.Sprintf("| **Total** | **%s** | **%s** | **%s** | **%s** | **$%.4f** |\n",
+			commaInt(totalExchanges),
+			commaInt(totalTurns),
+			commaInt(totalInput),
+			commaInt(totalOutput),
+			totalCost,
+		))
+	} else {
+		sb.WriteString("No usage recorded today.")
+	}
+
+	return sb.String(), nil
+}
+
 // commaInt formats an int64 with comma separators.
 func commaInt(n int64) string {
 	if n < 0 {

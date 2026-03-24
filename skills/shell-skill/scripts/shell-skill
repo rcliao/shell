@@ -1,0 +1,24 @@
+#!/bin/sh
+# shell-skill — load full skill instructions on-demand
+set -e
+
+SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
+URL="http://bridge/skills-load"
+
+if [ "$1" != "load" ] || [ -z "$2" ]; then
+  echo "usage: shell-skill load <name>" >&2
+  exit 1
+fi
+
+NAME="$2"
+
+RESPONSE=$(curl -sf --unix-socket "$SOCK" -X POST "$URL" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"$NAME\"}" 2>&1) || {
+  echo "Error: skill '$NAME' not found or bridge unreachable" >&2
+  exit 1
+}
+
+# Extract and print the body field
+echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body',''))" 2>/dev/null || \
+  echo "$RESPONSE"

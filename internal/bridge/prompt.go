@@ -10,10 +10,10 @@ func (b *Bridge) skillsSystemPrompt() string {
 	if b.skills == nil {
 		return ""
 	}
-	prompt := b.skills.SystemPrompt()
+	prompt := b.skills.CatalogPrompt()
 	prompt += "\n\n## Important: Use tools for bridge operations\n\n" +
 		"Do NOT emit text directives like `[pm]`, `[tunnel]`, `[schedule]`, `[relay]`, " +
-		"`[remember]`, `[heartbeat-learning]`, or `[task-complete]` in your response. " +
+		"`[remember]`, `[heartbeat-learning]`, `[task-complete]`, or `[browser]` in your response. " +
 		"These are deprecated.\n\n" +
 		"For process management and tunnels, use the `shell_pm` and `shell_tunnel` MCP tools directly.\n" +
 		"For scheduling, memory, relay, and tasks, use the corresponding skill scripts via Bash.\n\n" +

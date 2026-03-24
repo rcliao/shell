@@ -215,6 +215,11 @@ func (b *Bridge) resolveAgent(chatID int64) process.Agent {
 	return b.proc
 }
 
+// GetSkillRegistry returns the current skill registry.
+func (b *Bridge) GetSkillRegistry() *skill.Registry {
+	return b.skills
+}
+
 // SetSkillDirs sets the directories to scan when reloading skills.
 func (b *Bridge) SetSkillDirs(dirs []string) {
 	b.skillDirs = dirs
@@ -333,6 +338,9 @@ func (b *Bridge) SetMaxSessionTokens(maxTokens int) {
 // compactSessionIfNeeded sends /compact to the CLI when total input tokens exceed
 // the threshold. This summarizes old conversation turns while preserving continuity,
 // instead of killing the session entirely.
+//
+// The session is marked as StatusCompacting while running, which allows the manager
+// to queue incoming messages instead of rejecting them with "busy".
 func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID int64, usage *process.Usage) {
 	if b.maxSessionTokens <= 0 || usage == nil {
 		return
@@ -353,6 +361,15 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID int64, usage
 	procSess, _ := agent.Get(chatID)
 	if procSess == nil {
 		return
+	}
+
+	// Mark session as compacting so incoming messages wait instead of getting "busy".
+	agent.SetCompacting(chatID, true)
+	defer agent.SetCompacting(chatID, false)
+
+	// Notify user that compaction is in progress.
+	if b.transport != nil {
+		b.transport.Notify(chatID, "🗜 Compacting conversation...")
 	}
 
 	// Send /compact as a user message — the CLI handles it as a slash command.
@@ -502,7 +519,15 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		procSess.HasHistory = true
 	}
 
-	resp := b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result)
+	// Determine usage source for cost attribution.
+	source := "interactive"
+	if isHeartbeat {
+		source = "heartbeat"
+	} else if isSystemSender(senderName) {
+		source = "scheduler"
+	}
+
+	resp := b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result, source)
 
 	// Auto-compact session if token threshold exceeded (uses API-reported usage).
 	go b.compactSessionIfNeeded(ctx, chatID, result.Usage)
@@ -513,7 +538,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 // processResponse is the post-processing pipeline for HandleMessageStreaming.
 // It parses all response directives (relay, heartbeat, memory, schedule, artifacts),
 // logs the exchange, and returns a typed AgentResponse with collected photos.
-func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult) AgentResponse {
+func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source string) AgentResponse {
 	response := strings.TrimSpace(result.Text)
 
 	// Run memory maintenance during heartbeats.
@@ -542,7 +567,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, user
 		if err := b.store.LogUsage(chatID, sessID,
 			result.Usage.InputTokens, result.Usage.OutputTokens,
 			result.Usage.CacheCreationInputTokens, result.Usage.CacheReadInputTokens,
-			result.Usage.CostUSD, result.Usage.NumTurns,
+			result.Usage.CostUSD, result.Usage.NumTurns, source,
 		); err != nil {
 			slog.Warn("failed to log usage", "error", err)
 		}

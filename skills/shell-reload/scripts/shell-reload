@@ -1,0 +1,14 @@
+#!/bin/sh
+# shell-reload — hot-reload skills from disk
+set -e
+
+SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
+URL="http://bridge/skills-reload"
+
+RESPONSE=$(curl -sf --unix-socket "$SOCK" -X POST "$URL" 2>&1) || {
+  echo "Error: failed to reach bridge socket at $SOCK" >&2
+  exit 1
+}
+
+COUNT=$(echo "$RESPONSE" | grep -o '"count":[0-9]*' | cut -d: -f2)
+echo "Skills reloaded: ${COUNT:-0} skills loaded."

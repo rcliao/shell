@@ -1,6 +1,9 @@
 package skill
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Registry holds loaded skills and provides merged configuration.
 type Registry struct {
@@ -76,6 +79,64 @@ func (r *Registry) SystemPrompt() string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// CatalogPrompt returns a compact one-liner-per-skill listing for the system prompt.
+// Saves tokens compared to SystemPrompt() by omitting full skill bodies.
+func (r *Registry) CatalogPrompt() string {
+	if len(r.skills) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n## Available Skills\n\n")
+	sb.WriteString("**IMPORTANT: Artifact markers.** When a skill script outputs lines matching `[artifact type=\"...\" path=\"...\" caption=\"...\"]`, ")
+	sb.WriteString("you MUST include them verbatim in your response text. The bridge parses these markers to deliver binary content (images, files) to the user. ")
+	sb.WriteString("Do not omit, paraphrase, or summarize artifact markers.\n\n")
+	sb.WriteString("To load full instructions for a skill, run: `scripts/shell-skill load <name>`\n\n")
+	for _, s := range r.skills {
+		sb.WriteString("- **")
+		sb.WriteString(s.Name)
+		sb.WriteString("**: ")
+		sb.WriteString(s.Description)
+		if s.ScriptsDir != "" {
+			sb.WriteString(" (`")
+			sb.WriteString(s.ScriptsDir)
+			sb.WriteString("/`)")
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// FullPrompt returns the full body for a single skill by name.
+// Returns an error if the skill is not found.
+func (r *Registry) FullPrompt(name string) (string, error) {
+	s, ok := r.byName[name]
+	if !ok {
+		return "", fmt.Errorf("skill %q not found", name)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("### ")
+	sb.WriteString(s.Name)
+	sb.WriteString("\n")
+	sb.WriteString(s.Description)
+	sb.WriteString("\n")
+	sb.WriteString("- Dir: `")
+	sb.WriteString(s.Dir)
+	sb.WriteString("`\n")
+	if s.ScriptsDir != "" {
+		sb.WriteString("- Scripts: `")
+		sb.WriteString(s.ScriptsDir)
+		sb.WriteString("/`\n")
+	}
+	if s.Body != "" {
+		sb.WriteString("\n")
+		sb.WriteString(s.Body)
+		sb.WriteString("\n")
+	}
+	return sb.String(), nil
 }
 
 // AllowedTools returns the merged allowed-tools from all skills.

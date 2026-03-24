@@ -371,6 +371,16 @@ func New(cfg config.Config) (*Daemon, error) {
 		CronParse: func(expr string) (interface{ Next(time.Time) time.Time }, error) {
 			return scheduler.ParseCron(expr)
 		},
+		SkillsReload: func() (int, error) {
+			return br.ReloadSkills()
+		},
+		SkillsLoad: func(name string) (string, error) {
+			reg := br.GetSkillRegistry()
+			if reg == nil {
+				return "", fmt.Errorf("no skills loaded")
+			}
+			return reg.FullPrompt(name)
+		},
 		Timezone: cfg.Scheduler.Timezone,
 	})
 
@@ -432,8 +442,8 @@ func New(cfg config.Config) (*Daemon, error) {
 				"To create a skill, write a SKILL.md file and optional scripts/ directory to your agent skills directory: %s/. "+
 				"SKILL.md format: frontmatter (--- delimited) with name, description, allowed-tools fields, "+
 				"followed by markdown instructions. Scripts must be executable (chmod +x). "+
-				"After creating a skill, tell the user to run /skills reload (or run it yourself via the bridge) "+
-				"to hot-load it. The skill will then appear in your system prompt on the next message. "+
+				"After creating a skill, run `scripts/shell-reload` to hot-load it immediately. "+
+				"The skill will then appear in your system prompt on the next message. "+
 				"Use this when you notice a recurring need that could be automated — "+
 				"e.g., API integrations, data processing, custom workflows.",
 				agentSkillsDir)); err != nil {
@@ -645,16 +655,34 @@ func (d *Daemon) restoreSessions() {
 }
 
 func (d *Daemon) cleanupLoop(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
+	sessionTicker := time.NewTicker(10 * time.Minute)
+	defer sessionTicker.Stop()
+	dbTicker := time.NewTicker(6 * time.Hour)
+	defer dbTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-sessionTicker.C:
 			if err := d.bridge.CleanupStaleSessions(1 * time.Hour); err != nil {
 				slog.Warn("stale session cleanup failed", "error", err)
+			}
+		case <-dbTicker.C:
+			if n, err := d.store.CleanupOldMessages(7 * 24 * time.Hour); err != nil {
+				slog.Warn("message cleanup failed", "error", err)
+			} else if n > 0 {
+				slog.Info("cleaned up old messages", "deleted", n)
+			}
+			if n, err := d.store.CleanupCompletedTasks(3 * 24 * time.Hour); err != nil {
+				slog.Warn("task cleanup failed", "error", err)
+			} else if n > 0 {
+				slog.Info("cleaned up completed tasks", "deleted", n)
+			}
+			if n, err := d.store.CleanupDisabledSchedules(); err != nil {
+				slog.Warn("schedule cleanup failed", "error", err)
+			} else if n > 0 {
+				slog.Info("cleaned up disabled one-shot schedules", "deleted", n)
 			}
 		}
 	}

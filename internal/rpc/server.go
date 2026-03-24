@@ -33,6 +33,12 @@ type RelayToBridgeFunc func(ctx context.Context, chatID int64, message string)
 // CronParser parses a cron expression and returns something with a Next method.
 type CronParser func(expr string) (interface{ Next(time.Time) time.Time }, error)
 
+// SkillsReloadFunc reloads skills and returns the count loaded.
+type SkillsReloadFunc func() (int, error)
+
+// SkillsLoadFunc returns the full prompt body for a named skill.
+type SkillsLoadFunc func(name string) (string, error)
+
 // Server is the bridge RPC server listening on a Unix socket.
 type Server struct {
 	listener  net.Listener
@@ -46,6 +52,8 @@ type Server struct {
 	sendPhoto      SendPhotoFunc
 	relayToBridge  RelayToBridgeFunc
 	cronParse      CronParser
+	skillsReload   SkillsReloadFunc
+	skillsLoad     SkillsLoadFunc
 	timezone       string
 }
 
@@ -60,6 +68,8 @@ type Config struct {
 	SendPhoto     SendPhotoFunc
 	RelayToBridge RelayToBridgeFunc
 	CronParse     CronParser
+	SkillsReload  SkillsReloadFunc
+	SkillsLoad    SkillsLoadFunc
 	Timezone      string
 }
 
@@ -84,6 +94,8 @@ func New(cfg Config) *Server {
 		sendPhoto:     cfg.SendPhoto,
 		relayToBridge: cfg.RelayToBridge,
 		cronParse:     cfg.CronParse,
+		skillsReload:  cfg.SkillsReload,
+		skillsLoad:    cfg.SkillsLoad,
 		timezone:  cfg.Timezone,
 	}
 }
@@ -116,6 +128,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /schedule", s.handleSchedule)
 	mux.HandleFunc("POST /memory", s.handleMemory)
 	mux.HandleFunc("POST /task", s.handleTask)
+	mux.HandleFunc("POST /skills-reload", s.handleSkillsReload)
+	mux.HandleFunc("POST /skills-load", s.handleSkillsLoad)
 
 	s.server = &http.Server{Handler: mux}
 	slog.Info("rpc server starting", "socket", s.sockPath)
@@ -458,6 +472,47 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusBadRequest, "action must be 'complete'")
 	}
+}
+
+func (s *Server) handleSkillsReload(w http.ResponseWriter, r *http.Request) {
+	if s.skillsReload == nil {
+		writeError(w, http.StatusServiceUnavailable, "skills reload not configured")
+		return
+	}
+	count, err := s.skillsReload()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "reload failed: "+err.Error())
+		return
+	}
+	slog.Info("rpc: skills reloaded", "count", count)
+	writeJSON(w, map[string]any{"ok": true, "count": count})
+}
+
+// SkillsLoadRequest is the JSON body for POST /skills-load.
+type SkillsLoadRequest struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handleSkillsLoad(w http.ResponseWriter, r *http.Request) {
+	if s.skillsLoad == nil {
+		writeError(w, http.StatusServiceUnavailable, "skills load not configured")
+		return
+	}
+	var req SkillsLoadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	body, err := s.skillsLoad(req.Name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "name": req.Name, "body": body})
 }
 
 // --- Helpers ---

@@ -53,6 +53,8 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 		return b.Tunnel(ctx, chatID, args)
 	case "usage":
 		return b.Usage(ctx, chatID, args)
+	case "digest":
+		return b.Digest(ctx, chatID, args)
 	case "agent":
 		return b.SwitchAgent(ctx, chatID, args)
 	case "personality":
@@ -139,6 +141,7 @@ func (b *Bridge) Help() string {
 		"- `/usage` — Today's token usage\n" +
 		"- `/usage all` — All-time usage\n" +
 		"- `/usage global` — Usage across all chats\n" +
+		"- `/digest` — Daily digest with per-source cost breakdown\n" +
 		"- `/personality` — Show agent identity\n" +
 		"- `/personality reset` — Archive identity and re-onboard\n" +
 		"- `/skills` — List loaded skills\n" +
