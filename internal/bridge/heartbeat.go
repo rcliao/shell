@@ -28,8 +28,8 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	// Fetch pending background tasks
 	pendingTasks, _ := b.store.PendingTasks(chatID)
 
-	// Fetch general memory context for reflection
-	memoryCtx := b.memory.SystemPrompt(ctx, chatID)
+	// Fetch general memory context for reflection (reduced budget for heartbeats)
+	memoryCtx := b.memory.SystemPromptWithBudget(ctx, chatID, 300)
 
 	hasContent := len(exchanges) > 0 || insights != "" || len(pendingTasks) > 0
 
@@ -59,12 +59,8 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 
 	// Include memory context so heartbeat can reflect on stored knowledge
 	if memoryCtx != "" {
-		truncated := memoryCtx
-		if len(truncated) > 1000 {
-			truncated = truncated[:1000] + "\n... (truncated)"
-		}
 		sb.WriteString("[Memory context for reflection]\n")
-		sb.WriteString(truncated)
+		sb.WriteString(memoryCtx)
 		sb.WriteString("\n[End of memory context]\n\n")
 	}
 

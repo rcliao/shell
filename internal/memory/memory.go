@@ -103,6 +103,24 @@ func (m *Memory) SystemPrompt(ctx context.Context, chatID int64) string {
 	return m.systemPromptFromNamespaces(ctx, prof)
 }
 
+// SystemPromptWithBudget is like SystemPrompt but overrides the profile's SystemBudget.
+// Useful for heartbeats where a smaller budget is sufficient.
+func (m *Memory) SystemPromptWithBudget(ctx context.Context, chatID int64, budget int) string {
+	prof := m.profileFor(chatID)
+
+	if prof.AgentNS != "" {
+		// Override the budget for this call
+		overridden := prof
+		overridden.SystemBudget = budget
+		return m.systemPromptFromAgent(ctx, overridden)
+	}
+
+	// Legacy path: override the budget
+	overridden := prof
+	overridden.SystemBudget = budget
+	return m.systemPromptFromNamespaces(ctx, overridden)
+}
+
 // ghostSearchInstruction tells the agent to use ghost tools when context is missing.
 const ghostSearchInstruction = `[Memory retrieval] Sessions rotate frequently to save tokens. If the user references something you don't have context for, use ghost_search or ghost_context (with exclude_pinned=true for deeper search) to recall it before saying you don't know.`
 
