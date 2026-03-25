@@ -486,7 +486,10 @@ func main() {
 		Use:   "mcp",
 		Short: "Run MCP server on stdio (used by Claude CLI)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sockPath := rpc.DefaultSocketPath()
+			sockPath := os.Getenv("SHELL_BRIDGE_SOCK")
+			if sockPath == "" {
+				sockPath = rpc.DefaultSocketPath()
+			}
 			return shellmcp.Serve(context.Background(), sockPath)
 		},
 	}
