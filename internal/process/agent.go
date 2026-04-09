@@ -24,6 +24,7 @@ type AgentRequest struct {
 	Images       []ImageAttachment // attached images
 	PDFs         []PDFAttachment   // attached PDFs
 	SystemPrompt string            // appended system prompt
+	Model        string            // per-request model override (empty = use manager default)
 }
 
 // Agent abstracts the Claude session manager so the implementation can be

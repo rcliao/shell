@@ -532,6 +532,96 @@ func TestParseArtifacts_NoMatch(t *testing.T) {
 	}
 }
 
+func TestStripDirectives(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "relay with chat ID",
+			input: "Sure! [relay chat_id=123456 message=\"hello\"] Done!",
+			want:  "Sure!  Done!",
+		},
+		{
+			name:  "block relay",
+			input: "Here [relay chat_id=123]message text[/relay] done",
+			want:  "Here  done",
+		},
+		{
+			name:  "noop",
+			input: "[noop]",
+			want:  "",
+		},
+		{
+			name:  "browser directive",
+			input: "Let me check:\n[browser url=\"https://example.com\"]\nscreenshot\n[/browser]\nDone!",
+			want:  "Let me check:\n\nDone!",
+		},
+		{
+			name:  "schedule directive",
+			input: "[schedule cron=\"0 9 * * *\" tz=\"America/Los_Angeles\" mode=\"prompt\"]check status[/schedule]",
+			want:  "",
+		},
+		{
+			name:  "no directives",
+			input: "Just a normal response with [brackets] in text",
+			want:  "Just a normal response with [brackets] in text",
+		},
+		{
+			name:  "multiple directives",
+			input: "Hi [relay chat_id=1 message=\"a\"] and [relay chat_id=2 message=\"b\"] bye",
+			want:  "Hi  and  bye",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripDirectives(tt.input)
+			if got != tt.want {
+				t.Errorf("stripDirectives(%q)\n  got  %q\n  want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeToolCalls(t *testing.T) {
+	tests := []struct {
+		name  string
+		calls []process.ToolCall
+		want  string
+	}{
+		{
+			name:  "single tool",
+			calls: []process.ToolCall{{Name: "Bash"}},
+			want:  "✓ Bash",
+		},
+		{
+			name:  "multiple different tools",
+			calls: []process.ToolCall{{Name: "Read"}, {Name: "Bash"}},
+			want:  "✓ Read, Bash",
+		},
+		{
+			name:  "repeated tool",
+			calls: []process.ToolCall{{Name: "Bash"}, {Name: "Bash"}, {Name: "Bash"}},
+			want:  "✓ Bash ×3",
+		},
+		{
+			name:  "mixed",
+			calls: []process.ToolCall{{Name: "Read"}, {Name: "Bash"}, {Name: "Bash"}},
+			want:  "✓ Read, Bash ×2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := summarizeToolCalls(tt.calls)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseArtifacts_MissingFile(t *testing.T) {
 	b := testBridge(t)
 

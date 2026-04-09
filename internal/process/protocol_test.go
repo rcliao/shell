@@ -141,6 +141,54 @@ func TestParseBidirectionalEvents_MultipleToolCalls(t *testing.T) {
 	}
 }
 
+func TestParseBidirectionalEvents_TextThenToolCallEmptyResult(t *testing.T) {
+	// Claude streams text, then does a tool call, and the final result is empty.
+	// The accumulated text from earlier turns should be preserved.
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-fallback"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here's what I found."}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"scripts/shell-relay --chat-id 123 --message hi"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"sent"}]}}`,
+		`{"type":"result","result":"","session_id":"sess-fallback"}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, nil)
+
+	if result.Text != "Here's what I found." {
+		t.Errorf("expected accumulated text fallback, got %q", result.Text)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
+	}
+}
+
+func TestParseBidirectionalEvents_StreamedTextThenToolCallEmptyResult(t *testing.T) {
+	// Same scenario but with stream_event deltas instead of assistant blocks.
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-stream"}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Sending "}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"the message."}}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sending the message."}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"echo hi"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"hi"}]}}`,
+		`{"type":"result","result":"","session_id":"sess-stream"}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	var streamed strings.Builder
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, func(s string) {
+		streamed.WriteString(s)
+	})
+
+	if result.Text != "Sending the message." {
+		t.Errorf("expected streamed text fallback, got %q", result.Text)
+	}
+	if streamed.String() != "Sending the message." {
+		t.Errorf("expected streamed 'Sending the message.', got %q", streamed.String())
+	}
+}
+
 func TestParseBidirectionalEvents_KeepAlive(t *testing.T) {
 	input := strings.Join([]string{
 		`{"type":"keep_alive"}`,

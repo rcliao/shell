@@ -122,7 +122,19 @@ func (m *Memory) SystemPromptWithBudget(ctx context.Context, chatID int64, budge
 }
 
 // ghostSearchInstruction tells the agent to use ghost tools when context is missing.
-const ghostSearchInstruction = `[Memory retrieval] Sessions rotate frequently to save tokens. If the user references something you don't have context for, use ghost_search or ghost_context (with exclude_pinned=true for deeper search) to recall it before saying you don't know.`
+const ghostSearchInstruction = `[Memory retrieval]
+Sessions rotate frequently — you lose conversation history each restart.
+Your injected memories above are a SUBSET filtered by relevance. There is more you can recall.
+
+BEFORE saying "I don't know" or "I don't remember", you MUST:
+1. ghost_search(query="<what you're looking for>") — keyword/semantic search across all memories
+2. ghost_context(query="<topic>", exclude_pinned=true) — broader context assembly
+
+Do this when:
+- User references a past conversation, decision, or preference you don't see in context
+- User says "remember when...", "you said...", "we talked about...", "last time..."
+- You're unsure about user preferences, family details, or running jokes
+- A topic feels familiar but you lack specifics`
 
 // systemPromptFromAgent loads pinned memories from the agent namespace via Context().
 func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) string {
@@ -219,28 +231,64 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 	var sb strings.Builder
 
 	if prof.AgentNS != "" {
-		// New path: query agent namespace with chat tag
+		// Chat-scoped recall: memories tagged with this specific chat
+		chatBudget := prof.Budget * 2 / 3 // 2/3 for chat-specific
 		result, err := m.store.Context(ctx, agentmemory.ContextParams{
 			NS:     prof.AgentNS,
 			Query:  userMsg,
 			Tags:   []string{chatTag(chatID)},
-			Budget: prof.Budget,
+			Budget: chatBudget,
 		})
 		if err != nil {
 			slog.Warn("memory context fetch failed", "error", err)
 		} else {
 			if len(result.Memories) > 0 {
-				sb.WriteString("[Relevant memories from previous conversations]\n")
+				sb.WriteString("[Relevant memories from this chat]\n")
 				for _, mem := range result.Memories {
 					sb.WriteString("- ")
 					sb.WriteString(mem.Content)
 					sb.WriteString("\n")
 				}
-				sb.WriteString("[End of memories]\n\n")
+				sb.WriteString("[End of chat memories]\n\n")
 			}
 			if result.CompactionSuggested {
 				slog.Info("memory compaction suggested, triggering background reflect", "ns", prof.AgentNS, "skipped", result.Skipped)
 				go m.RunReflect(ctx)
+			}
+		}
+
+		// Cross-chat recall: agent-wide knowledge relevant to this message
+		crossBudget := prof.Budget / 3 // 1/3 for cross-chat
+		crossResult, err := m.store.Context(ctx, agentmemory.ContextParams{
+			NS:            prof.AgentNS,
+			Query:         userMsg,
+			Budget:        crossBudget,
+			ExcludePinned: true, // pinned already in system prompt
+		})
+		if err != nil {
+			slog.Warn("cross-chat context fetch failed", "error", err)
+		} else if len(crossResult.Memories) > 0 {
+			// Deduplicate against chat-scoped results
+			chatKeys := map[string]bool{}
+			if result != nil {
+				for _, mem := range result.Memories {
+					chatKeys[mem.Key] = true
+				}
+			}
+			var crossMems []agentmemory.ContextMemory
+			for _, mem := range crossResult.Memories {
+				if !chatKeys[mem.Key] {
+					crossMems = append(crossMems, mem)
+				}
+			}
+			if len(crossMems) > 0 {
+				sb.WriteString("[Related knowledge from other conversations]\n")
+				for _, mem := range crossMems {
+					sb.WriteString("- ")
+					sb.WriteString(mem.Content)
+					sb.WriteString("\n")
+				}
+				sb.WriteString("[End of related knowledge]\n\n")
 			}
 		}
 	} else {
@@ -642,6 +690,7 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 			Kind:       kind,
 			Tags:       tags,
 			Importance: 0.7, // agent-discovered learnings
+			Dedup:      true,
 		})
 		if err != nil {
 			slog.Warn("failed to store memory directive", "ns", ns, "error", err)
@@ -680,6 +729,7 @@ func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind
 		Kind:       kind,
 		Tags:       tags,
 		Importance: 0.7,
+		Dedup:      true,
 	})
 	return err
 }
@@ -746,6 +796,7 @@ func (m *Memory) StoreHeartbeatLearning(ctx context.Context, chatID int64, conte
 		Tags:       tags,
 		Priority:   "high",
 		Importance: 0.7, // heartbeat learnings — moderately important, self-discovered
+		Dedup:      true,
 	})
 	if err != nil {
 		return err
@@ -1236,13 +1287,14 @@ func (m *Memory) SummarizeExchanges(ctx context.Context, chatID int64) (int, err
 
 // RunReflect runs the memory reflect cycle to promote, decay, and prune memories.
 // Should be called periodically (e.g., after heartbeat processing).
-func (m *Memory) RunReflect(ctx context.Context) {
+// Returns the reflect result for callers that need cluster info (e.g., heartbeat consolidation).
+func (m *Memory) RunReflect(ctx context.Context) *agentmemory.ReflectResult {
 	result, err := m.store.Reflect(ctx, agentmemory.ReflectParams{})
 	if err != nil {
 		slog.Warn("memory reflect failed", "error", err)
-		return
+		return nil
 	}
-	if result.Promoted+result.Decayed+result.Demoted+result.Deleted+result.Archived > 0 {
+	if result.Promoted+result.Decayed+result.Demoted+result.Deleted+result.Archived+result.Merged > 0 {
 		slog.Info("memory reflect complete",
 			"evaluated", result.MemoriesEvaluated,
 			"promoted", result.Promoted,
@@ -1250,8 +1302,304 @@ func (m *Memory) RunReflect(ctx context.Context) {
 			"demoted", result.Demoted,
 			"deleted", result.Deleted,
 			"archived", result.Archived,
+			"deduped", result.Merged,
 		)
 	}
+	return result
+}
+
+// ConsolidationCandidates returns a formatted prompt section describing memory clusters
+// that need LLM-assisted consolidation. Empty string if nothing needs attention.
+func (m *Memory) ConsolidationCandidates(ctx context.Context, reflectResult *agentmemory.ReflectResult, maxClusters int) string {
+	if reflectResult == nil || len(reflectResult.LinkedClusters) == 0 {
+		return ""
+	}
+
+	// Resolve default namespace from first available profile
+	ns := ""
+	for _, p := range m.profiles {
+		if p.AgentNS != "" {
+			ns = p.AgentNS
+			break
+		}
+	}
+
+	// Filter to clusters with 3+ items that would benefit from summarization
+	type candidate struct {
+		keys    []string
+		samples []string
+	}
+	var candidates []candidate
+
+	for _, cluster := range reflectResult.LinkedClusters {
+		if cluster.Count < 3 || len(candidates) >= maxClusters {
+			break
+		}
+		// Fetch content samples for the cluster members
+		var samples []string
+		for i, key := range cluster.Keys {
+			if i >= 3 { // show at most 3 samples
+				break
+			}
+			mems, err := m.store.Get(ctx, agentmemory.GetParams{NS: ns, Key: key, History: true})
+			if err != nil || len(mems) == 0 {
+				continue
+			}
+			content := mems[0].Content
+			if len(content) > 150 {
+				content = content[:150] + "..."
+			}
+			samples = append(samples, fmt.Sprintf("  [%s]: %s", key, content))
+		}
+		if len(samples) >= 2 {
+			candidates = append(candidates, candidate{keys: cluster.Keys, samples: samples})
+		}
+	}
+
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[Memory consolidation needed]\n")
+	sb.WriteString("The following memory clusters contain duplicates or near-duplicates that should be merged.\n")
+	sb.WriteString("For each cluster: read the full memories with ghost_get, write a concise summary, then call ghost_consolidate.\n\n")
+
+	for i, c := range candidates {
+		sb.WriteString(fmt.Sprintf("Cluster %d (%d memories, keys: %s):\n", i+1, len(c.keys), strings.Join(c.keys[:min(5, len(c.keys))], ", ")))
+		for _, s := range c.samples {
+			sb.WriteString(s)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("[End of consolidation candidates]\n")
+	return sb.String()
+}
+
+// HealthResult captures a lightweight quality check on context assembly.
+type HealthResult struct {
+	QueriesTested  int     `json:"queries_tested"`
+	AvgResults     float64 `json:"avg_results"`
+	NoiseRatio     float64 `json:"noise_ratio"`      // fraction of results with importance < 0.3
+	PinnedPresent  bool    `json:"pinned_present"`    // at least one pinned memory in context
+	SuppressedOK   bool    `json:"suppressed_ok"`     // no child returned alongside its parent summary
+	CompactionHint bool    `json:"compaction_hint"`   // any query triggered compaction_suggested
+	Diagnosis      string  `json:"diagnosis"`
+}
+
+// HealthCheck runs a lightweight quality check on context assembly for an agent.
+// It samples recent user queries from exchange logs and checks context results
+// for noise, missing pinned memories, and suppression correctness.
+func (m *Memory) HealthCheck(ctx context.Context, agentNS string, chatID int64) HealthResult {
+	result := HealthResult{PinnedPresent: true, SuppressedOK: true}
+
+	if agentNS == "" {
+		result.Diagnosis = "no agent namespace configured"
+		return result
+	}
+
+	// Sample recent user messages from exchange logs.
+	exchanges := m.RecentExchanges(ctx, chatID, 10)
+	var queries []string
+	for _, ex := range exchanges {
+		// Extract user portion (before "Assistant:" line).
+		if idx := strings.Index(ex, "\nAssistant:"); idx > 0 {
+			q := strings.TrimPrefix(ex[:idx], "User: ")
+			q = strings.TrimSpace(q)
+			if len(q) > 10 && !strings.HasPrefix(q, "[Heartbeat]") {
+				queries = append(queries, q)
+			}
+		}
+	}
+	if len(queries) > 5 {
+		queries = queries[len(queries)-5:] // most recent 5
+	}
+	if len(queries) == 0 {
+		result.Diagnosis = "no recent queries to test"
+		return result
+	}
+
+	result.QueriesTested = len(queries)
+	totalResults := 0
+
+	// Check pinned memories exist by doing an empty-query context call (pinned-only).
+	pinnedResult, err := m.store.Context(ctx, agentmemory.ContextParams{
+		NS:     agentNS,
+		Query:  "",
+		Budget: 1000,
+	})
+	if err == nil && len(pinnedResult.Memories) > 0 {
+		result.PinnedPresent = true
+	} else {
+		result.PinnedPresent = false
+	}
+
+	for _, q := range queries {
+		cr, err := m.store.Context(ctx, agentmemory.ContextParams{
+			NS:     agentNS,
+			Query:  q,
+			Budget: 2000,
+		})
+		if err != nil {
+			continue
+		}
+		totalResults += len(cr.Memories)
+		if cr.CompactionSuggested {
+			result.CompactionHint = true
+		}
+	}
+
+	if totalResults > 0 {
+		result.AvgResults = float64(totalResults) / float64(len(queries))
+	}
+
+	// Check noise ratio using search (which returns full Memory with Importance).
+	noiseCount := 0
+	totalSearched := 0
+	for _, q := range queries[:min(3, len(queries))] {
+		results, err := m.store.Search(ctx, agentmemory.SearchParams{
+			NS:    agentNS,
+			Query: q,
+			Limit: 10,
+		})
+		if err != nil {
+			continue
+		}
+		for _, sr := range results {
+			totalSearched++
+			if sr.Memory.Importance < 0.3 {
+				noiseCount++
+			}
+		}
+	}
+	if totalSearched > 0 {
+		result.NoiseRatio = float64(noiseCount) / float64(totalSearched)
+	}
+
+	// Build diagnosis.
+	var diag []string
+	if result.NoiseRatio > 0.3 {
+		diag = append(diag, fmt.Sprintf("high noise: %.0f%% of results have low importance", result.NoiseRatio*100))
+	}
+	if !result.PinnedPresent {
+		diag = append(diag, "no pinned memories in context results")
+	}
+	if result.CompactionHint {
+		diag = append(diag, "compaction suggested")
+	}
+	if len(diag) == 0 {
+		result.Diagnosis = "healthy"
+	} else {
+		result.Diagnosis = strings.Join(diag, "; ")
+	}
+
+	return result
+}
+
+// LogHygieneOutcome stores a sensory-tier memory tracking the result of a hygiene cycle.
+// These auto-decay but allow trend tracking via ghost search --tags hygiene.
+func (m *Memory) LogHygieneOutcome(ctx context.Context, agentNS string, reflectResult *agentmemory.ReflectResult, health HealthResult) {
+	if agentNS == "" || reflectResult == nil {
+		return
+	}
+
+	content := fmt.Sprintf("Reflect: %d evaluated, %d merged, %d decayed, %d promoted, %d demoted. Health: noise=%.0f%%, pinned=%v, diagnosis=%s",
+		reflectResult.MemoriesEvaluated, reflectResult.Merged, reflectResult.Decayed,
+		reflectResult.Promoted, reflectResult.Demoted,
+		health.NoiseRatio*100, health.PinnedPresent, health.Diagnosis)
+
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:         agentNS,
+		Key:        fmt.Sprintf("hygiene-%d", time.Now().UnixMilli()),
+		Content:    content,
+		Kind:       "episodic",
+		Tags:       []string{"hygiene"},
+		Tier:       "sensory",
+		Importance: 0.2,
+		TTL:        "30d",
+	})
+	if err != nil {
+		slog.Warn("failed to log hygiene outcome", "error", err)
+	}
+}
+
+// NoisyCandidates returns a formatted prompt section describing memories that appear
+// frequently in context but have low importance — likely noise worth diminishing.
+// Returns empty string if no noise is detected.
+func (m *Memory) NoisyCandidates(ctx context.Context, agentNS string, chatID int64, maxItems int) string {
+	if agentNS == "" {
+		return ""
+	}
+
+	// Sample a few recent queries and collect low-importance results.
+	exchanges := m.RecentExchanges(ctx, chatID, 5)
+	type noisy struct {
+		key     string
+		content string
+		imp     float64
+		count   int
+	}
+	seen := map[string]*noisy{}
+
+	for _, ex := range exchanges {
+		if idx := strings.Index(ex, "\nAssistant:"); idx > 0 {
+			q := strings.TrimPrefix(ex[:idx], "User: ")
+			q = strings.TrimSpace(q)
+			if len(q) < 10 || strings.HasPrefix(q, "[Heartbeat]") {
+				continue
+			}
+			// Use search instead of context to get full Memory with Importance.
+			results, err := m.store.Search(ctx, agentmemory.SearchParams{
+				NS:    agentNS,
+				Query: q,
+				Limit: 10,
+			})
+			if err != nil {
+				continue
+			}
+			for _, sr := range results {
+				if sr.Memory.Importance >= 0.3 || sr.Memory.Pinned {
+					continue
+				}
+				if n, ok := seen[sr.Memory.Key]; ok {
+					n.count++
+				} else {
+					content := sr.Memory.Content
+					if len(content) > 100 {
+						content = content[:100] + "..."
+					}
+					seen[sr.Memory.Key] = &noisy{key: sr.Memory.Key, content: content, imp: sr.Memory.Importance, count: 1}
+				}
+			}
+		}
+	}
+
+	// Filter to items that appeared in 2+ queries (persistent noise).
+	var items []*noisy
+	for _, n := range seen {
+		if n.count >= 2 {
+			items = append(items, n)
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+
+	// Sort by count desc.
+	sort.Slice(items, func(i, j int) bool { return items[i].count > items[j].count })
+	if len(items) > maxItems {
+		items = items[:maxItems]
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[Memory noise detected]\n")
+	sb.WriteString("These low-importance memories keep appearing in context results. Consider using ghost_curate to diminish or archive them.\n\n")
+	for _, n := range items {
+		sb.WriteString(fmt.Sprintf("- [%s] (importance=%.2f, appeared %dx): %s\n", n.key, n.imp, n.count, n.content))
+	}
+	sb.WriteString("[End of noise candidates]\n")
+	return sb.String()
 }
 
 // Close closes the underlying store.

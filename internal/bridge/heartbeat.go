@@ -17,32 +17,64 @@ const defaultHeartbeatInterval = "1h"
 const defaultHeartbeatMessage = "Review recent activity and check for anything that needs attention."
 
 // enrichHeartbeatPrompt augments a heartbeat message with recent conversation
-// history, previous heartbeat insights, memory context, and pending background
-// tasks for self-improvement reflection and proactive work.
+// history, previous heartbeat insights, memory context, consolidation candidates,
+// and pending background tasks for self-improvement reflection and proactive work.
 // Returns the original message unchanged if there's nothing to reflect on.
 func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg string) string {
-	// Fetch context up front to decide whether enrichment is worthwhile
-	exchanges := b.memory.RecentExchanges(ctx, chatID, 10)
+	// Aggregate context from all active chats (shared heartbeat optimization).
+	// This pulls recent exchanges and pending tasks from every chat, not just
+	// the heartbeat's own chat, so a single heartbeat covers all conversations.
+	var exchanges []string
+	var pendingTasks []store.Task
+	allChats := b.activeHeartbeatChats()
+	for _, cid := range allChats {
+		if ex := b.memory.RecentExchanges(ctx, cid, 5); len(ex) > 0 {
+			exchanges = append(exchanges, ex...)
+		}
+		if tasks, err := b.store.PendingTasks(cid); err == nil {
+			pendingTasks = append(pendingTasks, tasks...)
+		}
+	}
 	insights := b.memory.HeartbeatContext(ctx, chatID, 500)
+	consolidation := b.popConsolidationCandidates(chatID)
 
-	// Fetch pending background tasks
-	pendingTasks, _ := b.store.PendingTasks(chatID)
+	hasConsolidation := consolidation != ""
+	hasContent := len(exchanges) > 0 || insights != "" || len(pendingTasks) > 0 || hasConsolidation
 
-	// Fetch general memory context for reflection (reduced budget for heartbeats)
-	memoryCtx := b.memory.SystemPromptWithBudget(ctx, chatID, 300)
+	slog.Info("heartbeat: enrichment",
+		"chat_id", chatID,
+		"chats_scanned", len(allChats),
+		"exchanges", len(exchanges),
+		"pending_tasks", len(pendingTasks),
+		"has_insights", insights != "",
+		"has_consolidation", hasConsolidation,
+		"has_content", hasContent,
+	)
 
-	hasContent := len(exchanges) > 0 || insights != "" || len(pendingTasks) > 0
-
-	// Skip enrichment if there's no history, learnings, or tasks
 	if !hasContent {
-		slog.Debug("heartbeat: skipping enrichment, no history, insights, or tasks", "chat_id", chatID)
 		return msg
 	}
 
 	var sb strings.Builder
 
+	// Priority 1: Consolidation tasks (memory hygiene)
+	if consolidation != "" {
+		sb.WriteString(consolidation)
+		sb.WriteString("\n")
+	}
+
+	// Priority 2: Pending background tasks
+	if len(pendingTasks) > 0 {
+		sb.WriteString("[Pending background tasks]\n")
+		for _, t := range pendingTasks {
+			sb.WriteString(fmt.Sprintf("- Task #%d: %s (queued %s)\n", t.ID, t.Description, t.CreatedAt.Format("Jan 2 15:04")))
+		}
+		sb.WriteString("[End of pending tasks]\n\n")
+	}
+
+	// Priority 3: Recent conversations for reflection
 	if len(exchanges) > 0 {
-		sb.WriteString("[Recent conversation history for reflection]\n")
+		sb.WriteString("[Recent conversation history]\n")
 		for _, ex := range exchanges {
 			sb.WriteString("- ")
 			sb.WriteString(ex)
@@ -51,47 +83,33 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("[End of recent history]\n\n")
 	}
 
+	// Priority 4: Previous insights
 	if insights != "" {
 		sb.WriteString("[Previous heartbeat insights]\n")
 		sb.WriteString(insights)
 		sb.WriteString("\n[End of previous insights]\n\n")
 	}
 
-	// Include memory context so heartbeat can reflect on stored knowledge
-	if memoryCtx != "" {
-		sb.WriteString("[Memory context for reflection]\n")
-		sb.WriteString(memoryCtx)
-		sb.WriteString("\n[End of memory context]\n\n")
-	}
-
-	// Include pending background tasks
-	if len(pendingTasks) > 0 {
-		sb.WriteString("[Pending background tasks]\n")
-		for _, t := range pendingTasks {
-			sb.WriteString(fmt.Sprintf("- Task #%d: %s (queued %s)\n", t.ID, t.Description, t.CreatedAt.Format("Jan 2 15:04")))
-		}
-		sb.WriteString("[End of pending tasks]\n\n")
-		sb.WriteString("If you can complete any pending tasks above, do so and run:\n")
-		sb.WriteString("scripts/shell-task complete --id <task_id>\n\n")
-	}
-
 	sb.WriteString(msg)
 
-	sb.WriteString("\n\n---\n")
-	sb.WriteString("Instructions for this heartbeat:\n")
-	sb.WriteString("1. Proactively check for anything that needs attention (files, PRs, notifications, scheduled items).\n")
-	sb.WriteString("2. If pending background tasks are listed, try to complete them.\n")
-	sb.WriteString("3. Reflect on recent conversations and memory for patterns or corrections.\n")
-	sb.WriteString("4. If you notice reusable patterns, user preferences, or useful corrections, store them:\n")
+	sb.WriteString("\n\n---\nHeartbeat priorities (in order):\n")
+	if consolidation != "" {
+		sb.WriteString("1. **CONSOLIDATE** the memory clusters listed above — use ghost_get to read full content, write a concise summary, call ghost_consolidate. This is the highest priority.\n")
+	}
+	if len(pendingTasks) > 0 {
+		sb.WriteString("2. Complete pending background tasks (scripts/shell-task complete --id <id>).\n")
+	}
+	sb.WriteString("3. If recent conversations reveal patterns, corrections, or user preferences worth remembering:\n")
 	sb.WriteString("   scripts/shell-remember --action heartbeat-learning --content \"<specific, actionable insight>\"\n")
-	sb.WriteString("5. If there is genuinely nothing to report, respond with just: [noop]\n")
-	sb.WriteString("6. Keep responses concise and actionable.\n")
+	sb.WriteString("4. If there is genuinely nothing to do, respond with just: [noop]\n")
 
 	return sb.String()
 }
 
-// EnsureDefaultHeartbeats creates default heartbeats for all active sessions
-// that don't already have one. Called at daemon startup.
+// EnsureDefaultHeartbeats creates a single shared heartbeat for one primary DM chat
+// rather than separate heartbeats per chat. This reduces token usage by ~2/3 since
+// all memory maintenance and reflection happens in one session.
+// Called at daemon startup.
 func (b *Bridge) EnsureDefaultHeartbeats() {
 	if !b.schedulerEnabled || b.memory == nil {
 		return
@@ -101,12 +119,41 @@ func (b *Bridge) EnsureDefaultHeartbeats() {
 		slog.Warn("failed to list sessions for default heartbeats", "error", err)
 		return
 	}
+
+	// Pick the first DM chat (positive chat_id) as the primary heartbeat chat.
+	// Group chats (negative chat_id) don't need their own heartbeat since the
+	// shared heartbeat aggregates context from all chats.
+	var primaryChat int64
 	for _, sess := range sessions {
-		b.ensureDefaultHeartbeat(sess.ChatID)
+		if sess.ChatID > 0 {
+			primaryChat = sess.ChatID
+			break
+		}
 	}
+	if primaryChat == 0 && len(sessions) > 0 {
+		primaryChat = sessions[0].ChatID // fallback to any chat
+	}
+	if primaryChat == 0 {
+		return
+	}
+
+	b.ensureDefaultHeartbeat(primaryChat)
 }
 
-// ensureDefaultHeartbeat creates a default 1-hour heartbeat for a chat if none exists.
+// activeHeartbeatChats returns all active chat IDs for heartbeat context aggregation.
+func (b *Bridge) activeHeartbeatChats() []int64 {
+	sessions, err := b.store.ListActiveSessions()
+	if err != nil {
+		return nil
+	}
+	chats := make([]int64, 0, len(sessions))
+	for _, sess := range sessions {
+		chats = append(chats, sess.ChatID)
+	}
+	return chats
+}
+
+// ensureDefaultHeartbeat creates a default heartbeat for a chat if none exists.
 func (b *Bridge) ensureDefaultHeartbeat(chatID int64) {
 	hb, err := b.store.GetHeartbeat(chatID)
 	if err != nil {
@@ -117,14 +164,19 @@ func (b *Bridge) ensureDefaultHeartbeat(chatID int64) {
 		return // already has a heartbeat
 	}
 
-	interval, _ := time.ParseDuration(defaultHeartbeatInterval)
+	hbInterval := b.heartbeatInterval
+	if hbInterval == "" {
+		hbInterval = defaultHeartbeatInterval
+	}
+
+	interval, _ := time.ParseDuration(hbInterval)
 	nextRun := time.Now().Add(interval).UTC()
 
 	sched := &store.Schedule{
 		ChatID:    chatID,
 		Label:     "Heartbeat: " + defaultHeartbeatMessage,
 		Message:   defaultHeartbeatMessage,
-		Schedule:  defaultHeartbeatInterval,
+		Schedule:  hbInterval,
 		Timezone:  b.schedulerTZ,
 		Type:      "heartbeat",
 		Mode:      "prompt",
@@ -137,5 +189,5 @@ func (b *Bridge) ensureDefaultHeartbeat(chatID int64) {
 		slog.Warn("failed to create default heartbeat", "chat_id", chatID, "error", err)
 		return
 	}
-	slog.Info("default heartbeat created", "chat_id", chatID, "id", id, "interval", defaultHeartbeatInterval)
+	slog.Info("default heartbeat created", "chat_id", chatID, "id", id, "interval", hbInterval)
 }

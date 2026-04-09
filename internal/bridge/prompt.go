@@ -42,7 +42,7 @@ func (b *Bridge) timestampSystemPrompt() string {
 	}
 	now := time.Now().In(loc)
 	return "\n\n## Current Time\n\n" +
-		"**Now:** " + now.Format("Monday, 2006-01-02 15:04:05") + " (" + tz + ")\n" +
+		"**Now:** " + now.Format("Monday, 2006-01-02 15:04:05 -07:00") + " (" + tz + ")\n" +
 		"Use this as the authoritative current time. Ignore any other date references that may conflict.\n"
 }
 
@@ -58,5 +58,5 @@ func (b *Bridge) injectCurrentTime(msg string) string {
 		loc = time.UTC
 	}
 	now := time.Now().In(loc)
-	return fmt.Sprintf("[Current time: %s (%s)]\n%s", now.Format("2006-01-02T15:04:05"), b.schedulerTZ, msg)
+	return fmt.Sprintf("[Current time: %s (%s)]\n%s", now.Format(time.RFC3339), b.schedulerTZ, msg)
 }

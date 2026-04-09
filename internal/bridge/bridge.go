@@ -17,6 +17,7 @@ import (
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
+	"github.com/rcliao/shell/internal/transcript"
 )
 
 // ImageInfo holds a downloaded image file path together with optional metadata
@@ -71,7 +72,15 @@ type Bridge struct {
 	skillDirs []string        // directories to scan on reload
 
 	// Agent identity prompt (prepended to system prompt)
-	agentIdentity string
+	agentIdentity    string
+	agentBotUsername string // this agent's bot username (for transcript filtering)
+
+	// Shared transcript for multi-agent awareness.
+	transcript      *transcript.Store
+	transcriptBudget int // token budget for transcript injection (0 = disabled)
+
+	// Peer agent capabilities for task delegation.
+	peerAgents []config.PeerAgent
 
 	// Onboarding: track which chats have confirmed identity
 	identityCheckedMu sync.Mutex
@@ -86,6 +95,17 @@ type Bridge struct {
 	// Preemption: user messages can cancel running system (heartbeat/scheduler) sessions.
 	systemCancelMu sync.Mutex
 	systemCancel   map[int64]context.CancelFunc
+
+	// Consolidation candidates from the last reflect cycle, keyed by chatID.
+	// Populated after heartbeat reflect, consumed by the next heartbeat enrichment.
+	consolidationMu         sync.Mutex
+	consolidationCandidates map[int64]string
+
+	// Claude config for per-task model routing.
+	claudeCfg config.ClaudeConfig
+
+	// Heartbeat interval for auto-created heartbeats (empty = "1h" default).
+	heartbeatInterval string
 }
 
 func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
@@ -110,9 +130,39 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		skills:       skills,
 		planRuns:        make(map[int64]*planRun),
 		reviewCache:     make(map[int64][]memory.ReviewEntry),
-		systemCancel:    make(map[int64]context.CancelFunc),
-		identityChecked: make(map[int64]bool),
+		systemCancel:            make(map[int64]context.CancelFunc),
+		identityChecked:         make(map[int64]bool),
+		consolidationCandidates: make(map[int64]string),
 	}
+}
+
+// SetClaudeConfig sets the Claude config for per-task model routing.
+func (b *Bridge) SetClaudeConfig(cfg config.ClaudeConfig) {
+	b.claudeCfg = cfg
+}
+
+// SetHeartbeatInterval overrides the default heartbeat interval for auto-created heartbeats.
+func (b *Bridge) SetHeartbeatInterval(interval string) {
+	b.heartbeatInterval = interval
+}
+
+// stashConsolidationCandidates stores consolidation candidates for the next heartbeat.
+func (b *Bridge) stashConsolidationCandidates(chatID int64, candidates string) {
+	if candidates == "" {
+		return
+	}
+	b.consolidationMu.Lock()
+	defer b.consolidationMu.Unlock()
+	b.consolidationCandidates[chatID] = candidates
+}
+
+// popConsolidationCandidates retrieves and clears stashed consolidation candidates.
+func (b *Bridge) popConsolidationCandidates(chatID int64) string {
+	b.consolidationMu.Lock()
+	defer b.consolidationMu.Unlock()
+	c := b.consolidationCandidates[chatID]
+	delete(b.consolidationCandidates, chatID)
+	return c
 }
 
 // runBackground runs fn as a pm-managed process (if pm is available) or as a raw goroutine.
@@ -299,6 +349,101 @@ func (b *Bridge) SetAgentIdentity(prompt string) {
 	b.agentIdentity = prompt
 }
 
+// SetTranscript configures the shared transcript store for multi-agent awareness.
+func (b *Bridge) SetTranscript(ts *transcript.Store, botUsername string, tokenBudget int) {
+	b.transcript = ts
+	b.agentBotUsername = botUsername
+	b.transcriptBudget = tokenBudget
+}
+
+// SetPeerAgents configures known peer agents and their skills for task delegation.
+func (b *Bridge) SetPeerAgents(peers []config.PeerAgent) {
+	b.peerAgents = peers
+}
+
+// RecordTranscript writes a message to the shared transcript so peer agents can see it.
+func (b *Bridge) RecordTranscript(e transcript.Entry) {
+	if b.transcript == nil {
+		return
+	}
+	if err := b.transcript.Record(e); err != nil {
+		slog.Warn("failed to record transcript entry", "error", err)
+	}
+}
+
+// groupAgentPrompt returns system prompt guidance for multi-agent group conversations.
+func (b *Bridge) groupAgentPrompt() string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf(`
+
+## Multi-Agent Group Chat
+You are **%s** (@%s) in a group conversation with other agents and humans.
+
+**CRITICAL: When to [noop]**
+- If a message starts with another agent's name (e.g., "皮卡..." or "Umbreon..."), it is NOT for you. Respond with [noop].
+- If another agent already answered well, respond with [noop].
+- If the message doesn't seem directed at you, respond with [noop].
+- When in doubt, [noop] is safer than responding as the wrong agent.
+
+**When to respond:**
+- Message explicitly addresses you by name or @mention.
+- Message is general (no name) and you have something relevant to add.
+- You can build on what another agent said, or correct a mistake.
+
+Be yourself — use your own personality and voice.
+Output [noop] (just that, nothing else) when you choose not to respond.
+`, b.agentBotUsername, b.agentBotUsername))
+
+	// Peer agent skills directory.
+	if len(b.peerAgents) > 0 {
+		sb.WriteString("\n## Peer Agents\n")
+		for _, p := range b.peerAgents {
+			sb.WriteString(fmt.Sprintf("- **%s** (@%s)", p.Name, p.BotUsername))
+			if len(p.Skills) > 0 {
+				sb.WriteString(": " + strings.Join(p.Skills, ", "))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	sb.WriteString(`
+## Task Delegation
+You can delegate work to peer agents and receive delegated tasks from them.
+
+To delegate a task:
+  [task to=agent_bot_username]Clear description of what you need done[/task]
+
+To report a task result (when you see a pending task assigned to you):
+  [task-result id=TASK_ID]Your findings or result[/task-result]
+
+To update task status while working:
+  [task-status id=TASK_ID status=working]
+
+Task statuses: pending → working → completed/failed/canceled
+
+When to delegate:
+- You need something verified or double-checked by another agent.
+- A peer agent has a skill better suited for the task (see Peer Agents above).
+- The task benefits from a second perspective or independent analysis.
+- You want to divide work: you do one part, they do another.
+
+When you receive a pending task:
+- Process it thoughtfully — the requesting agent is counting on you.
+- Report your result with [task-result id=...] when done.
+- If you can't complete it, use [task-status id=... status=failed].
+
+## Agent Privacy Boundaries
+- NEVER access another agent's memory namespace. Only use your own namespace (` + b.agentBotUsername + `).
+- NEVER read other agents' database files, config files, or session data under ~/.shell/agents/.
+- NEVER call ghost_search, ghost_get, ghost_context, or ghost_put with a namespace belonging to another agent.
+- The shared transcript and task delegation are the ONLY approved channels for cross-agent communication.
+- Violating these boundaries breaks trust between agents and their users.
+`)
+
+	return sb.String()
+}
+
 // needsOnboarding checks if this chat needs identity onboarding (no identity memories in ghost).
 // Caches the result per chat to avoid repeated ghost queries.
 func (b *Bridge) needsOnboarding(ctx context.Context, chatID int64) bool {
@@ -346,7 +491,10 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID int64, usage
 		return
 	}
 
-	totalInput := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	// Exclude CacheReadInputTokens: cache reads are cheap ($0.30/MTok vs $15/MTok)
+	// and don't represent actual context growth. Including them inflates the
+	// threshold so sessions hit the limit before compaction can help.
+	totalInput := usage.InputTokens + usage.CacheCreationInputTokens
 	if totalInput <= b.maxSessionTokens {
 		return
 	}
@@ -377,6 +525,7 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID int64, usage
 		ChatID:    chatID,
 		SessionID: procSess.ProviderSessionID,
 		Text:      "/compact",
+		Model:     b.claudeCfg.ResolveModel("compaction"),
 	}, nil)
 	if err != nil {
 		slog.Warn("compact failed", "chat_id", chatID, "error", err)
@@ -415,6 +564,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		slog.Warn("failed to log user message", "error", err)
 	}
 
+
+
 	// Inject memory context if available
 	augmentedMsg := userMsg
 	if b.memory != nil {
@@ -425,6 +576,27 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ")
 	if isHeartbeat && b.memory != nil {
 		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg)
+	}
+
+	// Inject shared transcript for multi-agent group awareness.
+	if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
+		if entries, err := b.transcript.RecentByTokenBudget(chatID, b.transcriptBudget); err != nil {
+			slog.Warn("failed to fetch transcript", "error", err)
+		} else if block := transcript.FormatTranscript(entries, b.agentBotUsername); block != "" {
+			augmentedMsg = block + "\n" + augmentedMsg
+		}
+		// Inject pending tasks assigned to this agent.
+		if pending, err := b.transcript.PendingTasksFor(chatID, b.agentBotUsername); err != nil {
+			slog.Warn("failed to fetch pending tasks", "error", err)
+		} else if block := transcript.FormatPendingTasks(pending); block != "" {
+			augmentedMsg = block + "\n" + augmentedMsg
+		}
+		// Inject recent task activity for general awareness.
+		if recent, err := b.transcript.RecentTasksInChat(chatID, 10); err != nil {
+			slog.Warn("failed to fetch recent tasks", "error", err)
+		} else if block := transcript.FormatRecentTasks(recent, b.agentBotUsername); block != "" {
+			augmentedMsg = block + "\n" + augmentedMsg
+		}
 	}
 
 	// Tag the message with sender identity so Claude knows who is speaking
@@ -490,11 +662,19 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		}
 		systemPrompt += b.timestampSystemPrompt()
 		systemPrompt += b.skillsSystemPrompt()
+		if b.transcript != nil {
+			systemPrompt += b.groupAgentPrompt()
+		}
 	}
 
 	// Track session in pm for /pm list visibility.
 	endTrack := b.trackSession(ctx, chatID, senderName)
 	defer endTrack()
+
+	taskType := "conversation"
+	if isHeartbeat {
+		taskType = "heartbeat"
+	}
 
 	result, err := agent.Send(ctx, process.AgentRequest{
 		ChatID:       chatID,
@@ -503,6 +683,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		Images:       imgAttachments,
 		PDFs:         pdfAttachments,
 		SystemPrompt: systemPrompt,
+		Model:        b.claudeCfg.ResolveModel(taskType),
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
@@ -523,6 +704,18 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	source := "interactive"
 	if isHeartbeat {
 		source = "heartbeat"
+		if result.Usage != nil {
+			slog.Info("heartbeat: usage",
+				"chat_id", chatID,
+				"input_tokens", result.Usage.InputTokens,
+				"output_tokens", result.Usage.OutputTokens,
+				"cache_read", result.Usage.CacheReadInputTokens,
+				"cache_create", result.Usage.CacheCreationInputTokens,
+				"cost_usd", result.Usage.CostUSD,
+				"turns", result.Usage.NumTurns,
+				"model", b.claudeCfg.ResolveModel("heartbeat"),
+			)
+		}
 	} else if isSystemSender(senderName) {
 		source = "scheduler"
 	}
@@ -543,14 +736,40 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, user
 
 	// Run memory maintenance during heartbeats.
 	if isHeartbeat && b.memory != nil {
-		// Run reflect cycle after heartbeat to promote/decay/prune memories.
-		b.memory.RunReflect(ctx)
+		// Run reflect cycle after heartbeat to promote/decay/prune/dedup memories.
+		reflectResult := b.memory.RunReflect(ctx)
 		// Summarize old exchanges during heartbeat maintenance.
 		if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
 			slog.Warn("exchange summarization failed", "error", err)
 		} else if n > 0 {
 			slog.Info("heartbeat summarized exchanges", "chat_id", chatID, "count", n)
 		}
+		// Stash consolidation + noise candidates for the NEXT heartbeat enrichment.
+		ns := b.memory.AgentNS(chatID)
+		if reflectResult != nil {
+			candidates := b.memory.ConsolidationCandidates(ctx, reflectResult, 3)
+			noise := b.memory.NoisyCandidates(ctx, ns, chatID, 5)
+			b.stashConsolidationCandidates(chatID, candidates+noise)
+		}
+		// Run health check and log hygiene outcome for trend tracking.
+		health := b.memory.HealthCheck(ctx, ns, chatID)
+		slog.Info("memory health", "noise_ratio", health.NoiseRatio,
+			"pinned", health.PinnedPresent, "diagnosis", health.Diagnosis,
+			"queries", health.QueriesTested, "avg_results", health.AvgResults)
+		if reflectResult != nil {
+			b.memory.LogHygieneOutcome(ctx, ns, reflectResult, health)
+		}
+	}
+
+	// Strip any legacy directives Claude may have emitted.
+	response = stripDirectives(response)
+
+	// Parse task delegation directives ([task to=...], [task-result id=...]).
+	response = b.parseTaskDirectives(chatID, response)
+
+	// If text is empty but tools were used, summarize what was done.
+	if response == "" && len(result.ToolCalls) > 0 {
+		response = summarizeToolCalls(result.ToolCalls)
 	}
 
 	// Collect photos from artifact markers (skill output).
@@ -560,6 +779,18 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, user
 	// Log assistant response.
 	if err := b.store.LogMessage(sessID, "assistant", response); err != nil {
 		slog.Warn("failed to log assistant message", "error", err)
+	}
+
+	// Record agent response in shared transcript for peer agent visibility.
+	if b.transcript != nil && response != "" {
+		b.RecordTranscript(transcript.Entry{
+			ChatID:        chatID,
+			Timestamp:     time.Now(),
+			SenderType:    "agent",
+			SenderName:    b.agentBotUsername,
+			AgentUsername: b.agentBotUsername,
+			Text:          response,
+		})
 	}
 
 	// Log token usage.

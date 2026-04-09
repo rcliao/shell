@@ -55,7 +55,9 @@ type ProgressFunc func(msg string)
 // Config holds planner settings.
 type Config struct {
 	ClaudeBinary         string        // path to claude CLI
-	Model                string        // optional model flag
+	Model                string        // default model flag (fallback for ExecuteModel/ReviewModel)
+	ExecuteModel         string        // model for execute phase (empty = use Model)
+	ReviewModel          string        // model for review phase (empty = use Model)
 	WorkDir              string        // project working directory
 	TestCmd              string        // test command (e.g. "go test ./...")
 	Conventions          string        // conventions text for the reviewer
@@ -81,6 +83,20 @@ func New(cfg Config) *Planner {
 		cfg.Timeout = 30 * time.Minute
 	}
 	return &Planner{cfg: cfg}
+}
+
+func (p *Planner) executeModel() string {
+	if p.cfg.ExecuteModel != "" {
+		return p.cfg.ExecuteModel
+	}
+	return p.cfg.Model
+}
+
+func (p *Planner) reviewModel() string {
+	if p.cfg.ReviewModel != "" {
+		return p.cfg.ReviewModel
+	}
+	return p.cfg.Model
 }
 
 // WorkDir returns the planner's configured working directory.
@@ -826,7 +842,7 @@ func (p *Planner) GitCheckpoint(ctx context.Context, taskSummary string) {
 func (p *Planner) runClaudeTextOnly(ctx context.Context, prompt string) (string, error) {
 	return p.runClaudeWithArgs(ctx, prompt, []string{
 		"--disallowedTools", "Bash,Write,Edit",
-	})
+	}, p.reviewModel())
 }
 
 // verifyTimeout caps how long E2E verification commands can run.
@@ -876,13 +892,13 @@ func (p *Planner) runClaude(ctx context.Context, prompt string) (string, error) 
 	return p.runClaudeWithMonitor(ctx, prompt, p.cfg.Timeout, []string{
 		"--allowedTools", "Bash,Write,Edit,Read",
 		"--permission-mode", "bypassPermissions",
-	})
+	}, p.executeModel())
 }
 
 // runClaudeWithMonitor runs Claude with --output-format json (for correct
 // tool execution) while a background goroutine periodically logs git diff
 // stats to provide visibility into what's changing during long executions.
-func (p *Planner) runClaudeWithMonitor(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string) (string, error) {
+func (p *Planner) runClaudeWithMonitor(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string, model string) (string, error) {
 	// Start a background progress monitor that logs git activity.
 	monCtx, monCancel := context.WithCancel(ctx)
 	defer monCancel()
@@ -890,7 +906,7 @@ func (p *Planner) runClaudeWithMonitor(ctx context.Context, prompt string, timeo
 		go p.monitorProgress(monCtx)
 	}
 
-	return p.runClaudeWithTimeout(ctx, prompt, timeout, extraArgs)
+	return p.runClaudeWithTimeout(ctx, prompt, timeout, extraArgs, model)
 }
 
 // monitorProgress periodically logs git diff stats in the working directory.
@@ -940,7 +956,7 @@ type streamEvent struct {
 // runClaudeStreaming spawns Claude with --output-format stream-json and reads
 // NDJSON events in real-time. Tool usage is logged as it happens, giving
 // visibility into what Claude is doing during long-running executions.
-func (p *Planner) runClaudeStreaming(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string) (string, error) {
+func (p *Planner) runClaudeStreaming(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string, model string) (string, error) {
 	procCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -950,8 +966,8 @@ func (p *Planner) runClaudeStreaming(ctx context.Context, prompt string, timeout
 		"--verbose",
 	}
 	args = append(args, extraArgs...)
-	if p.cfg.Model != "" {
-		args = append(args, "--model", p.cfg.Model)
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 
 	binary := p.cfg.ClaudeBinary
@@ -1178,11 +1194,11 @@ func extractToolInput(raw map[string]json.RawMessage) string {
 	return ""
 }
 
-func (p *Planner) runClaudeWithArgs(ctx context.Context, prompt string, extraArgs []string) (string, error) {
-	return p.runClaudeWithTimeout(ctx, prompt, p.cfg.Timeout, extraArgs)
+func (p *Planner) runClaudeWithArgs(ctx context.Context, prompt string, extraArgs []string, model string) (string, error) {
+	return p.runClaudeWithTimeout(ctx, prompt, p.cfg.Timeout, extraArgs, model)
 }
 
-func (p *Planner) runClaudeWithTimeout(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string) (string, error) {
+func (p *Planner) runClaudeWithTimeout(ctx context.Context, prompt string, timeout time.Duration, extraArgs []string, model string) (string, error) {
 	procCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -1191,8 +1207,8 @@ func (p *Planner) runClaudeWithTimeout(ctx context.Context, prompt string, timeo
 		"--output-format", "json",
 	}
 	args = append(args, extraArgs...)
-	if p.cfg.Model != "" {
-		args = append(args, "--model", p.cfg.Model)
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 
 	binary := p.cfg.ClaudeBinary

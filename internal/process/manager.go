@@ -56,9 +56,11 @@ type Manager struct {
 	workDir        string
 	allowedTools   []string
 	extraArgs      []string
+	env            map[string]string
 	settingSources []string
 	bridgeSockPath string
 	mcpConfigPath  string
+	settingsPath   string
 	agentNS        string
 	ghostDB        string
 }
@@ -71,9 +73,11 @@ type ManagerConfig struct {
 	WorkDir        string
 	AllowedTools   []string
 	ExtraArgs      []string
+	Env            map[string]string // extra environment variables for Claude CLI subprocess
 	SettingSources []string
 	BridgeSockPath string
 	MCPConfigPath  string
+	SettingsPath   string // path to per-agent settings.json for --settings flag
 	AgentNS        string // ghost namespace for this agent (e.g. "agent:pikamini")
 	GhostDB        string // ghost database path for this agent
 }
@@ -98,9 +102,11 @@ func NewManager(cfg ManagerConfig) *Manager {
 		workDir:        cfg.WorkDir,
 		allowedTools:   cfg.AllowedTools,
 		extraArgs:      cfg.ExtraArgs,
+		env:            cfg.Env,
 		settingSources: cfg.SettingSources,
 		bridgeSockPath: cfg.BridgeSockPath,
 		mcpConfigPath:  cfg.MCPConfigPath,
+		settingsPath:   cfg.SettingsPath,
 		agentNS:        cfg.AgentNS,
 		ghostDB:        cfg.GhostDB,
 	}
@@ -183,7 +189,7 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 	}
 
 	// Fall back to spawn-per-message.
-	slog.Info("falling back to spawn-per-message", "chat_id", req.ChatID, "error", err)
+	slog.Debug("falling back to spawn-per-message", "chat_id", req.ChatID, "reason", err)
 	result, err = m.runClaudeBidirectional(ctx, req, onUpdate)
 	if err != nil && req.SessionID != "" {
 		slog.Warn("resume failed, retrying as fresh session", "chat_id", req.ChatID, "error", err)
@@ -210,8 +216,12 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	if claudeSessionID != "" {
 		args = append(args, "--resume", claudeSessionID)
 	}
-	if m.model != "" {
-		args = append(args, "--model", m.model)
+	model := req.Model
+	if model == "" {
+		model = m.model
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	// Only append system prompt on fresh sessions — resumed sessions
 	// already have the system prompt in their conversation history.
@@ -224,6 +234,9 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	if len(m.settingSources) > 0 {
 		args = append(args, "--setting-sources", strings.Join(m.settingSources, ","))
 	}
+	if m.settingsPath != "" {
+		args = append(args, "--settings", m.settingsPath)
+	}
 	args = append(args, "--permission-mode", "bypassPermissions")
 	if m.mcpConfigPath != "" {
 		args = append(args, "--mcp-config", m.mcpConfigPath)
@@ -235,6 +248,21 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
 	env := filterEnv(os.Environ(), "CLAUDECODE")
+	for k := range m.env {
+		env = filterEnv(env, k)
+	}
+	for k, v := range m.env {
+		env = append(env, k+"="+v)
+	}
+	if len(m.env) > 0 {
+		for _, e := range env {
+			for k := range m.env {
+				if strings.HasPrefix(e, k+"=") {
+					slog.Info("claude env override", "var", e)
+				}
+			}
+		}
+	}
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
 	if m.bridgeSockPath != "" {
 		env = append(env, "SHELL_BRIDGE_SOCK="+m.bridgeSockPath)

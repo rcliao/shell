@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 )
 
 // ToolCall represents a tool invocation seen during streaming.
@@ -209,6 +210,12 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 	// assistant text to onUpdate to avoid double-counting.
 	hasStreamedText := false
 
+	// Accumulate all assistant text blocks across turns. The final "result"
+	// event only contains the last turn's text, so if Claude streams text
+	// then does tool calls and produces no more text, result.Text would be
+	// empty. We use this accumulator as a fallback.
+	var allText strings.Builder
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -229,9 +236,12 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 
 		case "stream_event":
 			if event.Event != nil && event.Event.Delta != nil && event.Event.Delta.Type == "text_delta" {
-				if event.Event.Delta.Text != "" && onUpdate != nil {
+				if event.Event.Delta.Text != "" {
 					hasStreamedText = true
-					onUpdate(event.Event.Delta.Text)
+					allText.WriteString(event.Event.Delta.Text)
+					if onUpdate != nil {
+						onUpdate(event.Event.Delta.Text)
+					}
 				}
 			}
 
@@ -246,8 +256,11 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 						// Only forward text if no stream_event deltas were
 						// received — otherwise this is a duplicate of text
 						// already delivered incrementally.
-						if !hasStreamedText && block.Text != "" && onUpdate != nil {
-							onUpdate(block.Text)
+						if !hasStreamedText && block.Text != "" {
+							allText.WriteString(block.Text)
+							if onUpdate != nil {
+								onUpdate(block.Text)
+							}
 						}
 					case "tool_use":
 						result.ToolCalls = append(result.ToolCalls, ToolCall{
@@ -259,8 +272,11 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 					}
 				}
 				// Plain string content (non-streaming fallback)
-				if !hasStreamedText && event.Message.Content.Text != "" && onUpdate != nil {
-					onUpdate(event.Message.Content.Text)
+				if !hasStreamedText && event.Message.Content.Text != "" {
+					allText.WriteString(event.Message.Content.Text)
+					if onUpdate != nil {
+						onUpdate(event.Message.Content.Text)
+					}
 				}
 			}
 
@@ -284,6 +300,12 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 
 		case "result":
 			result.Text = event.Result
+			// If the CLI's final result is empty but we accumulated text
+			// from earlier turns, use that instead. This happens when Claude
+			// streams text, then does tool calls with no final text turn.
+			if result.Text == "" && allText.Len() > 0 {
+				result.Text = allText.String()
+			}
 			if event.SessionID != "" {
 				result.SessionID = event.SessionID
 			}

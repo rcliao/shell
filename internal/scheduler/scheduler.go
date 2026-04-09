@@ -50,7 +50,9 @@ type Scheduler struct {
 	onHeartbeat     HeartbeatPromptFunc
 	defaultTZ       string
 	quietHours      QuietHours
-	heartbeatCounts map[int64]int // chat_id → number of heartbeats fired (for check-in cadence)
+	heartbeatCounts map[int64]int  // chat_id → number of heartbeats fired (for check-in cadence)
+	heartbeatIdle   map[int64]bool // chat_id → true if last heartbeat was noop
+	idleInterval    time.Duration  // interval after noop heartbeat (0 = use schedule interval)
 }
 
 // New creates a new Scheduler.
@@ -65,6 +67,7 @@ func New(store ScheduleStore, onNotify NotifyFunc, onPrompt PromptFunc, defaultT
 		defaultTZ:       defaultTZ,
 		quietHours:      QuietHours{Start: 22, End: 7},
 		heartbeatCounts: make(map[int64]int),
+		heartbeatIdle:   make(map[int64]bool),
 	}
 }
 
@@ -76,6 +79,13 @@ func (s *Scheduler) SetQuietHours(start, end int) {
 // SetHeartbeatPrompt sets the heartbeat-specific prompt function that returns the response.
 func (s *Scheduler) SetHeartbeatPrompt(fn HeartbeatPromptFunc) {
 	s.onHeartbeat = fn
+}
+
+// SetIdleInterval configures the interval used after a noop heartbeat.
+// When set, heartbeats that produce no output will schedule the next run
+// at this longer interval instead of the default.
+func (s *Scheduler) SetIdleInterval(d time.Duration) {
+	s.idleInterval = d
 }
 
 // Run starts the scheduler tick loop. Blocks until ctx is cancelled.
@@ -196,14 +206,23 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 		}
 
 		if s.onHeartbeat != nil {
+			hbStart := time.Now()
 			resp, err := s.onHeartbeat(sc.ChatID, msg)
+			hbElapsed := time.Since(hbStart)
 			if err != nil {
-				slog.Error("scheduler: heartbeat prompt failed", "chat_id", sc.ChatID, "error", err)
+				slog.Error("scheduler: heartbeat prompt failed", "chat_id", sc.ChatID, "elapsed", hbElapsed, "error", err)
 				return
 			}
-			// Suppress noop responses.
-			if isHeartbeatNoop(resp) {
-				slog.Info("scheduler: suppressing noop heartbeat response", "chat_id", sc.ChatID, "len", len(resp))
+			noop := isHeartbeatNoop(resp)
+			s.heartbeatIdle[sc.ChatID] = noop
+			slog.Info("scheduler: heartbeat completed",
+				"chat_id", sc.ChatID,
+				"noop", noop,
+				"resp_len", len(resp),
+				"elapsed", hbElapsed,
+				"count", count,
+			)
+			if noop {
 				return
 			}
 			if s.onNotify != nil {
@@ -250,6 +269,13 @@ func (s *Scheduler) advance(sc ScheduleEntry, now time.Time) {
 			slog.Error("scheduler: invalid heartbeat interval, disabling", "id", sc.ID, "interval", sc.Schedule, "error", err)
 			s.store.DisableSchedule(sc.ID)
 			return
+		}
+		// Use idle interval if last heartbeat was noop and idle interval is configured.
+		if s.heartbeatIdle[sc.ChatID] && s.idleInterval > 0 && s.idleInterval > interval {
+			slog.Info("scheduler: using idle interval for next heartbeat",
+				"id", sc.ID, "chat_id", sc.ChatID,
+				"normal", interval, "idle", s.idleInterval)
+			interval = s.idleInterval
 		}
 		nextRun := now.Add(interval)
 

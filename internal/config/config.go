@@ -33,10 +33,23 @@ type Config struct {
 // AgentIdentity configures a bot's identity for multi-agent group chats.
 type AgentIdentity struct {
 	Name                 string   `json:"name"`                  // display name (e.g. "pikamini")
+	Aliases              []string `json:"aliases"`                // name variants users may use to address this agent (e.g. "pika", "皮卡")
 	BotUsername          string   `json:"bot_username"`           // Telegram bot username without @
-	BroadcastProbability float64  `json:"broadcast_probability"`  // 0.0-1.0, chance to respond when not @mentioned in groups
+	BroadcastProbability float64  `json:"broadcast_probability"`  // 0.0-1.0, chance to respond when not @mentioned in groups (legacy mode)
 	PeerBots             []string `json:"peer_bots"`              // other bot usernames (to detect "not for me")
 	SystemPrompt         string   `json:"system_prompt"`          // personality/identity prompt prepended to all messages
+	GroupMode            string   `json:"group_mode"`             // "autonomous" = agent decides via [noop], "" = legacy probability
+	TranscriptPath       string   `json:"transcript_path"`        // path to shared transcript DB (default: ~/.shell/shared/transcript.db)
+	TranscriptBudget     int      `json:"transcript_budget"`      // token budget for shared transcript injection (default: 2000)
+	Skills               []string `json:"skills"`                 // declared capabilities for task delegation (e.g. "code-review", "research")
+}
+
+// PeerAgent describes a peer agent for multi-agent discovery.
+type PeerAgent struct {
+	Name        string   `json:"name"`
+	Aliases     []string `json:"aliases"`     // name variants for this peer (e.g. "pika", "皮卡")
+	BotUsername string   `json:"bot_username"`
+	Skills      []string `json:"skills"`
 }
 
 // AgentsConfig controls multi-agent manifests.
@@ -106,17 +119,53 @@ func (t *TelegramConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ModelRouting allows different Claude models per task type for cost optimization.
+// Empty strings fall back to ClaudeConfig.Model.
+type ModelRouting struct {
+	Conversation   string `json:"conversation"`     // user-facing chat
+	Heartbeat      string `json:"heartbeat"`        // periodic maintenance
+	Compaction     string `json:"compaction"`       // session compaction
+	PlannerExecute string `json:"planner_execute"`  // code changes with tools
+	PlannerReview  string `json:"planner_review"`   // text-only review verdict
+}
+
 type ClaudeConfig struct {
-	Binary         string        `json:"binary"`
-	Model          string        `json:"model"`
-	Timeout        time.Duration `json:"timeout"`
-	MaxSessions    int           `json:"max_sessions"`
-	WorkDir        string        `json:"work_dir"`
-	AllowedTools   []string      `json:"allowed_tools"`
-	ExtraArgs      []string      `json:"extra_args"`
+	Binary         string            `json:"binary"`
+	Model          string            `json:"model"`
+	ModelRouting   *ModelRouting     `json:"model_routing"`   // per-task model overrides (nil = use default)
+	Timeout        time.Duration     `json:"timeout"`
+	MaxSessions    int               `json:"max_sessions"`
+	WorkDir        string            `json:"work_dir"`
+	AllowedTools   []string          `json:"allowed_tools"`
+	ExtraArgs      []string          `json:"extra_args"`
+	Env            map[string]string `json:"env"`             // extra environment variables for Claude CLI subprocess
 	PlaygroundDir  string   `json:"playground_dir"`  // writable sandbox dir, auto-approved for Write/Edit/Bash
 	SettingSources []string `json:"setting_sources"` // e.g. ["user", "project"] for --setting-sources
 	MaxSessionTokens int   `json:"max_session_tokens"` // auto-rotate sessions exceeding this many total input tokens (0 = disabled)
+}
+
+// ResolveModel returns the model for a given task type, falling back to
+// the default Model, then empty string (CLI default).
+func (c ClaudeConfig) ResolveModel(taskType string) string {
+	if c.ModelRouting != nil {
+		var m string
+		switch taskType {
+		case "conversation":
+			m = c.ModelRouting.Conversation
+		case "heartbeat":
+			m = c.ModelRouting.Heartbeat
+		case "compaction":
+			m = c.ModelRouting.Compaction
+		case "planner_execute":
+			m = c.ModelRouting.PlannerExecute
+		case "planner_review":
+			m = c.ModelRouting.PlannerReview
+		}
+		if m != "" {
+			return m
+		}
+	}
+	return c.Model
 }
 
 type StoreConfig struct {
@@ -167,10 +216,12 @@ func (m MemoryConfig) ChatProfileMap() map[int64]string {
 }
 
 type SchedulerConfig struct {
-	Enabled        bool   `json:"enabled"`
-	Timezone       string `json:"timezone"`        // default: "UTC"
-	QuietHourStart int    `json:"quiet_hour_start"` // hour (0-23) when quiet hours begin, default: 22
-	QuietHourEnd   int    `json:"quiet_hour_end"`   // hour (0-23) when quiet hours end, default: 7
+	Enabled              bool   `json:"enabled"`
+	Timezone             string `json:"timezone"`               // default: "UTC"
+	QuietHourStart       int    `json:"quiet_hour_start"`       // hour (0-23) when quiet hours begin, default: 22
+	QuietHourEnd         int    `json:"quiet_hour_end"`         // hour (0-23) when quiet hours end, default: 7
+	HeartbeatInterval    string `json:"heartbeat_interval"`     // active heartbeat interval (default: "1h")
+	HeartbeatIdleInterval string `json:"heartbeat_idle_interval"` // interval after noop heartbeat (default: "2h")
 }
 
 type ReloadConfig struct {
@@ -266,13 +317,14 @@ func Default() Config {
 			ReactionMap:  DefaultReactionMap(),
 		},
 		Claude: ClaudeConfig{
-			Binary:       "claude",
-			Model:        "",
-			Timeout:      30 * time.Minute,
-			MaxSessions:  4,
-			WorkDir:      "",
-			AllowedTools: []string{},
-			ExtraArgs:    []string{},
+			Binary:           "claude",
+			Model:            "",
+			Timeout:          30 * time.Minute,
+			MaxSessions:      4,
+			MaxSessionTokens: 200000,
+			WorkDir:          "",
+			AllowedTools:     []string{},
+			ExtraArgs:        []string{},
 		},
 		Store: StoreConfig{
 			DBPath: filepath.Join(configDir, "shell.db"),
@@ -296,10 +348,12 @@ func Default() Config {
 			AutoApproveThreshold: 80,
 		},
 		Scheduler: SchedulerConfig{
-			Enabled:        false,
-			Timezone:       "UTC",
-			QuietHourStart: 22,
-			QuietHourEnd:   7,
+			Enabled:               false,
+			Timezone:              "UTC",
+			QuietHourStart:        22,
+			QuietHourEnd:          7,
+			HeartbeatInterval:     "1h",
+			HeartbeatIdleInterval: "2h",
 		},
 		Reload: ReloadConfig{
 			Enabled:   false,

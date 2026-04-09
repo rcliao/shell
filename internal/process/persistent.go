@@ -26,6 +26,7 @@ type persistentProc struct {
 
 	sessionID string // Claude session ID (from init response)
 	chatID    int64
+	model     string // model used when spawning this process
 
 	mu       sync.Mutex // guards stdin writes and scanner reads
 	cancel   context.CancelFunc
@@ -43,6 +44,15 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistent
 	m.mu.Unlock()
 
 	if ok && proc.cmd.ProcessState == nil {
+		// Check model mismatch — if the request wants a different model than
+		// the one used to spawn this process, fall back to per-message mode.
+		reqModel := req.Model
+		if reqModel == "" {
+			reqModel = m.model
+		}
+		if proc.model != reqModel {
+			return nil, fmt.Errorf("model mismatch: proc=%q req=%q", proc.model, reqModel)
+		}
 		// Process is still running — reset idle timer.
 		proc.idleTimer.Reset(idleTimeout)
 		return proc, nil
@@ -82,8 +92,12 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	if req.SessionID != "" {
 		args = append(args, "--resume", req.SessionID)
 	}
-	if m.model != "" {
-		args = append(args, "--model", m.model)
+	model := req.Model
+	if model == "" {
+		model = m.model
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	// Only append system prompt on fresh sessions — resumed sessions
 	// already have the system prompt in their conversation history.
@@ -96,6 +110,9 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	if len(m.settingSources) > 0 {
 		args = append(args, "--setting-sources", strings.Join(m.settingSources, ","))
 	}
+	if m.settingsPath != "" {
+		args = append(args, "--settings", m.settingsPath)
+	}
 	args = append(args, "--permission-mode", "bypassPermissions")
 	if m.mcpConfigPath != "" {
 		args = append(args, "--mcp-config", m.mcpConfigPath)
@@ -104,9 +121,21 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
 	env := filterEnv(os.Environ(), "CLAUDECODE")
+	for k := range m.env {
+		env = filterEnv(env, k)
+	}
+	for k, v := range m.env {
+		env = append(env, k+"="+v)
+	}
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
 	if m.bridgeSockPath != "" {
 		env = append(env, "SHELL_BRIDGE_SOCK="+m.bridgeSockPath)
+	}
+	if m.agentNS != "" {
+		env = append(env, "GHOST_NS="+m.agentNS)
+	}
+	if m.ghostDB != "" {
+		env = append(env, "GHOST_DB="+m.ghostDB)
 	}
 	cmd.Env = env
 	if m.workDir != "" {
@@ -155,6 +184,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 		stderr:  stderr,
 		scanner: sc,
 		chatID:  req.ChatID,
+		model:   model,
 		cancel:  cancel,
 	}
 

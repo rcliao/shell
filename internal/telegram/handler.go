@@ -915,8 +915,11 @@ type Handler struct {
 
 	// Multi-agent group chat support
 	botUsername           string
+	myAliases            []string          // name variants for this agent (lowercased)
 	broadcastProbability float64
 	peerBotUsernames     map[string]bool
+	peerAliases          []string          // name variants for peer agents (lowercased)
+	groupMode            string // "autonomous" = always deliver, agent decides via [noop]
 
 	// Bot-to-bot exchange tracking (per chat)
 	botExchangeMu     sync.Mutex
@@ -933,8 +936,11 @@ type Handler struct {
 // AgentConfig holds agent identity fields passed to the handler.
 type AgentConfig struct {
 	BotUsername           string
+	Aliases              []string // name variants for this agent (e.g. "pika", "皮卡")
 	BroadcastProbability float64
 	PeerBots             []string
+	PeerAliases          []string // name variants for peer agents (e.g. "umbreon", "小傘")
+	GroupMode            string // "autonomous" = agent decides, "" = legacy probability
 }
 
 func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
@@ -942,12 +948,23 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 	for _, p := range agentCfg.PeerBots {
 		peers[strings.ToLower(p)] = true
 	}
+	var myAliases []string
+	for _, a := range agentCfg.Aliases {
+		myAliases = append(myAliases, strings.ToLower(a))
+	}
+	var peerAliases []string
+	for _, a := range agentCfg.PeerAliases {
+		peerAliases = append(peerAliases, strings.ToLower(a))
+	}
 	return &Handler{
 		auth:                 auth,
 		bridge:               br,
 		botUsername:           strings.ToLower(agentCfg.BotUsername),
+		myAliases:            myAliases,
 		broadcastProbability: agentCfg.BroadcastProbability,
 		peerBotUsernames:     peers,
+		peerAliases:          peerAliases,
+		groupMode:            agentCfg.GroupMode,
 		botExchangeCount:     make(map[int64]int),
 		botLastResponse:      make(map[int64]time.Time),
 		albums:               make(map[string]*albumEntry),
@@ -972,6 +989,37 @@ func parseMentions(text string) []string {
 func stripMention(text, username string) string {
 	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(username) + `\b`)
 	return strings.TrimSpace(re.ReplaceAllString(text, ""))
+}
+
+// messageAddressedToPeer checks if the message text starts with a peer agent's name or alias.
+// This catches natural language addressing like "皮卡 lunch memo" or "umbreon check this".
+func (h *Handler) messageAddressedToPeer(text string) bool {
+	lower := strings.ToLower(text)
+	for _, alias := range h.peerAliases {
+		if strings.HasPrefix(lower, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// messageAddressedToMe checks if the message text starts with this agent's name or alias.
+func (h *Handler) messageAddressedToMe(text string) bool {
+	lower := strings.ToLower(text)
+	for _, alias := range h.myAliases {
+		if strings.HasPrefix(lower, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// truncate returns the first n characters of a string, appending "..." if truncated.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // isPeerBot checks if the message sender is a known peer bot.
@@ -1034,30 +1082,55 @@ func (h *Handler) shouldHandleGroupMessage(msg *models.Message, text string) (bo
 		return false, text
 	}
 
-	// Check if sender is a peer bot — apply stricter rules for bot-to-bot.
+	// Name-based routing: check if message starts with a peer's name/alias.
+	// e.g., "皮卡 lunch memo" → skip for umbreonmini because "皮卡" is pika's alias.
+	if h.messageAddressedToPeer(text) && !h.messageAddressedToMe(text) {
+		slog.Debug("group: message addressed to peer by name", "chat_id", msg.Chat.ID, "text_prefix", truncate(text, 30))
+		return false, text
+	}
+
+	// Autonomous mode: deliver all non-@peer messages to the agent.
+	// The agent decides whether to respond or output [noop].
+	// Bot-to-bot exchange limits still apply to prevent infinite loops.
+	if h.groupMode == "autonomous" {
+		if h.isPeerBot(msg) {
+			h.botExchangeMu.Lock()
+			count := h.botExchangeCount[msg.Chat.ID]
+			lastResp := h.botLastResponse[msg.Chat.ID]
+			h.botExchangeMu.Unlock()
+
+			if count >= botExchangeLimit {
+				slog.Debug("autonomous: bot exchange limit reached", "chat_id", msg.Chat.ID, "count", count)
+				return false, text
+			}
+			if time.Since(lastResp) < botCooldown {
+				slog.Debug("autonomous: bot cooldown active", "chat_id", msg.Chat.ID)
+				return false, text
+			}
+		} else {
+			h.resetBotExchange(msg.Chat.ID)
+		}
+		return true, text
+	}
+
+	// Legacy mode: probability-based gating.
 	if h.isPeerBot(msg) {
 		h.botExchangeMu.Lock()
 		count := h.botExchangeCount[msg.Chat.ID]
 		lastResp := h.botLastResponse[msg.Chat.ID]
 		h.botExchangeMu.Unlock()
 
-		// Hit exchange limit → stop responding to bots until a human speaks.
 		if count >= botExchangeLimit {
 			slog.Debug("bot-to-bot exchange limit reached", "chat_id", msg.Chat.ID, "count", count)
 			return false, text
 		}
-
-		// Cooldown: don't respond to peer bots too quickly.
 		if time.Since(lastResp) < botCooldown {
 			slog.Debug("bot-to-bot cooldown active", "chat_id", msg.Chat.ID, "since", time.Since(lastResp))
 			return false, text
 		}
-
-		// Reduced probability for bot-to-bot exchanges.
 		return rand.Float64() < peerBroadcastProbability, text
 	}
 
-	// Human message with no @mention → reset bot exchange counter, roll broadcast.
 	h.resetBotExchange(msg.Chat.ID)
 
 	if h.broadcastProbability <= 0 {
@@ -1351,6 +1424,15 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64
 	}
 
 	response := resp.Text
+
+	mu.Lock()
+	streamedContent := lastSentContent
+	streamedMarkdown := lastUsedMarkdown
+	mu.Unlock()
+
+	if response == "" && streamedContent != "" {
+		response = streamedContent
+	}
 	if response == "" {
 		response = "(empty response)"
 	}
@@ -1360,9 +1442,7 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64
 	// Final edit with fully formatted response.
 	formatted := formatForMarkdownV2(response)
 
-	mu.Lock()
-	alreadySent := lastUsedMarkdown && lastSentContent == response
-	mu.Unlock()
+	alreadySent := streamedMarkdown && streamedContent == response
 
 	if alreadySent && len(formatted) <= maxMessageLength {
 		return
@@ -1709,12 +1789,33 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		h.recordBotExchange(msg.Chat.ID)
 	}
 
+	response := resp.Text
+
+	// Autonomous group noop: agent decided not to speak — suppress silently.
+	if isGroup && h.groupMode == "autonomous" && response == "" && len(resp.Photos) == 0 {
+		slog.Info("autonomous noop: agent chose not to speak", "chat_id", msg.Chat.ID, "bot", h.botUsername)
+		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    msg.Chat.ID,
+			MessageID: msgID,
+		})
+		return
+	}
+
 	// Send any collected photos (generated images, artifacts).
 	for _, photo := range resp.Photos {
 		sendPhoto(ctx, b, msg.Chat.ID, photo.Data, photo.Caption)
 	}
 
-	response := resp.Text
+	// If final response is empty but we already streamed content to the user,
+	// keep what was displayed rather than overwriting with "(empty response)".
+	mu.Lock()
+	streamedContent := lastSentContent
+	streamedMarkdown := lastUsedMarkdown
+	mu.Unlock()
+
+	if response == "" && streamedContent != "" {
+		response = streamedContent
+	}
 	if response == "" {
 		response = "(empty response)"
 	}
@@ -1724,9 +1825,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// if it fits, or delete and send chunked.
 	formatted := formatForMarkdownV2(response)
 
-	mu.Lock()
-	alreadySent := lastUsedMarkdown && lastSentContent == response
-	mu.Unlock()
+	alreadySent := streamedMarkdown && streamedContent == response
 
 	// Track which bot message IDs correspond to this exchange.
 	var botMsgIDs []int
@@ -2051,15 +2150,22 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 	}
 
 	response := resp.Text
+
+	mu.Lock()
+	streamedContent := lastSentContent
+	streamedMarkdown := lastUsedMarkdown
+	mu.Unlock()
+
+	if response == "" && streamedContent != "" {
+		response = streamedContent
+	}
 	if response == "" {
 		response = "(empty response)"
 	}
 
 	formatted := formatForMarkdownV2(response)
 
-	mu.Lock()
-	alreadySent := lastUsedMarkdown && lastSentContent == response
-	mu.Unlock()
+	alreadySent := streamedMarkdown && streamedContent == response
 
 	var botMsgIDs []int
 

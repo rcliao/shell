@@ -26,6 +26,7 @@ import (
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/telegram"
 	"github.com/rcliao/shell/internal/tool"
+	"github.com/rcliao/shell/internal/transcript"
 )
 
 type Daemon struct {
@@ -169,6 +170,19 @@ func New(cfg config.Config) (*Daemon, error) {
 		os.WriteFile(mcpConfigPath, mcpData, 0644)
 	}
 
+	// Generate per-agent Claude settings with agent-scoped hooks.
+	// This ensures hooks use the correct ghost namespace and database
+	// for each agent, preventing cross-contamination between agents.
+	agentSettingsPath := filepath.Join(pidDir, "settings.json")
+	if agentNS != "" {
+		if settings := generateAgentSettings(agentNS, cfg.Memory.DBPath); settings != nil {
+			if data, err := json.MarshalIndent(settings, "", "  "); err == nil {
+				os.WriteFile(agentSettingsPath, data, 0644)
+				slog.Info("agent settings generated", "path", agentSettingsPath, "ns", agentNS)
+			}
+		}
+	}
+
 	// Create process manager
 	proc := process.NewManager(process.ManagerConfig{
 		Binary:         cfg.Claude.Binary,
@@ -178,10 +192,12 @@ func New(cfg config.Config) (*Daemon, error) {
 		WorkDir:        cfg.Claude.WorkDir,
 		AllowedTools:   allowedTools,
 		ExtraArgs:      cfg.Claude.ExtraArgs,
+		Env:            cfg.Claude.Env,
 		SettingSources: cfg.Claude.SettingSources,
 		BridgeSockPath: bridgeSockPath,
 		MCPConfigPath:  mcpConfigPath,
-		AgentNS:        resolveAgentNS(cfg),
+		SettingsPath:   agentSettingsPath,
+		AgentNS:        agentNS,
 		GhostDB:        cfg.Memory.DBPath,
 	})
 
@@ -245,6 +261,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		pl = planner.New(planner.Config{
 			ClaudeBinary:         cfg.Claude.Binary,
 			Model:                cfg.Claude.Model,
+			ExecuteModel:         cfg.Claude.ResolveModel("planner_execute"),
+			ReviewModel:          cfg.Claude.ResolveModel("planner_review"),
 			WorkDir:              cfg.Claude.WorkDir,
 			TestCmd:              cfg.Planner.TestCmd,
 			Conventions:          cfg.Planner.Conventions,
@@ -280,6 +298,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, tunnelMgr, pmMgr, skillRegistry)
+	br.SetClaudeConfig(cfg.Claude)
 
 	// Track skill directories for hot reload.
 	var skillDirs []string
@@ -321,12 +340,58 @@ func New(cfg config.Config) (*Daemon, error) {
 		br.SetAgentIdentity(cfg.Agent.SystemPrompt)
 	}
 
+	// Discover peer agents (needed for both transcript and name-based routing).
+	var peers []config.PeerAgent
+	if len(cfg.Agent.PeerBots) > 0 {
+		peers = discoverPeerAgents(cfg.Agent.PeerBots)
+	}
+
+	// Open shared transcript for multi-agent group awareness.
+	if cfg.Agent.GroupMode == "autonomous" && len(cfg.Agent.PeerBots) > 0 {
+		transcriptPath := cfg.Agent.TranscriptPath
+		if transcriptPath == "" {
+			transcriptPath = filepath.Join(config.DefaultConfigDir(), "shared", "transcript.db")
+		}
+		if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+			slog.Warn("failed to create transcript directory", "error", err)
+		} else if ts, err := transcript.Open(transcriptPath); err != nil {
+			slog.Warn("failed to open transcript store", "error", err)
+		} else {
+			budget := cfg.Agent.TranscriptBudget
+			if budget <= 0 {
+				budget = 2000
+			}
+			br.SetTranscript(ts, cfg.Agent.BotUsername, budget)
+			slog.Info("shared transcript enabled", "path", transcriptPath, "budget", budget)
+		}
+
+		if len(peers) > 0 {
+			br.SetPeerAgents(peers)
+			for _, p := range peers {
+				slog.Info("peer agent discovered", "name", p.Name, "bot", p.BotUsername, "skills", p.Skills)
+			}
+		}
+	}
+
 	// Create telegram bot with agent identity for group chat routing.
 	token := cfg.TelegramToken()
+
+	// Collect peer aliases from discovered peer agents for name-based routing.
+	var peerAliases []string
+	for _, p := range peers {
+		peerAliases = append(peerAliases, strings.ToLower(p.Name))
+		for _, a := range p.Aliases {
+			peerAliases = append(peerAliases, strings.ToLower(a))
+		}
+	}
+
 	agentCfg := telegram.AgentConfig{
 		BotUsername:           cfg.Agent.BotUsername,
+		Aliases:              cfg.Agent.Aliases,
 		BroadcastProbability: cfg.Agent.BroadcastProbability,
 		PeerBots:             cfg.Agent.PeerBots,
+		PeerAliases:          peerAliases,
+		GroupMode:            cfg.Agent.GroupMode,
 	}
 	bot, err := telegram.NewBot(token, auth, br, agentCfg)
 	if err != nil {
@@ -415,8 +480,22 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			return resp.Text, nil
 		})
+		// Configure adaptive heartbeat: back off to idle interval after noop.
+		if cfg.Scheduler.HeartbeatIdleInterval != "" {
+			if d, err := time.ParseDuration(cfg.Scheduler.HeartbeatIdleInterval); err == nil && d > 0 {
+				sched.SetIdleInterval(d)
+			}
+		}
 		br.SetSchedulerConfig(true, cfg.Scheduler.Timezone)
-		slog.Info("scheduler initialized", "timezone", cfg.Scheduler.Timezone, "quiet_hours", fmt.Sprintf("%d:00-%d:00", cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd))
+		if cfg.Scheduler.HeartbeatInterval != "" {
+			br.SetHeartbeatInterval(cfg.Scheduler.HeartbeatInterval)
+		}
+		slog.Info("scheduler initialized",
+			"timezone", cfg.Scheduler.Timezone,
+			"quiet_hours", fmt.Sprintf("%d:00-%d:00", cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd),
+			"heartbeat_interval", cfg.Scheduler.HeartbeatInterval,
+			"heartbeat_idle_interval", cfg.Scheduler.HeartbeatIdleInterval,
+		)
 
 		// Seed schedule docs into memory so they're always visible in system prompt.
 		if mem != nil {
@@ -541,6 +620,48 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	return d, nil
+}
+
+// discoverPeerAgents reads peer agent config files to discover their skills.
+func discoverPeerAgents(peerBots []string) []config.PeerAgent {
+	agentsDir := filepath.Join(config.DefaultConfigDir(), "agents")
+	var peers []config.PeerAgent
+
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return nil
+	}
+
+	// Build a set of peer bot usernames (lowercased) for matching.
+	peerSet := make(map[string]bool, len(peerBots))
+	for _, p := range peerBots {
+		peerSet[strings.ToLower(p)] = true
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		cfgPath := filepath.Join(agentsDir, entry.Name(), "config.json")
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			continue
+		}
+		var peerCfg config.Config
+		if err := json.Unmarshal(data, &peerCfg); err != nil {
+			continue
+		}
+		if !peerSet[strings.ToLower(peerCfg.Agent.BotUsername)] {
+			continue
+		}
+		peers = append(peers, config.PeerAgent{
+			Name:        peerCfg.Agent.Name,
+			Aliases:     peerCfg.Agent.Aliases,
+			BotUsername: peerCfg.Agent.BotUsername,
+			Skills:      peerCfg.Agent.Skills,
+		})
+	}
+	return peers
 }
 
 // Run starts the daemon and blocks until ctx is cancelled.
@@ -746,4 +867,94 @@ func resolveAgentNS(cfg config.Config) string {
 		}
 	}
 	return ""
+}
+
+// generateAgentSettings creates a Claude settings map with agent-scoped hooks.
+// It reads the global ~/.claude/settings.json, extracts hooks, and wraps each
+// hook command with GHOST_NS and GHOST_DB env vars for the specific agent.
+// Returns nil if the global settings cannot be read or have no hooks.
+func generateAgentSettings(agentNS, dbPath string) map[string]any {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	globalSettingsPath := filepath.Join(homeDir, ".claude", "settings.json")
+	data, err := os.ReadFile(globalSettingsPath)
+	if err != nil {
+		return nil
+	}
+
+	var globalSettings map[string]any
+	if err := json.Unmarshal(data, &globalSettings); err != nil {
+		return nil
+	}
+
+	hooksRaw, ok := globalSettings["hooks"]
+	if !ok {
+		return nil
+	}
+	hooks, ok := hooksRaw.(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	// Build env prefix for hook commands.
+	envPrefix := fmt.Sprintf("GHOST_NS=%s", agentNS)
+	if dbPath != "" {
+		envPrefix += fmt.Sprintf(" GHOST_DB=%s", dbPath)
+	}
+
+	// Walk the hooks structure and wrap each command with the env prefix.
+	agentHooks := make(map[string]any, len(hooks))
+	for eventName, eventRaw := range hooks {
+		eventList, ok := eventRaw.([]any)
+		if !ok {
+			continue
+		}
+		var agentEventList []any
+		for _, groupRaw := range eventList {
+			group, ok := groupRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			hookListRaw, ok := group["hooks"]
+			if !ok {
+				continue
+			}
+			hookList, ok := hookListRaw.([]any)
+			if !ok {
+				continue
+			}
+			var agentHookList []any
+			for _, hookRaw := range hookList {
+				hook, ok := hookRaw.(map[string]any)
+				if !ok {
+					continue
+				}
+				cmd, ok := hook["command"].(string)
+				if !ok {
+					continue
+				}
+				// Only wrap ghost-related hooks.
+				if !strings.Contains(cmd, "ghost") {
+					agentHookList = append(agentHookList, hook)
+					continue
+				}
+				agentHook := make(map[string]any, len(hook))
+				for k, v := range hook {
+					agentHook[k] = v
+				}
+				agentHook["command"] = envPrefix + " " + cmd
+				agentHookList = append(agentHookList, agentHook)
+			}
+			agentEventList = append(agentEventList, map[string]any{
+				"hooks": agentHookList,
+			})
+		}
+		agentHooks[eventName] = agentEventList
+	}
+
+	return map[string]any{
+		"hooks": agentHooks,
+	}
 }
