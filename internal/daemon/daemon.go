@@ -152,6 +152,9 @@ func New(cfg config.Config) (*Daemon, error) {
 		if cfg.Memory.DBPath != "" {
 			ghostEnv["GHOST_DB"] = cfg.Memory.DBPath
 		}
+		for k, v := range cfg.Memory.GhostEnv {
+			ghostEnv[k] = v
+		}
 		ghostBin, err := exec.LookPath("ghost")
 		if err != nil {
 			ghostBin = "ghost" // fallback; will fail at runtime if not found
@@ -175,7 +178,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	// for each agent, preventing cross-contamination between agents.
 	agentSettingsPath := filepath.Join(pidDir, "settings.json")
 	if agentNS != "" {
-		if settings := generateAgentSettings(agentNS, cfg.Memory.DBPath); settings != nil {
+		if settings := generateAgentSettings(agentNS, cfg.Memory.DBPath, cfg.Memory.GhostEnv); settings != nil {
 			if data, err := json.MarshalIndent(settings, "", "  "); err == nil {
 				os.WriteFile(agentSettingsPath, data, 0644)
 				slog.Info("agent settings generated", "path", agentSettingsPath, "ns", agentNS)
@@ -873,7 +876,7 @@ func resolveAgentNS(cfg config.Config) string {
 // It reads the global ~/.claude/settings.json, extracts hooks, and wraps each
 // hook command with GHOST_NS and GHOST_DB env vars for the specific agent.
 // Returns nil if the global settings cannot be read or have no hooks.
-func generateAgentSettings(agentNS, dbPath string) map[string]any {
+func generateAgentSettings(agentNS, dbPath string, ghostEnv map[string]string) map[string]any {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil
@@ -903,10 +906,25 @@ func generateAgentSettings(agentNS, dbPath string) map[string]any {
 	if dbPath != "" {
 		envPrefix += fmt.Sprintf(" GHOST_DB=%s", dbPath)
 	}
+	for k, v := range ghostEnv {
+		envPrefix += fmt.Sprintf(" %s=%s", k, v)
+	}
+
+	// Retrieval hooks (SessionStart, UserPromptSubmit) are redundant for shell
+	// agents because the bridge already injects memory context via memory.InjectContext()
+	// and memory.SystemPrompt(). Only keep Stop (learning extraction) and non-retrieval hooks.
+	skipEvents := map[string]bool{
+		"SessionStart":    true,
+		"UserPromptSubmit": true,
+	}
 
 	// Walk the hooks structure and wrap each command with the env prefix.
 	agentHooks := make(map[string]any, len(hooks))
 	for eventName, eventRaw := range hooks {
+		if skipEvents[eventName] {
+			agentHooks[eventName] = []any{} // empty array disables the event
+			continue
+		}
 		eventList, ok := eventRaw.([]any)
 		if !ok {
 			continue
