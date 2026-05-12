@@ -1,0 +1,26 @@
+{
+  "last_cycle": 35,
+  "last_cycle_at": "2026-05-08T20:56:00-07:00",
+  "cycle_35_note": "AUTO-STOP after 5 idle cycles. Day-2 digest broadcast. Halting overnight; resume via /loop.",
+  "idle_streak": 5,
+  "halted": true,
+  "b006_status": "shipped-but-no-metric-effect",
+  "b020_status": "shipped-validated",
+  "track_record": {"validated": 1, "wrong_lever": 1, "in_flight": 1},
+  "halted": false,
+  "shipped_count": 9,
+  "b006_remeasure_at_cycle": 28,
+  "shipped_count": 5,
+  "cadence_hours": 1,
+  "cadence_reason": "ScheduleWakeup clamps to 1h max. Use lightweight cycles (no investigation) when idle.",
+  "lightweight_when_idle": true,
+  "rotation_next": "skill-telemetry-real",
+  "shipped_count": 3,
+  "high_water": {
+    "shared_transcript_msg_id": 2053,
+    "pikamini_transcript_msg_id": 2053,
+    "umbreon_transcript_msg_id": 2184,
+    "shell_repo_sha": "d2c27b3",
+    "ghost_repo_sha": "3920d8f"
+  }
+}
