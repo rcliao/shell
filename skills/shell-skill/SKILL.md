@@ -1,7 +1,9 @@
 ---
 name: shell-skill
 description: Load full skill instructions on-demand
+usage: scripts/shell-skill load <skill-name>  # returns full SKILL.md body
 allowed-tools: Bash
+tier: core
 ---
 
 # Skill Loader

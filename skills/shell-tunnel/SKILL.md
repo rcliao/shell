@@ -1,6 +1,7 @@
 ---
 name: shell-tunnel
 description: Expose local ports to the internet via Cloudflare tunnels
+usage: scripts/shell-tunnel <start|stop|list> [--port N]
 allowed-tools: Bash
 ---
 

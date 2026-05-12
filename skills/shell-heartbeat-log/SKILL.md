@@ -4,7 +4,6 @@ description: Inspect recent agent-level heartbeat reflection activity from the s
 usage: scripts/shell-heartbeat-log [--limit N] [--full]
 allowed-tools: Bash
 core: true
-tier: hot
 ---
 
 # Heartbeat Log Inspector

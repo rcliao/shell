@@ -1,7 +1,7 @@
 ---
 name: summarize
 description: Summarize a file or URL in a few bullet points
-tier: hot
+usage: scripts/summarize <path-or-url>
 ---
 
 # Summarize

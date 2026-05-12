@@ -1,8 +1,8 @@
 ---
 name: browser
 description: Automate headless Chrome — navigate, click, type, extract, screenshot
+usage: scripts/browser <subcommand> [args]  # e.g. screenshot URL OUT.png
 allowed-tools: Bash
-tier: hot
 ---
 
 # Browser Automation

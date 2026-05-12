@@ -1,8 +1,8 @@
 ---
 name: generate-image
 description: Generate images from text prompts using Google Gemini
+usage: scripts/generate-image "<prompt>"  # outputs [artifact type="image" ...] marker
 allowed-tools: Bash
-tier: hot
 ---
 
 # Image Generation

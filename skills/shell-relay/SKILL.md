@@ -1,6 +1,7 @@
 ---
 name: shell-relay
 description: Send messages to other Telegram chats
+usage: scripts/shell-relay --chat-id <id> --message "<text>"
 allowed-tools: Bash
 tier: core
 ---
