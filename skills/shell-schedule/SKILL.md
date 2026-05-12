@@ -4,6 +4,7 @@ description: Create one-shot or recurring scheduled reminders
 usage: scripts/shell-schedule once --at "ISO8601" --message "..." [--tz TZ --mode notify|prompt]
 allowed-tools: Bash
 core: true
+tier: core
 ---
 
 # Scheduler

@@ -2,6 +2,7 @@
 name: weather
 description: Get current weather for a city
 allowed-tools: Bash(weather:*)
+tier: hot
 ---
 
 # Weather

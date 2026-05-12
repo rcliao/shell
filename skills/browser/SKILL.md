@@ -2,6 +2,7 @@
 name: browser
 description: Automate headless Chrome — navigate, click, type, extract, screenshot
 allowed-tools: Bash
+tier: hot
 ---
 
 # Browser Automation

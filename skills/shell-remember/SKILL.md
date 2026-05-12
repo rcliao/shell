@@ -4,6 +4,7 @@ description: Store memories, heartbeat learnings, and behavioral improvements
 usage: scripts/shell-remember --action remember|heartbeat-learning|behavioral --content "..." [--kind semantic|procedural]
 allowed-tools: Bash
 core: true
+tier: core
 ---
 
 # Memory Store
