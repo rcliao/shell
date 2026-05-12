@@ -1,6 +1,7 @@
 ---
 name: shell-pm
 description: Manage background processes (start, stop, list, logs)
+usage: scripts/shell-pm <start|stop|list|logs> [--name N] [--command CMD] [--dir D]
 allowed-tools: Bash
 ---
 

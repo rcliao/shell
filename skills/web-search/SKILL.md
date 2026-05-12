@@ -1,8 +1,8 @@
 ---
 name: web-search
 description: Search the web using Brave/Tavily APIs
+usage: scripts/web-search "<query>" [--max N]
 allowed-tools: Bash
-tier: hot
 ---
 
 # Web Search

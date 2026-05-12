@@ -150,6 +150,10 @@ func (r *Registry) CatalogPrompt() string {
 
 	var sb strings.Builder
 	sb.WriteString("\n\n## Skills\n\n")
+	sb.WriteString("**Skills are Bash scripts you invoke by file path**, NOT native MCP tools. ")
+	sb.WriteString("Each entry below shows a `Usage:` one-liner — that is the invocation. ")
+	sb.WriteString("Do not search for skills in your tool list; they live in the filesystem at the paths shown. ")
+	sb.WriteString("If a one-liner isn't enough detail, run `scripts/shell-skill load <name>` to load the full SKILL.md body for that turn.\n\n")
 	sb.WriteString("**Artifact markers:** When a skill script outputs `[artifact type=\"...\" path=\"...\" caption=\"...\"]`, ")
 	sb.WriteString("include them verbatim in your response — the bridge sends them as images/files to the user.\n\n")
 
@@ -168,7 +172,7 @@ func (r *Registry) CatalogPrompt() string {
 
 	// Lazy tier — compact catalog, capped.
 	if len(lazy) > 0 {
-		sb.WriteString("### Lazy skills (Read the SKILL.md before invoking)\n\n")
+		sb.WriteString("### Lazy skills (use the `Usage:` line; run `scripts/shell-skill load <name>` for more detail)\n\n")
 		lazyUsed := 0
 		shown := 0
 		for _, s := range lazy {

@@ -1,6 +1,7 @@
 ---
 name: shell-reload
 description: Hot-reload skills after creating or modifying them
+usage: scripts/shell-reload  # call after editing any SKILL.md
 allowed-tools: Bash
 ---
 
