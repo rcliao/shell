@@ -2,6 +2,7 @@
 name: generate-image
 description: Generate images from text prompts using Google Gemini
 allowed-tools: Bash
+tier: hot
 ---
 
 # Image Generation

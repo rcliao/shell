@@ -2,6 +2,7 @@
 name: shell-relay
 description: Send messages to other Telegram chats
 allowed-tools: Bash
+tier: core
 ---
 
 # Message Relay

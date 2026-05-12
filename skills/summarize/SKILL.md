@@ -1,6 +1,7 @@
 ---
 name: summarize
 description: Summarize a file or URL in a few bullet points
+tier: hot
 ---
 
 # Summarize

@@ -4,6 +4,7 @@ description: Create, complete, and manage tasks (self-decomposition and agent de
 usage: "scripts/shell-task create --to self --description \"research X\""
 allowed-tools: Bash
 core: true
+tier: core
 ---
 
 # Task Management

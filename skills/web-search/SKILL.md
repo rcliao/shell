@@ -2,6 +2,7 @@
 name: web-search
 description: Search the web using Brave/Tavily APIs
 allowed-tools: Bash
+tier: hot
 ---
 
 # Web Search
