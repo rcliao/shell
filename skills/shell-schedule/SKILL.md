@@ -1,7 +1,9 @@
 ---
 name: shell-schedule
 description: Create one-shot or recurring scheduled reminders
+usage: scripts/shell-schedule once --at "ISO8601" --message "..." [--tz TZ --mode notify|prompt]
 allowed-tools: Bash
+core: true
 ---
 
 # Scheduler
@@ -33,3 +35,12 @@ scripts/shell-schedule cron --expr "@daily" --message "Check inbox" --mode promp
 - `--mode <notify|prompt>` — notify sends plain text, prompt routes through Claude (default: notify)
 
 The SHELL_CHAT_ID environment variable is used automatically.
+
+**WARNING:** Do NOT use `[schedule]` text directives in your response — they are silently stripped and do nothing. Always use this script via Bash.
+
+**CRITICAL:** Do NOT use `CronCreate` for reminders — it is session-only and **dies on every session restart**. This script (`shell-schedule`) writes to SQLite and persists across restarts. It is the ONLY reliable way to create scheduled reminders.
+
+When a user asks "remind me at 9 PM to do X", ALWAYS use:
+```bash
+scripts/shell-schedule once --at "21:00" --message "Reminder: do X" --mode notify
+```

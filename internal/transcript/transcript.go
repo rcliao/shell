@@ -4,9 +4,7 @@
 package transcript
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -34,16 +32,22 @@ type Entry struct {
 }
 
 // Task is a delegated unit of work between agents (A2A-inspired).
+// Task is a unit of work — either self-decomposition or cross-agent delegation.
 type Task struct {
-	ID          string
-	ChatID      int64
-	FromAgent   string // bot username of the requesting agent
-	ToAgent     string // bot username of the target agent
-	Description string
-	Status      string // pending, working, completed, failed, canceled
-	Result      string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID             string
+	ChatID         int64
+	GoalID         string // links related tasks to a parent goal
+	FromAgent      string // bot username of the requesting agent
+	ToAgent        string // bot username of the target agent (can = FromAgent for self-tasks)
+	Description    string
+	Context        string // one-line context summary (invisible metadata)
+	Status         string // pending, working, completed, failed, canceled
+	Result         string
+	TelegramMsgID  int    // for editable status messages
+	TTLMinutes     int    // auto-fail after this many minutes (default 60)
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	CompletedAt    *time.Time
 }
 
 // Task status constants.
@@ -169,111 +173,9 @@ func (s *Store) RecentByTokenBudget(chatID int64, tokenBudget int) ([]Entry, err
 
 // --- Task delegation (A2A-inspired) ---
 
-// generateID returns a short random hex ID for tasks.
-func generateID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// CreateTask creates a new delegated task and returns its ID.
-func (s *Store) CreateTask(chatID int64, fromAgent, toAgent, description string) (string, error) {
-	id := generateID()
-	now := time.Now()
-	_, err := s.db.Exec(`
-		INSERT INTO tasks (id, chat_id, from_agent, to_agent, description, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatID, fromAgent, toAgent, description, TaskPending, now, now,
-	)
-	return id, err
-}
-
-// UpdateTaskStatus updates a task's status.
-func (s *Store) UpdateTaskStatus(taskID, status string) error {
-	_, err := s.db.Exec(`UPDATE tasks SET status = ?, updated_at = datetime('now') WHERE id = ?`, status, taskID)
-	return err
-}
-
-// CompleteTask marks a task as completed with a result.
-func (s *Store) CompleteTask(taskID, result string) error {
-	_, err := s.db.Exec(`UPDATE tasks SET status = ?, result = ?, updated_at = datetime('now') WHERE id = ?`,
-		TaskCompleted, result, taskID)
-	return err
-}
-
-// FailTask marks a task as failed with a reason.
-func (s *Store) FailTask(taskID, reason string) error {
-	_, err := s.db.Exec(`UPDATE tasks SET status = ?, result = ?, updated_at = datetime('now') WHERE id = ?`,
-		TaskFailed, reason, taskID)
-	return err
-}
-
-// PendingTasksFor returns all pending/working tasks addressed to this agent in a chat.
-func (s *Store) PendingTasksFor(chatID int64, agentUsername string) ([]Task, error) {
-	rows, err := s.db.Query(`
-		SELECT id, chat_id, from_agent, to_agent, description, status, result, created_at, updated_at
-		FROM tasks
-		WHERE chat_id = ? AND LOWER(to_agent) = LOWER(?) AND status IN (?, ?)
-		ORDER BY created_at ASC`,
-		chatID, agentUsername, TaskPending, TaskWorking)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanTasks(rows)
-}
-
-// RecentTasksInChat returns recent tasks in a chat (any status), for transcript context.
-func (s *Store) RecentTasksInChat(chatID int64, limit int) ([]Task, error) {
-	rows, err := s.db.Query(`
-		SELECT id, chat_id, from_agent, to_agent, description, status, result, created_at, updated_at
-		FROM tasks
-		WHERE chat_id = ?
-		ORDER BY created_at DESC
-		LIMIT ?`,
-		chatID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	tasks, err := scanTasks(rows)
-	if err != nil {
-		return nil, err
-	}
-	// Reverse to oldest-first.
-	for i, j := 0, len(tasks)-1; i < j; i, j = i+1, j-1 {
-		tasks[i], tasks[j] = tasks[j], tasks[i]
-	}
-	return tasks, nil
-}
-
-// GetTask returns a task by ID, or nil if not found.
-func (s *Store) GetTask(taskID string) (*Task, error) {
-	row := s.db.QueryRow(`
-		SELECT id, chat_id, from_agent, to_agent, description, status, result, created_at, updated_at
-		FROM tasks WHERE id = ?`, taskID)
-	var t Task
-	err := row.Scan(&t.ID, &t.ChatID, &t.FromAgent, &t.ToAgent, &t.Description, &t.Status, &t.Result, &t.CreatedAt, &t.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &t, nil
-}
-
-func scanTasks(rows *sql.Rows) ([]Task, error) {
-	var tasks []Task
-	for rows.Next() {
-		var t Task
-		if err := rows.Scan(&t.ID, &t.ChatID, &t.FromAgent, &t.ToAgent, &t.Description, &t.Status, &t.Result, &t.CreatedAt, &t.UpdatedAt); err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, t)
-	}
-	return tasks, nil
-}
+// Deprecated: Task methods on Store are superseded by TaskStore.
+// Kept as stubs to avoid breaking the transcript DB migration.
+// All new task operations should use TaskStore.
 
 // --- Formatting ---
 
@@ -307,50 +209,8 @@ func FormatTranscript(entries []Entry, selfUsername string) string {
 	return sb.String()
 }
 
-// FormatPendingTasks renders pending tasks for this agent as a context block.
-func FormatPendingTasks(tasks []Task) string {
-	if len(tasks) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString("\n[Pending tasks assigned to you]\n")
-	for _, t := range tasks {
-		fmt.Fprintf(&sb, "- Task %s (from %s, status: %s): %s\n", t.ID, t.FromAgent, t.Status, t.Description)
-	}
-	sb.WriteString("Process these tasks and respond with [task-result id=TASK_ID]your result[/task-result] for each.\n")
-	sb.WriteString("[End pending tasks]\n")
-	return sb.String()
-}
-
-// FormatRecentTasks renders recent task activity for general awareness.
-func FormatRecentTasks(tasks []Task, selfUsername string) string {
-	if len(tasks) == 0 {
-		return ""
-	}
-	selfLower := strings.ToLower(selfUsername)
-	var sb strings.Builder
-	sb.WriteString("\n[Recent task activity]\n")
-	for _, t := range tasks {
-		arrow := fmt.Sprintf("%s → %s", t.FromAgent, t.ToAgent)
-		switch t.Status {
-		case TaskCompleted:
-			result := t.Result
-			if len(result) > 200 {
-				result = result[:200] + "..."
-			}
-			fmt.Fprintf(&sb, "- Task %s (%s) COMPLETED: %s → Result: %s\n", t.ID, arrow, t.Description, result)
-		case TaskFailed:
-			fmt.Fprintf(&sb, "- Task %s (%s) FAILED: %s → %s\n", t.ID, arrow, t.Description, t.Result)
-		case TaskPending, TaskWorking:
-			if strings.ToLower(t.ToAgent) == selfLower {
-				continue // already shown in pending tasks
-			}
-			fmt.Fprintf(&sb, "- Task %s (%s) %s: %s\n", t.ID, arrow, strings.ToUpper(t.Status), t.Description)
-		}
-	}
-	sb.WriteString("[End task activity]\n")
-	return sb.String()
-}
+// Deprecated: FormatPendingTasks and FormatRecentTasks moved to taskstore.go
+// as FormatPendingTasksForAgent and FormatTaskActivity.
 
 // Close closes the database connection.
 func (s *Store) Close() error {

@@ -79,6 +79,9 @@ type Bridge struct {
 	transcript      *transcript.Store
 	transcriptBudget int // token budget for transcript injection (0 = disabled)
 
+	// Shared task store for task decomposition and delegation.
+	taskStore *transcript.TaskStore
+
 	// Peer agent capabilities for task delegation.
 	peerAgents []config.PeerAgent
 
@@ -94,7 +97,7 @@ type Bridge struct {
 
 	// Preemption: user messages can cancel running system (heartbeat/scheduler) sessions.
 	systemCancelMu sync.Mutex
-	systemCancel   map[int64]context.CancelFunc
+	systemCancel   map[process.SessionKey]context.CancelFunc
 
 	// Consolidation candidates from the last reflect cycle, keyed by chatID.
 	// Populated after heartbeat reflect, consumed by the next heartbeat enrichment.
@@ -130,7 +133,7 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		skills:       skills,
 		planRuns:        make(map[int64]*planRun),
 		reviewCache:     make(map[int64][]memory.ReviewEntry),
-		systemCancel:            make(map[int64]context.CancelFunc),
+		systemCancel:            make(map[process.SessionKey]context.CancelFunc),
 		identityChecked:         make(map[int64]bool),
 		consolidationCandidates: make(map[int64]string),
 	}
@@ -180,11 +183,20 @@ func (b *Bridge) runBackground(ctx context.Context, name, description string, ta
 
 // trackSession registers the current Claude session as a pm-managed process for visibility.
 // Returns a cleanup function that should be deferred. No-op if pm is disabled.
-func (b *Bridge) trackSession(ctx context.Context, chatID int64, sender string) func() {
+func (b *Bridge) trackSession(ctx context.Context, key process.SessionKey, sender string) func() {
 	if b.pmMgr == nil {
 		return func() {}
 	}
-	name := fmt.Sprintf("session-%d", chatID)
+	var name, desc string
+	tags := map[string]string{"type": "session", "chat": fmt.Sprint(key.ChatID), "sender": sender}
+	if key.ThreadID != 0 {
+		name = fmt.Sprintf("session-%d-t%d", key.ChatID, key.ThreadID)
+		desc = fmt.Sprintf("%s session (chat %d thread %d)", sender, key.ChatID, key.ThreadID)
+		tags["thread"] = fmt.Sprint(key.ThreadID)
+	} else {
+		name = fmt.Sprintf("session-%d", key.ChatID)
+		desc = fmt.Sprintf("%s session (chat %d)", sender, key.ChatID)
+	}
 	// Clean up any previous stopped entry for this chat.
 	b.pmMgr.Remove(name)
 
@@ -195,8 +207,7 @@ func (b *Bridge) trackSession(ctx context.Context, chatID int64, sender string) 
 		case <-fctx.Done():
 		}
 		return nil
-	}, fmt.Sprintf("%s session (chat %d)", sender, chatID),
-		pm.WithTags(map[string]string{"type": "session", "chat": fmt.Sprint(chatID), "sender": sender}))
+	}, desc, pm.WithTags(tags))
 	if err != nil {
 		slog.Debug("trackSession: pm registration failed", "error", err)
 		return func() {}
@@ -204,43 +215,55 @@ func (b *Bridge) trackSession(ctx context.Context, chatID int64, sender string) 
 	return func() { close(done) }
 }
 
+// SystemChatID is a reserved sentinel chat ID used for agent-level heartbeat
+// reflection. Telegram delivery is skipped for this chat — outputs only surface
+// via explicit shell-relay calls. The Claude session for this chat acts as the
+// agent's "inner monologue" container for cross-chat memory maintenance.
+const SystemChatID int64 = 0
+
+// IsSystemChat returns true if the chatID is the reserved phantom chat used
+// for agent-level heartbeat reflection.
+func IsSystemChat(chatID int64) bool {
+	return chatID == SystemChatID
+}
+
 // isSystemSender returns true if the sender is a system process (heartbeat, scheduler).
 func isSystemSender(sender string) bool {
 	return sender == "heartbeat" || sender == "scheduler"
 }
 
-// preemptSystemSession cancels any running system (heartbeat/scheduler) session for the chat
+// preemptSystemSession cancels any running system (heartbeat/scheduler) session for the key
 // and waits briefly for it to release. Called before user messages to prevent busy conflicts.
-func (b *Bridge) preemptSystemSession(chatID int64) {
+func (b *Bridge) preemptSystemSession(key process.SessionKey) {
 	b.systemCancelMu.Lock()
-	cancel, ok := b.systemCancel[chatID]
+	cancel, ok := b.systemCancel[key]
 	b.systemCancelMu.Unlock()
 	if !ok {
 		return
 	}
-	slog.Info("preempting system session for user message", "chat_id", chatID)
+	slog.Info("preempting system session for user message", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 	cancel()
 
 	// Wait for the system session to release (up to 3 seconds).
 	for i := 0; i < 30; i++ {
-		sess, exists := b.proc.Get(chatID)
+		sess, exists := b.proc.Get(key)
 		if !exists || sess.Status != process.StatusBusy {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	slog.Warn("preempt: system session did not release in time", "chat_id", chatID)
+	slog.Warn("preempt: system session did not release in time", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 }
 
 // registerSystemCancel stores a cancel function for the current system session,
 // allowing user messages to preempt it. Returns a cleanup function.
-func (b *Bridge) registerSystemCancel(chatID int64, cancel context.CancelFunc) func() {
+func (b *Bridge) registerSystemCancel(key process.SessionKey, cancel context.CancelFunc) func() {
 	b.systemCancelMu.Lock()
-	b.systemCancel[chatID] = cancel
+	b.systemCancel[key] = cancel
 	b.systemCancelMu.Unlock()
 	return func() {
 		b.systemCancelMu.Lock()
-		delete(b.systemCancel, chatID)
+		delete(b.systemCancel, key)
 		b.systemCancelMu.Unlock()
 	}
 }
@@ -361,6 +384,11 @@ func (b *Bridge) SetPeerAgents(peers []config.PeerAgent) {
 	b.peerAgents = peers
 }
 
+// SetTaskStore configures the shared task store for task decomposition and delegation.
+func (b *Bridge) SetTaskStore(ts *transcript.TaskStore) {
+	b.taskStore = ts
+}
+
 // RecordTranscript writes a message to the shared transcript so peer agents can see it.
 func (b *Bridge) RecordTranscript(e transcript.Entry) {
 	if b.transcript == nil {
@@ -408,37 +436,25 @@ Output [noop] (just that, nothing else) when you choose not to respond.
 	}
 
 	sb.WriteString(`
-## Task Delegation
-You can delegate work to peer agents and receive delegated tasks from them.
+## Task Decomposition & Delegation
+Use ` + "`scripts/shell-task`" + ` to break complex requests into subtasks or delegate to peers.
 
-To delegate a task:
-  [task to=agent_bot_username]Clear description of what you need done[/task]
+**Before diving into a complex request, consider:**
+1. Should I break this into steps? → ` + "`scripts/shell-task create --to self --description \"step 1: ...\"`" + `
+2. Would a peer agent add value? → ` + "`scripts/shell-task create --to <peer_bot_username> --description \"...\"`" + `
+3. Simple enough to handle directly? → Just do it.
 
-To report a task result (when you see a pending task assigned to you):
-  [task-result id=TASK_ID]Your findings or result[/task-result]
+**When you see pending tasks assigned to you:**
+- Process them and report: ` + "`scripts/shell-task complete --id <ID> --result \"...\"`" + `
+- If you can't complete: ` + "`scripts/shell-task fail --id <ID> --reason \"...\"`" + `
 
-To update task status while working:
-  [task-status id=TASK_ID status=working]
-
-Task statuses: pending → working → completed/failed/canceled
-
-When to delegate:
-- You need something verified or double-checked by another agent.
-- A peer agent has a skill better suited for the task (see Peer Agents above).
-- The task benefits from a second perspective or independent analysis.
-- You want to divide work: you do one part, they do another.
-
-When you receive a pending task:
-- Process it thoughtfully — the requesting agent is counting on you.
-- Report your result with [task-result id=...] when done.
-- If you can't complete it, use [task-status id=... status=failed].
+Don't over-decompose — tasks are for multi-step or collaborative work, not every message.
 
 ## Agent Privacy Boundaries
-- NEVER access another agent's memory namespace. Only use your own namespace (` + b.agentBotUsername + `).
+- NEVER access another agent's memory namespace. Only use your own.
 - NEVER read other agents' database files, config files, or session data under ~/.shell/agents/.
 - NEVER call ghost_search, ghost_get, ghost_context, or ghost_put with a namespace belonging to another agent.
-- The shared transcript and task delegation are the ONLY approved channels for cross-agent communication.
-- Violating these boundaries breaks trust between agents and their users.
+- Task delegation and shared tasks are the ONLY approved channels for cross-agent communication.
 `)
 
 	return sb.String()
@@ -480,13 +496,17 @@ func (b *Bridge) SetMaxSessionTokens(maxTokens int) {
 	b.maxSessionTokens = maxTokens
 }
 
-// compactSessionIfNeeded sends /compact to the CLI when total input tokens exceed
-// the threshold. This summarizes old conversation turns while preserving continuity,
-// instead of killing the session entirely.
-//
-// The session is marked as StatusCompacting while running, which allows the manager
-// to queue incoming messages instead of rejecting them with "busy".
-func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID int64, usage *process.Usage) {
+// compactionSoftRatio is the fraction of maxSessionTokens that triggers
+// proactive, background compaction. Below this threshold nothing runs; between
+// this and the hard threshold, compaction runs in the background while the
+// user keeps chatting; above the hard threshold, the reactive path runs
+// synchronously as a safety net.
+const compactionSoftRatio = 0.6
+
+// compactSessionIfNeeded decides whether proactive or reactive compaction
+// should run based on current token usage, and dispatches accordingly.
+// Called from the write-back path after every send.
+func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID int64, usage *process.Usage) {
 	if b.maxSessionTokens <= 0 || usage == nil {
 		return
 	}
@@ -495,52 +515,85 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID int64, usage
 	// and don't represent actual context growth. Including them inflates the
 	// threshold so sessions hit the limit before compaction can help.
 	totalInput := usage.InputTokens + usage.CacheCreationInputTokens
-	if totalInput <= b.maxSessionTokens {
-		return
-	}
+	softThreshold := int(float64(b.maxSessionTokens) * compactionSoftRatio)
 
-	slog.Info("compacting session: token threshold exceeded",
+	switch {
+	case totalInput > b.maxSessionTokens:
+		// Reactive: we're over the hard limit. Run synchronously as a safety net.
+		b.runCompaction(ctx, chatID, threadID, totalInput, "reactive")
+	case totalInput > softThreshold:
+		// Proactive: background compact while the user keeps chatting.
+		// The DB's compact_state column gates against repeat triggers.
+		if sess, err := b.store.GetSession(chatID, threadID); err == nil && sess != nil && sess.CompactState == "compacting" {
+			return
+		}
+		if err := b.store.SetCompactState(chatID, threadID, "compacting"); err != nil {
+			slog.Warn("set compact_state failed", "error", err)
+			return
+		}
+		go func() {
+			defer func() {
+				if err := b.store.SetCompactState(chatID, threadID, ""); err != nil {
+					slog.Warn("clear compact_state failed", "error", err)
+				}
+			}()
+			b.runCompaction(context.Background(), chatID, threadID, totalInput, "proactive")
+		}()
+	}
+}
+
+// runCompaction issues /compact to the CLI for a given session. Sync or async
+// is decided by the caller; this function just does the work and marks the
+// in-memory compacting flag so concurrent turns queue instead of failing.
+func (b *Bridge) runCompaction(ctx context.Context, chatID, threadID int64, totalInput int, mode string) {
+	slog.Info("compacting session",
 		"chat_id", chatID,
+		"thread_id", threadID,
 		"total_input_tokens", totalInput,
 		"max_tokens", b.maxSessionTokens,
+		"mode", mode,
 	)
 
+	key := process.SessionKey{ChatID: chatID, ThreadID: threadID}
 	agent := b.resolveAgent(chatID)
-	procSess, _ := agent.Get(chatID)
+	procSess, _ := agent.Get(key)
 	if procSess == nil {
 		return
 	}
 
 	// Mark session as compacting so incoming messages wait instead of getting "busy".
-	agent.SetCompacting(chatID, true)
-	defer agent.SetCompacting(chatID, false)
+	agent.SetCompacting(key, true)
+	defer agent.SetCompacting(key, false)
 
-	// Notify user that compaction is in progress.
-	if b.transport != nil {
-		b.transport.Notify(chatID, "🗜 Compacting conversation...")
+	// Only the reactive path notifies the user — proactive runs silently.
+	if mode == "reactive" && b.transport != nil {
+		b.transport.Notify(chatID, threadID, "🗜 Compacting conversation...")
 	}
 
-	// Send /compact as a user message — the CLI handles it as a slash command.
 	_, err := agent.Send(ctx, process.AgentRequest{
-		ChatID:    chatID,
-		SessionID: procSess.ProviderSessionID,
-		Text:      "/compact",
-		Model:     b.claudeCfg.ResolveModel("compaction"),
+		ChatID:          chatID,
+		MessageThreadID: threadID,
+		SessionID:       procSess.ProviderSessionID,
+		Text:            "/compact",
+		Model:           b.claudeCfg.ResolveModel("compaction"),
 	}, nil)
 	if err != nil {
-		slog.Warn("compact failed", "chat_id", chatID, "error", err)
+		slog.Warn("compact failed", "chat_id", chatID, "thread_id", threadID, "mode", mode, "error", err)
 	} else {
-		slog.Info("session compacted", "chat_id", chatID)
+		slog.Info("session compacted", "chat_id", chatID, "thread_id", threadID, "mode", mode)
 	}
 }
 
 // HandleMessageStreaming processes an incoming user message and streams text deltas via onUpdate.
 // senderName identifies who sent the message (e.g. Telegram first name).
+// threadID is the Telegram forum topic ID (0 = main chat / no topic); sessions
+// are keyed by (chatID, threadID) so each topic maintains isolated context.
 // images optionally contains downloaded image metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram photos).
 // pdfs optionally contains downloaded PDF metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram documents).
-func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (AgentResponse, error) {
+func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (AgentResponse, error) {
+	key := process.SessionKey{ChatID: chatID, ThreadID: threadID}
 	// Check for active plan draft — intercept the message (no streaming needed).
 	b.planMu.Lock()
 	run, hasPlan := b.planRuns[chatID]
@@ -554,9 +607,19 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		return AgentResponse{Text: text}, err
 	}
 
-	sess, err := b.ensureSession(ctx, chatID)
+	sess, err := b.ensureSession(ctx, chatID, threadID)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
+	}
+
+	// Check rotation triggers before doing anything else this turn. A true
+	// return means we just bumped generation — the process session is wiped
+	// and the next Send will go fresh with a rebuilt Channel A. Reload the
+	// row so downstream code sees the post-rotation state.
+	if b.maybeRotate(ctx, chatID, threadID) {
+		if fresh, rerr := b.store.GetSession(chatID, threadID); rerr == nil && fresh != nil {
+			sess = fresh
+		}
 	}
 
 	// Log user message
@@ -572,10 +635,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
 	}
 
-	// Enrich heartbeat messages with conversation history and previous insights
-	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ")
+	// Enrich heartbeat messages with conversation history and previous insights.
+	// Deep heartbeats use [Heartbeat:deep] prefix for behavioral reflection.
+	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ") || strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
+	isDeepHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
 	if isHeartbeat && b.memory != nil {
-		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg)
+		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg, isDeepHeartbeat)
 	}
 
 	// Inject shared transcript for multi-agent group awareness.
@@ -585,16 +650,18 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		} else if block := transcript.FormatTranscript(entries, b.agentBotUsername); block != "" {
 			augmentedMsg = block + "\n" + augmentedMsg
 		}
-		// Inject pending tasks assigned to this agent.
-		if pending, err := b.transcript.PendingTasksFor(chatID, b.agentBotUsername); err != nil {
+	}
+
+	// Inject pending tasks and recent task activity from shared task store.
+	if b.taskStore != nil && !isSystemSender(senderName) {
+		if pending, err := b.taskStore.PendingTasksFor(b.agentBotUsername); err != nil {
 			slog.Warn("failed to fetch pending tasks", "error", err)
-		} else if block := transcript.FormatPendingTasks(pending); block != "" {
+		} else if block := transcript.FormatPendingTasksForAgent(pending); block != "" {
 			augmentedMsg = block + "\n" + augmentedMsg
 		}
-		// Inject recent task activity for general awareness.
-		if recent, err := b.transcript.RecentTasksInChat(chatID, 10); err != nil {
+		if recent, err := b.taskStore.RecentTasks(10); err != nil {
 			slog.Warn("failed to fetch recent tasks", "error", err)
-		} else if block := transcript.FormatRecentTasks(recent, b.agentBotUsername); block != "" {
+		} else if block := transcript.FormatTaskActivity(recent, b.agentBotUsername); block != "" {
 			augmentedMsg = block + "\n" + augmentedMsg
 		}
 	}
@@ -604,8 +671,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
 	}
 
-	// Inject current time when scheduler is enabled so Claude can compute relative times
-	augmentedMsg = b.injectCurrentTime(augmentedMsg)
+	// Inject Channel B: current time + pinned-memory delta + active tasks.
+	// See docs/SESSION-LIFECYCLE.md — this is the fresh layer the cache doesn't hold.
+	augmentedMsg = b.injectPerTurnContext(ctx, chatID, threadID, augmentedMsg)
 
 	// Convert image/PDF attachments to typed structs.
 	var imgAttachments []process.ImageAttachment
@@ -627,25 +695,30 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 
 	// Preempt any running system session (heartbeat/scheduler) for user messages.
 	if !isSystemSender(senderName) {
-		b.preemptSystemSession(chatID)
+		b.preemptSystemSession(key)
 	}
 
 	// For system senders, register a cancellable context so user messages can preempt.
 	if isSystemSender(senderName) {
 		sysCtx, sysCancel := context.WithCancel(ctx)
 		defer sysCancel()
-		cleanupCancel := b.registerSystemCancel(chatID, sysCancel)
+		cleanupCancel := b.registerSystemCancel(key, sysCancel)
 		defer cleanupCancel()
 		ctx = sysCtx
 	}
 
 	// Determine session ID for --resume
 	agent := b.resolveAgent(chatID)
-	procSess, _ := agent.Get(chatID)
+	procSess, _ := agent.Get(key)
 	claudeSessionID := ""
 	if procSess != nil && procSess.HasHistory {
 		claudeSessionID = procSess.ProviderSessionID
 	}
+	// A fresh send (no UUID yet) means Claude CLI will accept the system
+	// prompt and cache it as the Channel A prefix for this generation.
+	// After the send succeeds we stamp the pinned-memory hash so Channel B
+	// can detect drift on subsequent turns.
+	isFreshSend := claudeSessionID == ""
 
 	// Build system prompt from agent identity + memory.
 	// If no identity memories exist and sender is not a system process, inject onboarding.
@@ -668,22 +741,25 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	}
 
 	// Track session in pm for /pm list visibility.
-	endTrack := b.trackSession(ctx, chatID, senderName)
+	endTrack := b.trackSession(ctx, key, senderName)
 	defer endTrack()
 
 	taskType := "conversation"
-	if isHeartbeat {
+	if isDeepHeartbeat {
+		taskType = "heartbeat_deep"
+	} else if isHeartbeat {
 		taskType = "heartbeat"
 	}
 
 	result, err := agent.Send(ctx, process.AgentRequest{
-		ChatID:       chatID,
-		SessionID:    claudeSessionID,
-		Text:         augmentedMsg,
-		Images:       imgAttachments,
-		PDFs:         pdfAttachments,
-		SystemPrompt: systemPrompt,
-		Model:        b.claudeCfg.ResolveModel(taskType),
+		ChatID:          chatID,
+		MessageThreadID: threadID,
+		SessionID:       claudeSessionID,
+		Text:            augmentedMsg,
+		Images:          imgAttachments,
+		PDFs:            pdfAttachments,
+		SystemPrompt:    systemPrompt,
+		Model:           b.claudeCfg.ResolveModel(taskType),
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
@@ -693,11 +769,23 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 	if procSess != nil {
 		if result.SessionID != "" {
 			procSess.ProviderSessionID = result.SessionID
-			if err := b.store.SaveSession(chatID, result.SessionID); err != nil {
+			if err := b.store.SaveSession(chatID, threadID, result.SessionID); err != nil {
 				slog.Warn("failed to update session ID in store", "error", err)
 			}
 		}
 		procSess.HasHistory = true
+	}
+
+	// Stamp the Channel A pinned-memory hash on fresh sends. The hash is
+	// what later turns diff against in injectPerTurnContext. If we skip
+	// this, every post-birth turn sees stale PrefixHash="" and would
+	// surface every pinned memory as "new" — defeating the purpose.
+	if isFreshSend && b.memory != nil && b.store != nil {
+		if _, hash := b.memory.PinnedSnapshot(ctx, chatID); hash != "" {
+			if err := b.store.SetPrefixHash(chatID, threadID, hash); err != nil {
+				slog.Warn("failed to stamp prefix hash", "chat_id", chatID, "error", err)
+			}
+		}
 	}
 
 	// Determine usage source for cost attribution.
@@ -720,10 +808,10 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 		source = "scheduler"
 	}
 
-	resp := b.processResponse(ctx, chatID, sess.ID, userMsg, isHeartbeat, result, source)
+	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source)
 
 	// Auto-compact session if token threshold exceeded (uses API-reported usage).
-	go b.compactSessionIfNeeded(ctx, chatID, result.Usage)
+	go b.compactSessionIfNeeded(ctx, chatID, threadID, result.Usage)
 
 	return resp, nil
 }
@@ -731,7 +819,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID int64, userM
 // processResponse is the post-processing pipeline for HandleMessageStreaming.
 // It parses all response directives (relay, heartbeat, memory, schedule, artifacts),
 // logs the exchange, and returns a typed AgentResponse with collected photos.
-func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source string) AgentResponse {
+func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source string) AgentResponse {
 	response := strings.TrimSpace(result.Text)
 
 	// Run memory maintenance during heartbeats.
@@ -810,30 +898,32 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, sessID int64, user
 	}
 
 	// Update session timestamp.
-	if err := b.store.UpdateSessionStatus(chatID, "active"); err != nil {
+	if err := b.store.UpdateSessionStatus(chatID, threadID, "active"); err != nil {
 		slog.Warn("failed to update session", "error", err)
 	}
 
 	return AgentResponse{Text: response, Photos: photos}
 }
 
-// ensureSession returns the existing session for a chat or creates a new one.
-func (b *Bridge) ensureSession(ctx context.Context, chatID int64) (*store.Session, error) {
-	sess, err := b.store.GetSession(chatID)
+// ensureSession returns the existing session for a (chat, thread) key or creates a new one.
+func (b *Bridge) ensureSession(ctx context.Context, chatID, threadID int64) (*store.Session, error) {
+	sess, err := b.store.GetSession(chatID, threadID)
 	if err != nil {
 		return nil, err
 	}
+	key := process.SessionKey{ChatID: chatID, ThreadID: threadID}
 	if sess != nil {
 		// Ensure process manager knows about it
-		if _, ok := b.proc.Get(chatID); !ok {
+		if _, ok := b.proc.Get(key); !ok {
 			procSess := &process.Session{
-				ID:              fmt.Sprintf("%d", sess.ID),
-				ChatID:          chatID,
+				ID:                fmt.Sprintf("%d", sess.ID),
+				ChatID:            chatID,
+				MessageThreadID:   threadID,
 				ProviderSessionID: sess.ProviderSessionID,
-				Status:          process.StatusActive,
-				HasHistory:      true, // restored from DB = already has history
-				CreatedAt:       sess.CreatedAt,
-				UpdatedAt:       sess.UpdatedAt,
+				Status:            process.StatusActive,
+				HasHistory:        true, // restored from DB = already has history
+				CreatedAt:         sess.CreatedAt,
+				UpdatedAt:         sess.UpdatedAt,
 			}
 			b.proc.Register(procSess)
 		}
@@ -841,32 +931,35 @@ func (b *Bridge) ensureSession(ctx context.Context, chatID int64) (*store.Sessio
 	}
 
 	// Create new session
-	procSess := process.NewSession(chatID)
+	procSess := process.NewSession(chatID, threadID)
 	b.proc.Register(procSess)
 
-	if err := b.store.SaveSession(chatID, procSess.ProviderSessionID); err != nil {
+	if err := b.store.SaveSession(chatID, threadID, procSess.ProviderSessionID); err != nil {
 		return nil, fmt.Errorf("save session: %w", err)
 	}
 
-	// Auto-create default heartbeat for new chats if scheduler + memory are enabled
-	if b.schedulerEnabled && b.memory != nil {
+	// Auto-create default heartbeat ONLY for the system chat (agent-level reflection).
+	// Real user chats no longer get per-chat heartbeats — the system chat aggregates
+	// context from all of them. Heartbeats run on the main thread (thread_id = 0).
+	if b.schedulerEnabled && b.memory != nil && IsSystemChat(chatID) && threadID == 0 {
 		b.ensureDefaultHeartbeat(chatID)
 	}
 
 	// Re-read to get the DB-assigned ID
-	return b.store.GetSession(chatID)
+	return b.store.GetSession(chatID, threadID)
 }
 
 // CleanupStaleSessions kills sessions that have been idle too long.
 func (b *Bridge) CleanupStaleSessions(idleDuration time.Duration) error {
-	chatIDs, err := b.store.StaleSessionChatIDs(idleDuration)
+	refs, err := b.store.StaleSessionRefs(idleDuration)
 	if err != nil {
 		return err
 	}
-	for _, chatID := range chatIDs {
-		b.proc.Kill(chatID)
-		b.store.UpdateSessionStatus(chatID, "stale")
-		slog.Info("cleaned up stale session", "chat_id", chatID)
+	for _, r := range refs {
+		key := process.SessionKey{ChatID: r.ChatID, ThreadID: r.ThreadID}
+		b.proc.Kill(key)
+		b.store.UpdateSessionStatus(r.ChatID, r.ThreadID, "stale")
+		slog.Info("cleaned up stale session", "chat_id", r.ChatID, "thread_id", r.ThreadID)
 	}
 	return nil
 }

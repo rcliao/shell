@@ -22,8 +22,8 @@ type ReactionContext struct {
 
 // SaveMessageMap persists a mapping between a user's Telegram message and the
 // bot's response message for the current session, including message content.
-func (b *Bridge) SaveMessageMap(chatID int64, userMessageID, botMessageID int, userMessage, botResponse string) error {
-	sess, err := b.store.GetSession(chatID)
+func (b *Bridge) SaveMessageMap(chatID, threadID int64, userMessageID, botMessageID int, userMessage, botResponse string) error {
+	sess, err := b.store.GetSession(chatID, threadID)
 	if err != nil || sess == nil {
 		return err
 	}
@@ -35,12 +35,21 @@ func (b *Bridge) GetMessageMapByBotMsg(chatID int64, botMessageID int) (*store.M
 	return b.store.GetMessageMapByBotMsg(chatID, botMessageID)
 }
 
+// SessionThreadID returns the Telegram forum topic ID (message_thread_id)
+// that owns the given session row, or 0 if the session doesn't exist.
+// Used by reactions to route replies back to the same topic as the original
+// exchange — Telegram's MessageReactionUpdated doesn't carry thread_id.
+func (b *Bridge) SessionThreadID(chatID int64, sessionID int64) int64 {
+	return b.store.SessionThreadID(sessionID)
+}
+
 // HandleReaction processes an emoji reaction as a user action.
 // The emoji→action mapping is controlled by Config.Telegram.ReactionMap.
 // messageID is the Telegram message ID that was reacted to, used to look up
-// which exchange the reaction targets.
+// which exchange the reaction targets. threadID is the forum topic the
+// reaction originated in (0 = main chat).
 // Returns a response message if the reaction triggered an action, or empty string if ignored.
-func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, messageID int, emoji string) (string, error) {
+func (b *Bridge) HandleReaction(ctx context.Context, chatID, threadID int64, messageID int, emoji string) (string, error) {
 	action, ok := b.reactionMap[emoji]
 	if !ok || action == "" {
 		return b.unmappedReactionHint(emoji), nil
@@ -67,13 +76,13 @@ func (b *Bridge) HandleReaction(ctx context.Context, chatID int64, messageID int
 	// Actions that work regardless of plan state.
 	switch action {
 	case "status":
-		return b.Status(chatID)
+		return b.Status(chatID, threadID)
 	case "cancel":
 		return b.PlanStop(chatID)
 	case "retry":
 		return b.PlanRetry(ctx, chatID)
 	case "regenerate":
-		resp, err := b.Regenerate(ctx, chatID, rc)
+		resp, err := b.Regenerate(ctx, chatID, threadID, rc)
 		return resp.Text, err
 	case "remember":
 		return b.RememberResponse(ctx, chatID, rc)
@@ -137,7 +146,7 @@ func (b *Bridge) unmappedReactionHint(emoji string) string {
 }
 
 // Regenerate re-sends the original user message to get a fresh response from Claude.
-func (b *Bridge) Regenerate(ctx context.Context, chatID int64, rc *ReactionContext) (AgentResponse, error) {
+func (b *Bridge) Regenerate(ctx context.Context, chatID, threadID int64, rc *ReactionContext) (AgentResponse, error) {
 	if rc == nil || rc.UserMessage == "" {
 		return AgentResponse{Text: "Cannot regenerate: message not found."}, nil
 	}
@@ -148,13 +157,13 @@ func (b *Bridge) Regenerate(ctx context.Context, chatID int64, rc *ReactionConte
 	if hasPlan && run.state != planStateDone {
 		return AgentResponse{Text: "Cannot regenerate while a plan is active."}, nil
 	}
-	return b.HandleMessageStreaming(ctx, chatID, rc.UserMessage, "", nil, nil, nil)
+	return b.HandleMessageStreaming(ctx, chatID, threadID, rc.UserMessage, "", nil, nil, nil)
 }
 
 // RegenerateStreaming re-sends the original user message with streaming support.
 // It looks up the exchange by botMessageID, checks plan state, and streams the
 // new response via onUpdate. On success it updates the stored message map entry.
-func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessageID int, onUpdate process.StreamFunc) (AgentResponse, error) {
+func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID, threadID int64, botMessageID int, onUpdate process.StreamFunc) (AgentResponse, error) {
 	msgMap, err := b.store.GetMessageMapByBotMsg(chatID, botMessageID)
 	if err != nil || msgMap == nil || msgMap.UserMessage == "" {
 		return AgentResponse{Text: "Cannot regenerate: message not found."}, nil
@@ -168,7 +177,7 @@ func (b *Bridge) RegenerateStreaming(ctx context.Context, chatID int64, botMessa
 		return AgentResponse{Text: "Cannot regenerate while a plan is active."}, nil
 	}
 
-	resp, err := b.HandleMessageStreaming(ctx, chatID, msgMap.UserMessage, "", nil, nil, onUpdate)
+	resp, err := b.HandleMessageStreaming(ctx, chatID, threadID, msgMap.UserMessage, "", nil, nil, onUpdate)
 	if err != nil {
 		return AgentResponse{}, err
 	}

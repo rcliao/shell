@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$CONTENT" ]; then
-  echo "usage: shell-remember --content <text> [--kind <semantic|episodic|procedural>] [--action <remember|heartbeat-learning>]" >&2
+  echo "usage: shell-remember --content <text> [--kind <semantic|episodic|procedural>] [--action <remember|heartbeat-learning|behavioral>]" >&2
   exit 1
 fi
 

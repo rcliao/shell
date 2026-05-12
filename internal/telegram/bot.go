@@ -108,35 +108,39 @@ func (b *Bot) Start(ctx context.Context) {
 	b.bot.Start(ctx)
 }
 
-// SendText sends a message to a chat, splitting at paragraph boundaries if needed.
-// Used for async notifications like plan progress.
-func (b *Bot) SendText(chatID int64, text string) {
+// SendText sends a message to a chat/topic, splitting at paragraph boundaries if needed.
+// Used for async notifications like plan progress. threadID is the Telegram
+// forum topic ID (0 = main chat / no topic).
+func (b *Bot) SendText(chatID, threadID int64, text string) {
 	ctx := context.Background()
 	chunks := splitMessage(text, maxMessageLength)
 	for _, chunk := range chunks {
 		_, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    chatID,
-			Text:      formatForMarkdownV2(chunk),
-			ParseMode: models.ParseModeMarkdown,
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Text:            formatForMarkdownV2(chunk),
+			ParseMode:       models.ParseModeMarkdown,
 		})
 		if err != nil {
-			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID)
+			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID, "thread_id", threadID)
 			_, err = b.bot.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: chatID,
-				Text:   chunk,
+				ChatID:          chatID,
+				MessageThreadID: int(threadID),
+				Text:            chunk,
 			})
 			if err != nil {
-				slog.Error("failed to send notification", "error", err, "chat_id", chatID)
+				slog.Error("failed to send notification", "error", err, "chat_id", chatID, "thread_id", threadID)
 			}
 		}
 	}
 }
 
-// SendPhoto sends an image to a chat as a Telegram photo message.
-func (b *Bot) SendPhoto(chatID int64, imageData []byte, caption string) {
+// SendPhoto sends an image to a chat/topic as a Telegram photo message.
+func (b *Bot) SendPhoto(chatID, threadID int64, imageData []byte, caption string) {
 	ctx := context.Background()
 	_, err := b.bot.SendPhoto(ctx, &bot.SendPhotoParams{
-		ChatID: chatID,
+		ChatID:          chatID,
+		MessageThreadID: int(threadID),
 		Photo: &models.InputFileUpload{
 			Filename: "image.png",
 			Data:     bytes.NewReader(imageData),
@@ -144,16 +148,17 @@ func (b *Bot) SendPhoto(chatID int64, imageData []byte, caption string) {
 		Caption: caption,
 	})
 	if err != nil {
-		slog.Error("failed to send photo", "error", err, "chat_id", chatID)
+		slog.Error("failed to send photo", "error", err, "chat_id", chatID, "thread_id", threadID)
 	}
 }
 
-// SendChatAction sends a chat action (e.g. "upload_photo", "typing") to a chat.
-func (b *Bot) SendChatAction(chatID int64, action string) {
+// SendChatAction sends a chat action (e.g. "upload_photo", "typing") to a chat/topic.
+func (b *Bot) SendChatAction(chatID, threadID int64, action string) {
 	ctx := context.Background()
 	b.bot.SendChatAction(ctx, &bot.SendChatActionParams{
-		ChatID: chatID,
-		Action: models.ChatAction(action),
+		ChatID:          chatID,
+		MessageThreadID: int(threadID),
+		Action:          models.ChatAction(action),
 	})
 }
 

@@ -122,11 +122,12 @@ func (t *TelegramConfig) UnmarshalJSON(data []byte) error {
 // ModelRouting allows different Claude models per task type for cost optimization.
 // Empty strings fall back to ClaudeConfig.Model.
 type ModelRouting struct {
-	Conversation   string `json:"conversation"`     // user-facing chat
-	Heartbeat      string `json:"heartbeat"`        // periodic maintenance
-	Compaction     string `json:"compaction"`       // session compaction
-	PlannerExecute string `json:"planner_execute"`  // code changes with tools
-	PlannerReview  string `json:"planner_review"`   // text-only review verdict
+	Conversation   string `json:"conversation"`      // user-facing chat
+	Heartbeat      string `json:"heartbeat"`         // periodic maintenance (sonnet recommended)
+	HeartbeatDeep  string `json:"heartbeat_deep"`    // deep reflection heartbeat (opus recommended)
+	Compaction     string `json:"compaction"`        // session compaction
+	PlannerExecute string `json:"planner_execute"`   // code changes with tools
+	PlannerReview  string `json:"planner_review"`    // text-only review verdict
 }
 
 type ClaudeConfig struct {
@@ -154,6 +155,11 @@ func (c ClaudeConfig) ResolveModel(taskType string) string {
 			m = c.ModelRouting.Conversation
 		case "heartbeat":
 			m = c.ModelRouting.Heartbeat
+		case "heartbeat_deep":
+			m = c.ModelRouting.HeartbeatDeep
+			if m == "" {
+				m = c.ModelRouting.Heartbeat // fall back to regular heartbeat model
+			}
 		case "compaction":
 			m = c.ModelRouting.Compaction
 		case "planner_execute":
@@ -200,6 +206,7 @@ type MemoryConfig struct {
 	SystemBudget     int               `json:"system_budget"`     // token cap for system prompt (default 3000)
 	Profiles         map[string]Profile `json:"profiles"`          // name → profile
 	ChatProfiles     map[string]string  `json:"chat_profiles"`     // chatID string → profile name
+	GhostEnv         map[string]string  `json:"ghost_env"`         // extra env vars passed to ghost MCP server and hooks
 }
 
 // ChatProfileMap converts string chatID keys to int64.
@@ -222,6 +229,7 @@ type SchedulerConfig struct {
 	QuietHourEnd         int    `json:"quiet_hour_end"`         // hour (0-23) when quiet hours end, default: 7
 	HeartbeatInterval    string `json:"heartbeat_interval"`     // active heartbeat interval (default: "1h")
 	HeartbeatIdleInterval string `json:"heartbeat_idle_interval"` // interval after noop heartbeat (default: "2h")
+	DeepReflectInterval  int    `json:"deep_reflect_interval"`  // every Nth heartbeat uses deep model for reflection (default: 6)
 }
 
 type ReloadConfig struct {

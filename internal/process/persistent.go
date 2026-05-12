@@ -15,8 +15,9 @@ import (
 	"time"
 )
 
-// persistentProc holds a long-lived Claude CLI process for a single chat.
-// Messages are sent via stdin and responses streamed from stdout.
+// persistentProc holds a long-lived Claude CLI process for a single
+// (chat, message_thread_id) key. Messages are sent via stdin and responses
+// streamed from stdout.
 type persistentProc struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -25,7 +26,7 @@ type persistentProc struct {
 	scanner *bufio.Scanner // persistent scanner across messages — avoids losing buffered bytes
 
 	sessionID string // Claude session ID (from init response)
-	chatID    int64
+	key       SessionKey
 	model     string // model used when spawning this process
 
 	mu       sync.Mutex // guards stdin writes and scanner reads
@@ -36,11 +37,13 @@ type persistentProc struct {
 // idleTimeout is how long a persistent process stays alive without messages.
 const idleTimeout = 10 * time.Minute
 
-// getOrSpawn returns the persistent process for a chat, spawning one if needed.
-// Returns nil if persistent mode is not suitable (will fall back to per-message).
+// getOrSpawn returns the persistent process for a (chat, thread) key,
+// spawning one if needed. Returns nil if persistent mode is not suitable
+// (will fall back to per-message).
 func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistentProc, error) {
+	key := req.Key()
 	m.mu.Lock()
-	proc, ok := m.persistent[req.ChatID]
+	proc, ok := m.persistent[key]
 	m.mu.Unlock()
 
 	if ok && proc.cmd.ProcessState == nil {
@@ -61,7 +64,7 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistent
 	// Clean up dead process if any.
 	if ok {
 		m.mu.Lock()
-		delete(m.persistent, req.ChatID)
+		delete(m.persistent, key)
 		m.mu.Unlock()
 	}
 
@@ -72,7 +75,7 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistent
 	}
 
 	m.mu.Lock()
-	m.persistent[req.ChatID] = proc
+	m.persistent[key] = proc
 	m.mu.Unlock()
 
 	return proc, nil
@@ -80,6 +83,7 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistent
 
 // spawnPersistent starts a new long-lived Claude CLI process.
 func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persistentProc, error) {
+	key := req.Key()
 	procCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -128,6 +132,9 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 		env = append(env, k+"="+v)
 	}
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
+	if req.MessageThreadID != 0 {
+		env = append(env, fmt.Sprintf("SHELL_MESSAGE_THREAD_ID=%d", req.MessageThreadID))
+	}
 	if m.bridgeSockPath != "" {
 		env = append(env, "SHELL_BRIDGE_SOCK="+m.bridgeSockPath)
 	}
@@ -136,6 +143,9 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	}
 	if m.ghostDB != "" {
 		env = append(env, "GHOST_DB="+m.ghostDB)
+	}
+	if m.botUsername != "" {
+		env = append(env, "SHELL_BOT_USERNAME="+m.botUsername)
 	}
 	cmd.Env = env
 	if m.workDir != "" {
@@ -160,7 +170,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
 
-	slog.Info("persistent process spawned", "chat_id", req.ChatID, "pid", cmd.Process.Pid, "resume", req.SessionID != "")
+	slog.Info("persistent process spawned", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "pid", cmd.Process.Pid, "resume", req.SessionID != "")
 
 	// Send initialize.
 	if err := writeJSON(stdin, stdinControlRequest{
@@ -183,17 +193,17 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 		stdout:  stdout,
 		stderr:  stderr,
 		scanner: sc,
-		chatID:  req.ChatID,
+		key:     key,
 		model:   model,
 		cancel:  cancel,
 	}
 
 	// Set up idle timer to kill the process if no messages arrive.
 	proc.idleTimer = time.AfterFunc(idleTimeout, func() {
-		slog.Info("persistent process idle timeout", "chat_id", req.ChatID)
+		slog.Info("persistent process idle timeout", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 		proc.kill()
 		m.mu.Lock()
-		delete(m.persistent, req.ChatID)
+		delete(m.persistent, key)
 		m.mu.Unlock()
 	})
 
@@ -231,7 +241,7 @@ func (p *persistentProc) kill() {
 	p.stdin.Close()
 	p.cancel()
 	p.cmd.Wait()
-	slog.Info("persistent process killed", "chat_id", p.chatID)
+	slog.Info("persistent process killed", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
 }
 
 // sendPersistent tries to use a persistent process for the request.
@@ -245,10 +255,10 @@ func (m *Manager) sendPersistent(ctx context.Context, req AgentRequest, onUpdate
 	result, err := proc.sendMessage(ctx, req, onUpdate)
 	if err != nil {
 		// Process likely died — clean up and let caller retry with spawn-per-message.
-		slog.Warn("persistent process send failed, cleaning up", "chat_id", req.ChatID, "error", err)
+		slog.Warn("persistent process send failed, cleaning up", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
 		proc.kill()
 		m.mu.Lock()
-		delete(m.persistent, req.ChatID)
+		delete(m.persistent, req.Key())
 		m.mu.Unlock()
 		return SendResult{}, err
 	}
@@ -256,12 +266,12 @@ func (m *Manager) sendPersistent(ctx context.Context, req AgentRequest, onUpdate
 	return result, nil
 }
 
-// killPersistent kills the persistent process for a chat if one exists.
-func (m *Manager) killPersistent(chatID int64) {
+// killPersistent kills the persistent process for a (chat, thread) key if one exists.
+func (m *Manager) killPersistent(key SessionKey) {
 	m.mu.Lock()
-	proc, ok := m.persistent[chatID]
+	proc, ok := m.persistent[key]
 	if ok {
-		delete(m.persistent, chatID)
+		delete(m.persistent, key)
 	}
 	m.mu.Unlock()
 
@@ -277,7 +287,7 @@ func (m *Manager) killAllPersistent() {
 	for _, p := range m.persistent {
 		procs = append(procs, p)
 	}
-	m.persistent = make(map[int64]*persistentProc)
+	m.persistent = make(map[SessionKey]*persistentProc)
 	m.mu.Unlock()
 
 	for _, p := range procs {
@@ -285,10 +295,10 @@ func (m *Manager) killAllPersistent() {
 	}
 }
 
-// hasPersistent returns true if a persistent process exists for the chat.
-func (m *Manager) hasPersistent(chatID int64) bool {
+// hasPersistent returns true if a persistent process exists for the (chat, thread) key.
+func (m *Manager) hasPersistent(key SessionKey) bool {
 	m.mu.RLock()
-	_, ok := m.persistent[chatID]
+	_, ok := m.persistent[key]
 	m.mu.RUnlock()
 	return ok
 }

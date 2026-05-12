@@ -209,7 +209,7 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 		run.progress = append(run.progress, msg)
 		b.planMu.Unlock()
 		if b.transport != nil {
-			b.transport.Notify(chatID, msg)
+			b.transport.Notify(chatID, 0, msg)
 		}
 	}
 
@@ -231,7 +231,7 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 				run.state = planStateBlocked
 				b.planMu.Unlock()
 				if b.transport != nil {
-					b.transport.Notify(chatID, b.formatPlanSummary(run))
+					b.transport.Notify(chatID, 0, b.formatPlanSummary(run))
 				}
 				return nil
 			}
@@ -271,7 +271,7 @@ func (b *Bridge) handlePlanBlocked(ctx context.Context, chatID int64, userMsg st
 			b.cleanupWorktree(run, chatID)
 
 			if b.transport != nil {
-				b.transport.Notify(chatID, b.formatPlanSummary(run))
+				b.transport.Notify(chatID, 0, b.formatPlanSummary(run))
 			}
 			return nil
 		})
@@ -380,7 +380,7 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 		b.planMu.Unlock()
 
 		if b.transport != nil {
-			b.transport.Notify(chatID, msg)
+			b.transport.Notify(chatID, 0, msg)
 		}
 	}
 
@@ -430,7 +430,7 @@ func (b *Bridge) startExecution(ctx context.Context, chatID int64, planText, int
 			b.cleanupWorktree(run, chatID)
 
 			if b.transport != nil {
-				b.transport.Notify(chatID, b.formatPlanSummary(run))
+				b.transport.Notify(chatID, 0, b.formatPlanSummary(run))
 			}
 			return nil
 		})
@@ -475,7 +475,7 @@ func (b *Bridge) executeMultiRepo(ctx context.Context, chatID int64, run *planRu
 			b.storeReviewerLearningsMultiRepo(ctx, run)
 
 			if b.transport != nil {
-				b.transport.Notify(chatID, b.formatPlanSummary(run))
+				b.transport.Notify(chatID, 0, b.formatPlanSummary(run))
 			}
 			return
 		}
@@ -498,7 +498,7 @@ func (b *Bridge) executeMultiRepo(ctx context.Context, chatID int64, run *planRu
 	b.cleanupWorktree(run, chatID)
 
 	if b.transport != nil {
-		b.transport.Notify(chatID, b.formatPlanSummary(run))
+		b.transport.Notify(chatID, 0, b.formatPlanSummary(run))
 	}
 }
 
@@ -647,7 +647,7 @@ func (b *Bridge) triggerSelfRestart(run *planRun, chatID int64) {
 		msg := "Self-restart failed. Relay continues running with old code."
 		slog.Error("self-restart: onSelfRestart returned (rebuild likely failed)")
 		if transport != nil && chatID != 0 {
-			transport.Notify(chatID, msg)
+			transport.Notify(chatID, 0, msg)
 		}
 	}()
 }
@@ -982,7 +982,7 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 		run.progress = append(run.progress, msg)
 		b.planMu.Unlock()
 		if b.transport != nil {
-			b.transport.Notify(chatID, msg)
+			b.transport.Notify(chatID, 0, msg)
 		}
 	}
 
@@ -1023,7 +1023,7 @@ func (b *Bridge) PlanSkip(chatID int64) (string, error) {
 			b.cleanupWorktree(run, chatID)
 
 			if b.transport != nil {
-				b.transport.Notify(chatID, b.formatPlanSummary(run))
+				b.transport.Notify(chatID, 0, b.formatPlanSummary(run))
 			}
 			return nil
 		})

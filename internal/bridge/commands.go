@@ -6,21 +6,25 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+
+	"github.com/rcliao/shell/internal/process"
 )
 
-// HandleCommand processes a bot command.
-func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args string) (string, error) {
+// HandleCommand processes a bot command. threadID is the Telegram forum topic
+// ID (0 = main chat). /new and /status operate on the specific (chat, thread)
+// pair; other commands are chat-scoped and ignore threadID.
+func (b *Bridge) HandleCommand(ctx context.Context, chatID, threadID int64, cmd, args string) (string, error) {
 	switch cmd {
 	case "new":
-		return b.Reset(ctx, chatID)
+		return b.Reset(ctx, chatID, threadID)
 	case "status":
-		return b.Status(chatID)
+		return b.Status(chatID, threadID)
 	case "help":
 		return b.Help(), nil
 	case "reactions":
 		return b.Reactions(), nil
 	case "start":
-		return b.Start(ctx, chatID)
+		return b.Start(ctx, chatID, threadID)
 	case "remember":
 		return b.Remember(ctx, chatID, args)
 	case "forget":
@@ -67,31 +71,36 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID int64, cmd, args stri
 }
 
 // Start handles the /start command.
-func (b *Bridge) Start(ctx context.Context, chatID int64) (string, error) {
-	_, err := b.ensureSession(ctx, chatID)
+func (b *Bridge) Start(ctx context.Context, chatID, threadID int64) (string, error) {
+	_, err := b.ensureSession(ctx, chatID, threadID)
 	if err != nil {
 		return "", err
 	}
 	return "Welcome to shell! Send me a message and I'll forward it to Claude Code.\n\nCommands:\n/new — Start a fresh session\n/status — Show session info\n/usage — Token usage stats\n/remember <text> — Remember something\n/forget <key> — Forget a memory\n/memories — List memories\n/review — Review all memories with summary\n/correct <n> <text> — Correct a memory by number\n/plan <goal> — Draft and run an autonomous plan\n/planstatus — Check plan progress\n/planstop — Cancel running plan\n/reactions — Show emoji reactions\n/help — Show help", nil
 }
 
-// Reset kills the current session and creates a fresh one.
-func (b *Bridge) Reset(ctx context.Context, chatID int64) (string, error) {
-	b.proc.Kill(chatID)
-	if err := b.store.DeleteSession(chatID); err != nil {
+// Reset kills the current session and creates a fresh one. Scoped to the
+// specific (chatID, threadID) pair — other topics in the same chat are untouched.
+func (b *Bridge) Reset(ctx context.Context, chatID, threadID int64) (string, error) {
+	key := process.SessionKey{ChatID: chatID, ThreadID: threadID}
+	b.proc.Kill(key)
+	if err := b.store.DeleteSession(chatID, threadID); err != nil {
 		slog.Warn("failed to delete session from store", "error", err)
 	}
 
-	_, err := b.ensureSession(ctx, chatID)
+	_, err := b.ensureSession(ctx, chatID, threadID)
 	if err != nil {
 		return "", err
+	}
+	if threadID != 0 {
+		return fmt.Sprintf("Session reset for topic %d. Starting fresh conversation.", threadID), nil
 	}
 	return "Session reset. Starting fresh conversation.", nil
 }
 
-// Status returns info about the current session.
-func (b *Bridge) Status(chatID int64) (string, error) {
-	sess, err := b.store.GetSession(chatID)
+// Status returns info about the current session for a (chat, thread) pair.
+func (b *Bridge) Status(chatID, threadID int64) (string, error) {
+	sess, err := b.store.GetSession(chatID, threadID)
 	if err != nil {
 		return "", err
 	}
@@ -104,19 +113,25 @@ func (b *Bridge) Status(chatID int64) (string, error) {
 		return "", err
 	}
 
-	procSess, _ := b.proc.Get(chatID)
+	procSess, _ := b.proc.Get(process.SessionKey{ChatID: chatID, ThreadID: threadID})
 	status := "active"
 	if procSess != nil {
 		status = string(procSess.Status)
 	}
 
+	topicLine := ""
+	if threadID != 0 {
+		topicLine = fmt.Sprintf("**Topic:** %d\n", threadID)
+	}
+
 	return fmt.Sprintf(
 		"## Status\n\n"+
-			"**Session:** `%s`\n"+
+			"%s**Session:** `%s`\n"+
 			"**Status:** %s\n"+
 			"**Messages:** %d\n"+
 			"**Created:** %s\n"+
 			"**Last active:** %s",
+		topicLine,
 		sess.ProviderSessionID[:12]+"...",
 		status,
 		len(msgs),
@@ -266,9 +281,10 @@ func (b *Bridge) Personality(ctx context.Context, chatID int64, args string) (st
 		if err != nil {
 			return "", fmt.Errorf("personality reset: %w", err)
 		}
-		// Kill session so next message starts fresh with onboarding prompt.
-		b.proc.Kill(chatID)
-		if err := b.store.DeleteSession(chatID); err != nil {
+		// Kill main-thread session so next message starts fresh with onboarding prompt.
+		// Topic-specific sessions (if any) are left alone — identity is chat-scoped.
+		b.proc.Kill(process.SessionKey{ChatID: chatID})
+		if err := b.store.DeleteSession(chatID, -1); err != nil {
 			slog.Warn("failed to delete session on personality reset", "error", err)
 		}
 		// Invalidate cache so next message triggers onboarding.
@@ -314,9 +330,9 @@ func (b *Bridge) SwitchAgent(ctx context.Context, chatID int64, args string) (st
 		return fmt.Sprintf("Agent %q not found. Use `/agent` to see available agents.", args), nil
 	}
 
-	// Kill current session so next message starts fresh with the new agent.
-	b.proc.Kill(chatID)
-	if err := b.store.DeleteSession(chatID); err != nil {
+	// Kill all sessions (all topics) so next message starts fresh with the new agent.
+	b.proc.Kill(process.SessionKey{ChatID: chatID})
+	if err := b.store.DeleteSession(chatID, -1); err != nil {
 		slog.Warn("failed to delete session on agent switch", "error", err)
 	}
 

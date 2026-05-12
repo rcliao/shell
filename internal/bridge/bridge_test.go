@@ -29,7 +29,7 @@ func TestHandleReaction_NoPlan(t *testing.T) {
 	b := testBridge(t)
 	ctx := context.Background()
 
-	resp, err := b.HandleReaction(ctx, 123, 0, "👍")
+	resp, err := b.HandleReaction(ctx, 123, 0, 0, "👍")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestHandleReaction_UnsupportedEmoji(t *testing.T) {
 	b.planMu.Unlock()
 
 	for _, emoji := range []string{"❤️", "😂", "🔥", "🎉", "✅"} {
-		resp, err := b.HandleReaction(ctx, 123, 0, emoji)
+		resp, err := b.HandleReaction(ctx, 123, 0, 0, emoji)
 		if err != nil {
 			t.Fatalf("unexpected error for %s: %v", emoji, err)
 		}
@@ -69,7 +69,7 @@ func TestHandleReaction_ThumbsDown_Drafting(t *testing.T) {
 	b.planRuns[123] = &planRun{state: planStateDrafting, draftPlan: "- task 1", intent: "do something"}
 	b.planMu.Unlock()
 
-	resp, err := b.HandleReaction(ctx, 123, 0, "👎")
+	resp, err := b.HandleReaction(ctx, 123, 0, 0, "👎")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestHandleReaction_ThumbsDown_Blocked(t *testing.T) {
 	b.planRuns[123] = &planRun{state: planStateBlocked, draftPlan: "- task 1", intent: "do something"}
 	b.planMu.Unlock()
 
-	resp, err := b.HandleReaction(ctx, 123, 0, "👎")
+	resp, err := b.HandleReaction(ctx, 123, 0, 0, "👎")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestHandleReaction_IgnoredInNonInteractiveStates(t *testing.T) {
 		b.planRuns[123] = &planRun{state: state, draftPlan: "- task 1"}
 		b.planMu.Unlock()
 
-		resp, err := b.HandleReaction(ctx, 123, 0, "👍")
+		resp, err := b.HandleReaction(ctx, 123, 0, 0, "👍")
 		if err != nil {
 			t.Fatalf("unexpected error for state %s: %v", state, err)
 		}
@@ -134,7 +134,7 @@ func TestHandleReaction_CancelEmoji(t *testing.T) {
 	ctx := context.Background()
 
 	// ❌ maps to "cancel" which calls PlanStop — with no plan it returns "No active plan."
-	resp, err := b.HandleReaction(ctx, 123, 0, "❌")
+	resp, err := b.HandleReaction(ctx, 123, 0, 0, "❌")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestHandleReaction_StatusEmoji(t *testing.T) {
 	ctx := context.Background()
 
 	// 📋 maps to "status" — returns session status even without a plan.
-	resp, err := b.HandleReaction(ctx, 123, 0, "📋")
+	resp, err := b.HandleReaction(ctx, 123, 0, 0, "📋")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestHandleReaction_CustomReactionMap(t *testing.T) {
 	b.planRuns[123] = &planRun{state: planStateDrafting, draftPlan: "just some text", intent: "do something"}
 	b.planMu.Unlock()
 
-	resp, err := b.HandleReaction(ctx, 123, 0, "🚀")
+	resp, err := b.HandleReaction(ctx, 123, 0, 0, "🚀")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestHandleReaction_CustomReactionMap(t *testing.T) {
 	b.planRuns[123] = &planRun{state: planStateDrafting, draftPlan: "just some text", intent: "do something"}
 	b.planMu.Unlock()
 
-	resp, err = b.HandleReaction(ctx, 123, 0, "👍")
+	resp, err = b.HandleReaction(ctx, 123, 0, 0, "👍")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestHandleReaction_ThumbsUp_Drafting_NoTasks(t *testing.T) {
 	b.planRuns[123] = &planRun{state: planStateDrafting, draftPlan: "just some text", intent: "do something"}
 	b.planMu.Unlock()
 
-	resp, err := b.HandleReaction(ctx, 123, 0, "👍")
+	resp, err := b.HandleReaction(ctx, 123, 0, 0, "👍")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestHandleReaction_Regenerate_NoContext(t *testing.T) {
 	ctx := context.Background()
 
 	// 🔄 maps to "regenerate" — with no message map it should return a helpful message.
-	resp, err := b.HandleReaction(ctx, 123, 999, "🔄")
+	resp, err := b.HandleReaction(ctx, 123, 0, 999, "🔄")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -239,11 +239,11 @@ func TestHandleReaction_Regenerate_DuringPlan(t *testing.T) {
 	b.planMu.Unlock()
 
 	// Save a message map entry for the reacted message.
-	b.store.SaveSession(123, "sess-1")
-	sess, _ := b.store.GetSession(123)
+	b.store.SaveSession(123, 0, "sess-1")
+	sess, _ := b.store.GetSession(123, 0)
 	b.store.SaveMessageMap(123, 10, 20, sess.ID, "original question", "original answer")
 
-	resp, err := b.HandleReaction(ctx, 123, 20, "🔄")
+	resp, err := b.HandleReaction(ctx, 123, 0, 20, "🔄")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestRegenerateStreaming_NoMessageMap(t *testing.T) {
 	b := testBridge(t)
 	ctx := context.Background()
 
-	resp, err := b.RegenerateStreaming(ctx, 123, 999, func(string) {})
+	resp, err := b.RegenerateStreaming(ctx, 123, 0, 999, func(string) {})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -287,11 +287,11 @@ func TestRegenerateStreaming_DuringPlan(t *testing.T) {
 	b.planRuns[123] = &planRun{state: planStateExecuting, draftPlan: "- task 1"}
 	b.planMu.Unlock()
 
-	b.store.SaveSession(123, "sess-1")
-	sess, _ := b.store.GetSession(123)
+	b.store.SaveSession(123, 0, "sess-1")
+	sess, _ := b.store.GetSession(123, 0)
 	b.store.SaveMessageMap(123, 10, 20, sess.ID, "original question", "original answer")
 
-	resp, err := b.RegenerateStreaming(ctx, 123, 20, func(string) {})
+	resp, err := b.RegenerateStreaming(ctx, 123, 0, 20, func(string) {})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestHandleReaction_Remember_NoMemory(t *testing.T) {
 	ctx := context.Background()
 
 	// 📌 maps to "remember" — with no memory enabled.
-	resp, err := b.HandleReaction(ctx, 123, 999, "📌")
+	resp, err := b.HandleReaction(ctx, 123, 0, 999, "📌")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestHandleReaction_Remember_NoContext(t *testing.T) {
 	ctx := context.Background()
 
 	// Memory is enabled but no message map exists for this message ID.
-	resp, err := b.HandleReaction(ctx, 123, 999, "📌")
+	resp, err := b.HandleReaction(ctx, 123, 0, 999, "📌")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,11 +354,11 @@ func TestHandleReaction_Remember_WithContext(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a session and message map.
-	b.store.SaveSession(123, "sess-1")
-	sess, _ := b.store.GetSession(123)
+	b.store.SaveSession(123, 0, "sess-1")
+	sess, _ := b.store.GetSession(123, 0)
 	b.store.SaveMessageMap(123, 10, 20, sess.ID, "What is Go?", "Go is a programming language.")
 
-	resp, err := b.HandleReaction(ctx, 123, 20, "📌")
+	resp, err := b.HandleReaction(ctx, 123, 0, 20, "📌")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestHandleReaction_Forget_NoContext(t *testing.T) {
 	ctx := context.Background()
 
 	// 🗑 maps to "forget" — with no message map.
-	resp, err := b.HandleReaction(ctx, 123, 999, "🗑")
+	resp, err := b.HandleReaction(ctx, 123, 0, 999, "🗑")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -395,13 +395,13 @@ func TestHandleReaction_Forget_WithContext(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a session and message map.
-	b.store.SaveSession(123, "sess-1")
-	sess, _ := b.store.GetSession(123)
+	b.store.SaveSession(123, 0, "sess-1")
+	sess, _ := b.store.GetSession(123, 0)
 	b.store.LogMessage(sess.ID, "user", "test question")
 	b.store.LogMessage(sess.ID, "assistant", "test answer")
 	b.store.SaveMessageMap(123, 10, 20, sess.ID, "test question", "test answer")
 
-	resp, err := b.HandleReaction(ctx, 123, 20, "🗑")
+	resp, err := b.HandleReaction(ctx, 123, 0, 20, "🗑")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

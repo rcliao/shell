@@ -8,11 +8,8 @@ import (
 	"github.com/rcliao/shell/internal/transcript"
 )
 
-// Task directive regexes for A2A-inspired agent-to-agent task delegation.
-//
-// Create: [task to=agent_name]description[/task]
-// Result: [task-result id=task_id]result text[/task-result]
-// Status: [task-status id=task_id status=working]
+// Task directive regexes — fallback for when agents emit text directives
+// instead of using the shell-task skill. The skill is the preferred path.
 var (
 	taskCreateRe = regexp.MustCompile(`(?s)\[task\s+to=(\w+)\](.*?)\[/task\]`)
 	taskResultRe = regexp.MustCompile(`(?s)\[task-result\s+id=([a-f0-9]+)\](.*?)\[/task-result\]`)
@@ -20,10 +17,10 @@ var (
 )
 
 // parseTaskDirectives extracts and processes task directives from an agent's
-// response. Creates/completes/updates tasks in the shared transcript store.
+// response. Routes through TaskStore (preferred) or falls back to transcript Store.
 // Returns the response with directives stripped.
 func (b *Bridge) parseTaskDirectives(chatID int64, response string) string {
-	if b.transcript == nil {
+	if b.taskStore == nil {
 		return response
 	}
 
@@ -39,12 +36,17 @@ func (b *Bridge) parseTaskDirectives(chatID int64, response string) string {
 			return match
 		}
 
-		taskID, err := b.transcript.CreateTask(chatID, b.agentBotUsername, toAgent, description)
+		taskID, err := b.taskStore.CreateTask(transcript.Task{
+			ChatID:      chatID,
+			FromAgent:   b.agentBotUsername,
+			ToAgent:     toAgent,
+			Description: description,
+		})
 		if err != nil {
 			slog.Warn("failed to create delegated task", "to", toAgent, "error", err)
 			return match
 		}
-		slog.Info("task created", "id", taskID, "from", b.agentBotUsername, "to", toAgent, "description", description)
+		slog.Info("task created via directive", "id", taskID, "from", b.agentBotUsername, "to", toAgent)
 		return "(delegated task " + taskID + " to " + toAgent + ")"
 	})
 
@@ -57,19 +59,12 @@ func (b *Bridge) parseTaskDirectives(chatID int64, response string) string {
 		taskID := strings.TrimSpace(sub[1])
 		result := strings.TrimSpace(sub[2])
 
-		task, err := b.transcript.GetTask(taskID)
-		if err != nil || task == nil {
-			slog.Warn("task-result for unknown task", "id", taskID, "error", err)
+		if err := b.taskStore.CompleteTask(taskID, result); err != nil {
+			slog.Warn("failed to complete task via directive", "id", taskID, "error", err)
 			return match
 		}
+		slog.Info("task completed via directive", "id", taskID, "by", b.agentBotUsername)
 
-		if err := b.transcript.CompleteTask(taskID, result); err != nil {
-			slog.Warn("failed to complete task", "id", taskID, "error", err)
-			return match
-		}
-		slog.Info("task completed", "id", taskID, "by", b.agentBotUsername)
-
-		// Truncate result preview for inline replacement.
 		preview := result
 		if len(preview) > 100 {
 			preview = preview[:100] + "..."
@@ -89,17 +84,13 @@ func (b *Bridge) parseTaskDirectives(chatID int64, response string) string {
 		switch status {
 		case transcript.TaskWorking, transcript.TaskFailed, transcript.TaskCanceled:
 			if status == transcript.TaskFailed {
-				if err := b.transcript.FailTask(taskID, "agent reported failure"); err != nil {
-					slog.Warn("failed to update task status", "id", taskID, "error", err)
-				}
+				b.taskStore.FailTask(taskID, "agent reported failure")
 			} else {
-				if err := b.transcript.UpdateTaskStatus(taskID, status); err != nil {
-					slog.Warn("failed to update task status", "id", taskID, "error", err)
-				}
+				b.taskStore.UpdateTaskStatus(taskID, status)
 			}
-			slog.Info("task status updated", "id", taskID, "status", status)
+			slog.Info("task status updated via directive", "id", taskID, "status", status)
 		default:
-			slog.Warn("unknown task status", "id", taskID, "status", status)
+			slog.Warn("unknown task status in directive", "id", taskID, "status", status)
 		}
 		return ""
 	})

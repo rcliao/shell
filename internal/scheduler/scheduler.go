@@ -36,23 +36,38 @@ type PromptFunc func(chatID int64, msg string)
 // The scheduler uses the response to decide whether to send it (noop suppression).
 type HeartbeatPromptFunc func(chatID int64, msg string) (string, error)
 
+// TaskPollFunc polls the shared task store for events targeting this agent.
+// Returns event payloads (JSON strings) for task.created events that need processing.
+// Called on every scheduler tick.
+type TaskPollFunc func() []string
+
+// TaskProcessFunc fires a Claude session to process a task event.
+// Receives the event payload JSON.
+type TaskProcessFunc func(payload string)
+
 // QuietHours defines the window during which heartbeats are suppressed.
 type QuietHours struct {
 	Start int // hour (0-23) when quiet hours begin
 	End   int // hour (0-23) when quiet hours end
 }
 
+// defaultDeepReflectInterval is the default number of heartbeats between deep reflection runs.
+const defaultDeepReflectInterval = 6
+
 // Scheduler runs a 1-minute tick loop to fire due schedules.
 type Scheduler struct {
-	store           ScheduleStore
-	onNotify        NotifyFunc
-	onPrompt        PromptFunc
-	onHeartbeat     HeartbeatPromptFunc
-	defaultTZ       string
-	quietHours      QuietHours
-	heartbeatCounts map[int64]int  // chat_id → number of heartbeats fired (for check-in cadence)
-	heartbeatIdle   map[int64]bool // chat_id → true if last heartbeat was noop
-	idleInterval    time.Duration  // interval after noop heartbeat (0 = use schedule interval)
+	store                ScheduleStore
+	onNotify             NotifyFunc
+	onPrompt             PromptFunc
+	onHeartbeat          HeartbeatPromptFunc
+	onTaskPoll           TaskPollFunc    // polls for pending task events
+	onTaskProcess        TaskProcessFunc // processes a task event
+	defaultTZ            string
+	quietHours           QuietHours
+	heartbeatCounts      map[int64]int  // chat_id → number of heartbeats fired (for check-in cadence)
+	heartbeatIdle        map[int64]bool // chat_id → true if last heartbeat was noop
+	idleInterval         time.Duration  // interval after noop heartbeat (0 = use schedule interval)
+	deepReflectInterval  int            // every Nth heartbeat escalates to deep reflection (0 = use default)
 }
 
 // New creates a new Scheduler.
@@ -88,6 +103,19 @@ func (s *Scheduler) SetIdleInterval(d time.Duration) {
 	s.idleInterval = d
 }
 
+// SetDeepReflectInterval sets how often (every N heartbeats) the deep
+// reflection model is used instead of the regular heartbeat model.
+func (s *Scheduler) SetDeepReflectInterval(n int) {
+	s.deepReflectInterval = n
+}
+
+// SetTaskPoll configures the task polling and processing callbacks.
+// poll returns event payloads for pending tasks; process fires a Claude session per task.
+func (s *Scheduler) SetTaskPoll(poll TaskPollFunc, process TaskProcessFunc) {
+	s.onTaskPoll = poll
+	s.onTaskProcess = process
+}
+
 // Run starts the scheduler tick loop. Blocks until ctx is cancelled.
 func (s *Scheduler) Run(ctx context.Context) {
 	slog.Info("scheduler started")
@@ -119,6 +147,25 @@ func (s *Scheduler) tick() {
 	for _, sc := range schedules {
 		s.execute(sc)
 		s.advance(sc, now)
+	}
+
+	// Poll shared task store for pending task events.
+	s.pollTasks()
+}
+
+// pollTasks checks for pending task events and processes each in a goroutine.
+func (s *Scheduler) pollTasks() {
+	if s.onTaskPoll == nil || s.onTaskProcess == nil {
+		return
+	}
+
+	payloads := s.onTaskPoll()
+	for _, p := range payloads {
+		payload := p // capture for goroutine
+		go func() {
+			slog.Info("scheduler: processing task event", "payload_len", len(payload))
+			s.onTaskProcess(payload)
+		}()
 	}
 }
 
@@ -197,8 +244,20 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 		s.heartbeatCounts[sc.ChatID]++
 		count := s.heartbeatCounts[sc.ChatID]
 
-		// Frame the message so Claude knows this is a periodic check-in.
-		msg = "[Heartbeat] " + msg
+		// Determine deep reflection interval.
+		deepInterval := s.deepReflectInterval
+		if deepInterval <= 0 {
+			deepInterval = defaultDeepReflectInterval
+		}
+
+		// Every Nth heartbeat, escalate to deep reflection for behavioral learning.
+		isDeep := count%deepInterval == 0
+		if isDeep {
+			msg = "[Heartbeat:deep] " + msg
+			slog.Info("scheduler: deep reflection heartbeat", "chat_id", sc.ChatID, "count", count, "interval", deepInterval)
+		} else {
+			msg = "[Heartbeat] " + msg
+		}
 
 		// Every ~4 heartbeats, add a check-in hint.
 		if count%4 == 0 {

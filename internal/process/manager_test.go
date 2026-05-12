@@ -31,10 +31,10 @@ func TestNewManager_Defaults(t *testing.T) {
 func TestRegisterAndGet(t *testing.T) {
 	m := NewManager(ManagerConfig{Binary: "echo"})
 
-	sess := NewSession(12345)
+	sess := NewSession(12345, 0)
 	m.Register(sess)
 
-	got, ok := m.Get(12345)
+	got, ok := m.Get(SessionKey{ChatID: 12345})
 	if !ok {
 		t.Fatal("expected session to exist")
 	}
@@ -46,11 +46,11 @@ func TestRegisterAndGet(t *testing.T) {
 func TestKillAndRemove(t *testing.T) {
 	m := NewManager(ManagerConfig{Binary: "echo"})
 
-	sess := NewSession(100)
+	sess := NewSession(100, 0)
 	m.Register(sess)
 
-	m.Kill(100)
-	_, ok := m.Get(100)
+	m.Kill(SessionKey{ChatID: 100})
+	_, ok := m.Get(SessionKey{ChatID: 100})
 	if ok {
 		t.Error("expected session to be removed after kill")
 	}
@@ -59,9 +59,9 @@ func TestKillAndRemove(t *testing.T) {
 func TestKillAll(t *testing.T) {
 	m := NewManager(ManagerConfig{Binary: "echo"})
 
-	m.Register(NewSession(1))
-	m.Register(NewSession(2))
-	m.Register(NewSession(3))
+	m.Register(NewSession(1, 0))
+	m.Register(NewSession(2, 0))
+	m.Register(NewSession(3, 0))
 
 	if m.ActiveCount() != 3 {
 		t.Errorf("expected 3 active, got %d", m.ActiveCount())
@@ -70,6 +70,32 @@ func TestKillAll(t *testing.T) {
 	m.KillAll()
 	if m.ActiveCount() != 0 {
 		t.Errorf("expected 0 active after killall, got %d", m.ActiveCount())
+	}
+}
+
+func TestThreadScopedSessions(t *testing.T) {
+	m := NewManager(ManagerConfig{Binary: "echo"})
+
+	// Two topics in the same chat: each gets its own session in the manager.
+	main := NewSession(500, 0)
+	topic := NewSession(500, 7)
+	m.Register(main)
+	m.Register(topic)
+
+	if got, ok := m.Get(SessionKey{ChatID: 500, ThreadID: 0}); !ok || got != main {
+		t.Error("expected main session to be retrievable by (500, 0)")
+	}
+	if got, ok := m.Get(SessionKey{ChatID: 500, ThreadID: 7}); !ok || got != topic {
+		t.Error("expected topic session to be retrievable by (500, 7)")
+	}
+
+	// Killing one topic must not affect the other.
+	m.Kill(SessionKey{ChatID: 500, ThreadID: 7})
+	if _, ok := m.Get(SessionKey{ChatID: 500, ThreadID: 7}); ok {
+		t.Error("expected topic session to be killed")
+	}
+	if _, ok := m.Get(SessionKey{ChatID: 500, ThreadID: 0}); !ok {
+		t.Error("main session was erroneously killed")
 	}
 }
 

@@ -18,13 +18,19 @@ type PDFAttachment struct {
 
 // AgentRequest is the typed message from bridge → process.
 type AgentRequest struct {
-	ChatID       int64
-	SessionID    string            // claude session ID for --resume
-	Text         string            // user message text
-	Images       []ImageAttachment // attached images
-	PDFs         []PDFAttachment   // attached PDFs
-	SystemPrompt string            // appended system prompt
-	Model        string            // per-request model override (empty = use manager default)
+	ChatID          int64
+	MessageThreadID int64             // Telegram forum topic ID (0 = main chat)
+	SessionID       string            // claude session ID for --resume
+	Text            string            // user message text
+	Images          []ImageAttachment // attached images
+	PDFs            []PDFAttachment   // attached PDFs
+	SystemPrompt    string            // appended system prompt
+	Model           string            // per-request model override (empty = use manager default)
+}
+
+// Key returns the session key (chat_id + message_thread_id) for this request.
+func (r AgentRequest) Key() SessionKey {
+	return SessionKey{ChatID: r.ChatID, ThreadID: r.MessageThreadID}
 }
 
 // Agent abstracts the Claude session manager so the implementation can be
@@ -33,18 +39,18 @@ type Agent interface {
 	// Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
 	Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error)
 
-	// Get returns the session for a chat ID.
-	Get(chatID int64) (*Session, bool)
+	// Get returns the session for a (chat, thread) key.
+	Get(key SessionKey) (*Session, bool)
 
 	// Register adds or updates a session.
 	Register(sess *Session)
 
 	// SetCompacting marks whether a session is being compacted.
 	// When compacting, incoming messages wait instead of getting "busy".
-	SetCompacting(chatID int64, compacting bool)
+	SetCompacting(key SessionKey, compacting bool)
 
 	// Kill terminates a session and removes it.
-	Kill(chatID int64)
+	Kill(key SessionKey)
 
 	// KillAll terminates all sessions.
 	KillAll()
