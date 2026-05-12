@@ -44,8 +44,8 @@ type SendResult struct {
 }
 
 type Manager struct {
-	sessions   map[int64]*Session
-	persistent map[int64]*persistentProc // long-lived Claude processes per chat
+	sessions   map[SessionKey]*Session
+	persistent map[SessionKey]*persistentProc // long-lived Claude processes per (chat, thread)
 	mu         sync.RWMutex
 	readyCond  *sync.Cond // signaled when any session transitions out of busy/compacting
 
@@ -63,6 +63,7 @@ type Manager struct {
 	settingsPath   string
 	agentNS        string
 	ghostDB        string
+	botUsername    string
 }
 
 type ManagerConfig struct {
@@ -80,6 +81,7 @@ type ManagerConfig struct {
 	SettingsPath   string // path to per-agent settings.json for --settings flag
 	AgentNS        string // ghost namespace for this agent (e.g. "agent:pikamini")
 	GhostDB        string // ghost database path for this agent
+	BotUsername    string // Telegram bot username (available as SHELL_BOT_USERNAME to skill scripts)
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -93,8 +95,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		cfg.MaxSessions = 4
 	}
 	mgr := &Manager{
-		sessions:       make(map[int64]*Session),
-		persistent:     make(map[int64]*persistentProc),
+		sessions:       make(map[SessionKey]*Session),
+		persistent:     make(map[SessionKey]*persistentProc),
 		binary:         cfg.Binary,
 		model:          cfg.Model,
 		timeout:        cfg.Timeout,
@@ -109,6 +111,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		settingsPath:   cfg.SettingsPath,
 		agentNS:        cfg.AgentNS,
 		ghostDB:        cfg.GhostDB,
+		botUsername:    cfg.BotUsername,
 	}
 	mgr.readyCond = sync.NewCond(&mgr.mu)
 	return mgr
@@ -117,12 +120,13 @@ func NewManager(cfg ManagerConfig) *Manager {
 // Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
 // If the session is busy due to compaction, waits for compaction to finish before proceeding.
 func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+	key := req.Key()
 	m.mu.Lock()
-	sess, exists := m.sessions[req.ChatID]
+	sess, exists := m.sessions[key]
 
 	// If session is busy due to compaction, wait for it to finish.
 	if exists && sess.Status == StatusBusy && sess.Compacting {
-		slog.Info("session compacting, waiting for completion", "chat_id", req.ChatID)
+		slog.Info("session compacting, waiting for completion", "chat_id", req.ChatID, "thread_id", req.MessageThreadID)
 		waitDone := make(chan struct{})
 		go func() {
 			m.mu.Lock()
@@ -136,21 +140,21 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 
 		select {
 		case <-waitDone:
-			slog.Info("compaction finished, proceeding with message", "chat_id", req.ChatID)
+			slog.Info("compaction finished, proceeding with message", "chat_id", req.ChatID, "thread_id", req.MessageThreadID)
 		case <-ctx.Done():
 			return SendResult{}, ctx.Err()
 		case <-time.After(2 * time.Minute):
-			return SendResult{}, fmt.Errorf("timed out waiting for compaction to finish for chat %d", req.ChatID)
+			return SendResult{}, fmt.Errorf("timed out waiting for compaction to finish for chat %d thread %d", req.ChatID, req.MessageThreadID)
 		}
 
 		// Re-acquire and re-check status after wait.
 		m.mu.Lock()
-		sess, exists = m.sessions[req.ChatID]
+		sess, exists = m.sessions[key]
 	}
 
 	if exists && sess.Status == StatusBusy {
 		m.mu.Unlock()
-		return SendResult{}, fmt.Errorf("session for chat %d is busy", req.ChatID)
+		return SendResult{}, fmt.Errorf("session for chat %d thread %d is busy", req.ChatID, req.MessageThreadID)
 	}
 
 	// Check concurrency limit
@@ -189,10 +193,10 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 	}
 
 	// Fall back to spawn-per-message.
-	slog.Debug("falling back to spawn-per-message", "chat_id", req.ChatID, "reason", err)
+	slog.Debug("falling back to spawn-per-message", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "reason", err)
 	result, err = m.runClaudeBidirectional(ctx, req, onUpdate)
 	if err != nil && req.SessionID != "" {
-		slog.Warn("resume failed, retrying as fresh session", "chat_id", req.ChatID, "error", err)
+		slog.Warn("resume failed, retrying as fresh session", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
 		freshReq := req
 		freshReq.SessionID = ""
 		result, err = m.runClaudeBidirectional(ctx, freshReq, onUpdate)
@@ -264,6 +268,9 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 		}
 	}
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
+	if req.MessageThreadID != 0 {
+		env = append(env, fmt.Sprintf("SHELL_MESSAGE_THREAD_ID=%d", req.MessageThreadID))
+	}
 	if m.bridgeSockPath != "" {
 		env = append(env, "SHELL_BRIDGE_SOCK="+m.bridgeSockPath)
 	}
@@ -272,6 +279,9 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	}
 	if m.ghostDB != "" {
 		env = append(env, "GHOST_DB="+m.ghostDB)
+	}
+	if m.botUsername != "" {
+		env = append(env, "SHELL_BOT_USERNAME="+m.botUsername)
 	}
 	cmd.Env = env
 	if m.workDir != "" {
@@ -342,22 +352,22 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 func (m *Manager) Register(sess *Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[sess.ChatID] = sess
+	m.sessions[sess.Key()] = sess
 }
 
-// Get returns the session for a chat ID.
-func (m *Manager) Get(chatID int64) (*Session, bool) {
+// Get returns the session for a (chat, thread) key.
+func (m *Manager) Get(key SessionKey) (*Session, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	s, ok := m.sessions[chatID]
+	s, ok := m.sessions[key]
 	return s, ok
 }
 
 // SetCompacting marks whether a session is being compacted.
 // When compacting is true, incoming messages will wait instead of getting "busy".
-func (m *Manager) SetCompacting(chatID int64, compacting bool) {
+func (m *Manager) SetCompacting(key SessionKey, compacting bool) {
 	m.mu.Lock()
-	if sess, ok := m.sessions[chatID]; ok {
+	if sess, ok := m.sessions[key]; ok {
 		sess.Compacting = compacting
 		sess.UpdatedAt = time.Now()
 	}
@@ -365,21 +375,21 @@ func (m *Manager) SetCompacting(chatID int64, compacting bool) {
 }
 
 // Remove removes a session from the manager.
-func (m *Manager) Remove(chatID int64) {
+func (m *Manager) Remove(key SessionKey) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.sessions, chatID)
+	delete(m.sessions, key)
 }
 
-// Kill terminates any running process for a chat ID and removes the session.
-func (m *Manager) Kill(chatID int64) {
-	m.killPersistent(chatID)
+// Kill terminates any running process for a (chat, thread) key and removes the session.
+func (m *Manager) Kill(key SessionKey) {
+	m.killPersistent(key)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if sess, ok := m.sessions[chatID]; ok {
+	if sess, ok := m.sessions[key]; ok {
 		sess.Status = StatusClosed
 	}
-	delete(m.sessions, chatID)
+	delete(m.sessions, key)
 }
 
 // KillAll terminates all sessions.
@@ -390,7 +400,7 @@ func (m *Manager) KillAll() {
 	for _, sess := range m.sessions {
 		sess.Status = StatusClosed
 	}
-	m.sessions = make(map[int64]*Session)
+	m.sessions = make(map[SessionKey]*Session)
 }
 
 // ActiveCount returns the number of active sessions.

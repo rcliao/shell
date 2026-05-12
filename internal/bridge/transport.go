@@ -4,12 +4,14 @@ import "github.com/rcliao/shell/internal/process"
 
 // Transport abstracts the delivery of messages and media to users.
 // The bridge calls Transport to send output; it never imports a transport package.
+//
+// threadID is the Telegram forum topic ID (0 = main chat / no topic).
 type Transport interface {
 	// Notify sends a one-way text message to a chat (plan progress, async notifications).
-	Notify(chatID int64, msg string)
+	Notify(chatID, threadID int64, msg string)
 
 	// SendPhoto sends an image to a chat.
-	SendPhoto(chatID int64, data []byte, caption string)
+	SendPhoto(chatID, threadID int64, data []byte, caption string)
 }
 
 // AgentPool resolves which Agent handles a given chat.

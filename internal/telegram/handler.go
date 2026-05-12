@@ -930,7 +930,15 @@ type Handler struct {
 	albums   map[string]*albumEntry // keyed by MediaGroupID
 
 	chatLocksMu sync.Mutex
-	chatLocks   map[int64]*sync.Mutex // per-chat message serialization
+	chatLocks   map[chatLockKey]*sync.Mutex // per (chat, thread) message serialization
+}
+
+// chatLockKey identifies a message serialization lock by (chat_id, message_thread_id).
+// Topics within a chat serialize independently so replies in different topics
+// don't queue behind each other.
+type chatLockKey struct {
+	chatID   int64
+	threadID int64
 }
 
 // AgentConfig holds agent identity fields passed to the handler.
@@ -968,7 +976,7 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 		botExchangeCount:     make(map[int64]int),
 		botLastResponse:      make(map[int64]time.Time),
 		albums:               make(map[string]*albumEntry),
-		chatLocks:            make(map[int64]*sync.Mutex),
+		chatLocks:            make(map[chatLockKey]*sync.Mutex),
 	}
 }
 
@@ -1204,16 +1212,32 @@ func (h *Handler) checkReactionAuth(reaction *models.MessageReactionUpdated) boo
 	return h.auth.Check(sender) == AuthAllowed
 }
 
-// getChatLock returns the per-chat mutex, creating one if needed.
-func (h *Handler) getChatLock(chatID int64) *sync.Mutex {
+// getChatLock returns the per-(chat,thread) mutex, creating one if needed.
+// Each forum topic serializes independently so a long reply in one topic
+// doesn't block another.
+func (h *Handler) getChatLock(chatID, threadID int64) *sync.Mutex {
+	key := chatLockKey{chatID: chatID, threadID: threadID}
 	h.chatLocksMu.Lock()
 	defer h.chatLocksMu.Unlock()
-	mu, ok := h.chatLocks[chatID]
+	mu, ok := h.chatLocks[key]
 	if !ok {
 		mu = &sync.Mutex{}
-		h.chatLocks[chatID] = mu
+		h.chatLocks[key] = mu
 	}
 	return mu
+}
+
+// msgThreadID returns the Telegram forum topic ID for a message (0 for main
+// chat / General topic). We trust MessageThreadID directly — Telegram clients
+// don't always populate IsTopicMessage (notably on reply-in-thread events and
+// on some older supergroup configurations), so gating on that flag causes
+// replies to fall back to the main chat. A non-zero MessageThreadID is
+// authoritative: the message lives in that topic.
+func msgThreadID(msg *models.Message) int64 {
+	if msg == nil {
+		return 0
+	}
+	return int64(msg.MessageThreadID)
 }
 
 // setReaction sets an emoji reaction on a message, replacing any previous reaction.
@@ -1233,10 +1257,11 @@ func setReaction(ctx context.Context, b *bot.Bot, chatID any, messageID int, emo
 	}
 }
 
-// sendPhoto sends an image to a chat as a Telegram photo message.
-func sendPhoto(ctx context.Context, b *bot.Bot, chatID int64, imageData []byte, caption string) {
+// sendPhoto sends an image to a chat/topic as a Telegram photo message.
+func sendPhoto(ctx context.Context, b *bot.Bot, chatID, threadID int64, imageData []byte, caption string) {
 	_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
-		ChatID: chatID,
+		ChatID:          chatID,
+		MessageThreadID: int(threadID),
 		Photo: &models.InputFileUpload{
 			Filename: "image.png",
 			Data:     bytes.NewReader(imageData),
@@ -1244,7 +1269,7 @@ func sendPhoto(ctx context.Context, b *bot.Bot, chatID int64, imageData []byte, 
 		Caption: caption,
 	})
 	if err != nil {
-		slog.Error("failed to send photo", "error", err, "chat_id", chatID)
+		slog.Error("failed to send photo", "error", err, "chat_id", chatID, "thread_id", threadID)
 	}
 }
 
@@ -1284,22 +1309,33 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 	}
 
 	chatID := reaction.Chat.ID
+	// Reactions don't carry message_thread_id directly; look up via the
+	// message_map entry (the bot response we mapped earlier remembers which
+	// thread it belongs to via the session). For now reactions reply on the
+	// main thread — Telegram's MessageReactionUpdated doesn't expose the
+	// topic the reacted-to message lives in.
+	var threadID int64 = 0
+	if mm, err := h.bridge.GetMessageMapByBotMsg(chatID, reaction.MessageID); err == nil && mm != nil {
+		// Fetching the session gets us the thread_id the exchange belongs to.
+		threadID = h.bridge.SessionThreadID(chatID, mm.SessionID)
+	}
 
 	// Regenerate is handled specially: stream the new response into the
 	// existing bot message instead of sending a separate reply.
 	if h.bridge.ReactionAction(emoji) == "regenerate" {
-		h.handleRegenerate(ctx, b, chatID, reaction.MessageID)
+		h.handleRegenerate(ctx, b, chatID, threadID, reaction.MessageID)
 		return
 	}
 
-	response, err := h.bridge.HandleReaction(ctx, chatID, reaction.MessageID, emoji)
+	response, err := h.bridge.HandleReaction(ctx, chatID, threadID, reaction.MessageID, emoji)
 	if err != nil {
-		slog.Error("bridge handle reaction failed", "error", err, "chat_id", chatID, "emoji", emoji)
+		slog.Error("bridge handle reaction failed", "error", err, "chat_id", chatID, "thread_id", threadID, "emoji", emoji)
 		setReaction(ctx, b, chatID, reaction.MessageID, "❌")
 		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    chatID,
-			Text:      formatErrorForMarkdownV2(err.Error()),
-			ParseMode: models.ParseModeMarkdown,
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Text:            formatErrorForMarkdownV2(err.Error()),
+			ParseMode:       models.ParseModeMarkdown,
 		})
 		return
 	}
@@ -1308,7 +1344,7 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 	}
 
 	setReaction(ctx, b, chatID, reaction.MessageID, "✅")
-	ids := h.sendChunked(ctx, b, chatID, response)
+	ids := h.sendChunked(ctx, b, chatID, threadID, response)
 	action := h.bridge.ReactionAction(emoji)
 	if (action == "remember" || action == "forget") && len(ids) > 0 {
 		setReaction(ctx, b, chatID, ids[len(ids)-1], "✅")
@@ -1317,9 +1353,9 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 
 // handleRegenerate re-sends the original user message to Claude and streams
 // the new response into the existing bot message, replacing its content.
-func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64, botMessageID int) {
-	// Serialize with other messages for this chat.
-	chatMu := h.getChatLock(chatID)
+func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID, threadID int64, botMessageID int) {
+	// Serialize with other messages for this (chat, thread).
+	chatMu := h.getChatLock(chatID, threadID)
 	if !chatMu.TryLock() {
 		// Edit the target message to indicate it's queued.
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -1406,7 +1442,7 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64
 		}
 	}
 
-	resp, err := h.bridge.RegenerateStreaming(ctx, chatID, botMessageID, onUpdate)
+	resp, err := h.bridge.RegenerateStreaming(ctx, chatID, threadID, botMessageID, onUpdate)
 	if err != nil {
 		slog.Error("regenerate failed", "error", err, "chat_id", chatID)
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -1420,7 +1456,7 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64
 
 	// Send any collected photos.
 	for _, photo := range resp.Photos {
-		sendPhoto(ctx, b, chatID, photo.Data, photo.Caption)
+		sendPhoto(ctx, b, chatID, threadID, photo.Data, photo.Caption)
 	}
 
 	response := resp.Text
@@ -1474,7 +1510,7 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID int64
 			ChatID:    chatID,
 			MessageID: botMessageID,
 		})
-		h.sendChunked(ctx, b, chatID, response)
+		h.sendChunked(ctx, b, chatID, threadID, response)
 	}
 }
 
@@ -1486,6 +1522,15 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		return
 	}
 
+	threadID := msgThreadID(msg)
+	if threadID != 0 || msg.IsTopicMessage {
+		slog.Info("telegram: message in forum topic",
+			"chat_id", msg.Chat.ID,
+			"thread_id", threadID,
+			"is_topic_message", msg.IsTopicMessage,
+			"raw_thread_id", msg.MessageThreadID,
+		)
+	}
 	text := strings.TrimSpace(msg.Text)
 
 	// Group chat @mention filtering and broadcast probability.
@@ -1626,8 +1671,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		senderName = msg.From.Username
 	}
 
-	// Serialize messages per chat so concurrent sends queue instead of failing.
-	chatMu := h.getChatLock(msg.Chat.ID)
+	// Serialize messages per (chat, thread) so concurrent sends in different
+	// topics run in parallel and only same-topic messages queue.
+	chatMu := h.getChatLock(msg.Chat.ID, threadID)
 	if !chatMu.TryLock() {
 		setReaction(ctx, b, msg.Chat.ID, msg.ID, "🕐")
 		chatMu.Lock()
@@ -1645,12 +1691,13 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 
 	// Send an initial placeholder message that we'll edit with streaming updates.
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: msg.Chat.ID,
-		Text:   escapeMarkdownV2Text("Thinking..."),
-		ParseMode: models.ParseModeMarkdown,
+		ChatID:          msg.Chat.ID,
+		MessageThreadID: int(threadID),
+		Text:            escapeMarkdownV2Text("Thinking..."),
+		ParseMode:       models.ParseModeMarkdown,
 	})
 	if err != nil {
-		slog.Error("failed to send placeholder", "error", err, "chat_id", msg.Chat.ID)
+		slog.Error("failed to send placeholder", "error", err, "chat_id", msg.Chat.ID, "thread_id", threadID)
 		return
 	}
 	msgID := placeholder.ID
@@ -1760,7 +1807,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 	}
 
-	resp, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, text, senderName, images, pdfs, onUpdate)
+	resp, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onUpdate)
 
 	// Stop the streaming edit goroutine and wait for it to finish.
 	// Send one final signal so the goroutine flushes any remaining text
@@ -1803,7 +1850,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 
 	// Send any collected photos (generated images, artifacts).
 	for _, photo := range resp.Photos {
-		sendPhoto(ctx, b, msg.Chat.ID, photo.Data, photo.Caption)
+		sendPhoto(ctx, b, msg.Chat.ID, threadID, photo.Data, photo.Caption)
 	}
 
 	// If final response is empty but we already streamed content to the user,
@@ -1867,13 +1914,13 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		if delErr != nil {
 			slog.Warn("failed to delete placeholder before chunked send", "error", delErr, "chat_id", msg.Chat.ID, "msg_id", msgID)
 		}
-		botMsgIDs = h.sendChunked(ctx, b, msg.Chat.ID, response)
+		botMsgIDs = h.sendChunked(ctx, b, msg.Chat.ID, threadID, response)
 	}
 
 	// Persist message-to-response mapping so reactions can target specific exchanges.
 	for _, botID := range botMsgIDs {
-		if err := h.bridge.SaveMessageMap(msg.Chat.ID, msg.ID, botID, text, response); err != nil {
-			slog.Warn("failed to save message map", "error", err, "chat_id", msg.Chat.ID)
+		if err := h.bridge.SaveMessageMap(msg.Chat.ID, threadID, msg.ID, botID, text, response); err != nil {
+			slog.Warn("failed to save message map", "error", err, "chat_id", msg.Chat.ID, "thread_id", threadID)
 		}
 	}
 
@@ -2009,8 +2056,10 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		senderName = first.From.Username
 	}
 
-	// Serialize messages per chat so concurrent sends queue instead of failing.
-	chatMu := h.getChatLock(first.Chat.ID)
+	threadID := msgThreadID(first)
+
+	// Serialize messages per (chat, thread) so album replies queue per-topic.
+	chatMu := h.getChatLock(first.Chat.ID, threadID)
 	if !chatMu.TryLock() {
 		setReaction(ctx, b, first.Chat.ID, first.ID, "🕐")
 		chatMu.Lock()
@@ -2028,12 +2077,13 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 
 	// Send an initial placeholder.
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    first.Chat.ID,
-		Text:      escapeMarkdownV2Text("Thinking..."),
-		ParseMode: models.ParseModeMarkdown,
+		ChatID:          first.Chat.ID,
+		MessageThreadID: int(threadID),
+		Text:            escapeMarkdownV2Text("Thinking..."),
+		ParseMode:       models.ParseModeMarkdown,
 	})
 	if err != nil {
-		slog.Error("failed to send placeholder (album)", "error", err, "chat_id", first.Chat.ID)
+		slog.Error("failed to send placeholder (album)", "error", err, "chat_id", first.Chat.ID, "thread_id", threadID)
 		return
 	}
 	msgID := placeholder.ID
@@ -2131,9 +2181,9 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		}
 	}
 
-	resp, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, text, senderName, images, nil, onUpdate)
+	resp, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, threadID, text, senderName, images, nil, onUpdate)
 	if err != nil {
-		slog.Error("bridge handle message failed (album)", "error", err, "chat_id", first.Chat.ID)
+		slog.Error("bridge handle message failed (album)", "error", err, "chat_id", first.Chat.ID, "thread_id", threadID)
 		setReaction(ctx, b, first.Chat.ID, first.ID, "❌")
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    first.Chat.ID,
@@ -2146,7 +2196,7 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 
 	// Send any collected photos.
 	for _, photo := range resp.Photos {
-		sendPhoto(ctx, b, first.Chat.ID, photo.Data, photo.Caption)
+		sendPhoto(ctx, b, first.Chat.ID, threadID, photo.Data, photo.Caption)
 	}
 
 	response := resp.Text
@@ -2202,14 +2252,14 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		if delErr != nil {
 			slog.Warn("failed to delete placeholder before chunked send (album)", "error", delErr, "chat_id", first.Chat.ID, "msg_id", msgID)
 		}
-		botMsgIDs = h.sendChunked(ctx, b, first.Chat.ID, response)
+		botMsgIDs = h.sendChunked(ctx, b, first.Chat.ID, threadID, response)
 	}
 
 	// Map all album messages to the bot response for reaction support.
 	for _, m := range messages {
 		for _, botID := range botMsgIDs {
-			if err := h.bridge.SaveMessageMap(first.Chat.ID, m.ID, botID, text, response); err != nil {
-				slog.Warn("failed to save message map (album)", "error", err, "chat_id", first.Chat.ID)
+			if err := h.bridge.SaveMessageMap(first.Chat.ID, threadID, m.ID, botID, text, response); err != nil {
+				slog.Warn("failed to save message map (album)", "error", err, "chat_id", first.Chat.ID, "thread_id", threadID)
 			}
 		}
 	}
@@ -2229,6 +2279,8 @@ func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Mes
 		return
 	}
 
+	threadID := msgThreadID(msg)
+
 	parts := strings.SplitN(msg.Text, " ", 2)
 	cmd := strings.TrimPrefix(parts[0], "/")
 	// Strip bot username suffix (e.g., /start@mybotname)
@@ -2241,26 +2293,28 @@ func (h *Handler) HandleCommand(ctx context.Context, b *bot.Bot, msg *models.Mes
 		args = parts[1]
 	}
 
-	response, err := h.bridge.HandleCommand(ctx, msg.Chat.ID, cmd, args)
+	response, err := h.bridge.HandleCommand(ctx, msg.Chat.ID, threadID, cmd, args)
 	if err != nil {
 		slog.Error("bridge handle command failed", "error", err, "cmd", cmd)
 		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    msg.Chat.ID,
-			Text:      formatErrorForMarkdownV2(err.Error()),
-			ParseMode: models.ParseModeMarkdown,
+			ChatID:          msg.Chat.ID,
+			MessageThreadID: int(threadID),
+			Text:            formatErrorForMarkdownV2(err.Error()),
+			ParseMode:       models.ParseModeMarkdown,
 		})
 		return
 	}
 
-	ids := h.sendChunked(ctx, b, msg.Chat.ID, response)
+	ids := h.sendChunked(ctx, b, msg.Chat.ID, threadID, response)
 	if (cmd == "remember" || cmd == "forget") && len(ids) > 0 {
 		setReaction(ctx, b, msg.Chat.ID, ids[len(ids)-1], "✅")
 	}
 }
 
 // sendChunked splits long messages at paragraph boundaries and sends them
-// sequentially. It returns the Telegram message IDs of the sent messages.
-func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID int64, text string) []int {
+// sequentially to the given chat/topic. Returns the Telegram message IDs of
+// the sent messages.
+func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID, threadID int64, text string) []int {
 	if text == "" {
 		text = "(empty response)"
 	}
@@ -2269,18 +2323,20 @@ func (h *Handler) sendChunked(ctx context.Context, b *bot.Bot, chatID int64, tex
 	var ids []int
 	for _, chunk := range chunks {
 		sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    chatID,
-			Text:      formatForMarkdownV2(chunk),
-			ParseMode: models.ParseModeMarkdown,
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Text:            formatForMarkdownV2(chunk),
+			ParseMode:       models.ParseModeMarkdown,
 		})
 		if err != nil {
-			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID)
+			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID, "thread_id", threadID)
 			sent, err = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: chatID,
-				Text:   chunk,
+				ChatID:          chatID,
+				MessageThreadID: int(threadID),
+				Text:            chunk,
 			})
 			if err != nil {
-				slog.Error("failed to send message", "error", err, "chat_id", chatID)
+				slog.Error("failed to send message", "error", err, "chat_id", chatID, "thread_id", threadID)
 			}
 		}
 		if sent != nil {
@@ -2389,11 +2445,12 @@ func splitMessage(text string, maxLen int) []string {
 	return chunks
 }
 
-func (h *Handler) sendTypingPeriodically(ctx context.Context, b *bot.Bot, chatID int64) {
+func (h *Handler) sendTypingPeriodically(ctx context.Context, b *bot.Bot, chatID, threadID int64) {
 	// Send immediately
 	b.SendChatAction(ctx, &bot.SendChatActionParams{
-		ChatID: chatID,
-		Action: models.ChatActionTyping,
+		ChatID:          chatID,
+		MessageThreadID: int(threadID),
+		Action:          models.ChatActionTyping,
 	})
 
 	ticker := time.NewTicker(5 * time.Second)
@@ -2405,8 +2462,9 @@ func (h *Handler) sendTypingPeriodically(ctx context.Context, b *bot.Bot, chatID
 			return
 		case <-ticker.C:
 			b.SendChatAction(ctx, &bot.SendChatActionParams{
-				ChatID: chatID,
-				Action: models.ChatActionTyping,
+				ChatID:          chatID,
+				MessageThreadID: int(threadID),
+				Action:          models.ChatActionTyping,
 			})
 		}
 	}

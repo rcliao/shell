@@ -3,6 +3,8 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -238,6 +240,7 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 			Query:  userMsg,
 			Tags:   []string{chatTag(chatID)},
 			Budget: chatBudget,
+			Scope:  sessionScopeFor(chatID),
 		})
 		if err != nil {
 			slog.Warn("memory context fetch failed", "error", err)
@@ -311,6 +314,7 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 			NS:     ns + "*",
 			Query:  userMsg,
 			Budget: prof.Budget,
+			Scope:  sessionScopeFor(chatID),
 		})
 		if err != nil {
 			slog.Warn("memory context fetch failed", "error", err)
@@ -324,6 +328,10 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 			sb.WriteString("[End of memories]\n\n")
 		}
 	}
+
+	// Behavioral guidelines are loaded via pinned memories in the system prompt
+	// (see systemPromptFromAgent), not via per-turn injection. This avoids duplication
+	// and ensures they're present on every turn regardless of semantic match.
 
 	if sb.Len() == 0 {
 		return userMsg
@@ -778,12 +786,18 @@ const maxHeartbeatLearnings = 20
 // StoreHeartbeatLearning stores a heartbeat learning as episodic memory.
 // Starts as stm — will be promoted to ltm if accessed frequently.
 // Prunes oldest entries beyond maxHeartbeatLearnings.
+//
+// Heartbeat learnings from the system chat (chatID == 0) are stored without a
+// chat tag so they remain agent-wide and apply to all real chats.
 func (m *Memory) StoreHeartbeatLearning(ctx context.Context, chatID int64, content string) error {
 	prof := m.profileFor(chatID)
 	ns := prof.AgentNS
 	var tags []string
 	if ns != "" {
-		tags = []string{"heartbeat", chatTag(chatID)}
+		tags = []string{"heartbeat"}
+		if chatID != 0 {
+			tags = append(tags, chatTag(chatID))
+		}
 	} else {
 		ns = legacyHeartbeatNamespace(chatID)
 	}
@@ -857,6 +871,89 @@ func (m *Memory) HeartbeatContext(ctx context.Context, chatID int64, budget int)
 	}
 	if err != nil {
 		slog.Warn("heartbeat context fetch failed", "error", err)
+		return ""
+	}
+	if len(result.Memories) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, mem := range result.Memories {
+		sb.WriteString("- ")
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// maxBehavioralLearnings is the cap on stored behavioral learnings.
+const maxBehavioralLearnings = 30
+
+// StoreBehavioralLearning stores a behavioral self-improvement as procedural memory.
+// These are specific, actionable behavior changes discovered during deep reflection.
+// Tagged with "behavioral" for retrieval and injection into conversation context.
+func (m *Memory) StoreBehavioralLearning(ctx context.Context, chatID int64, content string) error {
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	if ns == "" {
+		ns = legacyNamespace(chatID)
+	}
+	tags := []string{"behavioral"}
+
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:         ns,
+		Key:        fmt.Sprintf("behavioral-%d", time.Now().UnixMilli()),
+		Content:    content,
+		Kind:       "procedural",
+		Tags:       tags,
+		Priority:   "high",
+		Importance: 0.8, // behavioral learnings — high importance, shapes future behavior
+		Dedup:      true,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Prune oldest beyond cap
+	all, listErr := m.store.List(ctx, agentmemory.ListParams{
+		NS:    ns,
+		Kind:  "procedural",
+		Tags:  []string{"behavioral"},
+		Limit: maxBehavioralLearnings + 10,
+	})
+	if listErr != nil {
+		slog.Warn("behavioral learning prune list failed", "error", listErr)
+		return nil
+	}
+	if len(all) > maxBehavioralLearnings {
+		for _, mem := range all[maxBehavioralLearnings:] {
+			if rmErr := m.store.Rm(ctx, agentmemory.RmParams{NS: ns, Key: mem.Key}); rmErr != nil {
+				slog.Warn("behavioral learning prune failed", "key", mem.Key, "error", rmErr)
+			}
+		}
+		slog.Info("pruned behavioral learnings", "removed", len(all)-maxBehavioralLearnings)
+	}
+	return nil
+}
+
+// BehavioralContext returns relevant behavioral learnings as a bullet list.
+// Used during deep heartbeat reflection and injected into conversation context.
+func (m *Memory) BehavioralContext(ctx context.Context, chatID int64, budget int) string {
+	if budget <= 0 {
+		budget = 500
+	}
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	if ns == "" {
+		ns = legacyNamespace(chatID)
+	}
+	result, err := m.store.Context(ctx, agentmemory.ContextParams{
+		NS:     ns,
+		Query:  "behavioral improvements response patterns user interaction",
+		Tags:   []string{"behavioral"},
+		Budget: budget,
+	})
+	if err != nil {
+		slog.Warn("behavioral context fetch failed", "error", err)
 		return ""
 	}
 	if len(result.Memories) == 0 {
@@ -1049,6 +1146,33 @@ func (m *Memory) SeedCapability(ctx context.Context, agentNS, key, content strin
 	return err
 }
 
+// StoreSkillInventory upserts a pinned semantic memory summarizing the
+// agent-authored skills for chatID's profile. Survives session rotation so
+// the agent remembers its own tools across generations.
+//
+// The key is stable (skill-inventory-<agent-ns>) so repeated calls overwrite
+// rather than accumulate. Content is expected to be a compact, human-
+// readable digest produced by the bridge's retro builder.
+func (m *Memory) StoreSkillInventory(ctx context.Context, chatID int64, content string) error {
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	if ns == "" {
+		return fmt.Errorf("skill inventory requires AgentNS")
+	}
+	_, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:         ns,
+		Key:        "skill-inventory",
+		Content:    content,
+		Kind:       "semantic",
+		Tags:       []string{"skill-inventory", "capabilities"},
+		Priority:   "high",
+		Importance: 0.85,
+		Tier:       "ltm",
+		Pinned:     true,
+	})
+	return err
+}
+
 // SeedNamespace is deprecated — use SeedCapability instead.
 // Kept for backward compatibility.
 func (m *Memory) SeedNamespace(ctx context.Context, ns, key, content string) error {
@@ -1068,6 +1192,174 @@ func (m *Memory) SeedNamespace(ctx context.Context, ns, key, content string) err
 // AgentNS returns the ghost namespace for a chat's profile.
 func (m *Memory) AgentNS(chatID int64) string {
 	return m.profileFor(chatID).AgentNS
+}
+
+// PinnedSnapshot returns the current pinned-memory contents rendered as a
+// bullet list plus a stable hash of that rendering. Used by the session
+// lifecycle to freeze Channel A state at generation start (see
+// docs/SESSION-LIFECYCLE.md).
+//
+// The hash is deterministic and SHA-256 based — two calls that produce the
+// same rendered text return the same hash.
+func (m *Memory) PinnedSnapshot(ctx context.Context, chatID int64) (rendered, hash string) {
+	mems := m.pinnedMemories(ctx, chatID)
+	if len(mems) == 0 {
+		return "", ""
+	}
+	var sb strings.Builder
+	for _, mem := range mems {
+		sb.WriteString("- ")
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	rendered = sb.String()
+	sum := sha256.Sum256([]byte(rendered))
+	hash = hex.EncodeToString(sum[:])
+	return rendered, hash
+}
+
+// PinnedDelta computes what has changed in the pinned-memory set since the
+// given generationStart time. Returns the rendered delta text (empty if no
+// change), the current hash, and the estimated token count of the delta.
+//
+// "Changed" is detected via the memory CreatedAt field: any pinned memory
+// with CreatedAt >= generationStart is treated as an addition or content
+// revision that was not in Channel A. This covers the common case (user
+// adds a pinned behavioral memory mid-conversation). Removals are not
+// surfaced in the delta for v1 — if a memory was un-pinned, the agent's
+// stale view is inert and gets corrected at next rotation.
+//
+// If oldHash matches the current hash exactly, returns empty delta
+// immediately without further work.
+func (m *Memory) PinnedDelta(ctx context.Context, chatID int64, generationStart time.Time, oldHash string) (delta, newHash string, tokens int) {
+	mems := m.pinnedMemories(ctx, chatID)
+
+	// Recompute hash for short-circuit.
+	var full strings.Builder
+	for _, mem := range mems {
+		full.WriteString("- ")
+		full.WriteString(mem.Content)
+		full.WriteString("\n")
+	}
+	sum := sha256.Sum256([]byte(full.String()))
+	newHash = hex.EncodeToString(sum[:])
+
+	if oldHash != "" && oldHash == newHash {
+		return "", newHash, 0
+	}
+
+	// Collect entries newer than generation start.
+	var added []agentmemory.Memory
+	for _, mem := range mems {
+		if generationStart.IsZero() || !mem.CreatedAt.Before(generationStart) {
+			added = append(added, mem)
+		}
+	}
+	if len(added) == 0 {
+		// Hash differs but nothing is newer — likely a removal or an edit
+		// whose CreatedAt predates the snapshot (rare). Leave delta empty;
+		// rotation triggers will catch it eventually.
+		return "", newHash, 0
+	}
+
+	var sb strings.Builder
+	for _, mem := range added {
+		sb.WriteString("+ ")
+		sb.WriteString(mem.Content)
+		sb.WriteString("\n")
+	}
+	delta = sb.String()
+	// Rough token estimate: 4 chars per token is the widely-used heuristic.
+	tokens = len(delta) / 4
+	return delta, newHash, tokens
+}
+
+// RelevantMemoryPack returns the top-N non-pinned memories semantically
+// relevant to a query, intended as the carry-forward pack on session
+// rotation. Pinned memories are excluded because they reload into Channel A
+// automatically at rotation.
+//
+// Returns a shallow, JSON-friendly slice of (key, kind, content) tuples.
+// Empty slice on error or when no AgentNS is configured.
+type RelevantMemory struct {
+	Key     string `json:"key"`
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
+}
+
+// sessionScopeFor builds a SessionScope biased toward today's same-chat memories.
+// Returns nil chat <=0 (system/heartbeat sessions) so global retrieval isn't biased.
+// BoostFactor=2.5 reliably surfaces same-day same-chat memos through the 800-token
+// rotation pack and short-budget context retrievals.
+func sessionScopeFor(chatID int64) *agentmemory.SessionScope {
+	if chatID == 0 {
+		return nil
+	}
+	today := time.Now().Format("2006-01-02")
+	startOfToday := time.Now().Truncate(24 * time.Hour)
+	return &agentmemory.SessionScope{
+		Tags:        []string{fmt.Sprintf("chat:%d", chatID), "date:" + today},
+		Since:       startOfToday,
+		BoostFactor: 2.5,
+	}
+}
+
+func (m *Memory) RelevantMemoryPack(ctx context.Context, chatID int64, query string, budget int) []RelevantMemory {
+	if budget <= 0 {
+		budget = 800
+	}
+	prof := m.profileFor(chatID)
+	if prof.AgentNS == "" {
+		return nil
+	}
+	result, err := m.store.Context(ctx, agentmemory.ContextParams{
+		NS:            prof.AgentNS,
+		Query:         query,
+		Budget:        budget,
+		ExcludePinned: true,
+		Scope:         sessionScopeFor(chatID),
+	})
+	if err != nil {
+		slog.Warn("relevant memory pack fetch failed", "error", err)
+		return nil
+	}
+	out := make([]RelevantMemory, 0, len(result.Memories))
+	for _, mem := range result.Memories {
+		out = append(out, RelevantMemory{
+			Key:     mem.Key,
+			Kind:    mem.Kind,
+			Content: mem.Content,
+		})
+	}
+	return out
+}
+
+// pinnedMemories returns all pinned memories for an agent, sorted by
+// CreatedAt ascending. Returns empty when no AgentNS is configured
+// (legacy mode — pinned-delta is a no-op there).
+func (m *Memory) pinnedMemories(ctx context.Context, chatID int64) []agentmemory.Memory {
+	prof := m.profileFor(chatID)
+	if prof.AgentNS == "" {
+		return nil
+	}
+	all, err := m.store.List(ctx, agentmemory.ListParams{
+		NS:    prof.AgentNS,
+		Limit: 500,
+	})
+	if err != nil {
+		slog.Warn("pinned memories list failed", "ns", prof.AgentNS, "error", err)
+		return nil
+	}
+	var pinned []agentmemory.Memory
+	for _, mem := range all {
+		if mem.Pinned {
+			pinned = append(pinned, mem)
+		}
+	}
+	sort.Slice(pinned, func(i, j int) bool {
+		return pinned[i].CreatedAt.Before(pinned[j].CreatedAt)
+	})
+	return pinned
 }
 
 // HasIdentity checks whether the agent has any pinned identity memories.

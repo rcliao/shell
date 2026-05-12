@@ -17,9 +17,11 @@ import (
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/daemon"
 	shellmcp "github.com/rcliao/shell/internal/mcp"
+	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/rpc"
 	"github.com/rcliao/shell/internal/search"
+	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/telegram"
 	"github.com/spf13/cobra"
@@ -180,8 +182,12 @@ func main() {
 
 			fmt.Printf("Active sessions: %d\n\n", len(sessions))
 			for _, s := range sessions {
-				fmt.Printf("  Chat ID: %d\n  Session: %s\n  Status: %s\n  Created: %s\n  Updated: %s\n\n",
-					s.ChatID, s.ProviderSessionID[:12]+"...", s.Status,
+				topic := ""
+				if s.MessageThreadID != 0 {
+					topic = fmt.Sprintf("  Topic: %d\n", s.MessageThreadID)
+				}
+				fmt.Printf("  Chat ID: %d\n%s  Session: %s\n  Status: %s\n  Created: %s\n  Updated: %s\n\n",
+					s.ChatID, topic, s.ProviderSessionID[:12]+"...", s.Status,
 					s.CreatedAt.Format("2006-01-02 15:04:05"),
 					s.UpdatedAt.Format("2006-01-02 15:04:05"),
 				)
@@ -190,17 +196,24 @@ func main() {
 		},
 	}
 
-	// session command group
+	// session command group — persistent --config flag lets all subcommands
+	// target a specific agent's DB (e.g. ~/.shell/agents/pikamini/config.json).
+	// Without it, session commands load ~/.shell/config.json which in a
+	// multi-agent setup points at an unrelated DB.
+	var sessionConfigFlag string
 	sessionCmd := &cobra.Command{
 		Use:   "session",
 		Short: "Manage sessions",
 	}
+	sessionCmd.PersistentFlags().StringVar(&sessionConfigFlag, "config", "",
+		"Path to agent config (default: ~/.shell/config.json)")
+	loadSessionConfig := func() config.Config { return loadConfigFrom(sessionConfigFlag) }
 
 	sessionListCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
+			cfg := loadSessionConfig()
 			st, err := store.Open(cfg.Store.DBPath)
 			if err != nil {
 				return err
@@ -218,8 +231,8 @@ func main() {
 			}
 
 			for _, s := range sessions {
-				fmt.Printf("%d\t%s\t%s\t%s\n",
-					s.ChatID, s.ProviderSessionID[:12], s.Status,
+				fmt.Printf("%d\t%d\t%s\t%s\t%s\n",
+					s.ChatID, s.MessageThreadID, s.ProviderSessionID[:12], s.Status,
 					s.UpdatedAt.Format("2006-01-02 15:04"),
 				)
 			}
@@ -232,7 +245,7 @@ func main() {
 		Short: "Kill a session by chat ID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
+			cfg := loadSessionConfig()
 			st, err := store.Open(cfg.Store.DBPath)
 			if err != nil {
 				return err
@@ -249,9 +262,12 @@ func main() {
 				Binary:      cfg.Claude.Binary,
 				MaxSessions: cfg.Claude.MaxSessions,
 			})
-			proc.Kill(chatID)
+			// Kill the main-thread session. The CLI kill command doesn't
+			// accept thread_id today; pass -1 to DeleteSession to wipe all
+			// topic sessions for the chat at once.
+			proc.Kill(process.SessionKey{ChatID: chatID})
 
-			if err := st.DeleteSession(chatID); err != nil {
+			if err := st.DeleteSession(chatID, -1); err != nil {
 				return err
 			}
 
@@ -495,12 +511,346 @@ func main() {
 	}
 
 	pairingCmd.AddCommand(pairingListCmd, pairingApproveCmd, pairingAllowlistCmd, pairingRevokeCmd)
-	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd)
+	sessionRotateCmd := &cobra.Command{
+		Use:   "rotate <chat-id> [thread-id]",
+		Short: "Flag a session for rotation on its next turn",
+		Args:  cobra.RangeArgs(1, 2),
+		Long: `Sets the rotate_pending flag on the given session. The next message in that
+chat will close the current generation (summarizing the tail and packing
+relevant memories into session_summaries) and start a fresh one with a
+rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadSessionConfig()
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			var chatID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &chatID); err != nil {
+				return fmt.Errorf("invalid chat ID: %s", args[0])
+			}
+			var threadID int64
+			if len(args) == 2 {
+				if _, err := fmt.Sscanf(args[1], "%d", &threadID); err != nil {
+					return fmt.Errorf("invalid thread ID: %s", args[1])
+				}
+			}
+
+			if err := st.SetRotatePending(chatID, threadID, true); err != nil {
+				return err
+			}
+			fmt.Printf("Flagged chat %d thread %d for rotation on next turn.\n", chatID, threadID)
+			return nil
+		},
+	}
+
+	var sessionInspectFull bool
+	sessionInspectCmd := &cobra.Command{
+		Use:   "inspect <chat-id> [thread-id]",
+		Short: "Show lifecycle details for a session (generation, hash, age, flags)",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadSessionConfig()
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			var chatID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &chatID); err != nil {
+				return fmt.Errorf("invalid chat ID: %s", args[0])
+			}
+			var threadID int64
+			if len(args) == 2 {
+				if _, err := fmt.Sscanf(args[1], "%d", &threadID); err != nil {
+					return fmt.Errorf("invalid thread ID: %s", args[1])
+				}
+			}
+
+			sess, err := st.GetSession(chatID, threadID)
+			if err != nil {
+				return err
+			}
+			if sess == nil {
+				fmt.Printf("No session for chat %d thread %d.\n", chatID, threadID)
+				return nil
+			}
+
+			hashShort := sess.PrefixHash
+			if len(hashShort) > 12 {
+				hashShort = hashShort[:12]
+			}
+			uuidShort := sess.ProviderSessionID
+			if len(uuidShort) > 12 {
+				uuidShort = uuidShort[:12]
+			}
+			age := time.Since(sess.GenerationStartedAt).Round(time.Minute)
+
+			fmt.Printf("Session %d (chat %d, thread %d)\n", sess.ID, sess.ChatID, sess.MessageThreadID)
+			fmt.Printf("  Generation:  %d (age %s, started %s)\n",
+				sess.Generation, age, sess.GenerationStartedAt.Format("2006-01-02 15:04 MST"))
+			fmt.Printf("  Claude UUID: %s\n", uuidShort)
+			fmt.Printf("  PrefixHash:  %s\n", hashShort)
+			fmt.Printf("  Status:      %s\n", sess.Status)
+			fmt.Printf("  Compact:     %s\n", stringOr(sess.CompactState, "idle"))
+			fmt.Printf("  RotatePend.: %v\n", sess.RotatePending)
+			fmt.Printf("  Updated:     %s\n", sess.UpdatedAt.Format("2006-01-02 15:04 MST"))
+
+			if sm, err := st.GetLatestSessionSummary(chatID, threadID); err == nil && sm != nil {
+				fmt.Printf("\nLast carry-forward summary (generation %d, closed %s):\n",
+					sm.Generation, sm.ClosedAt.Format("2006-01-02 15:04 MST"))
+				// Print first 6 lines to keep inspect output readable.
+				lines := strings.SplitN(sm.Summary, "\n", 7)
+				if len(lines) > 6 {
+					lines = lines[:6]
+					lines = append(lines, "... (truncated)")
+				}
+				for _, line := range lines {
+					fmt.Printf("  %s\n", line)
+				}
+				if sm.MemoryPack != "" {
+					fmt.Printf("  Memory pack: %d bytes of JSON\n", len(sm.MemoryPack))
+				}
+			}
+
+			if sessionInspectFull {
+				renderFullPrompt(cfg, st, sess, chatID, threadID)
+			}
+			return nil
+		},
+	}
+	sessionInspectCmd.Flags().BoolVar(&sessionInspectFull, "full", false,
+		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
+
+	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
 	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func stringOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+// renderFullPrompt prints a dry-run of Channel A (system prompt) and Channel B
+// (per-turn prefix) as they would be assembled for this chat's next send.
+// Mirrors bridge.go's system-prompt assembly order; if the bridge changes
+// ordering, this helper will drift and needs updating alongside it.
+func renderFullPrompt(cfg config.Config, st *store.Store, sess *store.Session, chatID, threadID int64) {
+	ctx := context.Background()
+
+	fmt.Println()
+	fmt.Println("=== Channel A (frozen system prompt — what a fresh send would cache) ===")
+
+	// Agent identity (cfg.Agent.SystemPrompt — same thing daemon calls SetAgentIdentity with).
+	identity := cfg.Agent.SystemPrompt
+	printSection("agent identity", identity)
+
+	// Memory block: pinned memories + ghost-search instruction.
+	// Uses the same memory.SystemPrompt() call the bridge makes.
+	if cfg.Memory.Enabled {
+		mem, err := openMemoryFromConfig(cfg)
+		if err != nil {
+			fmt.Printf("  (memory section unavailable: %v)\n\n", err)
+		} else {
+			defer mem.Close()
+			block := mem.SystemPrompt(ctx, chatID)
+			printSection("memory (pinned + ghost-search instruction)", block)
+		}
+	}
+
+	// Timestamp guidance (static block; reproduced from bridge/prompt.go).
+	if cfg.Scheduler.Enabled {
+		tz := cfg.Scheduler.Timezone
+		if tz == "" {
+			tz = "UTC"
+		}
+		ts := "\n\n## Current Time\n\n" +
+			"Each user message is prefixed with `[Current time: ...]` containing the authoritative " +
+			"date, day of week, and time. **ALWAYS read that marker to determine what day it is.** " +
+			"Do not trust dates from conversation history, compacted summaries, or your own prior " +
+			"responses — only trust the `[Current time: ...]` marker on the current turn.\n" +
+			"Timezone: " + tz + "\n"
+		printSection("timestamp guidance", ts)
+	}
+
+	// Skills catalog.
+	if cfg.Skills.Enabled {
+		reg := loadSkillRegistryFromConfig(cfg)
+		if reg != nil {
+			printSection("skills catalog", reg.CatalogPrompt())
+		} else {
+			fmt.Println("  (no skills loaded)")
+			fmt.Println()
+		}
+	}
+
+	// Channel B dry-run.
+	fmt.Println()
+	fmt.Println("=== Channel B (per-turn prefix — what would ride the next user message) ===")
+
+	var parts []string
+
+	// Current time block.
+	if cfg.Scheduler.Enabled {
+		tz := cfg.Scheduler.Timezone
+		if tz == "" {
+			tz = "UTC"
+		}
+		loc, _ := time.LoadLocation(tz)
+		if loc == nil {
+			loc = time.UTC
+		}
+		now := time.Now().In(loc)
+		parts = append(parts, fmt.Sprintf("[Current time: %s | %s]",
+			now.Format("Monday 2006-01-02 15:04 MST"), tz))
+	}
+
+	// Carry-forward block (only if session is fresh — ProviderSessionID == "").
+	if sess.ProviderSessionID == "" {
+		if sm, err := st.GetLatestSessionSummary(chatID, threadID); err == nil && sm != nil && sm.Generation == sess.Generation-1 {
+			parts = append(parts,
+				fmt.Sprintf("[Previously in this chat (generation %d summary):\n%s\n]", sm.Generation, strings.TrimSpace(sm.Summary)))
+			if sm.MemoryPack != "" {
+				parts = append(parts, fmt.Sprintf("[Relevant memory context: %d bytes of JSON pack]", len(sm.MemoryPack)))
+			}
+		}
+	}
+
+	// Pinned-memory delta.
+	if cfg.Memory.Enabled {
+		mem, err := openMemoryFromConfig(cfg)
+		if err == nil {
+			defer mem.Close()
+			if sess.PrefixHash == "" && sess.ProviderSessionID != "" {
+				parts = append(parts, "[Memory updates since session start: (legacy session, hash will be stamped on next turn)]")
+			} else {
+				delta, _, tokens := mem.PinnedDelta(ctx, chatID, sess.GenerationStartedAt, sess.PrefixHash)
+				switch {
+				case tokens > 1000:
+					parts = append(parts, fmt.Sprintf("[Memory updates since session start: (%d tokens — would flip rotate_pending)]", tokens))
+				case delta != "":
+					parts = append(parts, "[Memory updates since session start:\n"+strings.TrimRight(delta, "\n")+"]")
+				default:
+					parts = append(parts, "[Memory updates since session start: (none)]")
+				}
+			}
+		}
+	}
+
+	// Active tasks.
+	if chatID != 0 {
+		if tasks, err := st.PendingTasks(chatID); err == nil && len(tasks) > 0 {
+			var sb strings.Builder
+			sb.WriteString("[Active tasks:\n")
+			for _, t := range tasks {
+				sb.WriteString("- ")
+				sb.WriteString(t.Description)
+				sb.WriteString("\n")
+			}
+			sb.WriteString("]")
+			parts = append(parts, sb.String())
+		} else {
+			parts = append(parts, "[Active tasks: (none)]")
+		}
+	}
+
+	if len(parts) == 0 {
+		fmt.Println("  (no Channel B blocks would be prepended)")
+	}
+	for _, p := range parts {
+		fmt.Println()
+		fmt.Println(p)
+	}
+	fmt.Println()
+}
+
+// printSection prints a labeled section with token estimate and content.
+// Used by renderFullPrompt to keep the Channel A dump scannable.
+func printSection(label, content string) {
+	content = strings.TrimSpace(content)
+	approxTokens := len(content) / 4
+	fmt.Printf("\n--- %s (~%d tokens, %d chars) ---\n", label, approxTokens, len(content))
+	if content == "" {
+		fmt.Println("  (empty)")
+		return
+	}
+	fmt.Println(content)
+}
+
+// openMemoryFromConfig constructs a memory.Memory matching the daemon's config,
+// so dry-run rendering sees the same pinned set the bridge would.
+func openMemoryFromConfig(cfg config.Config) (*memory.Memory, error) {
+	dbPath := cfg.Memory.DBPath
+	if dbPath == "" {
+		dbPath = filepath.Join(config.DefaultConfigDir(), "memory.db")
+	}
+	profiles := map[string]memory.ProfileConfig{}
+	for name, p := range cfg.Memory.Profiles {
+		profiles[name] = memory.ProfileConfig{
+			AgentNS:          p.AgentNS,
+			SystemNamespaces: p.SystemNamespaces,
+			SystemBudget:     p.SystemBudget,
+			GlobalNamespaces: p.GlobalNamespaces,
+			GlobalBudget:     p.GlobalBudget,
+			Budget:           p.Budget,
+			ExchangeTTL:      p.ExchangeTTL,
+			ExchangeMaxUser:  p.ExchangeMaxUser,
+			ExchangeMaxReply: p.ExchangeMaxReply,
+			MemoryDirectives: p.MemoryDirectives,
+			DirectiveNS:      p.DirectiveNS,
+		}
+	}
+	return memory.New(
+		dbPath, cfg.Memory.Budget,
+		cfg.Memory.GlobalNamespaces, cfg.Memory.GlobalBudget,
+		cfg.Memory.SystemNamespaces, cfg.Memory.SystemBudget,
+		profiles, cfg.Memory.ChatProfileMap(),
+	)
+}
+
+// loadSkillRegistryFromConfig mirrors daemon.go's skill loading sequence so
+// dry-run rendering includes the same skills the running daemon has.
+func loadSkillRegistryFromConfig(cfg config.Config) *skill.Registry {
+	var all []*skill.Skill
+
+	// Global skills.
+	globalDir := cfg.Skills.Dir
+	if globalDir == "" {
+		globalDir = filepath.Join(config.DefaultConfigDir(), "skills")
+	}
+	if s, err := skill.LoadDir(globalDir); err == nil {
+		all = append(all, s...)
+	}
+
+	// Project skills.
+	if cfg.Claude.WorkDir != "" {
+		projectDir := filepath.Join(cfg.Claude.WorkDir, ".agent", "skills")
+		if s, err := skill.LoadDir(projectDir); err == nil {
+			all = append(all, s...)
+		}
+	}
+
+	// Per-agent skills (derived from PID file directory — same rule as daemon.go).
+	if cfg.Daemon.PIDFile != "" {
+		agentDir := filepath.Join(filepath.Dir(cfg.Daemon.PIDFile), "skills")
+		if s, err := skill.LoadDir(agentDir); err == nil {
+			all = append(all, s...)
+		}
+	}
+
+	if len(all) == 0 {
+		return nil
+	}
+	return skill.NewRegistry(all)
 }
 
 func loadConfig() config.Config {

@@ -92,3 +92,114 @@ func TestRegistryHas(t *testing.T) {
 		t.Error("Has(nope) should be false")
 	}
 }
+
+func TestCatalogPrompt_ThreeTiers(t *testing.T) {
+	skills := []*Skill{
+		{Name: "core-skill", Description: "Always on", Tier: TierCore, Body: "CORE BODY"},
+		{Name: "hot-skill", Description: "Frequently used", Tier: TierHot, Body: "HOT BODY"},
+		{Name: "lazy-skill", Description: "Rare path", Tier: TierLazy, Body: "LAZY BODY", Dir: "/skills/lazy-skill"},
+	}
+	r := NewRegistry(skills)
+	p := r.CatalogPrompt()
+
+	// Core: full body appears.
+	if !strings.Contains(p, "CORE BODY") {
+		t.Error("core body missing")
+	}
+	// Hot: full body appears under Hot heading.
+	if !strings.Contains(p, "### Hot skills") {
+		t.Error("Hot skills heading missing")
+	}
+	if !strings.Contains(p, "HOT BODY") {
+		t.Error("hot body missing")
+	}
+	// Lazy: body does NOT appear; description + on-disk path does.
+	if strings.Contains(p, "LAZY BODY") {
+		t.Error("lazy body should NOT be inlined")
+	}
+	if !strings.Contains(p, "### Lazy skills") {
+		t.Error("Lazy skills heading missing")
+	}
+	if !strings.Contains(p, "/skills/lazy-skill/SKILL.md") {
+		t.Error("lazy entry missing on-disk path")
+	}
+}
+
+func TestCatalogPrompt_HotBudgetOverflowDemotes(t *testing.T) {
+	// Build a body that exceeds the hot budget on its own.
+	huge := strings.Repeat("x", (HotTierBudget+100)*4)
+	skills := []*Skill{
+		{Name: "tiny-hot", Description: "small hot skill", Tier: TierHot, Body: "compact body"},
+		{Name: "giant-hot", Description: "over budget", Tier: TierHot, Body: huge, Dir: "/skills/giant-hot"},
+	}
+	r := NewRegistry(skills)
+	p := r.CatalogPrompt()
+
+	// tiny-hot fits and appears under Hot.
+	if !strings.Contains(p, "compact body") {
+		t.Error("tiny hot skill body missing")
+	}
+	// giant-hot got demoted — body must NOT be in the prompt.
+	if strings.Contains(p, huge) {
+		t.Error("over-budget hot body should have been demoted, not inlined")
+	}
+	// But it should still appear as a lazy entry so the agent knows it exists.
+	if !strings.Contains(p, "/skills/giant-hot/SKILL.md") {
+		t.Error("demoted skill should appear in Lazy catalog")
+	}
+}
+
+func TestCatalogPrompt_LazyBudgetTruncates(t *testing.T) {
+	// Generate enough lazy skills that the catalog budget overflows.
+	// Each entry carries an ~80-char description so we hit the cap with ~50 skills.
+	var skills []*Skill
+	for i := 0; i < 80; i++ {
+		skills = append(skills, &Skill{
+			Name:        "lazy-" + string(rune('a'+(i%26))) + string(rune('0'+(i/26))),
+			Description: strings.Repeat("word ", 20), // ~100 chars
+			Tier:        TierLazy,
+			Dir:         "/fake/skills/x",
+			SkillRoot:   "/fake/skills/x",
+		})
+	}
+	r := NewRegistry(skills)
+	p := r.CatalogPrompt()
+
+	if !strings.Contains(p, "### Lazy skills") {
+		t.Error("lazy heading missing")
+	}
+	if !strings.Contains(p, "more skills") {
+		t.Error("expected truncation marker when lazy catalog overflows")
+	}
+}
+
+func TestCatalogPrompt_LegacyCoreFieldStillWorks(t *testing.T) {
+	// Simulate a skill loaded via Load() with Core=true — the loader sets
+	// Tier=TierCore in that case. Here we simulate the end state directly.
+	skills := []*Skill{
+		{Name: "legacy", Description: "legacy core", Core: true, Tier: TierCore, Body: "LEGACY BODY"},
+	}
+	r := NewRegistry(skills)
+	p := r.CatalogPrompt()
+	if !strings.Contains(p, "LEGACY BODY") {
+		t.Error("legacy core skill body should appear in prompt")
+	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"", 0},
+		{"a", 1},
+		{"abcd", 1},
+		{"abcde", 2},
+		{strings.Repeat("x", 400), 100},
+	}
+	for _, c := range cases {
+		if got := EstimateTokens(c.in); got != c.want {
+			t.Errorf("EstimateTokens(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}

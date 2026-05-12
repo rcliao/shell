@@ -12,23 +12,26 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/store"
+	"github.com/rcliao/shell/internal/transcript"
 )
 
-// NotifyFunc sends a text message to a Telegram chat.
-type NotifyFunc func(chatID int64, msg string)
+// NotifyFunc sends a text message to a Telegram chat/topic. threadID is the
+// Telegram forum topic ID (0 = main chat / no topic).
+type NotifyFunc func(chatID, threadID int64, msg string)
 
-// SendPhotoFunc sends a photo to a Telegram chat.
-type SendPhotoFunc func(chatID int64, data []byte, caption string)
+// SendPhotoFunc sends a photo to a Telegram chat/topic.
+type SendPhotoFunc func(chatID, threadID int64, data []byte, caption string)
 
 // RelayToBridgeFunc routes a relay message through the bridge so Claude
-// processes it and has it in its session history for the target chat.
-type RelayToBridgeFunc func(ctx context.Context, chatID int64, message string)
+// processes it and has it in its session history for the target chat/topic.
+type RelayToBridgeFunc func(ctx context.Context, chatID, threadID int64, message string)
 
 // CronParser parses a cron expression and returns something with a Next method.
 type CronParser func(expr string) (interface{ Next(time.Time) time.Time }, error)
@@ -48,6 +51,7 @@ type Server struct {
 	tunnelMgr *tunnel.Manager
 	store     *store.Store
 	memory    *memory.Memory
+	taskStore *transcript.TaskStore // shared task store for delegation
 	notify         NotifyFunc
 	sendPhoto      SendPhotoFunc
 	relayToBridge  RelayToBridgeFunc
@@ -55,6 +59,7 @@ type Server struct {
 	skillsReload   SkillsReloadFunc
 	skillsLoad     SkillsLoadFunc
 	timezone       string
+	botUsername    string // this agent's bot username
 }
 
 // Config holds the dependencies for the RPC server.
@@ -64,6 +69,7 @@ type Config struct {
 	TunnelMgr     *tunnel.Manager
 	Store         *store.Store
 	Memory        *memory.Memory
+	TaskStore     *transcript.TaskStore // shared task store
 	Notify        NotifyFunc
 	SendPhoto     SendPhotoFunc
 	RelayToBridge RelayToBridgeFunc
@@ -71,6 +77,7 @@ type Config struct {
 	SkillsReload  SkillsReloadFunc
 	SkillsLoad    SkillsLoadFunc
 	Timezone      string
+	BotUsername   string // this agent's bot username
 }
 
 // DefaultSocketPath returns the default Unix socket path.
@@ -90,6 +97,7 @@ func New(cfg Config) *Server {
 		tunnelMgr: cfg.TunnelMgr,
 		store:     cfg.Store,
 		memory:    cfg.Memory,
+		taskStore: cfg.TaskStore,
 		notify:        cfg.Notify,
 		sendPhoto:     cfg.SendPhoto,
 		relayToBridge: cfg.RelayToBridge,
@@ -97,6 +105,7 @@ func New(cfg Config) *Server {
 		skillsReload:  cfg.SkillsReload,
 		skillsLoad:    cfg.SkillsLoad,
 		timezone:  cfg.Timezone,
+		botUsername: cfg.BotUsername,
 	}
 }
 
@@ -130,6 +139,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /task", s.handleTask)
 	mux.HandleFunc("POST /skills-reload", s.handleSkillsReload)
 	mux.HandleFunc("POST /skills-load", s.handleSkillsLoad)
+	mux.HandleFunc("POST /heartbeat-log", s.handleHeartbeatLog)
 
 	s.server = &http.Server{Handler: mux}
 	slog.Info("rpc server starting", "socket", s.sockPath)
@@ -227,9 +237,10 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 // RelayRequest is the JSON body for POST /relay.
 type RelayRequest struct {
-	ChatID    int64  `json:"chat_id"`
-	Message   string `json:"message"`
-	ImagePath string `json:"image_path"` // optional: send photo from file path
+	ChatID          int64  `json:"chat_id"`
+	MessageThreadID int64  `json:"message_thread_id"` // Telegram forum topic ID (0 = main chat)
+	Message         string `json:"message"`
+	ImagePath       string `json:"image_path"` // optional: send photo from file path
 }
 
 func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
@@ -259,11 +270,11 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "failed to read image: "+err.Error())
 			return
 		}
-		slog.Info("rpc: relaying photo", "to_chat_id", req.ChatID, "path", req.ImagePath, "caption_len", len(req.Message))
-		s.sendPhoto(req.ChatID, data, req.Message)
+		slog.Info("rpc: relaying photo", "to_chat_id", req.ChatID, "thread_id", req.MessageThreadID, "path", req.ImagePath, "caption_len", len(req.Message))
+		s.sendPhoto(req.ChatID, req.MessageThreadID, data, req.Message)
 		// Log to target chat's store so Claude has context (don't send text to Telegram).
 		if s.store != nil {
-			if sess, err := s.store.GetSession(req.ChatID); err == nil && sess != nil {
+			if sess, err := s.store.GetSession(req.ChatID, req.MessageThreadID); err == nil && sess != nil {
 				s.store.LogMessage(sess.ID, "assistant", "[Relayed photo] "+req.Message)
 			}
 		}
@@ -271,14 +282,14 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("rpc: relaying message", "to_chat_id", req.ChatID, "len", len(req.Message))
+	slog.Info("rpc: relaying message", "to_chat_id", req.ChatID, "thread_id", req.MessageThreadID, "len", len(req.Message))
 
 	// Route through bridge so Claude's session for the target chat has context.
 	// This sends to Telegram AND adds to Claude's conversation history.
 	if s.relayToBridge != nil {
-		s.relayToBridge(r.Context(), req.ChatID, req.Message)
+		s.relayToBridge(r.Context(), req.ChatID, req.MessageThreadID, req.Message)
 	} else {
-		s.notify(req.ChatID, req.Message)
+		s.notify(req.ChatID, req.MessageThreadID, req.Message)
 	}
 	writeJSON(w, map[string]any{"ok": true, "type": "text"})
 }
@@ -432,24 +443,36 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		slog.Info("rpc: stored heartbeat learning", "chat_id", req.ChatID, "len", len(req.Content))
 		writeJSON(w, map[string]any{"ok": true})
 
+	case "behavioral":
+		err := s.memory.StoreBehavioralLearning(r.Context(), req.ChatID, req.Content)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store: "+err.Error())
+			return
+		}
+		slog.Info("rpc: stored behavioral learning", "chat_id", req.ChatID, "len", len(req.Content))
+		writeJSON(w, map[string]any{"ok": true})
+
 	default:
-		writeError(w, http.StatusBadRequest, "action must be 'remember' or 'heartbeat-learning'")
+		writeError(w, http.StatusBadRequest, "action must be 'remember', 'heartbeat-learning', or 'behavioral'")
 	}
 }
 
 // TaskRequest is the JSON body for POST /task.
+// Supports both legacy background tasks (numeric ID) and new delegated tasks (string ID).
 type TaskRequest struct {
-	ChatID int64  `json:"chat_id"`
-	Action string `json:"action"` // "complete"
-	ID     int64  `json:"id"`     // task ID
+	ChatID      int64  `json:"chat_id"`
+	Action      string `json:"action"`      // create, complete, fail, list, status, legacy_complete
+	ID          int64  `json:"id"`          // legacy background task ID (numeric)
+	TaskID      string `json:"task_id"`     // delegated task ID (string hex)
+	To          string `json:"to"`          // target agent bot username (create)
+	Description string `json:"description"` // task description (create)
+	Context     string `json:"context"`     // context summary (create)
+	GoalID      string `json:"goal_id"`     // parent goal ID (create)
+	Result      string `json:"result"`      // result text (complete/fail)
+	Reason      string `json:"reason"`      // failure reason (fail)
 }
 
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeError(w, http.StatusServiceUnavailable, "store not available")
-		return
-	}
-
 	var req TaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -457,20 +480,174 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch req.Action {
+	// --- Legacy background task completion (backward compat) ---
 	case "complete":
-		if req.ID == 0 {
-			writeError(w, http.StatusBadRequest, "id is required")
+		// If numeric ID is set, this is the old background task system.
+		if req.ID > 0 {
+			if s.store == nil {
+				writeError(w, http.StatusServiceUnavailable, "store not available")
+				return
+			}
+			if err := s.store.CompleteTask(req.ID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to complete task: "+err.Error())
+				return
+			}
+			slog.Info("rpc: completed background task", "task_id", req.ID)
+			writeJSON(w, map[string]any{"ok": true})
 			return
 		}
-		if err := s.store.CompleteTask(req.ID); err != nil {
+		// String task_id means new delegated task system.
+		if req.TaskID == "" {
+			writeError(w, http.StatusBadRequest, "task_id is required")
+			return
+		}
+		if s.taskStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "task store not available")
+			return
+		}
+		if err := s.taskStore.CompleteTask(req.TaskID, req.Result); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to complete task: "+err.Error())
 			return
 		}
-		slog.Info("rpc: completed task", "chat_id", req.ChatID, "task_id", req.ID)
-		writeJSON(w, map[string]any{"ok": true})
+		slog.Info("rpc: completed delegated task", "task_id", req.TaskID, "by", s.botUsername)
+		// Notify originator via Telegram if this is a cross-agent task.
+		if t, err := s.taskStore.GetTask(req.TaskID); err == nil && t != nil && t.FromAgent != t.ToAgent && s.notify != nil && t.ChatID != 0 {
+			preview := req.Result
+			if len(preview) > 80 {
+				preview = preview[:80] + "..."
+			}
+			s.notify(t.ChatID, 0, fmt.Sprintf("✅ %s completed task %s: %s", s.botUsername, req.TaskID[:8], preview))
+		}
+		writeJSON(w, map[string]any{"ok": true, "task_id": req.TaskID})
+
+	// --- New task system: create ---
+	case "create":
+		if s.taskStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "task store not available")
+			return
+		}
+		if req.Description == "" {
+			writeError(w, http.StatusBadRequest, "description is required")
+			return
+		}
+		toAgent := req.To
+		if toAgent == "" || toAgent == "self" {
+			toAgent = s.botUsername
+		}
+		fromAgent := s.botUsername
+		if fromAgent == "" {
+			fromAgent = "unknown"
+		}
+		taskID, err := s.taskStore.CreateTask(transcript.Task{
+			ChatID:      req.ChatID,
+			GoalID:      req.GoalID,
+			FromAgent:   fromAgent,
+			ToAgent:     toAgent,
+			Description: req.Description,
+			Context:     req.Context,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create task: "+err.Error())
+			return
+		}
+		slog.Info("rpc: created task", "task_id", taskID, "from", fromAgent, "to", toAgent, "description", req.Description)
+		// Send Telegram notification for cross-agent delegation.
+		if toAgent != fromAgent && s.notify != nil && req.ChatID != 0 {
+			desc := req.Description
+			if len(desc) > 80 {
+				desc = desc[:80] + "..."
+			}
+			s.notify(req.ChatID, 0, fmt.Sprintf("📋 %s → @%s: %s", fromAgent, toAgent, desc))
+		}
+		writeJSON(w, map[string]any{"ok": true, "task_id": taskID})
+
+	// --- New task system: fail ---
+	case "fail":
+		if s.taskStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "task store not available")
+			return
+		}
+		if req.TaskID == "" {
+			writeError(w, http.StatusBadRequest, "task_id is required")
+			return
+		}
+		reason := req.Reason
+		if reason == "" {
+			reason = req.Result // accept either field
+		}
+		if err := s.taskStore.FailTask(req.TaskID, reason); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to fail task: "+err.Error())
+			return
+		}
+		slog.Info("rpc: failed task", "task_id", req.TaskID, "reason", reason)
+		if t, err := s.taskStore.GetTask(req.TaskID); err == nil && t != nil && t.FromAgent != t.ToAgent && s.notify != nil && t.ChatID != 0 {
+			s.notify(t.ChatID, 0, fmt.Sprintf("❌ Task %s failed: %s", req.TaskID[:8], reason))
+		}
+		writeJSON(w, map[string]any{"ok": true, "task_id": req.TaskID})
+
+	// --- New task system: list ---
+	case "list":
+		if s.taskStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "task store not available")
+			return
+		}
+		agent := s.botUsername
+		if agent == "" {
+			agent = req.To
+		}
+		pending, err := s.taskStore.PendingTasksFor(agent)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list tasks: "+err.Error())
+			return
+		}
+		var items []map[string]any
+		for _, t := range pending {
+			items = append(items, map[string]any{
+				"id":          t.ID,
+				"from":        t.FromAgent,
+				"to":          t.ToAgent,
+				"description": t.Description,
+				"status":      t.Status,
+				"goal_id":     t.GoalID,
+				"created_at":  t.CreatedAt.Format(time.RFC3339),
+			})
+		}
+		writeJSON(w, map[string]any{"ok": true, "tasks": items, "count": len(items)})
+
+	// --- New task system: status ---
+	case "status":
+		if s.taskStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "task store not available")
+			return
+		}
+		if req.TaskID == "" {
+			writeError(w, http.StatusBadRequest, "task_id is required")
+			return
+		}
+		t, err := s.taskStore.GetTask(req.TaskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to get task: "+err.Error())
+			return
+		}
+		if t == nil {
+			writeError(w, http.StatusNotFound, "task not found: "+req.TaskID)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"ok":          true,
+			"id":          t.ID,
+			"from":        t.FromAgent,
+			"to":          t.ToAgent,
+			"description": t.Description,
+			"context":     t.Context,
+			"status":      t.Status,
+			"result":      t.Result,
+			"goal_id":     t.GoalID,
+			"created_at":  t.CreatedAt.Format(time.RFC3339),
+		})
 
 	default:
-		writeError(w, http.StatusBadRequest, "action must be 'complete'")
+		writeError(w, http.StatusBadRequest, "action must be 'create', 'complete', 'fail', 'list', or 'status'")
 	}
 }
 
@@ -513,6 +690,90 @@ func (s *Server) handleSkillsLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "name": req.Name, "body": body})
+}
+
+// HeartbeatLogRequest is the JSON body for POST /heartbeat-log.
+type HeartbeatLogRequest struct {
+	Limit int  `json:"limit"` // number of exchanges to return (default 10)
+	Full  bool `json:"full"`  // if true, return full content (no truncation)
+}
+
+// HeartbeatLogEntry represents one heartbeat exchange in the system chat.
+type HeartbeatLogEntry struct {
+	Timestamp string `json:"timestamp"`
+	Role      string `json:"role"`
+	Kind      string `json:"kind"` // "regular", "deep", or "" for assistant
+	Content   string `json:"content"`
+}
+
+func (s *Server) handleHeartbeatLog(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "store not available")
+		return
+	}
+
+	var req HeartbeatLogRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
+
+	// Find the system chat session (chat_id = 0, main thread)
+	sess, err := s.store.GetSession(0, 0)
+	if err != nil || sess == nil {
+		writeJSON(w, map[string]any{
+			"ok":      true,
+			"entries": []HeartbeatLogEntry{},
+			"note":    "no system chat session yet — heartbeats haven't fired",
+		})
+		return
+	}
+
+	// Get last N*2 messages (paired user/assistant) — limited to 200 total
+	rawLimit := req.Limit * 2
+	if rawLimit > 200 {
+		rawLimit = 200
+	}
+	msgs, err := s.store.GetMessages(sess.ID, rawLimit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get messages: "+err.Error())
+		return
+	}
+
+	truncLen := 300
+	if req.Full {
+		truncLen = 4000
+	}
+
+	entries := make([]HeartbeatLogEntry, 0, len(msgs))
+	for _, m := range msgs {
+		entry := HeartbeatLogEntry{
+			Timestamp: m.CreatedAt.Format(time.RFC3339),
+			Role:      m.Role,
+		}
+		content := m.Content
+		if m.Role == "user" {
+			if strings.Contains(content, "[Heartbeat:deep]") {
+				entry.Kind = "deep"
+			} else if strings.Contains(content, "[Heartbeat]") {
+				entry.Kind = "regular"
+			}
+		}
+		if len(content) > truncLen {
+			content = content[:truncLen] + "..."
+		}
+		entry.Content = content
+		entries = append(entries, entry)
+	}
+
+	writeJSON(w, map[string]any{
+		"ok":      true,
+		"entries": entries,
+		"count":   len(entries),
+	})
 }
 
 // --- Helpers ---

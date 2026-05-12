@@ -15,12 +15,38 @@ type Store struct {
 }
 
 type Session struct {
-	ID               int64
-	ChatID           int64
-	ProviderSessionID  string
-	Status           string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                int64
+	ChatID            int64
+	MessageThreadID   int64 // Telegram forum topic ID (0 = main chat / no topic)
+	ProviderSessionID string
+	Status            string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+
+	// Lifecycle fields (see docs/SESSION-LIFECYCLE.md). `Generation` increments
+	// on rotation; all other fields key off it. `PrefixHash` captures the frozen
+	// Channel A contents (identity + skills + pinned memory snapshot) at
+	// generation start — drift from the current live value triggers rotation.
+	// `CompactState` is '' (idle) or 'compacting' (proactive compaction in
+	// flight). `RotatePending` is a boolean flag set by soft triggers.
+	Generation          int64
+	PrefixHash          string
+	GenerationStartedAt time.Time
+	RotatePending       bool
+	CompactState        string
+}
+
+// SessionSummary is the carry-forward artifact written at rotation. The
+// `Summary` is the compacted conversation; `MemoryPack` is JSON with the
+// top-N semantically-relevant memories selected from ghost at close time.
+type SessionSummary struct {
+	ID         int64
+	ChatID     int64
+	ThreadID   int64
+	Generation int64
+	ClosedAt   time.Time
+	Summary    string
+	MemoryPack string
 }
 
 type Message struct {
@@ -87,14 +113,21 @@ func Open(dbPath string) (*Store, error) {
 }
 
 func (s *Store) migrate() error {
-	schema := `
+	// Phase 1: create tables. `CREATE TABLE IF NOT EXISTS` is a no-op on
+	// legacy DBs that still have the old column-less schema, which is fine —
+	// Phase 2 will rebuild the sessions table to add message_thread_id.
+	// Indexes that reference message_thread_id must wait until Phase 3 so they
+	// don't fail on legacy DBs during the initial apply.
+	tableSchema := `
 	CREATE TABLE IF NOT EXISTS sessions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		chat_id INTEGER UNIQUE NOT NULL,
+		chat_id INTEGER NOT NULL,
+		message_thread_id INTEGER NOT NULL DEFAULT 0,
 		claude_session_id TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'active',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(chat_id, message_thread_id)
 	);
 
 	CREATE TABLE IF NOT EXISTS messages (
@@ -137,7 +170,7 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(enabled, next_run_at);
 	CREATE INDEX IF NOT EXISTS idx_schedules_chat ON schedules(chat_id);
 	`
-	if _, err := s.db.Exec(schema); err != nil {
+	if _, err := s.db.Exec(tableSchema); err != nil {
 		return err
 	}
 
@@ -147,6 +180,18 @@ func (s *Store) migrate() error {
 		"ALTER TABLE message_map ADD COLUMN bot_response TEXT NOT NULL DEFAULT ''",
 	} {
 		s.db.Exec(col) // ignore "duplicate column" errors
+	}
+
+	// Phase 2: upgrade legacy sessions tables that pre-date message_thread_id.
+	// Old schema had UNIQUE(chat_id); the new schema needs UNIQUE(chat_id, message_thread_id).
+	// SQLite can't alter constraints in-place — rebuild the table.
+	if err := s.upgradeSessionsThreadID(); err != nil {
+		return fmt.Errorf("upgrade sessions for message_thread_id: %w", err)
+	}
+
+	// Phase 3: composite index now that the column is guaranteed to exist.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_chat_thread ON sessions(chat_id, message_thread_id)`); err != nil {
+		return fmt.Errorf("create idx_sessions_chat_thread: %w", err)
 	}
 
 	// Token usage tracking per exchange.
@@ -173,6 +218,40 @@ func (s *Store) migrate() error {
 	// Add source column to usage table (idempotent for existing databases).
 	s.db.Exec("ALTER TABLE usage ADD COLUMN source TEXT NOT NULL DEFAULT 'interactive'")
 
+	// Phase 4: lifecycle columns on sessions (see docs/SESSION-LIFECYCLE.md).
+	// Idempotent — duplicate-column errors are ignored on legacy DBs.
+	for _, col := range []string{
+		"ALTER TABLE sessions ADD COLUMN generation INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE sessions ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sessions ADD COLUMN generation_started_at DATETIME",
+		"ALTER TABLE sessions ADD COLUMN rotate_pending INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sessions ADD COLUMN compact_state TEXT NOT NULL DEFAULT ''",
+	} {
+		s.db.Exec(col)
+	}
+	// Backfill generation_started_at for rows that predate the column.
+	s.db.Exec(`UPDATE sessions SET generation_started_at = created_at WHERE generation_started_at IS NULL`)
+
+	// Session summaries: one row per closed generation, used as the
+	// carry-forward pack when the next generation starts.
+	summarySchema := `
+	CREATE TABLE IF NOT EXISTS session_summaries (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		message_thread_id INTEGER NOT NULL DEFAULT 0,
+		generation INTEGER NOT NULL,
+		closed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		summary TEXT NOT NULL,
+		memory_pack TEXT NOT NULL DEFAULT '',
+		UNIQUE(chat_id, message_thread_id, generation)
+	);
+	CREATE INDEX IF NOT EXISTS idx_session_summaries_key
+		ON session_summaries(chat_id, message_thread_id, generation DESC);
+	`
+	if _, err := s.db.Exec(summarySchema); err != nil {
+		return err
+	}
+
 	// Background task queue for heartbeat to pick up.
 	taskSchema := `
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -192,32 +271,246 @@ func (s *Store) migrate() error {
 	return nil
 }
 
-func (s *Store) SaveSession(chatID int64, claudeSessionID string) error {
+// upgradeSessionsThreadID adds the message_thread_id column and rebuilds the
+// sessions table with a composite UNIQUE(chat_id, message_thread_id) constraint
+// when upgrading from pre-thread-support databases.
+func (s *Store) upgradeSessionsThreadID() error {
+	// Does message_thread_id already exist?
+	rows, err := s.db.Query(`PRAGMA table_info(sessions)`)
+	if err != nil {
+		return err
+	}
+	hasThreadID := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "message_thread_id" {
+			hasThreadID = true
+		}
+	}
+	rows.Close()
+	if hasThreadID {
+		return nil // nothing to do — fresh installs and already-migrated DBs
+	}
+
+	// Rebuild table inside a transaction.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	steps := []string{
+		`CREATE TABLE sessions_new (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			chat_id INTEGER NOT NULL,
+			message_thread_id INTEGER NOT NULL DEFAULT 0,
+			claude_session_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(chat_id, message_thread_id)
+		)`,
+		`INSERT INTO sessions_new (id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at)
+			SELECT id, chat_id, 0, claude_session_id, status, created_at, updated_at FROM sessions`,
+		`DROP TABLE sessions`,
+		`ALTER TABLE sessions_new RENAME TO sessions`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_chat_id ON sessions(chat_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_chat_thread ON sessions(chat_id, message_thread_id)`,
+	}
+	for _, stmt := range steps {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt[:min(60, len(stmt))], err)
+		}
+	}
+	return tx.Commit()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (s *Store) SaveSession(chatID, threadID int64, claudeSessionID string) error {
+	// Preserve lifecycle fields on upsert — only the conversation UUID,
+	// status, and updated_at advance when a turn writes back. Generation /
+	// prefix_hash / compact_state are owned by the rotation + compaction
+	// paths and must not be clobbered by regular SaveSession calls.
 	_, err := s.db.Exec(`
-		INSERT INTO sessions (chat_id, claude_session_id, status, created_at, updated_at)
-		VALUES (?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT(chat_id) DO UPDATE SET
+		INSERT INTO sessions (chat_id, message_thread_id, claude_session_id, status,
+			created_at, updated_at, generation, generation_started_at)
+		VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, CURRENT_TIMESTAMP)
+		ON CONFLICT(chat_id, message_thread_id) DO UPDATE SET
 			claude_session_id = excluded.claude_session_id,
 			status = 'active',
 			updated_at = CURRENT_TIMESTAMP
-	`, chatID, claudeSessionID)
+	`, chatID, threadID, claudeSessionID)
 	return err
 }
 
-func (s *Store) GetSession(chatID int64) (*Session, error) {
-	row := s.db.QueryRow(`
-		SELECT id, chat_id, claude_session_id, status, created_at, updated_at
-		FROM sessions WHERE chat_id = ?
-	`, chatID)
+// SetPrefixHash records the hash of Channel A contents (identity + skills +
+// pinned memory snapshot) at generation start. Channel B diff detection
+// compares live pinned-memory hash against this value.
+func (s *Store) SetPrefixHash(chatID, threadID int64, hash string) error {
+	_, err := s.db.Exec(`
+		UPDATE sessions SET prefix_hash = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE chat_id = ? AND message_thread_id = ?
+	`, hash, chatID, threadID)
+	return err
+}
 
-	var sess Session
-	err := row.Scan(&sess.ID, &sess.ChatID, &sess.ProviderSessionID, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt)
+// BumpGeneration increments the generation counter, resets generation_started_at,
+// clears the Claude session UUID (so the next turn starts fresh), stamps a new
+// prefix_hash, and clears rotate_pending + compact_state. Returns the new
+// generation number.
+func (s *Store) BumpGeneration(chatID, threadID int64, newPrefixHash string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var gen int64
+	err = tx.QueryRow(`
+		SELECT generation FROM sessions WHERE chat_id = ? AND message_thread_id = ?
+	`, chatID, threadID).Scan(&gen)
+	if err != nil {
+		return 0, err
+	}
+	gen++
+
+	_, err = tx.Exec(`
+		UPDATE sessions SET
+			generation = ?,
+			generation_started_at = CURRENT_TIMESTAMP,
+			claude_session_id = '',
+			prefix_hash = ?,
+			rotate_pending = 0,
+			compact_state = '',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE chat_id = ? AND message_thread_id = ?
+	`, gen, newPrefixHash, chatID, threadID)
+	if err != nil {
+		return 0, err
+	}
+	return gen, tx.Commit()
+}
+
+// SetRotatePending flags a session for rotation on its next turn. Soft
+// triggers (7-day age, pinned delta over budget) call this; the bridge
+// checks the flag before each Send and calls BumpGeneration if set.
+func (s *Store) SetRotatePending(chatID, threadID int64, pending bool) error {
+	v := 0
+	if pending {
+		v = 1
+	}
+	_, err := s.db.Exec(`
+		UPDATE sessions SET rotate_pending = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE chat_id = ? AND message_thread_id = ?
+	`, v, chatID, threadID)
+	return err
+}
+
+// SetCompactState records the proactive-compaction state machine transition:
+// '' (idle) or 'compacting' (background /compact in flight).
+func (s *Store) SetCompactState(chatID, threadID int64, state string) error {
+	_, err := s.db.Exec(`
+		UPDATE sessions SET compact_state = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE chat_id = ? AND message_thread_id = ?
+	`, state, chatID, threadID)
+	return err
+}
+
+// SaveSessionSummary writes the carry-forward artifact for a closed generation.
+// Called by rotateSession() just before BumpGeneration. memoryPack is a JSON
+// blob (schema owned by bridge); empty string is valid.
+func (s *Store) SaveSessionSummary(chatID, threadID, generation int64, summary, memoryPack string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO session_summaries (chat_id, message_thread_id, generation, summary, memory_pack)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(chat_id, message_thread_id, generation) DO UPDATE SET
+			summary = excluded.summary,
+			memory_pack = excluded.memory_pack,
+			closed_at = CURRENT_TIMESTAMP
+	`, chatID, threadID, generation, summary, memoryPack)
+	return err
+}
+
+// GetLatestSessionSummary returns the most recently closed generation's
+// summary for a chat+thread, or nil if no prior generation exists.
+// Used on fresh-session turns after rotation to build the carry-forward pack.
+func (s *Store) GetLatestSessionSummary(chatID, threadID int64) (*SessionSummary, error) {
+	row := s.db.QueryRow(`
+		SELECT id, chat_id, message_thread_id, generation, closed_at, summary, memory_pack
+		FROM session_summaries
+		WHERE chat_id = ? AND message_thread_id = ?
+		ORDER BY generation DESC LIMIT 1
+	`, chatID, threadID)
+
+	var sm SessionSummary
+	err := row.Scan(&sm.ID, &sm.ChatID, &sm.ThreadID, &sm.Generation, &sm.ClosedAt, &sm.Summary, &sm.MemoryPack)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	return &sm, nil
+}
+
+// SessionThreadID returns the message_thread_id for a session row by its
+// primary key, or 0 if the row doesn't exist. Used by reactions to resolve
+// which topic a previously-mapped exchange belongs to.
+func (s *Store) SessionThreadID(sessionID int64) int64 {
+	var threadID int64
+	err := s.db.QueryRow(`SELECT message_thread_id FROM sessions WHERE id = ?`, sessionID).Scan(&threadID)
+	if err != nil {
+		return 0
+	}
+	return threadID
+}
+
+func (s *Store) GetSession(chatID, threadID int64) (*Session, error) {
+	row := s.db.QueryRow(`
+		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state
+		FROM sessions WHERE chat_id = ? AND message_thread_id = ?
+	`, chatID, threadID)
+	return scanSession(row)
+}
+
+// scanSession extracts a Session from a row including lifecycle fields.
+// Accepts anything with a Scan method matching the 12-column SELECT used by
+// GetSession and ListActiveSessions.
+func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
+	var sess Session
+	var rotatePending int
+	var genStarted sql.NullTime
+	err := row.Scan(
+		&sess.ID, &sess.ChatID, &sess.MessageThreadID, &sess.ProviderSessionID,
+		&sess.Status, &sess.CreatedAt, &sess.UpdatedAt,
+		&sess.Generation, &sess.PrefixHash, &genStarted, &rotatePending, &sess.CompactState,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if genStarted.Valid {
+		sess.GenerationStartedAt = genStarted.Time
+	} else {
+		sess.GenerationStartedAt = sess.CreatedAt
+	}
+	sess.RotatePending = rotatePending != 0
 	return &sess, nil
 }
 
@@ -293,6 +586,43 @@ func (s *Store) UpdateMessageMapResponse(id int64, botResponse string) error {
 	return err
 }
 
+// RecentExchanges returns the last N (user, bot) exchanges for a session
+// ordered from oldest to newest. Used to build rotation summaries — we pull
+// the tail of the conversation as a cheap mechanical summary before handing
+// it to ghost for semantic enrichment.
+func (s *Store) RecentExchanges(sessionID int64, limit int) ([]MessageMap, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.Query(`
+		SELECT id, chat_id, user_message_id, bot_message_id, session_id,
+		       user_message, bot_response, created_at
+		FROM message_map
+		WHERE session_id = ?
+		ORDER BY id DESC
+		LIMIT ?
+	`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []MessageMap
+	for rows.Next() {
+		var m MessageMap
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.UserMessageID, &m.BotMessageID, &m.SessionID,
+			&m.UserMessage, &m.BotResponse, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	// Reverse to chronological order.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 // DeleteMessageMap deletes a single message_map entry by its row ID.
 func (s *Store) DeleteMessageMap(id int64) error {
 	_, err := s.db.Exec("DELETE FROM message_map WHERE id = ?", id)
@@ -325,34 +655,56 @@ func (s *Store) DeleteExchangeMessages(sessionID int64, userMessage, botResponse
 	return nil
 }
 
-func (s *Store) DeleteSession(chatID int64) error {
+// DeleteSession deletes the session(s) for a chat. If threadID >= 0, only
+// the session for that specific topic is deleted. Pass -1 to delete ALL
+// topic sessions for the chat (used by /new and DeleteSession CLI).
+func (s *Store) DeleteSession(chatID, threadID int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
+	allTopics := threadID < 0
+
+	var sessionFilter string
+	var sessionArgs []any
+	if allTopics {
+		sessionFilter = `SELECT id FROM sessions WHERE chat_id = ?`
+		sessionArgs = []any{chatID}
+	} else {
+		sessionFilter = `SELECT id FROM sessions WHERE chat_id = ? AND message_thread_id = ?`
+		sessionArgs = []any{chatID, threadID}
+	}
+
 	// Delete message_map entries first
-	_, err = tx.Exec(`
-		DELETE FROM message_map WHERE session_id IN (
-			SELECT id FROM sessions WHERE chat_id = ?
-		)
-	`, chatID)
+	_, err = tx.Exec(`DELETE FROM message_map WHERE session_id IN (`+sessionFilter+`)`, sessionArgs...)
 	if err != nil {
 		return err
 	}
 
 	// Delete messages
-	_, err = tx.Exec(`
-		DELETE FROM messages WHERE session_id IN (
-			SELECT id FROM sessions WHERE chat_id = ?
-		)
-	`, chatID)
+	_, err = tx.Exec(`DELETE FROM messages WHERE session_id IN (`+sessionFilter+`)`, sessionArgs...)
 	if err != nil {
 		return err
 	}
 
-	_, err = tx.Exec(`DELETE FROM sessions WHERE chat_id = ?`, chatID)
+	if allTopics {
+		_, err = tx.Exec(`DELETE FROM sessions WHERE chat_id = ?`, chatID)
+	} else {
+		_, err = tx.Exec(`DELETE FROM sessions WHERE chat_id = ? AND message_thread_id = ?`, chatID, threadID)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Cascade session summaries — carry-forward artifacts are meaningless
+	// once the session is gone.
+	if allTopics {
+		_, err = tx.Exec(`DELETE FROM session_summaries WHERE chat_id = ?`, chatID)
+	} else {
+		_, err = tx.Exec(`DELETE FROM session_summaries WHERE chat_id = ? AND message_thread_id = ?`, chatID, threadID)
+	}
 	if err != nil {
 		return err
 	}
@@ -360,17 +712,18 @@ func (s *Store) DeleteSession(chatID int64) error {
 	return tx.Commit()
 }
 
-func (s *Store) UpdateSessionStatus(chatID int64, status string) error {
+func (s *Store) UpdateSessionStatus(chatID, threadID int64, status string) error {
 	_, err := s.db.Exec(`
 		UPDATE sessions SET status = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE chat_id = ?
-	`, status, chatID)
+		WHERE chat_id = ? AND message_thread_id = ?
+	`, status, chatID, threadID)
 	return err
 }
 
 func (s *Store) ListActiveSessions() ([]Session, error) {
 	rows, err := s.db.Query(`
-		SELECT id, chat_id, claude_session_id, status, created_at, updated_at
+		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state
 		FROM sessions WHERE status = 'active' ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -380,19 +733,27 @@ func (s *Store) ListActiveSessions() ([]Session, error) {
 
 	var sessions []Session
 	for rows.Next() {
-		var sess Session
-		if err := rows.Scan(&sess.ID, &sess.ChatID, &sess.ProviderSessionID, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		sess, err := scanSession(rows)
+		if err != nil {
 			return nil, err
 		}
-		sessions = append(sessions, sess)
+		if sess != nil {
+			sessions = append(sessions, *sess)
+		}
 	}
 	return sessions, nil
 }
 
-func (s *Store) StaleSessionChatIDs(idleDuration time.Duration) ([]int64, error) {
+// StaleSessionRef identifies a stale session by its (chat_id, message_thread_id) key.
+type StaleSessionRef struct {
+	ChatID   int64
+	ThreadID int64
+}
+
+func (s *Store) StaleSessionRefs(idleDuration time.Duration) ([]StaleSessionRef, error) {
 	cutoff := time.Now().Add(-idleDuration)
 	rows, err := s.db.Query(`
-		SELECT chat_id FROM sessions
+		SELECT chat_id, message_thread_id FROM sessions
 		WHERE status = 'active' AND updated_at < ?
 	`, cutoff)
 	if err != nil {
@@ -400,15 +761,15 @@ func (s *Store) StaleSessionChatIDs(idleDuration time.Duration) ([]int64, error)
 	}
 	defer rows.Close()
 
-	var ids []int64
+	var refs []StaleSessionRef
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var r StaleSessionRef
+		if err := rows.Scan(&r.ChatID, &r.ThreadID); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		refs = append(refs, r)
 	}
-	return ids, nil
+	return refs, nil
 }
 
 // SaveSchedule inserts a new schedule and returns its ID.

@@ -20,12 +20,12 @@ func testStore(t *testing.T) *Store {
 func TestSaveAndGetSession(t *testing.T) {
 	s := testStore(t)
 
-	err := s.SaveSession(12345, "claude-sess-abc")
+	err := s.SaveSession(12345, 0, "claude-sess-abc")
 	if err != nil {
 		t.Fatalf("save session: %v", err)
 	}
 
-	sess, err := s.GetSession(12345)
+	sess, err := s.GetSession(12345, 0)
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestSaveAndGetSession(t *testing.T) {
 func TestGetSession_NotFound(t *testing.T) {
 	s := testStore(t)
 
-	sess, err := s.GetSession(99999)
+	sess, err := s.GetSession(99999, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,10 +55,10 @@ func TestGetSession_NotFound(t *testing.T) {
 func TestSaveSession_Upsert(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	s.SaveSession(100, "sess-2")
+	s.SaveSession(100, 0, "sess-1")
+	s.SaveSession(100, 0, "sess-2")
 
-	sess, err := s.GetSession(100)
+	sess, err := s.GetSession(100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +70,8 @@ func TestSaveSession_Upsert(t *testing.T) {
 func TestLogAndGetMessages(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 
 	s.LogMessage(sess.ID, "user", "hello")
 	s.LogMessage(sess.ID, "assistant", "hi there")
@@ -95,16 +95,16 @@ func TestLogAndGetMessages(t *testing.T) {
 func TestDeleteSession(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 	s.LogMessage(sess.ID, "user", "hello")
 
-	err := s.DeleteSession(100)
+	err := s.DeleteSession(100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sess, err = s.GetSession(100)
+	sess, err = s.GetSession(100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,8 +116,8 @@ func TestDeleteSession(t *testing.T) {
 func TestListActiveSessions(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	s.SaveSession(200, "sess-2")
+	s.SaveSession(100, 0, "sess-1")
+	s.SaveSession(200, 0, "sess-2")
 
 	sessions, err := s.ListActiveSessions()
 	if err != nil {
@@ -131,8 +131,8 @@ func TestListActiveSessions(t *testing.T) {
 func TestSaveAndGetMessageMap(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 
 	err := s.SaveMessageMap(100, 10, 20, sess.ID, "hello world", "hi there")
 	if err != nil {
@@ -181,11 +181,11 @@ func TestGetMessageMap_NotFound(t *testing.T) {
 func TestDeleteSession_CascadesMessageMap(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 	s.SaveMessageMap(100, 10, 20, sess.ID, "hello", "hi")
 
-	err := s.DeleteSession(100)
+	err := s.DeleteSession(100, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,8 +202,8 @@ func TestDeleteSession_CascadesMessageMap(t *testing.T) {
 func TestSaveMessageMap_MultipleChunks(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 
 	// Simulate chunked response: multiple bot messages for one user message
 	s.SaveMessageMap(100, 10, 20, sess.ID, "hello", "response part 1")
@@ -227,8 +227,8 @@ func TestSaveMessageMap_MultipleChunks(t *testing.T) {
 func TestDeleteMessageMap(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 	s.SaveMessageMap(100, 10, 20, sess.ID, "hello", "hi")
 
 	m, _ := s.GetMessageMapByBotMsg(100, 20)
@@ -253,8 +253,8 @@ func TestDeleteMessageMap(t *testing.T) {
 func TestUpdateMessageMapResponse(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 	s.SaveMessageMap(100, 10, 20, sess.ID, "question", "old answer")
 
 	m, _ := s.GetMessageMapByBotMsg(100, 20)
@@ -283,8 +283,8 @@ func TestUpdateMessageMapResponse(t *testing.T) {
 func TestDeleteExchangeMessages(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
-	sess, _ := s.GetSession(100)
+	s.SaveSession(100, 0, "sess-1")
+	sess, _ := s.GetSession(100, 0)
 
 	s.LogMessage(sess.ID, "user", "first question")
 	s.LogMessage(sess.ID, "assistant", "first answer")
@@ -308,17 +308,200 @@ func TestDeleteExchangeMessages(t *testing.T) {
 	}
 }
 
-func TestStaleSessionChatIDs(t *testing.T) {
+func TestStaleSessionRefs(t *testing.T) {
 	s := testStore(t)
 
-	s.SaveSession(100, "sess-1")
+	s.SaveSession(100, 0, "sess-1")
 
 	// With a very short idle duration, nothing should be stale yet
-	ids, err := s.StaleSessionChatIDs(24 * time.Hour)
+	refs, err := s.StaleSessionRefs(24 * time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 0 {
-		t.Errorf("expected 0 stale sessions, got %d", len(ids))
+	if len(refs) != 0 {
+		t.Errorf("expected 0 stale sessions, got %d", len(refs))
+	}
+}
+
+func TestSession_LifecycleFields_DefaultsOnFreshRow(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.SaveSession(100, 0, "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.GetSession(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess == nil {
+		t.Fatal("expected session")
+	}
+	if sess.Generation != 1 {
+		t.Errorf("expected generation=1 on fresh row, got %d", sess.Generation)
+	}
+	if sess.PrefixHash != "" {
+		t.Errorf("expected empty prefix_hash on fresh row, got %q", sess.PrefixHash)
+	}
+	if sess.RotatePending {
+		t.Error("expected rotate_pending=false on fresh row")
+	}
+	if sess.CompactState != "" {
+		t.Errorf("expected empty compact_state on fresh row, got %q", sess.CompactState)
+	}
+	if sess.GenerationStartedAt.IsZero() {
+		t.Error("expected generation_started_at to be set on fresh row")
+	}
+}
+
+func TestSession_SaveSessionPreservesLifecycleFields(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.SaveSession(100, 0, "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPrefixHash(100, 0, "hash-abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRotatePending(100, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetCompactState(100, 0, "compacting"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-saving (simulating a normal turn write-back) must NOT clobber
+	// lifecycle fields.
+	if err := s.SaveSession(100, 0, "sess-2"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.GetSession(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ProviderSessionID != "sess-2" {
+		t.Errorf("expected UUID advance to sess-2, got %s", sess.ProviderSessionID)
+	}
+	if sess.PrefixHash != "hash-abc" {
+		t.Errorf("prefix_hash clobbered: got %q", sess.PrefixHash)
+	}
+	if !sess.RotatePending {
+		t.Error("rotate_pending clobbered")
+	}
+	if sess.CompactState != "compacting" {
+		t.Errorf("compact_state clobbered: got %q", sess.CompactState)
+	}
+}
+
+func TestSession_BumpGeneration(t *testing.T) {
+	s := testStore(t)
+	s.SaveSession(100, 0, "sess-1")
+	s.SetPrefixHash(100, 0, "old-hash")
+	s.SetRotatePending(100, 0, true)
+	s.SetCompactState(100, 0, "compacting")
+
+	newGen, err := s.BumpGeneration(100, 0, "new-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newGen != 2 {
+		t.Errorf("expected generation 2, got %d", newGen)
+	}
+
+	sess, _ := s.GetSession(100, 0)
+	if sess.Generation != 2 {
+		t.Errorf("generation not persisted: got %d", sess.Generation)
+	}
+	if sess.PrefixHash != "new-hash" {
+		t.Errorf("prefix_hash not updated: got %q", sess.PrefixHash)
+	}
+	if sess.ProviderSessionID != "" {
+		t.Errorf("expected claude_session_id cleared on rotation, got %q", sess.ProviderSessionID)
+	}
+	if sess.RotatePending {
+		t.Error("expected rotate_pending cleared on rotation")
+	}
+	if sess.CompactState != "" {
+		t.Error("expected compact_state cleared on rotation")
+	}
+}
+
+func TestSession_SaveAndGetSessionSummary(t *testing.T) {
+	s := testStore(t)
+	s.SaveSession(100, 0, "sess-1")
+
+	if err := s.SaveSessionSummary(100, 0, 1, "prior convo: lunch talk", `{"memories":["prefer Asian"]}`); err != nil {
+		t.Fatal(err)
+	}
+	sm, err := s.GetLatestSessionSummary(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sm == nil {
+		t.Fatal("expected summary")
+	}
+	if sm.Generation != 1 {
+		t.Errorf("expected generation 1, got %d", sm.Generation)
+	}
+	if sm.Summary != "prior convo: lunch talk" {
+		t.Errorf("summary round-trip mismatch: %q", sm.Summary)
+	}
+	if sm.MemoryPack != `{"memories":["prefer Asian"]}` {
+		t.Errorf("memory_pack round-trip mismatch: %q", sm.MemoryPack)
+	}
+
+	// Writing generation 2 → GetLatest should return it.
+	s.SaveSessionSummary(100, 0, 2, "later convo", "")
+	sm, _ = s.GetLatestSessionSummary(100, 0)
+	if sm.Generation != 2 {
+		t.Errorf("expected latest generation 2, got %d", sm.Generation)
+	}
+}
+
+func TestSession_DeleteSessionCascadesSummaries(t *testing.T) {
+	s := testStore(t)
+	s.SaveSession(100, 0, "sess-1")
+	s.SaveSessionSummary(100, 0, 1, "summary", "")
+
+	if err := s.DeleteSession(100, 0); err != nil {
+		t.Fatal(err)
+	}
+	sm, _ := s.GetLatestSessionSummary(100, 0)
+	if sm != nil {
+		t.Error("expected session summary to be deleted with session")
+	}
+}
+
+func TestSession_ThreadIsolation(t *testing.T) {
+	s := testStore(t)
+
+	// Two topics in the same chat → two distinct sessions.
+	if err := s.SaveSession(100, 0, "sess-main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSession(100, 42, "sess-topic42"); err != nil {
+		t.Fatal(err)
+	}
+
+	main, _ := s.GetSession(100, 0)
+	topic, _ := s.GetSession(100, 42)
+	if main == nil || topic == nil {
+		t.Fatal("expected both sessions to exist")
+	}
+	if main.ProviderSessionID == topic.ProviderSessionID {
+		t.Error("main and topic sessions should have distinct provider session IDs")
+	}
+	if main.MessageThreadID != 0 || topic.MessageThreadID != 42 {
+		t.Errorf("thread ids wrong: main=%d topic=%d", main.MessageThreadID, topic.MessageThreadID)
+	}
+
+	// Delete just the topic session — main must remain.
+	if err := s.DeleteSession(100, 42); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetSession(100, 42); got != nil {
+		t.Error("expected topic session to be deleted")
+	}
+	if got, _ := s.GetSession(100, 0); got == nil {
+		t.Error("main session was erroneously deleted")
 	}
 }

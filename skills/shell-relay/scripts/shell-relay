@@ -1,27 +1,45 @@
 #!/bin/sh
-# shell-relay — relay message to another chat
+# shell-relay — relay message to another chat (or a specific forum topic)
 set -e
 
 SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
 URL="http://bridge/relay"
 
 CHAT_ID=""
+THREAD_ID="0"
 MESSAGE=""
+IMAGE_PATH=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --chat-id) CHAT_ID="$2"; shift 2 ;;
+    --thread-id|--topic-id|--message-thread-id) THREAD_ID="$2"; shift 2 ;;
     --message) MESSAGE="$2"; shift 2 ;;
+    --image-path) IMAGE_PATH="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
 
-if [ -z "$CHAT_ID" ] || [ -z "$MESSAGE" ]; then
-  echo "usage: shell-relay --chat-id <id> --message <text>" >&2
+if [ -z "$CHAT_ID" ]; then
+  echo "usage: shell-relay --chat-id <id> [--thread-id <topic>] --message <text> [--image-path <path>]" >&2
+  exit 1
+fi
+if [ -z "$MESSAGE" ] && [ -z "$IMAGE_PATH" ]; then
+  echo "usage: shell-relay --chat-id <id> [--thread-id <topic>] --message <text> [--image-path <path>]" >&2
   exit 1
 fi
 
-BODY=$(python3 -c "import json; print(json.dumps({'chat_id': int('$CHAT_ID'), 'message': '''$MESSAGE'''}))")
+BODY=$(CHAT_ID="$CHAT_ID" THREAD_ID="$THREAD_ID" MESSAGE="$MESSAGE" IMAGE_PATH="$IMAGE_PATH" python3 -c '
+import json, os
+body = {
+    "chat_id": int(os.environ["CHAT_ID"]),
+    "message_thread_id": int(os.environ.get("THREAD_ID", "0") or 0),
+    "message": os.environ.get("MESSAGE", ""),
+}
+if os.environ.get("IMAGE_PATH"):
+    body["image_path"] = os.environ["IMAGE_PATH"]
+print(json.dumps(body))
+')
 
 RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$BODY")
 

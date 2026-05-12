@@ -99,6 +99,13 @@ func New(cfg config.Config) (*Daemon, error) {
 		// Per-agent skills: ~/.shell/agents/<name>/skills/
 		// Derived from PID file directory (e.g. ~/.shell/agents/umbreonmini/skills/)
 		agentSkillsDir := filepath.Join(pidDir, "skills")
+
+		// Install/refresh the run-skill wrapper that agents use to invoke
+		// their own skills with USAGE.jsonl logging. Safe on every startup.
+		if err := skill.EnsureRunSkillWrapper(agentSkillsDir); err != nil {
+			slog.Warn("run-skill wrapper install failed", "dir", agentSkillsDir, "error", err)
+		}
+
 		if s, err := skill.LoadDir(agentSkillsDir); err == nil {
 			allSkills = append(allSkills, s...)
 			if len(s) > 0 {
@@ -130,6 +137,22 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Merge all allowed-tools.
 	allowedTools := cfg.Claude.AllowedTools
 	allowedTools = append(allowedTools, toolReg.AllowedTools()...)
+
+	// Skill authoring perimeter: agents can Write inside their playground and
+	// per-agent skills dir, and invoke skills via the run-skill wrapper.
+	// Scoped narrowly so a buggy skill can't touch the wider filesystem.
+	if cfg.Skills.Enabled {
+		if cfg.Claude.PlaygroundDir != "" {
+			allowedTools = append(allowedTools,
+				"Write("+cfg.Claude.PlaygroundDir+"/**)",
+				"Edit("+cfg.Claude.PlaygroundDir+"/**)",
+				"Bash(cd "+cfg.Claude.PlaygroundDir+":*)")
+		}
+		allowedTools = append(allowedTools,
+			"Write("+agentSkillsDir+"/**)",
+			"Edit("+agentSkillsDir+"/**)",
+			"Bash("+agentSkillsDir+"/run-skill:*)")
+	}
 
 	// Derive per-agent socket and MCP config paths from PID file directory.
 	bridgeSockPath := filepath.Join(pidDir, "bridge.sock")
@@ -202,6 +225,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		SettingsPath:   agentSettingsPath,
 		AgentNS:        agentNS,
 		GhostDB:        cfg.Memory.DBPath,
+		BotUsername:    cfg.Agent.BotUsername,
 	})
 
 	// Legacy: inject shell:capabilities into system namespaces for profiles without AgentNS.
@@ -376,6 +400,21 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
+	// Open shared task store for task decomposition and delegation.
+	var taskStore *transcript.TaskStore
+	{
+		taskStorePath := filepath.Join(config.DefaultConfigDir(), "shared", "tasks.db")
+		if err := os.MkdirAll(filepath.Dir(taskStorePath), 0o755); err != nil {
+			slog.Warn("failed to create task store directory", "error", err)
+		} else if ts, err := transcript.OpenTaskStore(taskStorePath); err != nil {
+			slog.Warn("failed to open task store", "error", err)
+		} else {
+			taskStore = ts
+			br.SetTaskStore(ts)
+			slog.Info("shared task store enabled", "path", taskStorePath)
+		}
+	}
+
 	// Create telegram bot with agent identity for group chat routing.
 	token := cfg.TelegramToken()
 
@@ -420,21 +459,21 @@ func New(cfg config.Config) (*Daemon, error) {
 		TunnelMgr:  tunnelMgr,
 		Store:      st,
 		Memory:     mem,
-		Notify: func(chatID int64, msg string) {
-			bot.SendText(chatID, msg)
+		Notify: func(chatID, threadID int64, msg string) {
+			bot.SendText(chatID, threadID, msg)
 		},
-		SendPhoto: func(chatID int64, data []byte, caption string) {
-			bot.SendPhoto(chatID, data, caption)
+		SendPhoto: func(chatID, threadID int64, data []byte, caption string) {
+			bot.SendPhoto(chatID, threadID, data, caption)
 		},
-		RelayToBridge: func(ctx context.Context, chatID int64, message string) {
+		RelayToBridge: func(ctx context.Context, chatID, threadID int64, message string) {
 			// Log the relay message to the target chat's session so Claude
 			// has context when the recipient replies. Don't run a full Claude
 			// turn — that would block the session and cause "busy" rejections.
-			sess, err := st.GetSession(chatID)
+			sess, err := st.GetSession(chatID, threadID)
 			if err == nil && sess != nil {
 				st.LogMessage(sess.ID, "assistant", "[Relay message]\n"+message)
 			}
-			bot.SendText(chatID, message)
+			bot.SendText(chatID, threadID, message)
 		},
 		CronParse: func(expr string) (interface{ Next(time.Time) time.Time }, error) {
 			return scheduler.ParseCron(expr)
@@ -449,37 +488,52 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			return reg.FullPrompt(name)
 		},
-		Timezone: cfg.Scheduler.Timezone,
+		Timezone:    cfg.Scheduler.Timezone,
+		TaskStore:   taskStore,
+		BotUsername: cfg.Agent.BotUsername,
 	})
 
 	// Initialize scheduler if enabled.
 	var sched *scheduler.Scheduler
 	if cfg.Scheduler.Enabled {
 		adapter := scheduler.NewStoreAdapter(st)
+		// Scheduler callbacks operate on main-thread sessions (thread_id = 0).
+		// Per-topic scheduling is not supported today — schedule entries target
+		// chat_id only. If we ever need topic-targeted schedules, extend the
+		// scheduler adapter + store.Schedule to carry thread_id.
 		onNotify := func(chatID int64, msg string) {
-			bot.SendText(chatID, msg)
+			if bridge.IsSystemChat(chatID) {
+				slog.Debug("system chat: skipping telegram send", "len", len(msg))
+				return
+			}
+			bot.SendText(chatID, 0, msg)
 		}
 		onPrompt := func(chatID int64, msg string) {
 			// Route through bridge as if user sent it
-			resp, err := br.HandleMessageStreaming(context.Background(), chatID, msg, "scheduler", nil, nil, nil)
+			resp, err := br.HandleMessageStreaming(context.Background(), chatID, 0, msg, "scheduler", nil, nil, nil)
 			if err != nil {
 				slog.Error("scheduler prompt failed", "chat_id", chatID, "error", err)
 				return
 			}
-			for _, photo := range resp.Photos {
-				bot.SendPhoto(chatID, photo.Data, photo.Caption)
+			if bridge.IsSystemChat(chatID) {
+				return
 			}
-			bot.SendText(chatID, resp.Text)
+			for _, photo := range resp.Photos {
+				bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)
+			}
+			bot.SendText(chatID, 0, resp.Text)
 		}
 		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
 		sched.SetQuietHours(cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd)
 		sched.SetHeartbeatPrompt(func(chatID int64, msg string) (string, error) {
-			resp, err := br.HandleMessageStreaming(context.Background(), chatID, msg, "heartbeat", nil, nil, nil)
+			resp, err := br.HandleMessageStreaming(context.Background(), chatID, 0, msg, "heartbeat", nil, nil, nil)
 			if err != nil {
 				return "", err
 			}
-			for _, photo := range resp.Photos {
-				bot.SendPhoto(chatID, photo.Data, photo.Caption)
+			if !bridge.IsSystemChat(chatID) {
+				for _, photo := range resp.Photos {
+					bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)
+				}
 			}
 			return resp.Text, nil
 		})
@@ -489,6 +543,85 @@ func New(cfg config.Config) (*Daemon, error) {
 				sched.SetIdleInterval(d)
 			}
 		}
+		// Configure deep reflection interval (every Nth heartbeat uses stronger model).
+		if cfg.Scheduler.DeepReflectInterval > 0 {
+			sched.SetDeepReflectInterval(cfg.Scheduler.DeepReflectInterval)
+		}
+
+		// Wire task polling if task store is available.
+		if taskStore != nil {
+			botUser := cfg.Agent.BotUsername
+			sched.SetTaskPoll(
+				// Poll: consume events and expire overdue tasks.
+				func() []string {
+					if n, err := taskStore.ExpireOverdueTasks(); err != nil {
+						slog.Warn("scheduler: task TTL check failed", "error", err)
+					} else if n > 0 {
+						slog.Info("scheduler: expired overdue tasks", "count", n)
+					}
+					events, err := taskStore.ConsumeEvents(botUser)
+					if err != nil {
+						slog.Error("scheduler: failed to consume events", "error", err)
+						return nil
+					}
+					var payloads []string
+					for _, e := range events {
+						if e.EventType == "task.created" {
+							payloads = append(payloads, e.Payload)
+						}
+						// task.completed and task.failed are informational —
+						// the originating agent sees them in next heartbeat context.
+						if e.EventType == "task.completed" || e.EventType == "task.failed" {
+							slog.Info("scheduler: task event received", "type", e.EventType, "payload_len", len(e.Payload))
+						}
+					}
+					return payloads
+				},
+				// Process: fire a Claude session in the task's originating chat context.
+				func(payload string) {
+					// Parse the task event payload to extract task details.
+					var data struct {
+						TaskID      string `json:"task_id"`
+						ChatID      int64  `json:"chat_id"`
+						FromAgent   string `json:"from_agent"`
+						Description string `json:"description"`
+						GoalID      string `json:"goal_id"`
+					}
+					if err := json.Unmarshal([]byte(payload), &data); err != nil {
+						slog.Error("scheduler: failed to parse task event", "error", err)
+						return
+					}
+
+					// Build task prompt for a fresh Claude session.
+					taskPrompt := fmt.Sprintf("[Task] id=%s", data.TaskID)
+					if data.GoalID != "" {
+						taskPrompt += fmt.Sprintf(" goal=%s", data.GoalID)
+					}
+					if data.FromAgent != "" && data.FromAgent != botUser {
+						taskPrompt += fmt.Sprintf(" from=%s", data.FromAgent)
+					}
+					taskPrompt += fmt.Sprintf("\n%s", data.Description)
+
+					// Look up full task for context field.
+					if t, err := taskStore.GetTask(data.TaskID); err == nil && t != nil && t.Context != "" {
+						taskPrompt += fmt.Sprintf("\n\nContext: %s", t.Context)
+					}
+
+					taskPrompt += "\n\nProcess this task. When done: scripts/shell-task complete --id " + data.TaskID + " --result \"your findings\""
+					taskPrompt += "\nIf you cannot complete it: scripts/shell-task fail --id " + data.TaskID + " --reason \"why\""
+					if data.ChatID != 0 {
+						taskPrompt += fmt.Sprintf("\n\nOriginating chat: %d (use shell-relay if you need to send results there)", data.ChatID)
+					}
+
+					// Always process tasks in SystemChat (agent's inner monologue) to avoid
+					// preemption by user messages in the originating chat session.
+					slog.Info("scheduler: firing task prompt", "task_id", data.TaskID, "system_chat", bridge.SystemChatID)
+					onPrompt(bridge.SystemChatID, taskPrompt)
+				},
+			)
+			slog.Info("scheduler: task polling enabled", "agent", botUser)
+		}
+
 		br.SetSchedulerConfig(true, cfg.Scheduler.Timezone)
 		if cfg.Scheduler.HeartbeatInterval != "" {
 			br.SetHeartbeatInterval(cfg.Scheduler.HeartbeatInterval)
@@ -499,69 +632,12 @@ func New(cfg config.Config) (*Daemon, error) {
 			"heartbeat_interval", cfg.Scheduler.HeartbeatInterval,
 			"heartbeat_idle_interval", cfg.Scheduler.HeartbeatIdleInterval,
 		)
-
-		// Seed schedule docs into memory so they're always visible in system prompt.
-		if mem != nil {
-			if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "scheduling",
-				"Schedule capabilities: Use scripts/shell-schedule for one-shot or recurring reminders. "+
-					"Commands: /schedule add|list|delete|enable|pause. Supports @daily, @hourly, @weekly, @monthly aliases. "+
-					"Use --tz flag for per-schedule timezone override."); err != nil {
-				slog.Warn("failed to seed schedule docs", "error", err)
-			}
-			if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "heartbeat-learning",
-				"Heartbeat self-improvement: During [Heartbeat] check-ins, recent conversations and previous "+
-					"insights are provided. Use scripts/shell-remember --action heartbeat-learning to store reusable "+
-					"patterns discovered during heartbeats."); err != nil {
-				slog.Warn("failed to seed heartbeat-learning docs", "error", err)
-			}
-		}
-	}
-
-	// Seed skill-authoring docs if skills are enabled.
-	if cfg.Skills.Enabled && mem != nil {
-		if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "skill-authoring",
-			fmt.Sprintf("Skill authoring: You can create new skills to expand your capabilities. "+
-				"To create a skill, write a SKILL.md file and optional scripts/ directory to your agent skills directory: %s/. "+
-				"SKILL.md format: frontmatter (--- delimited) with name, description, allowed-tools fields, "+
-				"followed by markdown instructions. Scripts must be executable (chmod +x). "+
-				"After creating a skill, run `scripts/shell-reload` to hot-load it immediately. "+
-				"The skill will then appear in your system prompt on the next message. "+
-				"Use this when you notice a recurring need that could be automated — "+
-				"e.g., API integrations, data processing, custom workflows.",
-				agentSkillsDir)); err != nil {
-			slog.Warn("failed to seed skill-authoring docs", "error", err)
-		}
 	}
 
 	// Always set timezone on bridge so the agent knows current time,
 	// even when the scheduler is disabled.
 	if !cfg.Scheduler.Enabled && cfg.Scheduler.Timezone != "" {
 		br.SetTimezone(cfg.Scheduler.Timezone)
-	}
-
-	// Seed playground docs into memory if configured.
-	if cfg.Claude.PlaygroundDir != "" && mem != nil {
-		if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "playground",
-			fmt.Sprintf("Playground directory: %s — You have full write access to this directory. "+
-				"Create project subdirectories here (e.g. %s/my-app/) for web apps, experiments, and prototypes. "+
-				"Files here can be written and edited without permission prompts. "+
-				"IMPORTANT: When running web servers or long-running processes, ALWAYS run them in the background "+
-				"(e.g. 'nohup python -m http.server 8080 &' or 'node server.js &') so you can continue with "+
-				"other tasks like setting up tunnels. Never run a server in the foreground or your session will block.",
-				cfg.Claude.PlaygroundDir, cfg.Claude.PlaygroundDir)); err != nil {
-			slog.Warn("failed to seed playground docs", "error", err)
-		}
-	}
-
-	// Seed tunnel docs into memory if tunnels are enabled.
-	if tunnelMgr != nil && mem != nil {
-		if err := mem.SeedCapability(context.Background(), resolveAgentNS(cfg), "tunnel",
-			"HTTP tunnel capabilities: Use scripts/shell-tunnel to expose local ports via Cloudflare quick tunnel. "+
-				"Tunnels provide public URLs for local web apps. "+
-				"WORKFLOW: 1) Write app files, 2) Start server via scripts/shell-pm, "+
-				"3) Use scripts/shell-tunnel to expose it."); err != nil {
-			slog.Warn("failed to seed tunnel docs", "error", err)
-		}
 	}
 
 	d := &Daemon{
@@ -763,13 +839,14 @@ func (d *Daemon) restoreSessions() {
 	}
 	for _, sess := range sessions {
 		procSess := &process.Session{
-			ID:              fmt.Sprintf("%d", sess.ID),
-			ChatID:          sess.ChatID,
+			ID:                fmt.Sprintf("%d", sess.ID),
+			ChatID:            sess.ChatID,
+			MessageThreadID:   sess.MessageThreadID,
 			ProviderSessionID: sess.ProviderSessionID,
-			Status:          process.StatusActive,
-			HasHistory:      true,
-			CreatedAt:       sess.CreatedAt,
-			UpdatedAt:       sess.UpdatedAt,
+			Status:            process.StatusActive,
+			HasHistory:        true,
+			CreatedAt:         sess.CreatedAt,
+			UpdatedAt:         sess.UpdatedAt,
 		}
 		d.proc.Register(procSess)
 	}
@@ -854,12 +931,12 @@ type telegramTransport struct {
 	bot *telegram.Bot
 }
 
-func (t *telegramTransport) Notify(chatID int64, msg string) {
-	t.bot.SendText(chatID, msg)
+func (t *telegramTransport) Notify(chatID, threadID int64, msg string) {
+	t.bot.SendText(chatID, threadID, msg)
 }
 
-func (t *telegramTransport) SendPhoto(chatID int64, data []byte, caption string) {
-	t.bot.SendPhoto(chatID, data, caption)
+func (t *telegramTransport) SendPhoto(chatID, threadID int64, data []byte, caption string) {
+	t.bot.SendPhoto(chatID, threadID, data, caption)
 }
 
 // resolveAgentNS returns the first AgentNS found in config profiles, or "" for legacy mode.

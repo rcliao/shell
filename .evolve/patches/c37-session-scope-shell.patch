@@ -1,0 +1,15 @@
+# Session-scope wiring for shell — apply after bridge WIP commits.
+# Requires ghost >= a7d0fbe (ContextParams.Scope, ghost.SessionScope alias).
+#
+# Three hunks:
+#   1) add sessionScopeFor() helper near RelevantMemoryPack
+#   2) pass Scope to chat-scoped recall in InjectContext
+#   3) pass Scope to legacy-namespace path in InjectContext
+#   4) pass Scope to RelevantMemoryPack store.Context call
+#
+# Apply: cd ~/src/pikamini/projects/shell && git apply .evolve/patches/c37-session-scope-shell.patch
+
+diff --git a/internal/memory/memory.go b/internal/memory/memory.go
+index 525ac73..a6105e5 100644
+--- a/internal/memory/memory.go
++++ b/internal/memory/memory.go

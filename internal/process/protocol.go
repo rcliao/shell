@@ -211,10 +211,27 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 	hasStreamedText := false
 
 	// Accumulate all assistant text blocks across turns. The final "result"
-	// event only contains the last turn's text, so if Claude streams text
-	// then does tool calls and produces no more text, result.Text would be
-	// empty. We use this accumulator as a fallback.
+	// event only contains the last turn's text, so if Claude emits text both
+	// before and after tool calls, the earlier text would be dropped. allText
+	// is a strict superset of event.Result and is what we hand back.
 	var allText strings.Builder
+	// pendingSeparator becomes true after a tool_use; the next text append
+	// inserts "\n\n" so the pre-tool and post-tool prose don't get glued
+	// together with no whitespace.
+	var pendingSeparator bool
+	appendText := func(s string) {
+		if s == "" {
+			return
+		}
+		if pendingSeparator && allText.Len() > 0 {
+			allText.WriteString("\n\n")
+			if onUpdate != nil {
+				onUpdate("\n\n")
+			}
+		}
+		pendingSeparator = false
+		allText.WriteString(s)
+	}
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -238,7 +255,7 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 			if event.Event != nil && event.Event.Delta != nil && event.Event.Delta.Type == "text_delta" {
 				if event.Event.Delta.Text != "" {
 					hasStreamedText = true
-					allText.WriteString(event.Event.Delta.Text)
+					appendText(event.Event.Delta.Text)
 					if onUpdate != nil {
 						onUpdate(event.Event.Delta.Text)
 					}
@@ -257,7 +274,7 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 						// received — otherwise this is a duplicate of text
 						// already delivered incrementally.
 						if !hasStreamedText && block.Text != "" {
-							allText.WriteString(block.Text)
+							appendText(block.Text)
 							if onUpdate != nil {
 								onUpdate(block.Text)
 							}
@@ -268,12 +285,13 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 							Name:  block.Name,
 							Input: block.Input,
 						})
+						pendingSeparator = true
 						slog.Info("tool use", "name", block.Name, "id", block.ID)
 					}
 				}
 				// Plain string content (non-streaming fallback)
 				if !hasStreamedText && event.Message.Content.Text != "" {
-					allText.WriteString(event.Message.Content.Text)
+					appendText(event.Message.Content.Text)
 					if onUpdate != nil {
 						onUpdate(event.Message.Content.Text)
 					}
@@ -299,12 +317,14 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 			slog.Debug("bidirectional: control_response received")
 
 		case "result":
-			result.Text = event.Result
-			// If the CLI's final result is empty but we accumulated text
-			// from earlier turns, use that instead. This happens when Claude
-			// streams text, then does tool calls with no final text turn.
-			if result.Text == "" && allText.Len() > 0 {
+			// event.Result only contains the last text turn's text. If Claude
+			// emitted text both before and after tool calls, the earlier text
+			// would be dropped. allText is a strict superset, so prefer it
+			// and fall back to event.Result only if nothing was accumulated.
+			if allText.Len() > 0 {
 				result.Text = allText.String()
+			} else {
+				result.Text = event.Result
 			}
 			if event.SessionID != "" {
 				result.SessionID = event.SessionID

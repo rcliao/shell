@@ -3,6 +3,7 @@ package skill
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -200,6 +201,141 @@ func TestLoadDir_NonExistent(t *testing.T) {
 	}
 	if skills != nil {
 		t.Fatalf("expected nil skills for nonexistent dir, got %v", skills)
+	}
+}
+
+func TestLoad_TierField(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		md   string
+		want string
+	}{
+		{"hot", "---\nname: hot\ndescription: x\ntier: hot\n---\nbody", TierHot},
+		{"lazy", "---\nname: lazy\ndescription: x\ntier: lazy\n---\nbody", TierLazy},
+		{"core_explicit", "---\nname: cexp\ndescription: x\ntier: core\n---\nbody", TierCore},
+		{"core_legacy_wins", "---\nname: cleg\ndescription: x\ncore: true\ntier: lazy\n---\nbody", TierCore},
+		{"default_lazy", "---\nname: def\ndescription: x\n---\nbody", TierLazy},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := filepath.Join(dir, c.name)
+			os.MkdirAll(d, 0755)
+			os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(c.md), 0644)
+			s, err := Load(filepath.Join(d, "SKILL.md"))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if s.Tier != c.want {
+				t.Errorf("Tier = %q, want %q", s.Tier, c.want)
+			}
+		})
+	}
+}
+
+func TestLoadDir_VersionedLayout(t *testing.T) {
+	dir := t.TempDir()
+	skillRoot := filepath.Join(dir, "dairy-tally")
+	os.MkdirAll(filepath.Join(skillRoot, "v1"), 0755)
+	os.MkdirAll(filepath.Join(skillRoot, "v2"), 0755)
+
+	// ACTIVE points at v2.
+	os.WriteFile(filepath.Join(skillRoot, "ACTIVE"), []byte("v2\n"), 0644)
+
+	// v1 and v2 have different descriptions so we can tell them apart.
+	os.WriteFile(filepath.Join(skillRoot, "v1", "SKILL.md"),
+		[]byte("---\nname: dairy-tally\ndescription: v1 original\ntier: lazy\n---\nv1 body"),
+		0644)
+	os.WriteFile(filepath.Join(skillRoot, "v2", "SKILL.md"),
+		[]byte("---\nname: dairy-tally\ndescription: v2 improved\ntier: hot\n---\nv2 body"),
+		0644)
+
+	skills, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(skills) != 1 {
+		t.Fatalf("got %d skills, want 1", len(skills))
+	}
+	s := skills[0]
+	if s.Version != "v2" {
+		t.Errorf("Version = %q, want v2", s.Version)
+	}
+	if s.Description != "v2 improved" {
+		t.Errorf("Description = %q, want v2 improved", s.Description)
+	}
+	if s.Tier != TierHot {
+		t.Errorf("Tier = %q, want hot", s.Tier)
+	}
+	if s.SkillRoot != skillRoot {
+		t.Errorf("SkillRoot = %q, want %q", s.SkillRoot, skillRoot)
+	}
+	if !strings.HasSuffix(s.Dir, "/v2") {
+		t.Errorf("Dir = %q, expected suffix /v2", s.Dir)
+	}
+}
+
+func TestLoadDir_VersionedLayout_EmptyActive(t *testing.T) {
+	dir := t.TempDir()
+	skillRoot := filepath.Join(dir, "broken")
+	os.MkdirAll(filepath.Join(skillRoot, "v1"), 0755)
+	os.WriteFile(filepath.Join(skillRoot, "ACTIVE"), []byte("   \n"), 0644)
+	os.WriteFile(filepath.Join(skillRoot, "v1", "SKILL.md"),
+		[]byte("---\nname: broken\ndescription: x\n---\nbody"), 0644)
+
+	// Empty ACTIVE means this skill is invalid — should be silently skipped,
+	// not fall through to a flat SKILL.md (which doesn't exist here anyway).
+	skills, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(skills) != 0 {
+		t.Fatalf("expected 0 skills (empty ACTIVE is invalid), got %d", len(skills))
+	}
+}
+
+func TestLoadDir_VersionedLayout_PathTraversalBlocked(t *testing.T) {
+	dir := t.TempDir()
+	skillRoot := filepath.Join(dir, "sneaky")
+	os.MkdirAll(skillRoot, 0755)
+	os.WriteFile(filepath.Join(skillRoot, "ACTIVE"), []byte("../../etc\n"), 0644)
+
+	skills, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(skills) != 0 {
+		t.Fatalf("expected path-traversal ACTIVE to be rejected, got %d skills", len(skills))
+	}
+}
+
+func TestLoadDir_PlaygroundAndArchiveSkipped(t *testing.T) {
+	dir := t.TempDir()
+
+	// Valid skill.
+	real := filepath.Join(dir, "real")
+	os.MkdirAll(real, 0755)
+	os.WriteFile(filepath.Join(real, "SKILL.md"),
+		[]byte("---\nname: real\ndescription: real one\n---\nbody"), 0644)
+
+	// Reserved dirs — each contains a SKILL.md that SHOULD NOT load.
+	for _, reserved := range []string{"playground", ".archive", ".whatever"} {
+		p := filepath.Join(dir, reserved)
+		os.MkdirAll(p, 0755)
+		os.WriteFile(filepath.Join(p, "SKILL.md"),
+			[]byte("---\nname: "+reserved+"\ndescription: should be skipped\n---\nbody"), 0644)
+	}
+
+	skills, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "real" {
+		names := make([]string, len(skills))
+		for i, s := range skills {
+			names[i] = s.Name
+		}
+		t.Fatalf("expected only 'real' loaded, got %v", names)
 	}
 }
 

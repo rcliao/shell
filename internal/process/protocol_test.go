@@ -189,6 +189,58 @@ func TestParseBidirectionalEvents_StreamedTextThenToolCallEmptyResult(t *testing
 	}
 }
 
+func TestParseBidirectionalEvents_TextThenToolThenText(t *testing.T) {
+	// Claude emits text, calls tools, then emits more text. The "result" event
+	// only contains the final text block — the earlier text must not be dropped.
+	// Regression for https://… (mami noticed only "Memory saved" arriving in TG).
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-bug"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Long reply with content."},{"type":"tool_use","id":"tu_1","name":"Write","input":{"path":"/tmp/x"}},{"type":"tool_use","id":"tu_2","name":"Edit","input":{"path":"/tmp/y"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":""},{"type":"tool_result","tool_use_id":"tu_2","content":""}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Memory saved"}]}}`,
+		`{"type":"result","result":"Memory saved","session_id":"sess-bug"}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, nil)
+
+	want := "Long reply with content.\n\nMemory saved"
+	if result.Text != want {
+		t.Errorf("expected %q, got %q", want, result.Text)
+	}
+	if len(result.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(result.ToolCalls))
+	}
+}
+
+func TestParseBidirectionalEvents_StreamedTextThenToolThenText(t *testing.T) {
+	// Streaming variant: text deltas before and after a tool call.
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-bug-stream"}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Long "}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"reply."}}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Long reply."},{"type":"tool_use","id":"tu_1","name":"Write","input":{"path":"/tmp/x"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":""}]}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Memory saved"}}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Memory saved"}]}}`,
+		`{"type":"result","result":"Memory saved","session_id":"sess-bug-stream"}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	var streamed strings.Builder
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, func(s string) {
+		streamed.WriteString(s)
+	})
+
+	want := "Long reply.\n\nMemory saved"
+	if result.Text != want {
+		t.Errorf("expected %q, got %q", want, result.Text)
+	}
+	if streamed.String() != want {
+		t.Errorf("expected streamed %q, got %q", want, streamed.String())
+	}
+}
+
 func TestParseBidirectionalEvents_KeepAlive(t *testing.T) {
 	input := strings.Join([]string{
 		`{"type":"keep_alive"}`,
