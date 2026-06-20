@@ -48,10 +48,17 @@ func isWriteTrigger(userMsg string) bool {
 }
 
 // writeClaimCJK are prose phrases the agent uses to assert it persisted
-// something (to Notion, the food log, a doc, or memory).
+// something (to Notion, the food log, a doc, or memory). Mined from pika's
+// actual mami-DM replies — the agent improvises phrasing, so this list must be
+// generous or real confabulations ("記進 Notion 了 ✅") slip past unflagged.
+// Keep additions evidence-driven (grep the transcript) and in spirit with
+// bench/write_hygiene.go's trigger detection.
 var writeClaimCJK = []string{
-	"補進", "補上", "補好", "記下", "記錄", "記在", "存好", "存到", "存進",
-	"寫進", "寫到", "加進", "更新到", "更新進", "建頁面", "建好頁面", "存起來",
+	"補進", "補上", "補好", "記下", "記錄", "記在", "記進", "記好",
+	"存好", "存到", "存進", "存起來", "已存",
+	"寫進", "寫到", "寫好", "已寫", "加進", "加到",
+	"更新到", "更新進", "更新好", "更新了", "已更新",
+	"建頁面", "建好頁面", "建好了", "已記", "登記", "登錄",
 }
 
 // writeClaimRe catches English persistence claims and explicit Notion/doc cues.
