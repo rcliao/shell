@@ -19,18 +19,18 @@ import (
 // (chat, message_thread_id) key. Messages are sent via stdin and responses
 // streamed from stdout.
 type persistentProc struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr bytes.Buffer
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  io.ReadCloser
+	stderr  bytes.Buffer
 	scanner *bufio.Scanner // persistent scanner across messages — avoids losing buffered bytes
 
 	sessionID string // Claude session ID (from init response)
 	key       SessionKey
 	model     string // model used when spawning this process
 
-	mu       sync.Mutex // guards stdin writes and scanner reads
-	cancel   context.CancelFunc
+	mu        sync.Mutex // guards stdin writes and scanner reads
+	cancel    context.CancelFunc
 	idleTimer *time.Timer
 }
 
@@ -117,7 +117,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	if m.settingsPath != "" {
 		args = append(args, "--settings", m.settingsPath)
 	}
-	args = append(args, "--permission-mode", "bypassPermissions")
+	args = append(args, "--permission-mode", m.permissionMode)
 	if m.mcpConfigPath != "" {
 		args = append(args, "--mcp-config", m.mcpConfigPath)
 	}

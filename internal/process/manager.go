@@ -64,6 +64,7 @@ type Manager struct {
 	agentNS        string
 	ghostDB        string
 	botUsername    string
+	permissionMode string
 }
 
 type ManagerConfig struct {
@@ -82,6 +83,7 @@ type ManagerConfig struct {
 	AgentNS        string // ghost namespace for this agent (e.g. "agent:pikamini")
 	GhostDB        string // ghost database path for this agent
 	BotUsername    string // Telegram bot username (available as SHELL_BOT_USERNAME to skill scripts)
+	PermissionMode string // --permission-mode value (default "bypassPermissions")
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -93,6 +95,9 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 4
+	}
+	if cfg.PermissionMode == "" {
+		cfg.PermissionMode = "bypassPermissions"
 	}
 	mgr := &Manager{
 		sessions:       make(map[SessionKey]*Session),
@@ -112,6 +117,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		agentNS:        cfg.AgentNS,
 		ghostDB:        cfg.GhostDB,
 		botUsername:    cfg.BotUsername,
+		permissionMode: cfg.PermissionMode,
 	}
 	mgr.readyCond = sync.NewCond(&mgr.mu)
 	return mgr
@@ -241,7 +247,7 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	if m.settingsPath != "" {
 		args = append(args, "--settings", m.settingsPath)
 	}
-	args = append(args, "--permission-mode", "bypassPermissions")
+	args = append(args, "--permission-mode", m.permissionMode)
 	if m.mcpConfigPath != "" {
 		args = append(args, "--mcp-config", m.mcpConfigPath)
 	}

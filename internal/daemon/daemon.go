@@ -261,6 +261,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		AgentNS:        agentNS,
 		GhostDB:        cfg.Memory.DBPath,
 		BotUsername:    cfg.Agent.BotUsername,
+		PermissionMode: cfg.Claude.PermissionMode,
 	})
 
 	// Legacy: inject shell:capabilities into system namespaces for profiles without AgentNS.
