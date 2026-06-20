@@ -199,11 +199,12 @@ func main() {
 	// write-hygiene command — read the runtime confabulation ledger.
 	var whSinceFlag string
 	var whChatFlag int64
+	var whConfigFlag string
 	writeHygieneCmd := &cobra.Command{
 		Use:   "write-hygiene",
 		Short: "Report runtime write-hygiene (confabulation) stats from the ledger",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
+			cfg := loadConfigFrom(whConfigFlag)
 			st, err := store.Open(cfg.Store.DBPath)
 			if err != nil {
 				return err
@@ -244,6 +245,7 @@ func main() {
 	}
 	writeHygieneCmd.Flags().StringVar(&whSinceFlag, "since", "", "lookback window (e.g. 168h, 24h); empty = all-time")
 	writeHygieneCmd.Flags().Int64Var(&whChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
+	writeHygieneCmd.Flags().StringVar(&whConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
 
 	// session command group — persistent --config flag lets all subcommands
 	// target a specific agent's DB (e.g. ~/.shell/agents/pikamini/config.json).
