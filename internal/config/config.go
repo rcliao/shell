@@ -155,7 +155,8 @@ type ClaudeConfig struct {
 	Env                map[string]string `json:"env"`                  // extra environment variables for Claude CLI subprocess
 	PlaygroundDir      string            `json:"playground_dir"`       // writable sandbox dir, auto-approved for Write/Edit/Bash
 	SettingSources     []string          `json:"setting_sources"`      // e.g. ["user", "project"] for --setting-sources
-	MaxSessionTokens   int               `json:"max_session_tokens"`   // auto-rotate sessions exceeding this many total input tokens (0 = disabled)
+	MaxSessionTokens   int               `json:"max_session_tokens"`   // in-place /compact when total input tokens exceed this (0 = disabled)
+	RotateMaxTokens    int               `json:"rotate_max_tokens"`    // full session ROTATION (fresh system prompt: skills+identity+pinned reloaded) once total input tokens exceed this (0 = disabled). Lower = fresher/less drift, at higher cache cost.
 	WriteVerifyEnforce bool              `json:"write_verify_enforce"` // when true, a caught write-claim confabulation triggers a bounded correction turn before delivery
 }
 

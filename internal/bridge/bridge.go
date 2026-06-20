@@ -54,8 +54,11 @@ type Bridge struct {
 	selfSourceDir string // resolved path to shell's source dir (empty = disabled)
 	onSelfRestart func() // called when self-modification detected after merge
 
-	// Session rotation: auto-rotate when total input tokens exceed threshold (0 = disabled)
+	// Session compaction: in-place /compact when total input tokens exceed threshold (0 = disabled)
 	maxSessionTokens int
+	// Session rotation: full fresh rebuild (reloads skills/identity/pinned) when
+	// total input tokens exceed this. Lower = fresher context / less drift. (0 = disabled)
+	rotateMaxTokens int
 
 	// Scheduler
 	schedulerEnabled bool
@@ -491,9 +494,15 @@ func (b *Bridge) invalidateIdentityCache(chatID int64) {
 	b.identityCheckedMu.Unlock()
 }
 
-// SetMaxSessionTokens configures auto-rotation when total input tokens exceed maxTokens.
+// SetMaxSessionTokens configures in-place compaction when total input tokens exceed maxTokens.
 func (b *Bridge) SetMaxSessionTokens(maxTokens int) {
 	b.maxSessionTokens = maxTokens
+}
+
+// SetRotateMaxTokens configures token-based full session rotation (fresh
+// system-prompt rebuild) when total input tokens exceed maxTokens.
+func (b *Bridge) SetRotateMaxTokens(maxTokens int) {
+	b.rotateMaxTokens = maxTokens
 }
 
 // compactionSoftRatio is the fraction of maxSessionTokens that triggers
@@ -507,7 +516,7 @@ const compactionSoftRatio = 0.6
 // should run based on current token usage, and dispatches accordingly.
 // Called from the write-back path after every send.
 func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID int64, usage *process.Usage) {
-	if b.maxSessionTokens <= 0 || usage == nil {
+	if usage == nil || (b.maxSessionTokens <= 0 && b.rotateMaxTokens <= 0) {
 		return
 	}
 
@@ -515,6 +524,28 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID in
 	// and don't represent actual context growth. Including them inflates the
 	// threshold so sessions hit the limit before compaction can help.
 	totalInput := usage.InputTokens + usage.CacheCreationInputTokens
+
+	// Token-based rotation takes precedence over in-place compaction: a fresh
+	// generation reloads the full system prompt (skills/identity/pinned memory),
+	// shedding accumulated drift, whereas /compact keeps the drifted session.
+	// Flag rotate_pending so the NEXT turn's maybeRotate rebuilds fresh, and
+	// skip compaction (rotation resets the token count anyway).
+	if b.rotateMaxTokens > 0 && totalInput > b.rotateMaxTokens {
+		if err := b.store.SetRotatePending(chatID, threadID, true); err != nil {
+			slog.Warn("set rotate_pending (token trigger) failed", "chat_id", chatID, "error", err)
+		} else {
+			slog.Info("session flagged for token-based rotation",
+				"chat_id", chatID, "thread_id", threadID,
+				"total_input_tokens", totalInput, "rotate_max", b.rotateMaxTokens)
+		}
+		return
+	}
+
+	// In-place compaction (only when configured; rotation above may be the
+	// sole mechanism if max_session_tokens is 0).
+	if b.maxSessionTokens <= 0 {
+		return
+	}
 	softThreshold := int(float64(b.maxSessionTokens) * compactionSoftRatio)
 
 	switch {

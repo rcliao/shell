@@ -375,10 +375,15 @@ func New(cfg config.Config) (*Daemon, error) {
 	skillDirs = append(skillDirs, agentSkillsDir)
 	br.SetSkillDirs(skillDirs)
 
-	// Configure session auto-rotation by token count.
+	// Configure in-place compaction by token count.
 	if cfg.Claude.MaxSessionTokens > 0 {
 		br.SetMaxSessionTokens(cfg.Claude.MaxSessionTokens)
-		slog.Info("session rotation enabled", "max_tokens", cfg.Claude.MaxSessionTokens)
+		slog.Info("session compaction enabled", "max_tokens", cfg.Claude.MaxSessionTokens)
+	}
+	// Configure token-based full rotation (fresh system-prompt rebuild).
+	if cfg.Claude.RotateMaxTokens > 0 {
+		br.SetRotateMaxTokens(cfg.Claude.RotateMaxTokens)
+		slog.Info("session token-rotation enabled", "rotate_max_tokens", cfg.Claude.RotateMaxTokens)
 	}
 
 	// Create auth with policy engine
