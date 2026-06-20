@@ -23,7 +23,7 @@ type Config struct {
 	Reload    ReloadConfig    `json:"reload"`
 	Google    GoogleConfig    `json:"google"`
 	Secrets   SecretsConfig   `json:"secrets"`
-	Tunnel TunnelConfig `json:"tunnel"`
+	Tunnel    TunnelConfig    `json:"tunnel"`
 	PM        PMConfig        `json:"pm"`
 	Skills    SkillsConfig    `json:"skills"`
 	Agent     AgentIdentity   `json:"agent"`
@@ -33,21 +33,21 @@ type Config struct {
 // AgentIdentity configures a bot's identity for multi-agent group chats.
 type AgentIdentity struct {
 	Name                 string   `json:"name"`                  // display name (e.g. "pikamini")
-	Aliases              []string `json:"aliases"`                // name variants users may use to address this agent (e.g. "pika", "皮卡")
-	BotUsername          string   `json:"bot_username"`           // Telegram bot username without @
-	BroadcastProbability float64  `json:"broadcast_probability"`  // 0.0-1.0, chance to respond when not @mentioned in groups (legacy mode)
-	PeerBots             []string `json:"peer_bots"`              // other bot usernames (to detect "not for me")
-	SystemPrompt         string   `json:"system_prompt"`          // personality/identity prompt prepended to all messages
-	GroupMode            string   `json:"group_mode"`             // "autonomous" = agent decides via [noop], "" = legacy probability
-	TranscriptPath       string   `json:"transcript_path"`        // path to shared transcript DB (default: ~/.shell/shared/transcript.db)
-	TranscriptBudget     int      `json:"transcript_budget"`      // token budget for shared transcript injection (default: 2000)
-	Skills               []string `json:"skills"`                 // declared capabilities for task delegation (e.g. "code-review", "research")
+	Aliases              []string `json:"aliases"`               // name variants users may use to address this agent (e.g. "pika", "皮卡")
+	BotUsername          string   `json:"bot_username"`          // Telegram bot username without @
+	BroadcastProbability float64  `json:"broadcast_probability"` // 0.0-1.0, chance to respond when not @mentioned in groups (legacy mode)
+	PeerBots             []string `json:"peer_bots"`             // other bot usernames (to detect "not for me")
+	SystemPrompt         string   `json:"system_prompt"`         // personality/identity prompt prepended to all messages
+	GroupMode            string   `json:"group_mode"`            // "autonomous" = agent decides via [noop], "" = legacy probability
+	TranscriptPath       string   `json:"transcript_path"`       // path to shared transcript DB (default: ~/.shell/shared/transcript.db)
+	TranscriptBudget     int      `json:"transcript_budget"`     // token budget for shared transcript injection (default: 2000)
+	Skills               []string `json:"skills"`                // declared capabilities for task delegation (e.g. "code-review", "research")
 }
 
 // PeerAgent describes a peer agent for multi-agent discovery.
 type PeerAgent struct {
 	Name        string   `json:"name"`
-	Aliases     []string `json:"aliases"`     // name variants for this peer (e.g. "pika", "皮卡")
+	Aliases     []string `json:"aliases"` // name variants for this peer (e.g. "pika", "皮卡")
 	BotUsername string   `json:"bot_username"`
 	Skills      []string `json:"skills"`
 }
@@ -122,27 +122,28 @@ func (t *TelegramConfig) UnmarshalJSON(data []byte) error {
 // ModelRouting allows different Claude models per task type for cost optimization.
 // Empty strings fall back to ClaudeConfig.Model.
 type ModelRouting struct {
-	Conversation   string `json:"conversation"`      // user-facing chat
-	Heartbeat      string `json:"heartbeat"`         // periodic maintenance (sonnet recommended)
-	HeartbeatDeep  string `json:"heartbeat_deep"`    // deep reflection heartbeat (opus recommended)
-	Compaction     string `json:"compaction"`        // session compaction
-	PlannerExecute string `json:"planner_execute"`   // code changes with tools
-	PlannerReview  string `json:"planner_review"`    // text-only review verdict
+	Conversation   string `json:"conversation"`    // user-facing chat
+	Heartbeat      string `json:"heartbeat"`       // periodic maintenance (sonnet recommended)
+	HeartbeatDeep  string `json:"heartbeat_deep"`  // deep reflection heartbeat (opus recommended)
+	Compaction     string `json:"compaction"`      // session compaction
+	PlannerExecute string `json:"planner_execute"` // code changes with tools
+	PlannerReview  string `json:"planner_review"`  // text-only review verdict
 }
 
 type ClaudeConfig struct {
-	Binary         string            `json:"binary"`
-	Model          string            `json:"model"`
-	ModelRouting   *ModelRouting     `json:"model_routing"`   // per-task model overrides (nil = use default)
-	Timeout        time.Duration     `json:"timeout"`
-	MaxSessions    int               `json:"max_sessions"`
-	WorkDir        string            `json:"work_dir"`
-	AllowedTools   []string          `json:"allowed_tools"`
-	ExtraArgs      []string          `json:"extra_args"`
-	Env            map[string]string `json:"env"`             // extra environment variables for Claude CLI subprocess
-	PlaygroundDir  string   `json:"playground_dir"`  // writable sandbox dir, auto-approved for Write/Edit/Bash
-	SettingSources []string `json:"setting_sources"` // e.g. ["user", "project"] for --setting-sources
-	MaxSessionTokens int   `json:"max_session_tokens"` // auto-rotate sessions exceeding this many total input tokens (0 = disabled)
+	Binary             string            `json:"binary"`
+	Model              string            `json:"model"`
+	ModelRouting       *ModelRouting     `json:"model_routing"` // per-task model overrides (nil = use default)
+	Timeout            time.Duration     `json:"timeout"`
+	MaxSessions        int               `json:"max_sessions"`
+	WorkDir            string            `json:"work_dir"`
+	AllowedTools       []string          `json:"allowed_tools"`
+	ExtraArgs          []string          `json:"extra_args"`
+	Env                map[string]string `json:"env"`                  // extra environment variables for Claude CLI subprocess
+	PlaygroundDir      string            `json:"playground_dir"`       // writable sandbox dir, auto-approved for Write/Edit/Bash
+	SettingSources     []string          `json:"setting_sources"`      // e.g. ["user", "project"] for --setting-sources
+	MaxSessionTokens   int               `json:"max_session_tokens"`   // auto-rotate sessions exceeding this many total input tokens (0 = disabled)
+	WriteVerifyEnforce bool              `json:"write_verify_enforce"` // when true, a caught write-claim confabulation triggers a bounded correction turn before delivery
 }
 
 // ResolveModel returns the model for a given task type, falling back to
@@ -183,10 +184,10 @@ type DaemonConfig struct {
 }
 
 type Profile struct {
-	AgentNS          string   `json:"agent_ns"`           // agent namespace (e.g. "agent:pikamini")
-	SystemNamespaces []string `json:"system_namespaces"`  // deprecated: use agent_ns + pinned memories
+	AgentNS          string   `json:"agent_ns"`          // agent namespace (e.g. "agent:pikamini")
+	SystemNamespaces []string `json:"system_namespaces"` // deprecated: use agent_ns + pinned memories
 	SystemBudget     int      `json:"system_budget"`
-	GlobalNamespaces []string `json:"global_namespaces"`  // deprecated: use agent_ns + tag filtering
+	GlobalNamespaces []string `json:"global_namespaces"` // deprecated: use agent_ns + tag filtering
 	GlobalBudget     int      `json:"global_budget"`
 	Budget           int      `json:"budget"`
 	ExchangeTTL      string   `json:"exchange_ttl"`       // "7d", "30d"
@@ -197,13 +198,13 @@ type Profile struct {
 }
 
 type MemoryConfig struct {
-	DBPath           string            `json:"db_path"`
-	Enabled          bool              `json:"enabled"`
-	Budget           int               `json:"budget"`            // token budget for context injection
-	GlobalNamespaces []string          `json:"global_namespaces"` // namespace patterns for background context
-	GlobalBudget     int               `json:"global_budget"`     // token budget for global context (default 500)
-	SystemNamespaces []string          `json:"system_namespaces"` // always-on via --append-system-prompt (no search)
-	SystemBudget     int               `json:"system_budget"`     // token cap for system prompt (default 3000)
+	DBPath           string             `json:"db_path"`
+	Enabled          bool               `json:"enabled"`
+	Budget           int                `json:"budget"`            // token budget for context injection
+	GlobalNamespaces []string           `json:"global_namespaces"` // namespace patterns for background context
+	GlobalBudget     int                `json:"global_budget"`     // token budget for global context (default 500)
+	SystemNamespaces []string           `json:"system_namespaces"` // always-on via --append-system-prompt (no search)
+	SystemBudget     int                `json:"system_budget"`     // token cap for system prompt (default 3000)
 	Profiles         map[string]Profile `json:"profiles"`          // name → profile
 	ChatProfiles     map[string]string  `json:"chat_profiles"`     // chatID string → profile name
 	GhostEnv         map[string]string  `json:"ghost_env"`         // extra env vars passed to ghost MCP server and hooks
@@ -223,13 +224,13 @@ func (m MemoryConfig) ChatProfileMap() map[int64]string {
 }
 
 type SchedulerConfig struct {
-	Enabled              bool   `json:"enabled"`
-	Timezone             string `json:"timezone"`               // default: "UTC"
-	QuietHourStart       int    `json:"quiet_hour_start"`       // hour (0-23) when quiet hours begin, default: 22
-	QuietHourEnd         int    `json:"quiet_hour_end"`         // hour (0-23) when quiet hours end, default: 7
-	HeartbeatInterval    string `json:"heartbeat_interval"`     // active heartbeat interval (default: "1h")
+	Enabled               bool   `json:"enabled"`
+	Timezone              string `json:"timezone"`                // default: "UTC"
+	QuietHourStart        int    `json:"quiet_hour_start"`        // hour (0-23) when quiet hours begin, default: 22
+	QuietHourEnd          int    `json:"quiet_hour_end"`          // hour (0-23) when quiet hours end, default: 7
+	HeartbeatInterval     string `json:"heartbeat_interval"`      // active heartbeat interval (default: "1h")
 	HeartbeatIdleInterval string `json:"heartbeat_idle_interval"` // interval after noop heartbeat (default: "2h")
-	DeepReflectInterval  int    `json:"deep_reflect_interval"`  // every Nth heartbeat uses deep model for reflection (default: 6)
+	DeepReflectInterval   int    `json:"deep_reflect_interval"`   // every Nth heartbeat uses deep model for reflection (default: 6)
 }
 
 type ReloadConfig struct {

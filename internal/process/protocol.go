@@ -14,6 +14,10 @@ type ToolCall struct {
 	ID    string         `json:"id"`
 	Name  string         `json:"name"`
 	Input map[string]any `json:"input"`
+	// Failed is set true when the CLI later echoes a tool_result with
+	// is_error=true for this ToolUseID. Lets the bridge distinguish a write
+	// that actually landed from one that errored (silent-failure detection).
+	Failed bool `json:"failed,omitempty"`
 }
 
 // ToolResult represents a tool execution result.
@@ -28,10 +32,10 @@ type ToolResult struct {
 // stdinUserMessage is sent to the CLI to provide the user prompt.
 // Matches SDKUserMessage from the Agent SDK.
 type stdinUserMessage struct {
-	Type            string         `json:"type"`               // "user"
-	SessionID       string         `json:"session_id"`         // "" for first message, then session_id from system init
-	Message         stdinMsgParam  `json:"message"`            // Anthropic API MessageParam
-	ParentToolUseID *string        `json:"parent_tool_use_id"` // null for top-level messages
+	Type            string        `json:"type"`               // "user"
+	SessionID       string        `json:"session_id"`         // "" for first message, then session_id from system init
+	Message         stdinMsgParam `json:"message"`            // Anthropic API MessageParam
+	ParentToolUseID *string       `json:"parent_tool_use_id"` // null for top-level messages
 }
 
 // stdinMsgParam is the Anthropic API MessageParam shape.
@@ -63,11 +67,10 @@ func newUserMessage(req AgentRequest, sessionID string) stdinUserMessage {
 	return newTextUserMessage(text, sessionID)
 }
 
-
 // stdinControlRequest is sent to the CLI to request an action (initialize, interrupt, etc.).
 // Direction: SDK → CLI
 type stdinControlRequest struct {
-	Type      string         `json:"type"`       // "control_request"
+	Type      string         `json:"type"` // "control_request"
 	RequestID string         `json:"request_id"`
 	Request   map[string]any `json:"request"`
 }
@@ -76,7 +79,7 @@ type stdinControlRequest struct {
 // (e.g. answering a can_use_tool permission check).
 // Direction: SDK → CLI (in response to CLI's control_request on stdout)
 type stdinControlResponse struct {
-	Type     string         `json:"type"`     // "control_response"
+	Type     string         `json:"type"` // "control_response"
 	Response map[string]any `json:"response"`
 }
 
@@ -115,17 +118,17 @@ type stdoutEvent struct {
 	NumTurns     int             `json:"num_turns,omitempty"`
 	Usage        *usageData      `json:"usage,omitempty"`
 	IsError      bool            `json:"is_error,omitempty"`
-	Event        *innerEvent     `json:"event,omitempty"`     // stream_event: content_block_delta etc.
-	Message      *stdoutMessage  `json:"message,omitempty"`   // assistant/user messages
-	Request      json.RawMessage `json:"request,omitempty"`   // control_request body (CLI → SDK)
-	Response     json.RawMessage `json:"response,omitempty"`  // control_response body (CLI → SDK, re: our init)
+	Event        *innerEvent     `json:"event,omitempty"`    // stream_event: content_block_delta etc.
+	Message      *stdoutMessage  `json:"message,omitempty"`  // assistant/user messages
+	Request      json.RawMessage `json:"request,omitempty"`  // control_request body (CLI → SDK)
+	Response     json.RawMessage `json:"response,omitempty"` // control_response body (CLI → SDK, re: our init)
 }
 
 // stdoutMessage represents a message in assistant or user events.
 // Content can be a string or array of content blocks.
 type stdoutMessage struct {
-	Role    string          `json:"role,omitempty"`
-	Content contentUnion    `json:"content"`
+	Role    string       `json:"role,omitempty"`
+	Content contentUnion `json:"content"`
 }
 
 // contentUnion handles the Anthropic API content field which can be
@@ -304,6 +307,16 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 				for _, block := range event.Message.Content.Blocks {
 					if block.Type == "tool_result" {
 						slog.Debug("bidirectional: tool_result", "tool_use_id", block.ToolUseID, "is_error", block.IsError)
+						// Back-fill the matching tool_use's Failed flag so the
+						// bridge can tell a landed write from a failed one.
+						if block.IsError {
+							for i := range result.ToolCalls {
+								if result.ToolCalls[i].ID == block.ToolUseID {
+									result.ToolCalls[i].Failed = true
+									break
+								}
+							}
+						}
 					}
 				}
 			}

@@ -196,6 +196,55 @@ func main() {
 		},
 	}
 
+	// write-hygiene command — read the runtime confabulation ledger.
+	var whSinceFlag string
+	var whChatFlag int64
+	writeHygieneCmd := &cobra.Command{
+		Use:   "write-hygiene",
+		Short: "Report runtime write-hygiene (confabulation) stats from the ledger",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfig()
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			var since time.Time
+			if whSinceFlag != "" {
+				d, perr := time.ParseDuration(whSinceFlag)
+				if perr != nil {
+					return fmt.Errorf("invalid --since %q: %w", whSinceFlag, perr)
+				}
+				since = time.Now().Add(-d)
+			}
+
+			h, err := st.GetWriteHygieneSummary(whChatFlag, since)
+			if err != nil {
+				return err
+			}
+			window := "all-time"
+			if whSinceFlag != "" {
+				window = "last " + whSinceFlag
+			}
+			fmt.Printf("Write-hygiene ledger (%s):\n\n", window)
+			fmt.Printf("  Total persistence-relevant turns: %d\n", h.Total)
+			fmt.Printf("  verified           %d\n", h.Verified)
+			fmt.Printf("  verbal_save        %d  (claimed a write, none landed — confabulation)\n", h.VerbalSave)
+			fmt.Printf("  silent_failure     %d  (write tool errored)\n", h.SilentFailure)
+			fmt.Printf("  unclaimed_trigger  %d  (asked to persist, agent ignored)\n", h.UnclaimedTrigger)
+			fmt.Printf("\n  Confabulation rate: %.1f%%  (verbal_save / claimed writes)\n",
+				100*h.ConfabulationRate())
+			if scored := h.Verified + h.VerbalSave + h.SilentFailure; scored > 0 {
+				fmt.Printf("  Verified rate:      %.1f%%  (verified / claimed writes)\n",
+					100*float64(h.Verified)/float64(scored))
+			}
+			return nil
+		},
+	}
+	writeHygieneCmd.Flags().StringVar(&whSinceFlag, "since", "", "lookback window (e.g. 168h, 24h); empty = all-time")
+	writeHygieneCmd.Flags().Int64Var(&whChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
+
 	// session command group — persistent --config flag lets all subcommands
 	// target a specific agent's DB (e.g. ~/.shell/agents/pikamini/config.json).
 	// Without it, session commands load ~/.shell/config.json which in a
@@ -626,7 +675,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
