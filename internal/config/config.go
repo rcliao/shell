@@ -28,6 +28,19 @@ type Config struct {
 	Skills    SkillsConfig    `json:"skills"`
 	Agent     AgentIdentity   `json:"agent"`
 	Agents    AgentsConfig    `json:"agents"`
+	Notion    NotionConfig    `json:"notion"`
+}
+
+// NotionConfig wires the official Notion MCP server (@notionhq/notion-mcp-server)
+// into the agent's generated mcp.json, giving the conversational agent a real,
+// headless-safe write tool for the food-log / docs (vs. the claude.ai connector
+// which only exists in interactive sessions). The integration token is resolved
+// via the secret store (or env), so it never lands in config.json.
+type NotionConfig struct {
+	Enabled     bool     `json:"enabled"`
+	TokenSecret string   `json:"token_secret"` // secret/env name holding the Notion integration token (default "NOTION_TOKEN")
+	Command     string   `json:"command"`      // launcher, default "npx"
+	Args        []string `json:"args"`         // default ["-y", "@notionhq/notion-mcp-server"]
 }
 
 // AgentIdentity configures a bot's identity for multi-agent group chats.
