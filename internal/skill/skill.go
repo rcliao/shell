@@ -22,6 +22,7 @@ type Skill struct {
 	AllowedTools []string // parsed from frontmatter allowed-tools
 	Core         bool     // legacy: if true, treated as TierCore
 	Tier         string   // "core" | "hot" | "lazy" (default "lazy")
+	Draft        bool     // frontmatter status: draft — capped to lazy until graduated
 	Version      string   // version folder name (e.g. "v1") or "" for flat layout
 	Body         string   // full markdown after frontmatter
 	Dir          string   // directory containing the loaded SKILL.md (version dir when versioned)
@@ -69,6 +70,16 @@ func Load(skillMdPath string) (*Skill, error) {
 		resolvedTier = TierLazy
 	}
 
+	// A skill marked `status: draft` is work-in-progress: it stays a lazy
+	// catalog entry (body fetched on demand) regardless of its declared tier.
+	// To graduate a draft into the hot/core prompt, remove `status: draft`.
+	// Previously `status:` was silently ignored, so a draft could half-load —
+	// e.g. meal-memo sat as lazy and its format never shaped responses.
+	draft := frontmatterStatus(string(data)) == "draft"
+	if draft && (resolvedTier == TierHot || resolvedTier == TierCore) {
+		resolvedTier = TierLazy
+	}
+
 	return &Skill{
 		Name:         name,
 		Description:  desc,
@@ -76,6 +87,7 @@ func Load(skillMdPath string) (*Skill, error) {
 		AllowedTools: allowedTools,
 		Core:         core,
 		Tier:         resolvedTier,
+		Draft:        draft,
 		Body:         body,
 		Dir:          dir,
 		SkillRoot:    dir,
@@ -164,6 +176,28 @@ func LoadDir(dir string) ([]*Skill, error) {
 		skills = append(skills, s)
 	}
 	return skills, nil
+}
+
+// frontmatterStatus extracts the lowercased `status:` value from a SKILL.md's
+// frontmatter, or "" if absent. Kept separate from parseFrontmatter so adding
+// the field didn't churn that function's multi-value signature.
+func frontmatterStatus(content string) string {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "---") {
+		return ""
+	}
+	rest := strings.TrimLeft(content[3:], "\r\n")
+	idx := strings.Index(rest, "---")
+	if idx < 0 {
+		return ""
+	}
+	for _, line := range strings.Split(rest[:idx], "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if ok && strings.TrimSpace(strings.ToLower(k)) == "status" {
+			return strings.ToLower(strings.TrimSpace(v))
+		}
+	}
+	return ""
 }
 
 // parseFrontmatter splits SKILL.md content into frontmatter fields and body.

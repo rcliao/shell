@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -61,14 +62,14 @@ type Message struct {
 // reactions on a specific bot response can be traced back to the
 // originating user message and session.
 type MessageMap struct {
-	ID             int64
-	ChatID         int64
-	UserMessageID  int
-	BotMessageID   int
-	SessionID      int64
-	UserMessage    string // original user message text
-	BotResponse    string // bot response text
-	CreatedAt      time.Time
+	ID            int64
+	ChatID        int64
+	UserMessageID int
+	BotMessageID  int
+	SessionID     int64
+	UserMessage   string // original user message text
+	BotResponse   string // bot response text
+	CreatedAt     time.Time
 }
 
 // Schedule represents a scheduled notification or prompt.
@@ -268,6 +269,125 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Cycle 67: topic thread state for L3 thread-state architecture.
+	// One row per (chat_id, topic) with running summary + open commitments.
+	// Distinct from the topic REGISTRY (which lives in ghost ns loop:topics) —
+	// this is per-conversation operational state, not memory.
+	topicSchema := `
+	CREATE TABLE IF NOT EXISTS topic_threads (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		topic TEXT NOT NULL,
+		summary TEXT NOT NULL DEFAULT '',
+		open_commitments TEXT NOT NULL DEFAULT '[]',
+		last_turn_at DATETIME,
+		last_turn_msg_id INTEGER NOT NULL DEFAULT 0,
+		turn_count INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(chat_id, topic)
+	);
+	CREATE INDEX IF NOT EXISTS idx_topic_threads_chat ON topic_threads(chat_id, topic);
+	CREATE INDEX IF NOT EXISTS idx_topic_threads_last_turn ON topic_threads(last_turn_at DESC);
+
+	CREATE TABLE IF NOT EXISTS topic_turn_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		thread_id INTEGER NOT NULL,
+		msg_id INTEGER NOT NULL,
+		role TEXT NOT NULL,
+		snippet TEXT NOT NULL DEFAULT '',
+		classified_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (thread_id) REFERENCES topic_threads(id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_topic_turn_log_thread ON topic_turn_log(thread_id, classified_at DESC);
+	`
+	if _, err := s.db.Exec(topicSchema); err != nil {
+		return err
+	}
+
+	// Cycle 69: per-turn classifier + write-path observability.
+	// One row per classify call so future cycles can analyze:
+	//   - fast-path vs Haiku vs cache hit rate
+	//   - Haiku latency p50/p95
+	//   - new-topic creation rate (registry sprawl)
+	//   - commitment extraction density
+	feedbackSchema := `
+	CREATE TABLE IF NOT EXISTS topic_decisions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		msg_id INTEGER NOT NULL DEFAULT 0,
+		topic TEXT NOT NULL,
+		source TEXT NOT NULL,                   -- keyword | haiku | cache | fallback | error | disabled
+		confidence REAL NOT NULL DEFAULT 0,
+		latency_ms INTEGER NOT NULL DEFAULT 0,
+		is_new INTEGER NOT NULL DEFAULT 0,
+		commitments_extracted INTEGER NOT NULL DEFAULT 0,
+		summary_changed INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_topic_decisions_chat_ts ON topic_decisions(chat_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_topic_decisions_topic ON topic_decisions(topic, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_topic_decisions_source ON topic_decisions(source, created_at DESC);
+	`
+	if _, err := s.db.Exec(feedbackSchema); err != nil {
+		return err
+	}
+
+	// Cycle 145: conversation stickiness experiment.
+	// Per-chat sticky pointer to the "current conversation thread". The
+	// foreground reads this in <1ms to render Channel B; the existing
+	// classifier still runs to populate it (this cycle records data only —
+	// behavior unchanged so we can compare).
+	//   - cold_start=1 means we've never had a successful classifier hit
+	//   - turns_since_check is the budget counter for the future async
+	//     drift detector; not consumed yet
+	stickySchema := `
+	CREATE TABLE IF NOT EXISTS conversations (
+		chat_id              INTEGER PRIMARY KEY,
+		current_thread_id    INTEGER,
+		current_topic        TEXT NOT NULL DEFAULT '',
+		last_drift_check_at  DATETIME,
+		turns_since_check    INTEGER NOT NULL DEFAULT 0,
+		cold_start           INTEGER NOT NULL DEFAULT 1,
+		updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (current_thread_id) REFERENCES topic_threads(id)
+	);
+	`
+	if _, err := s.db.Exec(stickySchema); err != nil {
+		return err
+	}
+
+	// Write-verification ledger: one row per turn where the agent either was
+	// asked to persist something (memo trigger) or claimed in prose to have
+	// persisted something. Records whether a real, successful write tool call
+	// actually occurred. This is the runtime counterpart to the offline
+	// bench/write_hygiene metric — it lets us measure the confabulation
+	// ("verbal save") rate over time and prove the enforcement loop helps.
+	//
+	// classification ∈ {verified, verbal_save, silent_failure, unclaimed_trigger}
+	// enforced=1 once a correction turn was issued for this row (0 in log-only mode).
+	writeVerifySchema := `
+	CREATE TABLE IF NOT EXISTS write_verifications (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id        INTEGER NOT NULL,
+		session_id     INTEGER NOT NULL,
+		classification TEXT NOT NULL,
+		triggered      INTEGER NOT NULL DEFAULT 0,
+		claimed        INTEGER NOT NULL DEFAULT 0,
+		write_ok       INTEGER NOT NULL DEFAULT 0,
+		write_failed   INTEGER NOT NULL DEFAULT 0,
+		tool_names     TEXT NOT NULL DEFAULT '',
+		enforced       INTEGER NOT NULL DEFAULT 0,
+		source         TEXT NOT NULL DEFAULT 'interactive',
+		created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_write_verif_chat_ts ON write_verifications(chat_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_write_verif_class ON write_verifications(classification);
+	`
+	if _, err := s.db.Exec(writeVerifySchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -420,7 +540,7 @@ func (s *Store) SetRotatePending(chatID, threadID int64, pending bool) error {
 }
 
 // SetCompactState records the proactive-compaction state machine transition:
-// '' (idle) or 'compacting' (background /compact in flight).
+// ” (idle) or 'compacting' (background /compact in flight).
 func (s *Store) SetCompactState(chatID, threadID int64, state string) error {
 	_, err := s.db.Exec(`
 		UPDATE sessions SET compact_state = ?, updated_at = CURRENT_TIMESTAMP
@@ -1010,6 +1130,106 @@ func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cac
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, costUSD, numTurns, source)
 	return err
+}
+
+// WriteVerification is a single runtime write-hygiene observation.
+type WriteVerification struct {
+	ChatID         int64
+	SessionID      int64
+	Classification string // verified | verbal_save | silent_failure | unclaimed_trigger
+	Triggered      bool   // user message matched a memo/persist trigger
+	Claimed        bool   // agent's prose claimed a save/log happened
+	WriteOK        bool   // at least one successful persistence tool call observed
+	WriteFailed    bool   // a persistence tool call was observed but errored
+	ToolNames      string // comma-joined persistence tool names seen (for debugging)
+	Enforced       bool   // a correction turn was issued for this row
+	Source         string // interactive | heartbeat | scheduler
+}
+
+// LogWriteVerification records one runtime write-hygiene observation.
+// Best-effort: callers log-and-continue on error.
+func (s *Store) LogWriteVerification(v WriteVerification) error {
+	src := v.Source
+	if src == "" {
+		src = "interactive"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO write_verifications
+			(chat_id, session_id, classification, triggered, claimed, write_ok, write_failed, tool_names, enforced, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, v.ChatID, v.SessionID, v.Classification,
+		b2i(v.Triggered), b2i(v.Claimed), b2i(v.WriteOK), b2i(v.WriteFailed),
+		v.ToolNames, b2i(v.Enforced), src)
+	return err
+}
+
+// WriteHygieneSummary aggregates write_verifications for measuring the
+// confabulation rate. Pass zero `since` for all-time.
+type WriteHygieneSummary struct {
+	Total            int
+	Verified         int
+	VerbalSave       int // claimed a write, no successful tool call — confabulation
+	SilentFailure    int // tool call errored
+	UnclaimedTrigger int // asked to persist, neither claimed nor wrote
+}
+
+// ConfabulationRate is verbal_save / (verified + verbal_save + silent_failure).
+// Returns 0 when there are no write-claim turns to score.
+func (h WriteHygieneSummary) ConfabulationRate() float64 {
+	denom := h.Verified + h.VerbalSave + h.SilentFailure
+	if denom == 0 {
+		return 0
+	}
+	return float64(h.VerbalSave) / float64(denom)
+}
+
+// GetWriteHygieneSummary returns counts per classification for a chat
+// (chatID=0 for all chats), optionally since a time (zero = all-time).
+func (s *Store) GetWriteHygieneSummary(chatID int64, since time.Time) (*WriteHygieneSummary, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT classification, COUNT(*) FROM write_verifications WHERE 1=1`)
+	var args []any
+	if chatID != 0 {
+		sb.WriteString(` AND chat_id = ?`)
+		args = append(args, chatID)
+	}
+	if !since.IsZero() {
+		sb.WriteString(` AND created_at >= ?`)
+		args = append(args, since)
+	}
+	sb.WriteString(` GROUP BY classification`)
+	rows, err := s.db.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var h WriteHygieneSummary
+	for rows.Next() {
+		var class string
+		var n int
+		if err := rows.Scan(&class, &n); err != nil {
+			return nil, err
+		}
+		h.Total += n
+		switch class {
+		case "verified":
+			h.Verified = n
+		case "verbal_save":
+			h.VerbalSave = n
+		case "silent_failure":
+			h.SilentFailure = n
+		case "unclaimed_trigger":
+			h.UnclaimedTrigger = n
+		}
+	}
+	return &h, rows.Err()
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // GetUsageSummary returns aggregated usage for a chat, optionally filtered by time.

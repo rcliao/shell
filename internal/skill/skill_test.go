@@ -364,3 +364,60 @@ Body.
 		t.Errorf("ScriptsDir should be empty for non-executable scripts, got %q", s.ScriptsDir)
 	}
 }
+
+func TestLoad_DraftCappedToLazy(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "meal-memo")
+	os.MkdirAll(skillDir, 0755)
+
+	// A draft skill declaring tier: hot must still load as lazy until graduated.
+	md := `---
+name: meal-memo
+description: Draft skill that wants to be hot
+tier: hot
+status: draft
+---
+
+# body
+`
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(md), 0644)
+
+	s, err := Load(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !s.Draft {
+		t.Error("Draft = false, want true")
+	}
+	if s.Tier != TierLazy {
+		t.Errorf("Tier = %q, want %q (draft must cap hot->lazy)", s.Tier, TierLazy)
+	}
+}
+
+func TestLoad_GraduatedHotStaysHot(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "meal-memo")
+	os.MkdirAll(skillDir, 0755)
+
+	// Same skill without status: draft graduates to hot.
+	md := `---
+name: meal-memo
+description: Graduated skill
+tier: hot
+---
+
+# body
+`
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(md), 0644)
+
+	s, err := Load(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if s.Draft {
+		t.Error("Draft = true, want false")
+	}
+	if s.Tier != TierHot {
+		t.Errorf("Tier = %q, want %q", s.Tier, TierHot)
+	}
+}

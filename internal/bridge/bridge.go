@@ -810,6 +810,14 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 
 	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source)
 
+	// Runtime write-hygiene: cross-check persistence claims vs actual tool
+	// calls, optionally issue a bounded correction turn, and log the verdict.
+	// Conversational turns only — heartbeat/scheduler writes aren't user-facing
+	// "I saved it" claims.
+	if !isHeartbeat {
+		resp = b.verifyWriteHygiene(ctx, agent, chatID, threadID, sess.ID, userMsg, resp, result, source)
+	}
+
 	// Auto-compact session if token threshold exceeded (uses API-reported usage).
 	go b.compactSessionIfNeeded(ctx, chatID, threadID, result.Usage)
 
