@@ -30,6 +30,20 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "verbal_save",
 		},
 		{
+			name:     "verbal save — real 6/20 phrasing '記進 Notion 了 ✅' with no tool call",
+			userMsg:  "晚餐：地瓜 + 優格",
+			response: "好的 mami～ 記進 Notion 了 ✅",
+			calls:    nil,
+			want:     "verbal_save",
+		},
+		{
+			name:     "verbal save — '更新好了 ✅' Notion claim, no write",
+			userMsg:  "幫我改一下午餐",
+			response: "更新好了 mami ✅",
+			calls:    nil,
+			want:     "verbal_save",
+		},
+		{
 			name:     "verified — claims save and ghost_put succeeded",
 			userMsg:  "晚餐：地瓜 + 優格",
 			response: "收到 mami 📝 補進 Notion ✅",
