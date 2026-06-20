@@ -12,11 +12,11 @@ import (
 
 // Runtime write-hygiene verification.
 //
-// The agent frequently tells mami it persisted something ("補進 Notion ✅",
-// "記下了") without a real write ever happening — pure confabulation, because
-// the conversational agent often lacks (or fails to call) the write tool. This
-// module classifies each turn by cross-checking three signals that are all
-// already available at response time:
+// A conversational agent can tell the user it persisted something ("saved to
+// Notion ✅", "noted it down") without a real write ever happening — pure
+// confabulation, because the agent often lacks, or fails to call, the write
+// tool. This module classifies each turn by cross-checking three signals that
+// are all available at response time:
 //
 //   1. did the user ask to persist something?     (write trigger)
 //   2. did the agent's prose claim a save?         (write claim)
@@ -47,34 +47,23 @@ func isWriteTrigger(userMsg string) bool {
 	return false
 }
 
-// writeClaimCJK are prose phrases the agent uses to assert it persisted
-// something (to Notion, the food log, a doc, or memory). Mined from pika's
-// actual mami-DM replies — the agent improvises phrasing, so this list must be
-// generous or real confabulations ("記進 Notion 了 ✅") slip past unflagged.
-// Keep additions evidence-driven (grep the transcript) and in spirit with
-// bench/write_hygiene.go's trigger detection.
-var writeClaimCJK = []string{
-	"補進", "補上", "補好", "記下", "記錄", "記在", "記進", "記好",
-	"存好", "存到", "存進", "存起來", "已存",
-	"寫進", "寫到", "寫好", "已寫", "加進", "加到",
-	"更新到", "更新進", "更新好", "更新了", "已更新",
-	"建頁面", "建好頁面", "建好了", "已記", "登記", "登錄",
-}
+// writeClaimRe_CJK matches Chinese persistence claims at the language level:
+// a persistence verb (record / save / write / fill-in / update / register)
+// followed by a resultative or directional particle that signals completion.
+// This is vocabulary-level, not tied to any user or deployment — agents
+// improvise phrasing, so a verb×particle pattern generalizes far better than an
+// enumerated phrase list. Particle sets are curated per verb to avoid common
+// false positives that share a character (e.g. 存在 "exist", 記得 "remember"
+// are excluded because 在/得 are not persistence resultatives here).
+var writeClaimRe_CJK = regexp.MustCompile(
+	`記(進|下|好|錄|了)|存(進|到|好|起來)|寫(進|到|好)|補(進|上|好)|更新(好|到|進|了)|加(進|到)|建好|登記|登錄`)
 
 // writeClaimRe catches English persistence claims and explicit Notion/doc cues.
 var writeClaimRe = regexp.MustCompile(`(?i)\b(logged|saved (it|this|that)|added (it|this|that)? ?to (notion|the (doc|log|database))|recorded (it|this)|noted (it|this) down|wrote (it|this) (to|into))\b`)
 
 // claimsWrite reports whether the agent's prose asserts a persistence happened.
 func claimsWrite(response string) bool {
-	if writeClaimRe.MatchString(response) {
-		return true
-	}
-	for _, k := range writeClaimCJK {
-		if strings.Contains(response, k) {
-			return true
-		}
-	}
-	return false
+	return writeClaimRe.MatchString(response) || writeClaimRe_CJK.MatchString(response)
 }
 
 // isPersistenceTool reports whether a tool call is a durable write (memory,
