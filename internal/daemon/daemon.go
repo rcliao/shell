@@ -189,6 +189,41 @@ func New(cfg config.Config) (*Daemon, error) {
 			"env":     ghostEnv,
 		}
 	}
+	// Add the Notion MCP server when enabled and a token resolves. This gives
+	// the conversational agent a real, headless-safe write tool so memo claims
+	// can be backed by an actual Notion write (see write-hygiene verification).
+	if cfg.Notion.Enabled {
+		tokenName := cfg.Notion.TokenSecret
+		if tokenName == "" {
+			tokenName = "NOTION_TOKEN"
+		}
+		token := cfg.Secret(tokenName)
+		if token == "" {
+			slog.Warn("notion mcp enabled but token is empty; skipping notion server",
+				"secret", tokenName)
+		} else {
+			command := cfg.Notion.Command
+			if command == "" {
+				command = "npx"
+			}
+			args := cfg.Notion.Args
+			if len(args) == 0 {
+				args = []string{"-y", "@notionhq/notion-mcp-server"}
+			}
+			mcpServers["notion"] = map[string]any{
+				"type":    "stdio",
+				"command": command,
+				"args":    args,
+				// Set both env shapes for cross-version compatibility:
+				// newer servers read NOTION_TOKEN, older ones OPENAPI_MCP_HEADERS.
+				"env": map[string]string{
+					"NOTION_TOKEN":        token,
+					"OPENAPI_MCP_HEADERS": fmt.Sprintf(`{"Authorization":"Bearer %s","Notion-Version":"2022-06-28"}`, token),
+				},
+			}
+			slog.Info("notion mcp server enabled", "command", command)
+		}
+	}
 	mcpConfig := map[string]any{
 		"mcpServers": mcpServers,
 	}
