@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot/models"
 )
@@ -1078,16 +1079,33 @@ func TestFormatForTelegram(t *testing.T) {
 		}
 	})
 
-	t.Run("formatted expansion handled by truncation", func(t *testing.T) {
-		// Create text full of special chars that double in size when escaped.
-		// Each '!' becomes '\!' (2 bytes), so 100 chars → 200 escaped bytes.
+	t.Run("formatted expansion falls back to plain text (cycle 80)", func(t *testing.T) {
+		// Heavy MarkdownV2 escaping (each '!' → '\!') doubles formatted size.
+		// Cycle 80: prefer FULL raw plain text over TRUNCATED formatted.
 		text := strings.Repeat("!", 100)
 		result, ok := formatForTelegram(text, 120)
-		if !ok {
-			t.Fatal("expected ok=true after truncation retries")
+		if ok {
+			t.Fatalf("expected ok=false (plain-text fallback); got formatted")
 		}
-		if len(result) > 120 {
-			t.Errorf("formatted result exceeds maxLen: %d > 120", len(result))
+		if result != text {
+			t.Errorf("plain-text fallback should return full raw text\n  got:  %q (len %d)\n  want: %q (len %d)",
+				result, len(result), text, len(text))
+		}
+	})
+
+	t.Run("head-keeping truncation when raw also overflows (cycle 80)", func(t *testing.T) {
+		// Both formatted AND raw exceed maxLen → truncate raw with HEAD
+		// preserved + "..." suffix. Previously kept tail; mami complaint cycle 80.
+		text := "ABCDEFGHIJ" + strings.Repeat("X", 100)
+		result, ok := formatForTelegram(text, 13)
+		if ok {
+			t.Fatal("expected ok=false")
+		}
+		if !strings.HasPrefix(result, "ABCDEFGHIJ") {
+			t.Errorf("truncation should keep the head; got %q", result)
+		}
+		if !strings.HasSuffix(result, "...") {
+			t.Errorf("truncation should end with '...'; got %q", result)
 		}
 	})
 
@@ -1308,7 +1326,7 @@ func TestStripMention(t *testing.T) {
 
 func TestShouldHandleGroupMessage(t *testing.T) {
 	h := &Handler{
-		botUsername:           "pikamini_bot",
+		botUsername:          "pikamini_bot",
 		broadcastProbability: 1.0,
 		peerBotUsernames:     map[string]bool{"umbreonmini_bot": true},
 		botExchangeCount:     make(map[int64]int),
@@ -1352,7 +1370,7 @@ func TestShouldHandleGroupMessage(t *testing.T) {
 
 	// Test with low broadcast probability — should sometimes skip.
 	h2 := &Handler{
-		botUsername:           "pikamini_bot",
+		botUsername:          "pikamini_bot",
 		broadcastProbability: 0.0, // never broadcast
 		peerBotUsernames:     map[string]bool{"umbreonmini_bot": true},
 		botExchangeCount:     make(map[int64]int),
@@ -1371,7 +1389,7 @@ func TestShouldHandleGroupMessage(t *testing.T) {
 
 func TestBotExchangeLimit(t *testing.T) {
 	h := &Handler{
-		botUsername:           "pikamini_bot",
+		botUsername:          "pikamini_bot",
 		broadcastProbability: 1.0,
 		peerBotUsernames:     map[string]bool{"umbreonmini_bot": true},
 		botExchangeCount:     make(map[int64]int),
@@ -1442,5 +1460,62 @@ func TestFormatErrorForMarkdownV2(t *testing.T) {
 				t.Errorf("formatErrorForMarkdownV2(%q)\n  got:  %q\n  want: %q", tt.msg, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTelegramLen_CJKvsBytes(t *testing.T) {
+	s := "晚餐記下了補進Notion" // mostly CJK
+	if telegramLen(s) >= len(s) {
+		t.Errorf("telegramLen(%q)=%d should be < byte len %d for CJK", s, telegramLen(s), len(s))
+	}
+	if telegramLen("abc") != 3 {
+		t.Errorf("ascii telegramLen wrong: %d", telegramLen("abc"))
+	}
+	// astral emoji counts as 2 UTF-16 units
+	if telegramLen("🐱") != 2 {
+		t.Errorf("emoji telegramLen=%d, want 2", telegramLen("🐱"))
+	}
+}
+
+func TestTruncateToTelegramLen_RuneSafe(t *testing.T) {
+	s := strings.Repeat("好", 100) // 100 CJK chars = 100 UTF-16 units, 300 bytes
+	out := truncateToTelegramLen(s, 10)
+	if telegramLen(out) != 10 {
+		t.Errorf("telegramLen(out)=%d, want 10", telegramLen(out))
+	}
+	if !utf8.ValidString(out) {
+		t.Error("truncate produced invalid UTF-8 (split a rune)")
+	}
+}
+
+func TestSplitMessage_CJKNotPrematurelySplit(t *testing.T) {
+	// 1000 CJK chars = 1000 UTF-16 units (well under 4096) but ~3000 bytes.
+	// With the old byte-based check it would split; now it must stay one chunk.
+	msg := strings.Repeat("中", 1000)
+	chunks := splitMessage(msg, maxMessageLength)
+	if len(chunks) != 1 {
+		t.Errorf("1000-char CJK message split into %d chunks, want 1", len(chunks))
+	}
+}
+
+func TestSplitMessage_LongCJKRuneSafe(t *testing.T) {
+	// 5000 CJK chars (> 4096 units) must split into valid-UTF-8 chunks.
+	msg := strings.Repeat("字", 5000)
+	chunks := splitMessage(msg, maxMessageLength)
+	if len(chunks) < 2 {
+		t.Fatalf("5000-char message should split, got %d chunks", len(chunks))
+	}
+	total := 0
+	for _, c := range chunks {
+		if !utf8.ValidString(c) {
+			t.Error("chunk has invalid UTF-8 (split a rune)")
+		}
+		if telegramLen(formatForMarkdownV2(c)) > maxMessageLength {
+			t.Errorf("chunk exceeds telegram limit: %d", telegramLen(formatForMarkdownV2(c)))
+		}
+		total += len([]rune(c))
+	}
+	if total != 5000 {
+		t.Errorf("chunks total %d runes, want 5000 (content lost!)", total)
 	}
 }
