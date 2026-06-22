@@ -665,6 +665,10 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	if b.memory != nil {
 		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
 	}
+	// ghostInjected: did ghost supply any context this turn? Captured here,
+	// before heartbeat/transcript enrichment also mutate augmentedMsg, so the
+	// recall ledger can credit behind-the-scenes ghost grounding.
+	ghostInjected := augmentedMsg != userMsg
 
 	// Enrich heartbeat messages with conversation history and previous insights.
 	// Deep heartbeats use [Heartbeat:deep] prefix for behavioral reflection.
@@ -847,6 +851,10 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// "I saved it" claims.
 	if !isHeartbeat {
 		resp = b.verifyWriteHygiene(ctx, agent, chatID, threadID, sess.ID, userMsg, resp, result, source)
+		// Runtime recall-grounding: did the answer to a "what did I log / how
+		// much so far" question come from a real read (a store query or the
+		// ghost context the bridge injected) — or from lossy chat memory?
+		b.verifyRecall(chatID, sess.ID, userMsg, resp.Text, result.ToolCalls, ghostInjected, source)
 	}
 
 	// Auto-compact session if token threshold exceeded (uses API-reported usage).

@@ -388,6 +388,32 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// recall_verifications is the read-side twin of write_verifications.
+	// A recall-trigger turn (user asks about a previously-stored fact) is
+	// "grounded" when the answer is backed by a real read — either the agent
+	// actively queried a store (ghost/Notion/food-log) or the bridge injected
+	// relevant ghost memories behind the scenes. grounding records which.
+	recallVerifySchema := `
+	CREATE TABLE IF NOT EXISTS recall_verifications (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id        INTEGER NOT NULL,
+		session_id     INTEGER NOT NULL,
+		classification TEXT NOT NULL,
+		triggered      INTEGER NOT NULL DEFAULT 0,
+		read_ok        INTEGER NOT NULL DEFAULT 0,
+		ghost_injected INTEGER NOT NULL DEFAULT 0,
+		grounding      TEXT NOT NULL DEFAULT 'none',
+		tool_names     TEXT NOT NULL DEFAULT '',
+		source         TEXT NOT NULL DEFAULT 'interactive',
+		created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_recall_verif_chat_ts ON recall_verifications(chat_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_recall_verif_class ON recall_verifications(classification);
+	`
+	if _, err := s.db.Exec(recallVerifySchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1220,6 +1246,115 @@ func (s *Store) GetWriteHygieneSummary(chatID int64, since time.Time) (*WriteHyg
 			h.SilentFailure = n
 		case "unclaimed_trigger":
 			h.UnclaimedTrigger = n
+		}
+	}
+	return &h, rows.Err()
+}
+
+// RecallVerification is a single runtime recall-grounding observation — the
+// read-side twin of WriteVerification.
+type RecallVerification struct {
+	ChatID         int64
+	SessionID      int64
+	Classification string // grounded_recall | memory_recall
+	Triggered      bool   // user message asked about a previously-stored fact
+	ReadOK         bool   // a real read tool call (ghost/Notion/food-log) succeeded
+	GhostInjected  bool   // the bridge injected ghost memories for this turn
+	Grounding      string // active_read | ghost_inject | none
+	ToolNames      string // comma-joined read tool names seen (for debugging)
+	Source         string // interactive | heartbeat | scheduler
+}
+
+// LogRecallVerification records one runtime recall-grounding observation.
+// Best-effort: callers log-and-continue on error.
+func (s *Store) LogRecallVerification(v RecallVerification) error {
+	src := v.Source
+	if src == "" {
+		src = "interactive"
+	}
+	grounding := v.Grounding
+	if grounding == "" {
+		grounding = "none"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO recall_verifications
+			(chat_id, session_id, classification, triggered, read_ok, ghost_injected, grounding, tool_names, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, v.ChatID, v.SessionID, v.Classification,
+		b2i(v.Triggered), b2i(v.ReadOK), b2i(v.GhostInjected), grounding, v.ToolNames, src)
+	return err
+}
+
+// RecallHygieneSummary aggregates recall_verifications for measuring the
+// ungrounded-recall rate and how much grounding ghost carries behind the
+// scenes. Pass zero `since` for all-time.
+type RecallHygieneSummary struct {
+	Total          int
+	GroundedRecall int // answer backed by a real read (active or ghost-injected)
+	MemoryRecall   int // recall trigger answered from raw context, no read — risky
+	ActiveRead     int // grounded via an explicit read tool call
+	GhostInject    int // grounded via behind-the-scenes ghost injection
+}
+
+// UngroundedRate is memory_recall / (grounded_recall + memory_recall).
+// Returns 0 when there are no recall-trigger turns to score.
+func (h RecallHygieneSummary) UngroundedRate() float64 {
+	denom := h.GroundedRecall + h.MemoryRecall
+	if denom == 0 {
+		return 0
+	}
+	return float64(h.MemoryRecall) / float64(denom)
+}
+
+// GhostCoverage is ghost_inject / grounded_recall — the share of grounded
+// recalls carried by ghost injection rather than an explicit read. Returns 0
+// when nothing was grounded.
+func (h RecallHygieneSummary) GhostCoverage() float64 {
+	if h.GroundedRecall == 0 {
+		return 0
+	}
+	return float64(h.GhostInject) / float64(h.GroundedRecall)
+}
+
+// GetRecallHygieneSummary returns recall-grounding counts for a chat
+// (chatID=0 for all chats), optionally since a time (zero = all-time).
+func (s *Store) GetRecallHygieneSummary(chatID int64, since time.Time) (*RecallHygieneSummary, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT classification, grounding, COUNT(*) FROM recall_verifications WHERE 1=1`)
+	var args []any
+	if chatID != 0 {
+		sb.WriteString(` AND chat_id = ?`)
+		args = append(args, chatID)
+	}
+	if !since.IsZero() {
+		sb.WriteString(` AND created_at >= ?`)
+		args = append(args, since)
+	}
+	sb.WriteString(` GROUP BY classification, grounding`)
+	rows, err := s.db.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var h RecallHygieneSummary
+	for rows.Next() {
+		var class, grounding string
+		var n int
+		if err := rows.Scan(&class, &grounding, &n); err != nil {
+			return nil, err
+		}
+		h.Total += n
+		switch class {
+		case "grounded_recall":
+			h.GroundedRecall += n
+		case "memory_recall":
+			h.MemoryRecall += n
+		}
+		switch grounding {
+		case "active_read":
+			h.ActiveRead += n
+		case "ghost_inject":
+			h.GhostInject += n
 		}
 	}
 	return &h, rows.Err()

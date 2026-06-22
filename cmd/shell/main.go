@@ -247,6 +247,56 @@ func main() {
 	writeHygieneCmd.Flags().Int64Var(&whChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
 	writeHygieneCmd.Flags().StringVar(&whConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
 
+	// recall-hygiene command — read the runtime recall-grounding ledger (the
+	// read-side twin of write-hygiene).
+	var rhSinceFlag string
+	var rhChatFlag int64
+	var rhConfigFlag string
+	recallHygieneCmd := &cobra.Command{
+		Use:   "recall-hygiene",
+		Short: "Report runtime recall-grounding stats from the ledger",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(rhConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			var since time.Time
+			if rhSinceFlag != "" {
+				d, perr := time.ParseDuration(rhSinceFlag)
+				if perr != nil {
+					return fmt.Errorf("invalid --since %q: %w", rhSinceFlag, perr)
+				}
+				since = time.Now().Add(-d)
+			}
+
+			h, err := st.GetRecallHygieneSummary(rhChatFlag, since)
+			if err != nil {
+				return err
+			}
+			window := "all-time"
+			if rhSinceFlag != "" {
+				window = "last " + rhSinceFlag
+			}
+			fmt.Printf("Recall-hygiene ledger (%s):\n\n", window)
+			fmt.Printf("  Total recall-trigger turns: %d\n", h.Total)
+			fmt.Printf("  grounded_recall    %d  (answer backed by a real read)\n", h.GroundedRecall)
+			fmt.Printf("    ├─ active_read   %d  (agent queried a store: ghost/Notion/food-log)\n", h.ActiveRead)
+			fmt.Printf("    └─ ghost_inject  %d  (bridge injected ghost memories behind the scenes)\n", h.GhostInject)
+			fmt.Printf("  memory_recall      %d  (answered from chat memory, no read — risky)\n", h.MemoryRecall)
+			fmt.Printf("\n  Ungrounded rate:   %.1f%%  (memory_recall / recall turns)\n",
+				100*h.UngroundedRate())
+			fmt.Printf("  Ghost coverage:    %.1f%%  (ghost_inject / grounded — how much ghost carries)\n",
+				100*h.GhostCoverage())
+			return nil
+		},
+	}
+	recallHygieneCmd.Flags().StringVar(&rhSinceFlag, "since", "", "lookback window (e.g. 168h, 24h); empty = all-time")
+	recallHygieneCmd.Flags().Int64Var(&rhChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
+	recallHygieneCmd.Flags().StringVar(&rhConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
+
 	// session command group — persistent --config flag lets all subcommands
 	// target a specific agent's DB (e.g. ~/.shell/agents/pikamini/config.json).
 	// Without it, session commands load ~/.shell/config.json which in a
@@ -677,7 +727,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
