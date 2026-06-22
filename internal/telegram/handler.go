@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -868,35 +869,117 @@ func closeOpenMarkdown(text string) string {
 // formatForTelegram converts Markdown text to Telegram MarkdownV2 format,
 // ensuring the result fits within maxLen bytes. It closes any unclosed
 // Markdown formatting before conversion (important for streaming content).
-// If the formatted text exceeds maxLen, it retries with progressively
-// shorter raw text (showing the tail). Returns the formatted string and
-// true if MarkdownV2 was applied, or the truncated raw text and false
-// as a fallback.
+//
+// Returns (text, mdv2-applied):
+//   - When formatted fits → return formatted, true
+//   - When formatted overflows but RAW text fits → return raw, false
+//     (plain-text fallback preserves full content over partial formatted)
+//   - When raw also overflows → return text[:maxLen-3]+"..." (head-keeping
+//     truncation), false. Mami's "cut off" complaint (cycle 80) traced to
+//     the previous tail-keeping behavior where setup was dropped.
 func formatForTelegram(text string, maxLen int) (string, bool) {
 	formatted := formatForMarkdownV2(closeOpenMarkdown(text))
-	if len(formatted) <= maxLen {
+	if telegramLen(formatted) <= maxLen {
 		return formatted, true
 	}
 
-	// Formatted text exceeds the limit — retry with shorter raw text.
-	// MarkdownV2 escaping adds at most one backslash per character (≤2×),
-	// so halving the raw text guarantees the formatted result fits.
-	for _, limit := range []int{maxLen * 2 / 3, maxLen / 2, maxLen / 3} {
-		if limit >= len(text) {
-			continue
-		}
-		truncated := "..." + text[len(text)-limit:]
-		formatted = formatForMarkdownV2(closeOpenMarkdown(truncated))
-		if len(formatted) <= maxLen {
-			return formatted, true
-		}
+	// Cycle 80: prefer plain-text-full over formatted-partial. Heavy
+	// MarkdownV2 escaping can 2-3x message size for CJK + bold/list content;
+	// if the raw text fits unformatted, send it without markdown rather
+	// than truncating mid-content.
+	if telegramLen(text) <= maxLen {
+		return text, false
 	}
 
-	// Could not fit even at half length. Return truncated raw text.
-	if len(text) > maxLen-3 {
-		return "..." + text[len(text)-maxLen+3:], false
+	// Both formatted and raw overflow. Truncate raw HEAD-FIRST (preserve
+	// setup; drop tail), rune-safe and in UTF-16 units. Better than the
+	// previous suffix-only behavior which made responses feel cut-off.
+	if maxLen >= 3 {
+		return truncateToTelegramLen(text, maxLen-3) + "...", false
 	}
-	return text, false
+	return truncateToTelegramLen(text, maxLen), false
+}
+
+// telegramLen returns the length of s in UTF-16 code units — the unit
+// Telegram uses for its 4096-character message limit. Go's len() counts
+// bytes, which over-counts CJK ~3x (and emoji 4x), causing Chinese replies to
+// be truncated/split at roughly one-third their real length.
+func telegramLen(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2 // astral plane (most emoji) → UTF-16 surrogate pair
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// truncateToTelegramLen returns the longest rune-aligned prefix of s whose
+// telegramLen is <= max. Never splits a multi-byte rune.
+func truncateToTelegramLen(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	n := 0
+	for i, r := range s {
+		w := 1
+		if r > 0xFFFF {
+			w = 2
+		}
+		if n+w > max {
+			return s[:i]
+		}
+		n += w
+	}
+	return s
+}
+
+// byteEndForTelegramBudget returns the byte offset of the longest rune-aligned
+// prefix of s whose telegramLen is <= budget (an upper bound for split search).
+func byteEndForTelegramBudget(s string, budget int) int {
+	n := 0
+	for i, r := range s {
+		w := 1
+		if r > 0xFFFF {
+			w = 2
+		}
+		if n+w > budget {
+			return i
+		}
+		n += w
+	}
+	return len(s)
+}
+
+// isNotModified reports whether a Telegram edit error is the benign
+// "message is not modified" response (identical content) — treated as success
+// so the final reconcile edit doesn't fall back to plain text and lose markup.
+func isNotModified(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not modified")
+}
+
+// tailKeepTelegramLen returns the longest rune-aligned SUFFIX of s whose
+// telegramLen is <= max (used by streaming edits that keep the latest content).
+func tailKeepTelegramLen(s string, max int) string {
+	if telegramLen(s) <= max {
+		return s
+	}
+	rs := []rune(s)
+	units, i := 0, len(rs)
+	for i > 0 {
+		w := 1
+		if rs[i-1] > 0xFFFF {
+			w = 2
+		}
+		if units+w > max {
+			break
+		}
+		units += w
+		i--
+	}
+	return string(rs[i:])
 }
 
 // botExchangeLimit is the max consecutive bot-to-bot messages before suppressing.
@@ -914,17 +997,17 @@ type Handler struct {
 	bridge *bridge.Bridge
 
 	// Multi-agent group chat support
-	botUsername           string
-	myAliases            []string          // name variants for this agent (lowercased)
+	botUsername          string
+	myAliases            []string // name variants for this agent (lowercased)
 	broadcastProbability float64
 	peerBotUsernames     map[string]bool
-	peerAliases          []string          // name variants for peer agents (lowercased)
-	groupMode            string // "autonomous" = always deliver, agent decides via [noop]
+	peerAliases          []string // name variants for peer agents (lowercased)
+	groupMode            string   // "autonomous" = always deliver, agent decides via [noop]
 
 	// Bot-to-bot exchange tracking (per chat)
-	botExchangeMu     sync.Mutex
-	botExchangeCount  map[int64]int       // consecutive bot-to-bot messages per chat
-	botLastResponse   map[int64]time.Time // last time this bot responded to a peer
+	botExchangeMu    sync.Mutex
+	botExchangeCount map[int64]int       // consecutive bot-to-bot messages per chat
+	botLastResponse  map[int64]time.Time // last time this bot responded to a peer
 
 	albumsMu sync.Mutex
 	albums   map[string]*albumEntry // keyed by MediaGroupID
@@ -943,12 +1026,12 @@ type chatLockKey struct {
 
 // AgentConfig holds agent identity fields passed to the handler.
 type AgentConfig struct {
-	BotUsername           string
+	BotUsername          string
 	Aliases              []string // name variants for this agent (e.g. "pika", "皮卡")
 	BroadcastProbability float64
 	PeerBots             []string
 	PeerAliases          []string // name variants for peer agents (e.g. "umbreon", "小傘")
-	GroupMode            string // "autonomous" = agent decides, "" = legacy probability
+	GroupMode            string   // "autonomous" = agent decides, "" = legacy probability
 }
 
 func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
@@ -967,7 +1050,7 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 	return &Handler{
 		auth:                 auth,
 		bridge:               br,
-		botUsername:           strings.ToLower(agentCfg.BotUsername),
+		botUsername:          strings.ToLower(agentCfg.BotUsername),
 		myAliases:            myAliases,
 		broadcastProbability: agentCfg.BroadcastProbability,
 		peerBotUsernames:     peers,
@@ -1424,8 +1507,8 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID, thre
 		}
 
 		plain := current
-		if len(plain) > maxMessageLength-3 {
-			plain = "..." + plain[len(plain)-maxMessageLength+3:]
+		if telegramLen(plain) > maxMessageLength {
+			plain = "..." + tailKeepTelegramLen(plain, maxMessageLength-3)
 		}
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    chatID,
@@ -1475,30 +1558,31 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID, thre
 
 	setReaction(ctx, b, chatID, botMessageID, "✅")
 
-	// Final edit with fully formatted response.
+	// Final edit with fully formatted response. Always reconcile (push the
+	// complete text) rather than trusting that streaming already displayed it —
+	// a throttled or dropped streaming edit can leave a stale/truncated view.
+	// A benign "message is not modified" means the streamed view was already
+	// correct; treat it as success so we don't fall back to plain and lose
+	// markup. Lengths are in UTF-16 units (telegramLen) to match Telegram.
+	_ = streamedContent
+	_ = streamedMarkdown
 	formatted := formatForMarkdownV2(response)
 
-	alreadySent := streamedMarkdown && streamedContent == response
-
-	if alreadySent && len(formatted) <= maxMessageLength {
-		return
-	}
-
-	if len(formatted) <= maxMessageLength {
+	if telegramLen(formatted) <= maxMessageLength {
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    chatID,
 			MessageID: botMessageID,
 			Text:      formatted,
 			ParseMode: models.ParseModeMarkdown,
 		})
-		if editErr != nil {
+		if editErr != nil && !isNotModified(editErr) {
 			b.EditMessageText(ctx, &bot.EditMessageTextParams{
 				ChatID:    chatID,
 				MessageID: botMessageID,
 				Text:      response,
 			})
 		}
-	} else if len(response) <= maxMessageLength {
+	} else if telegramLen(response) <= maxMessageLength {
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    chatID,
 			MessageID: botMessageID,
@@ -1777,8 +1861,8 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 
 			// Fallback: send without formatting.
 			plain := current
-			if len(plain) > maxMessageLength-3 {
-				plain = "..." + plain[len(plain)-maxMessageLength+3:]
+			if telegramLen(plain) > maxMessageLength {
+				plain = "..." + tailKeepTelegramLen(plain, maxMessageLength-3)
 			}
 			_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 				ChatID:    msg.Chat.ID,
@@ -1867,27 +1951,26 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		response = "(empty response)"
 	}
 
-	// Final response: skip if the last streaming edit already displayed
-	// this content with MarkdownV2 formatting. Otherwise edit in place
-	// if it fits, or delete and send chunked.
+	// Final response: always reconcile by pushing the complete formatted text
+	// (a throttled/dropped streaming edit can leave a stale, truncated-looking
+	// view). A benign "message is not modified" means streaming already showed
+	// it correctly — treat as success so we don't fall back to plain and lose
+	// markup. Lengths in UTF-16 units (telegramLen) to match Telegram's limit.
+	_ = streamedContent
+	_ = streamedMarkdown
 	formatted := formatForMarkdownV2(response)
-
-	alreadySent := streamedMarkdown && streamedContent == response
 
 	// Track which bot message IDs correspond to this exchange.
 	var botMsgIDs []int
 
-	if alreadySent && len(formatted) <= maxMessageLength {
-		// Streaming already displayed the final formatted content.
-		botMsgIDs = []int{msgID}
-	} else if len(formatted) <= maxMessageLength {
+	if telegramLen(formatted) <= maxMessageLength {
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
 			Text:      formatted,
 			ParseMode: models.ParseModeMarkdown,
 		})
-		if editErr != nil {
+		if editErr != nil && !isNotModified(editErr) {
 			// Fallback: try without markdown formatting
 			setReaction(ctx, b, msg.Chat.ID, msg.ID, "🔄")
 			b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -1897,7 +1980,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			})
 		}
 		botMsgIDs = []int{msgID}
-	} else if len(response) <= maxMessageLength {
+	} else if telegramLen(response) <= maxMessageLength {
 		// Formatted text exceeds the limit but raw text fits — send unformatted.
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
@@ -1944,7 +2027,6 @@ func (h *Handler) HandleSticker(ctx context.Context, b *bot.Bot, msg *models.Mes
 func (h *Handler) HandlePDF(ctx context.Context, b *bot.Bot, msg *models.Message) {
 	h.HandleMessage(ctx, b, msg)
 }
-
 
 // formatBytes formats a byte count as a human-readable string.
 func formatBytes(bytes int64) string {
@@ -2163,8 +2245,8 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		}
 
 		plain := current
-		if len(plain) > maxMessageLength-3 {
-			plain = "..." + plain[len(plain)-maxMessageLength+3:]
+		if telegramLen(plain) > maxMessageLength {
+			plain = "..." + tailKeepTelegramLen(plain, maxMessageLength-3)
 		}
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    first.Chat.ID,
@@ -2213,22 +2295,20 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		response = "(empty response)"
 	}
 
+	_ = streamedContent
+	_ = streamedMarkdown
 	formatted := formatForMarkdownV2(response)
-
-	alreadySent := streamedMarkdown && streamedContent == response
 
 	var botMsgIDs []int
 
-	if alreadySent && len(formatted) <= maxMessageLength {
-		botMsgIDs = []int{msgID}
-	} else if len(formatted) <= maxMessageLength {
+	if telegramLen(formatted) <= maxMessageLength {
 		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    first.Chat.ID,
 			MessageID: msgID,
 			Text:      formatted,
 			ParseMode: models.ParseModeMarkdown,
 		})
-		if editErr != nil {
+		if editErr != nil && !isNotModified(editErr) {
 			setReaction(ctx, b, first.Chat.ID, first.ID, "🔄")
 			b.EditMessageText(ctx, &bot.EditMessageTextParams{
 				ChatID:    first.Chat.ID,
@@ -2237,7 +2317,7 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 			})
 		}
 		botMsgIDs = []int{msgID}
-	} else if len(response) <= maxMessageLength {
+	} else if telegramLen(response) <= maxMessageLength {
 		b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    first.Chat.ID,
 			MessageID: msgID,
@@ -2373,25 +2453,23 @@ func codeBlockStart(text string, pos int) int {
 // formatted with formatForMarkdownV2, fits within maxLen bytes. It prefers
 // to split at paragraph boundaries (\n\n), then line boundaries (\n).
 func splitMessage(text string, maxLen int) []string {
-	if len(formatForMarkdownV2(text)) <= maxLen {
+	if telegramLen(formatForMarkdownV2(text)) <= maxLen {
 		return []string{text}
 	}
 
 	var chunks []string
 	for len(text) > 0 {
-		if len(formatForMarkdownV2(text)) <= maxLen {
+		if telegramLen(formatForMarkdownV2(text)) <= maxLen {
 			chunks = append(chunks, text)
 			break
 		}
 
-		// Find the largest raw prefix whose formatted length fits in maxLen.
-		// Start optimistically at maxLen raw chars, then shrink proportionally.
-		end := maxLen
-		if end > len(text) {
-			end = len(text)
-		}
+		// Find the largest raw prefix whose formatted length (in UTF-16 units,
+		// matching Telegram's limit) fits in maxLen. Start at the byte offset
+		// for maxLen units, then shrink proportionally.
+		end := byteEndForTelegramBudget(text, maxLen)
 		for end > 1 {
-			fmtLen := len(formatForMarkdownV2(text[:end]))
+			fmtLen := telegramLen(formatForMarkdownV2(text[:end]))
 			if fmtLen <= maxLen {
 				break
 			}
@@ -2404,6 +2482,14 @@ func splitMessage(text string, maxLen int) []string {
 				newEnd = 1
 			}
 			end = newEnd
+		}
+		// Snap end down to a rune boundary so a hard split never cuts a
+		// multi-byte (CJK/emoji) character into invalid UTF-8.
+		for end > 0 && end < len(text) && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if end < 1 {
+			end = 1
 		}
 
 		// Try to split at a nice boundary within [0, end].
