@@ -494,7 +494,7 @@ func TestParseArtifacts(t *testing.T) {
 Hope you like it!`
 
 	var photos []Photo
-	cleaned := b.parseArtifacts(response, &photos)
+	cleaned := b.parseArtifacts(response, &photos, new([]Video))
 
 	// Should strip the artifact marker
 	if strings.Contains(cleaned, "[artifact") {
@@ -519,11 +519,42 @@ Hope you like it!`
 	}
 }
 
+func TestParseArtifacts_Video(t *testing.T) {
+	b := testBridge(t)
+
+	tmpFile := filepath.Join(t.TempDir(), "test-video.mp4")
+	os.WriteFile(tmpFile, []byte("fake-mp4-data"), 0644)
+
+	response := `Here's your clip!
+[artifact type="video" path="` + tmpFile + `" caption="a surfing cat"]
+Enjoy!`
+
+	var photos []Photo
+	var videos []Video
+	cleaned := b.parseArtifacts(response, &photos, &videos)
+
+	if strings.Contains(cleaned, "[artifact") {
+		t.Error("artifact marker should be stripped")
+	}
+	if len(photos) != 0 {
+		t.Errorf("expected 0 photos, got %d", len(photos))
+	}
+	if len(videos) != 1 {
+		t.Fatalf("expected 1 video, got %d", len(videos))
+	}
+	if string(videos[0].Data) != "fake-mp4-data" {
+		t.Errorf("data = %q", videos[0].Data)
+	}
+	if videos[0].Caption != "a surfing cat" {
+		t.Errorf("caption = %q", videos[0].Caption)
+	}
+}
+
 func TestParseArtifacts_NoMatch(t *testing.T) {
 	b := testBridge(t)
 	response := "just plain text, no artifacts"
 	var photos []Photo
-	cleaned := b.parseArtifacts(response, &photos)
+	cleaned := b.parseArtifacts(response, &photos, new([]Video))
 	if cleaned != response {
 		t.Errorf("should return unchanged, got %q", cleaned)
 	}
@@ -627,7 +658,7 @@ func TestParseArtifacts_MissingFile(t *testing.T) {
 
 	response := `[artifact type="image" path="/nonexistent/file.png" caption="test"]`
 	var photos []Photo
-	cleaned := b.parseArtifacts(response, &photos)
+	cleaned := b.parseArtifacts(response, &photos, new([]Video))
 	if !strings.Contains(cleaned, "failed to read image") {
 		t.Errorf("should contain error message, got %q", cleaned)
 	}

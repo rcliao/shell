@@ -12,6 +12,9 @@ type Transport interface {
 
 	// SendPhoto sends an image to a chat.
 	SendPhoto(chatID, threadID int64, data []byte, caption string)
+
+	// SendVideo sends a video to a chat.
+	SendVideo(chatID, threadID int64, data []byte, caption string)
 }
 
 // AgentPool resolves which Agent handles a given chat.

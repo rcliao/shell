@@ -18,9 +18,9 @@ var artifactRe = regexp.MustCompile(`\[artifact\s+type="([^"]+)"\s+path="([^"]+)
 var legacyDirectiveRe = regexp.MustCompile(`(?s)\[(?:relay|schedule|remember|browser|pm|tunnel|heartbeat-learning|task-complete|noop)(?:\s[^\]]*)?\](?:.*?\[/(?:relay|schedule|remember|browser|pm|tunnel|heartbeat-learning|task-complete)\])?`)
 
 // parseArtifacts extracts [artifact type="..." path="..." caption="..."] markers
-// from the response, collects image artifacts into photos, and returns the
-// cleaned response text.
-func (b *Bridge) parseArtifacts(response string, photos *[]Photo) string {
+// from the response, collects image artifacts into photos and video artifacts
+// into videos, and returns the cleaned response text.
+func (b *Bridge) parseArtifacts(response string, photos *[]Photo, videos *[]Video) string {
 	matches := artifactRe.FindAllStringSubmatchIndex(response, -1)
 	if len(matches) == 0 {
 		return response
@@ -45,6 +45,15 @@ func (b *Bridge) parseArtifacts(response string, photos *[]Photo) string {
 				continue
 			}
 			*photos = append(*photos, Photo{Data: data, Caption: caption})
+			os.Remove(path)
+		case "video":
+			data, err := os.ReadFile(path)
+			if err != nil {
+				slog.Error("artifact: failed to read video", "path", path, "error", err)
+				clean = clean[:m[0]] + "(failed to read video)" + clean[m[1]:]
+				continue
+			}
+			*videos = append(*videos, Video{Data: data, Caption: caption})
 			os.Remove(path)
 		default:
 			slog.Warn("artifact: unknown type", "type", artifactType, "path", path)

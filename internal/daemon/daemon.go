@@ -980,6 +980,10 @@ func (t *telegramTransport) SendPhoto(chatID, threadID int64, data []byte, capti
 	t.bot.SendPhoto(chatID, threadID, data, caption)
 }
 
+func (t *telegramTransport) SendVideo(chatID, threadID int64, data []byte, caption string) {
+	t.bot.SendVideo(chatID, threadID, data, caption)
+}
+
 // resolveAgentNS returns the first AgentNS found in config profiles, or "" for legacy mode.
 func resolveAgentNS(cfg config.Config) string {
 	for _, p := range cfg.Memory.Profiles {

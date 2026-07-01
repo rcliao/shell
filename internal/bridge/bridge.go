@@ -907,9 +907,10 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		response = summarizeToolCalls(result.ToolCalls)
 	}
 
-	// Collect photos from artifact markers (skill output).
+	// Collect photos and videos from artifact markers (skill output).
 	var photos []Photo
-	response = b.parseArtifacts(response, &photos)
+	var videos []Video
+	response = b.parseArtifacts(response, &photos, &videos)
 
 	// Log assistant response.
 	if err := b.store.LogMessage(sessID, "assistant", response); err != nil {
@@ -949,7 +950,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		slog.Warn("failed to update session", "error", err)
 	}
 
-	return AgentResponse{Text: response, Photos: photos}
+	return AgentResponse{Text: response, Photos: photos, Videos: videos}
 }
 
 // ensureSession returns the existing session for a (chat, thread) key or creates a new one.

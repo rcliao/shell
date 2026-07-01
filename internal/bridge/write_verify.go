@@ -183,7 +183,7 @@ func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, ch
 			} else {
 				enforced = true
 				corrText := stripDirectives(strings.TrimSpace(corr.Text))
-				corrText = b.parseArtifacts(corrText, &resp.Photos)
+				corrText = b.parseArtifacts(corrText, &resp.Photos, &resp.Videos)
 				if corrText != "" {
 					if resp.Text != "" {
 						resp.Text += "\n\n" + corrText

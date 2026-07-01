@@ -1356,6 +1356,22 @@ func sendPhoto(ctx context.Context, b *bot.Bot, chatID, threadID int64, imageDat
 	}
 }
 
+// sendVideo sends a video to a chat/topic as a Telegram video message.
+func sendVideo(ctx context.Context, b *bot.Bot, chatID, threadID int64, videoData []byte, caption string) {
+	_, err := b.SendVideo(ctx, &bot.SendVideoParams{
+		ChatID:          chatID,
+		MessageThreadID: int(threadID),
+		Video: &models.InputFileUpload{
+			Filename: "video.mp4",
+			Data:     bytes.NewReader(videoData),
+		},
+		Caption: caption,
+	})
+	if err != nil {
+		slog.Error("failed to send video", "error", err, "chat_id", chatID, "thread_id", threadID)
+	}
+}
+
 // looksLikeClarification checks if a response appears to be asking the user
 // for clarification (i.e. it ends with a question mark).
 func looksLikeClarification(response string) bool {
@@ -1540,6 +1556,9 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID, thre
 	// Send any collected photos.
 	for _, photo := range resp.Photos {
 		sendPhoto(ctx, b, chatID, threadID, photo.Data, photo.Caption)
+	}
+	for _, video := range resp.Videos {
+		sendVideo(ctx, b, chatID, threadID, video.Data, video.Caption)
 	}
 
 	response := resp.Text
@@ -1923,7 +1942,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	response := resp.Text
 
 	// Autonomous group noop: agent decided not to speak — suppress silently.
-	if isGroup && h.groupMode == "autonomous" && response == "" && len(resp.Photos) == 0 {
+	if isGroup && h.groupMode == "autonomous" && response == "" && len(resp.Photos) == 0 && len(resp.Videos) == 0 {
 		slog.Info("autonomous noop: agent chose not to speak", "chat_id", msg.Chat.ID, "bot", h.botUsername)
 		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
 			ChatID:    msg.Chat.ID,
@@ -1935,6 +1954,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// Send any collected photos (generated images, artifacts).
 	for _, photo := range resp.Photos {
 		sendPhoto(ctx, b, msg.Chat.ID, threadID, photo.Data, photo.Caption)
+	}
+	for _, video := range resp.Videos {
+		sendVideo(ctx, b, msg.Chat.ID, threadID, video.Data, video.Caption)
 	}
 
 	// If final response is empty but we already streamed content to the user,
@@ -2279,6 +2301,9 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 	// Send any collected photos.
 	for _, photo := range resp.Photos {
 		sendPhoto(ctx, b, first.Chat.ID, threadID, photo.Data, photo.Caption)
+	}
+	for _, video := range resp.Videos {
+		sendVideo(ctx, b, first.Chat.ID, threadID, video.Data, video.Caption)
 	}
 
 	response := resp.Text

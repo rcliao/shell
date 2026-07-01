@@ -152,6 +152,23 @@ func (b *Bot) SendPhoto(chatID, threadID int64, imageData []byte, caption string
 	}
 }
 
+// SendVideo sends a video to a chat/topic as a Telegram video message.
+func (b *Bot) SendVideo(chatID, threadID int64, videoData []byte, caption string) {
+	ctx := context.Background()
+	_, err := b.bot.SendVideo(ctx, &bot.SendVideoParams{
+		ChatID:          chatID,
+		MessageThreadID: int(threadID),
+		Video: &models.InputFileUpload{
+			Filename: "video.mp4",
+			Data:     bytes.NewReader(videoData),
+		},
+		Caption: caption,
+	})
+	if err != nil {
+		slog.Error("failed to send video", "error", err, "chat_id", chatID, "thread_id", threadID)
+	}
+}
+
 // SendChatAction sends a chat action (e.g. "upload_photo", "typing") to a chat/topic.
 func (b *Bot) SendChatAction(chatID, threadID int64, action string) {
 	ctx := context.Background()
