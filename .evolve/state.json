@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 153,
-  "last_cycle_at": "2026-07-02T09:28:00-07:00",
+  "last_cycle": 154,
+  "last_cycle_at": "2026-07-02T10:30:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -78,14 +78,14 @@
   "open_proposals": 1,
   "agent_author_pipeline_v1": "shipped",
   "cv_dimension": "shipped",
-  "halted": false,
+  "halted": true,
   "high_water": {
     "shell_repo_sha": "d2c27b3",
     "ghost_repo_sha": "3920d8f"
   },
   "_legacy_notes": "v1 had multiple overwriting writes; bumped to v2. Cycles 36-39 (C36 receipt-first, C37 SessionScope, C38 ns-migration+skill-tiers, C39 bench-driven RF) ran without numbered state updates.",
   "accepted_proposals": 6,
-  "idle_streak": 2,
+  "idle_streak": 3,
   "consecutive_failures": 0,
   "autonomous_loop_v1": "shipped + smoke-tested",
   "deferred_proposals": 2,
@@ -346,5 +346,5 @@
   "deploy_pending": [
     "restart daemons for shadow tier router (V2-H11 p2, cycle 151) — log-only, binary built"
   ],
-  "v2_note": "cycle 153: quiet (idle_streak 2). Shadow router still deploy_pending (owner HUP needed). H1 clean, H2 accruing. One more quiet cycle → halt with digest; B-017 formal grade due 7/3 morning either way."
+  "v2_note": "HALTED after 3 quiet cycles (152-154), 2026-07-02 10:30 PT. In flight: V2-H1 (grade due 7/4 20:30 — trending strongly validated: is_new 0%, 0-5ms, zero LLM rows), V2-H2 (grade 7/8 — 1 grounded recall so far), V2-H11-p2 shadow router (SHIPPED 0f2565c but NOT DEPLOYED — needs owner daemon restart; tier_decisions table will appear when live). Also due: B-017 formal noop grade 7/3 morning (corrected baselines pika 58.3%/umb 39.7%). Resume: owner re-fires /loop in the shell repo, or asks the assistant."
 }
