@@ -227,6 +227,27 @@ func (s *Store) migrate() error {
 	// cost_usd_total set at insert.
 	s.db.Exec("UPDATE usage SET cost_usd_total = cost_usd WHERE cost_usd_total = 0 AND cost_usd > 0")
 
+	// Per-exchange tool-call log. One row per tool_use block observed in the
+	// Claude stream — powers usage analysis (which tools/skills actually get
+	// used, failure rates, media-generation metering).
+	toolUseSchema := `
+	CREATE TABLE IF NOT EXISTS tool_uses (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		session_id INTEGER NOT NULL,
+		source TEXT NOT NULL DEFAULT 'interactive',
+		tool_name TEXT NOT NULL,
+		detail TEXT NOT NULL DEFAULT '',
+		failed INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_tool_uses_created ON tool_uses(created_at);
+	CREATE INDEX IF NOT EXISTS idx_tool_uses_name ON tool_uses(tool_name, created_at);
+	`
+	if _, err := s.db.Exec(toolUseSchema); err != nil {
+		return err
+	}
+
 	// Phase 4: lifecycle columns on sessions (see docs/SESSION-LIFECYCLE.md).
 	// Idempotent — duplicate-column errors are ignored on legacy DBs.
 	for _, col := range []string{
@@ -1182,6 +1203,86 @@ func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cac
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD)
 	return err
+}
+
+// ToolUse is one observed tool call within an exchange.
+type ToolUse struct {
+	Name   string
+	Detail string // short non-sensitive hint (command head, file path, action)
+	Failed bool
+}
+
+// LogToolUses records the tool calls of one exchange in a single transaction.
+// Best-effort: callers log-and-continue on error.
+func (s *Store) LogToolUses(chatID, sessionID int64, source string, calls []ToolUse) error {
+	if len(calls) == 0 {
+		return nil
+	}
+	if source == "" {
+		source = "interactive"
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`
+		INSERT INTO tool_uses (chat_id, session_id, source, tool_name, detail, failed)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, c := range calls {
+		failed := 0
+		if c.Failed {
+			failed = 1
+		}
+		if _, err := stmt.Exec(chatID, sessionID, source, c.Name, c.Detail, failed); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ToolUsageRow is one tool's aggregate in the tool-use ledger.
+type ToolUsageRow struct {
+	Name     string
+	Calls    int64
+	Failed   int64
+	LastUsed string
+}
+
+// GetToolUsageSummary aggregates the tool-use ledger per tool, most-used
+// first. chatID 0 means all chats; a zero since means all-time.
+func (s *Store) GetToolUsageSummary(chatID int64, since time.Time) ([]ToolUsageRow, error) {
+	q := `SELECT tool_name, COUNT(*), COALESCE(SUM(failed),0), MAX(created_at)
+	      FROM tool_uses WHERE 1=1`
+	var args []any
+	if chatID != 0 {
+		q += " AND chat_id = ?"
+		args = append(args, chatID)
+	}
+	if !since.IsZero() {
+		q += " AND created_at >= ?"
+		args = append(args, since.UTC().Format("2006-01-02 15:04:05"))
+	}
+	q += " GROUP BY tool_name ORDER BY COUNT(*) DESC"
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ToolUsageRow
+	for rows.Next() {
+		var r ToolUsageRow
+		if err := rows.Scan(&r.Name, &r.Calls, &r.Failed, &r.LastUsed); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // WriteVerification is a single runtime write-hygiene observation.

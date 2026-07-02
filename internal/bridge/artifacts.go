@@ -11,6 +11,7 @@ import (
 
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/store"
 )
 
 // artifactRe matches [artifact type="..." path="..." caption="..."] markers from skill scripts.
@@ -99,6 +100,24 @@ func (b *Bridge) archiveArtifact(path string) {
 func stripDirectives(response string) string {
 	cleaned := legacyDirectiveRe.ReplaceAllString(response, "")
 	return strings.TrimSpace(cleaned)
+}
+
+// toolUseRows maps observed tool calls to store rows. Detail keeps only a
+// short routing-relevant hint (command head, file path, action) — full inputs
+// can carry whole message bodies and stay out of the log.
+func toolUseRows(calls []process.ToolCall) []store.ToolUse {
+	rows := make([]store.ToolUse, 0, len(calls))
+	for _, tc := range calls {
+		detail := ""
+		for _, key := range []string{"command", "file_path", "path", "action", "skill"} {
+			if v, ok := tc.Input[key].(string); ok && v != "" {
+				detail = head(key+"="+v, 160)
+				break
+			}
+		}
+		rows = append(rows, store.ToolUse{Name: tc.Name, Detail: detail, Failed: tc.Failed})
+	}
+	return rows
 }
 
 // summarizeToolCalls produces a short summary when Claude used tools but

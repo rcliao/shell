@@ -297,6 +297,59 @@ func main() {
 	recallHygieneCmd.Flags().Int64Var(&rhChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
 	recallHygieneCmd.Flags().StringVar(&rhConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
 
+	// tool-usage command — read the per-exchange tool-call ledger.
+	var tuSinceFlag string
+	var tuChatFlag int64
+	var tuConfigFlag string
+	toolUsageCmd := &cobra.Command{
+		Use:   "tool-usage",
+		Short: "Report tool-call counts and failure rates from the ledger",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(tuConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			var since time.Time
+			if tuSinceFlag != "" {
+				d, perr := time.ParseDuration(tuSinceFlag)
+				if perr != nil {
+					return fmt.Errorf("invalid --since %q: %w", tuSinceFlag, perr)
+				}
+				since = time.Now().Add(-d)
+			}
+
+			rows, err := st.GetToolUsageSummary(tuChatFlag, since)
+			if err != nil {
+				return err
+			}
+			window := "all-time"
+			if tuSinceFlag != "" {
+				window = "last " + tuSinceFlag
+			}
+			fmt.Printf("Tool-use ledger (%s):\n\n", window)
+			if len(rows) == 0 {
+				fmt.Println("  no tool calls recorded (ledger started with this build)")
+				return nil
+			}
+			fmt.Printf("  %-40s %8s %8s  %s\n", "TOOL", "CALLS", "FAILED", "LAST USED")
+			var calls, failed int64
+			for _, r := range rows {
+				fmt.Printf("  %-40s %8d %8d  %s\n", r.Name, r.Calls, r.Failed, r.LastUsed)
+				calls += r.Calls
+				failed += r.Failed
+			}
+			fmt.Printf("\n  Total: %d calls, %d failed (%.1f%%)\n", calls, failed,
+				100*float64(failed)/float64(max(calls, 1)))
+			return nil
+		},
+	}
+	toolUsageCmd.Flags().StringVar(&tuSinceFlag, "since", "", "lookback window (e.g. 168h, 24h); empty = all-time")
+	toolUsageCmd.Flags().Int64Var(&tuChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
+	toolUsageCmd.Flags().StringVar(&tuConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
+
 	// session command group — persistent --config flag lets all subcommands
 	// target a specific agent's DB (e.g. ~/.shell/agents/pikamini/config.json).
 	// Without it, session commands load ~/.shell/config.json which in a
@@ -727,7 +780,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, toolUsageCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

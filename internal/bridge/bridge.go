@@ -985,6 +985,14 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		})
 	}
 
+	// Log tool calls for usage analysis (which tools/skills get used,
+	// failure rates, media-generation metering).
+	if len(result.ToolCalls) > 0 {
+		if err := b.store.LogToolUses(chatID, sessID, source, toolUseRows(result.ToolCalls)); err != nil {
+			slog.Warn("failed to log tool uses", "error", err)
+		}
+	}
+
 	// Log token usage.
 	if result.Usage != nil {
 		if err := b.store.LogUsage(chatID, sessID,
