@@ -218,6 +218,14 @@ func (s *Store) migrate() error {
 
 	// Add source column to usage table (idempotent for existing databases).
 	s.db.Exec("ALTER TABLE usage ADD COLUMN source TEXT NOT NULL DEFAULT 'interactive'")
+	// cost_usd_total keeps the CLI's raw cumulative session cost; cost_usd
+	// holds the per-exchange delta so SUM(cost_usd) is meaningful.
+	s.db.Exec("ALTER TABLE usage ADD COLUMN cost_usd_total REAL NOT NULL DEFAULT 0")
+	// Backfill: pre-migration rows stored the cumulative total in cost_usd.
+	// Copy it over so the first post-migration delta doesn't book a whole
+	// session's running total. Idempotent — post-migration rows always have
+	// cost_usd_total set at insert.
+	s.db.Exec("UPDATE usage SET cost_usd_total = cost_usd WHERE cost_usd_total = 0 AND cost_usd > 0")
 
 	// Phase 4: lifecycle columns on sessions (see docs/SESSION-LIFECYCLE.md).
 	// Idempotent — duplicate-column errors are ignored on legacy DBs.
@@ -1147,14 +1155,32 @@ type UsageSummary struct {
 
 // LogUsage records token usage for a single exchange.
 // source identifies the origin: "interactive", "heartbeat", or "scheduler".
+//
+// costUSD arrives from the Claude CLI as the session's CUMULATIVE total, not
+// this exchange's cost — summing it naively overstated spend ~4x. We store
+// the raw value in cost_usd_total and derive the per-exchange delta into
+// cost_usd, so SUM(cost_usd) reports true spend. A delta below zero means the
+// CLI session restarted (fresh running total); the reported value then IS the
+// exchange cost.
 func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source string) error {
 	if source == "" {
 		source = "interactive"
 	}
-	_, err := s.db.Exec(`
-		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, costUSD, numTurns, source)
+	var prevTotal float64
+	err := s.db.QueryRow(`
+		SELECT cost_usd_total FROM usage WHERE session_id = ? ORDER BY id DESC LIMIT 1
+	`, sessionID).Scan(&prevTotal)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	delta := costUSD - prevTotal
+	if delta < 0 {
+		delta = costUSD
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source, cost_usd_total)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD)
 	return err
 }
 
