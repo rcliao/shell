@@ -733,9 +733,15 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		}
 	}
 
-	// Tag the message with sender identity so Claude knows who is speaking
+	// Tag the message with sender identity AND location so Claude knows who
+	// is speaking and which chat this is — relays default here, not to a
+	// remembered chat (repeated wrong-chat routing failures).
 	if senderName != "" {
-		augmentedMsg = fmt.Sprintf("[From: %s]\n%s", senderName, augmentedMsg)
+		where := fmt.Sprintf("chat: %d", chatID)
+		if threadID != 0 {
+			where += fmt.Sprintf(" | thread: %d", threadID)
+		}
+		augmentedMsg = fmt.Sprintf("[From: %s | %s]\n%s", senderName, where, augmentedMsg)
 	}
 
 	// Inject Channel B: current time + pinned-memory delta + active tasks.

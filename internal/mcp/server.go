@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -153,9 +155,10 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 	// shell_relay — send messages/photos to other Telegram chats/topics
 	server.AddTool(&gomcp.Tool{
 		Name:        "shell_relay",
-		Description: "Send a message or photo to another Telegram chat. Optional message_thread_id routes the reply into a specific forum topic (0 = main chat). Use this to forward info, send generated images, or communicate with other users.",
-		InputSchema: schema([]string{"chat_id"}, map[string]map[string]any{
-			"chat_id":           prop("integer", "Target Telegram chat ID"),
+		Description: "Send a message or photo to a Telegram chat. Omit chat_id to send to the CURRENT chat (the one this conversation is happening in) — this is the safe default. Sending to a DIFFERENT chat requires both chat_id and cross_chat=true. Optional message_thread_id routes the reply into a specific forum topic (0 = main chat).",
+		InputSchema: schema([]string{}, map[string]map[string]any{
+			"chat_id":           prop("integer", "Target Telegram chat ID. Omit to send to the current chat."),
+			"cross_chat":        prop("boolean", "Required (true) when chat_id is a different chat than the current one. Acknowledges the message is intentionally leaving this conversation."),
 			"message_thread_id": prop("integer", "Forum topic ID (0 = main chat). Optional."),
 			"message":           prop("string", "Text message or photo caption"),
 			"image_path":        prop("string", "Path to image file to send as photo (optional)"),
@@ -163,6 +166,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		var p struct {
 			ChatID          int64  `json:"chat_id"`
+			CrossChat       bool   `json:"cross_chat"`
 			MessageThreadID int64  `json:"message_thread_id"`
 			Message         string `json:"message"`
 			ImagePath       string `json:"image_path"`
@@ -170,8 +174,17 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 		if err := unmarshalArgs(req, &p); err != nil {
 			return errResult(err.Error()), nil
 		}
+		// SHELL_CHAT_ID is the chat this Claude subprocess is serving
+		// (0 / unset for heartbeat and system turns, which have no
+		// current chat and must always target explicitly).
+		currentChat, _ := strconv.ParseInt(os.Getenv("SHELL_CHAT_ID"), 10, 64)
 		if p.ChatID == 0 {
-			return errResult("chat_id is required"), nil
+			if currentChat == 0 {
+				return errResult("chat_id is required (no current chat in this context)"), nil
+			}
+			p.ChatID = currentChat
+		} else if currentChat != 0 && p.ChatID != currentChat && !p.CrossChat {
+			return errResult(fmt.Sprintf("chat_id %d differs from the current chat %d — pass cross_chat=true if this is intentional, or omit chat_id to reply here", p.ChatID, currentChat)), nil
 		}
 		if p.Message == "" && p.ImagePath == "" {
 			return errResult("message or image_path is required"), nil
