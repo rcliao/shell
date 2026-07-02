@@ -24,7 +24,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 - **kill-switch:** stickiness or drift-catch regresses vs the cycle-148 table → revert flag.
 
 ### V2-H11 — [H] Tiered model routing for conversation turns (owner-requested 7/1)
-- **status:** approved for phases 1-2 (shadow mode); phase 3+ rollout needs owner sign-off
+- **status:** phase 2 SHIPPED cycle 151 (0f2565c, validating — 7d shadow data after deploy); phase 3+ rollout needs owner sign-off
 - **why:** owner wants complexity-tiered routing — fable (most demanding), opus
   (deep thinking/complex), sonnet (everyday), haiku (simple) — to cut token
   spend. June interactive spend was ~$1,292 of $1,572, all on the top-tier

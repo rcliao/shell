@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 150,
-  "last_cycle_at": "2026-07-01T21:20:00-07:00",
+  "last_cycle": 151,
+  "last_cycle_at": "2026-07-02T07:35:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -343,6 +343,8 @@
   "cycle_75_pid_conflict_verified_live": "yes — refused duplicate start of pid 77397",
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
-  "deploy_pending": [],
-  "v2_note": "cycle 150 complete: V2-H1 validating (deployed 20:31, measure-by 7/4 20:30 PT), V2-H2 validating (deployed 21:35 PT by owner, measure-by 7/8). Cycle 151 fires 07:19 via one-shot cron: H1 overnight check, B-017 early read, then V2-H11 shadow router if ≤2 ships in flight."
+  "deploy_pending": [
+    "restart daemons for shadow tier router (V2-H11 p2, cycle 151) — log-only, binary built"
+  ],
+  "v2_note": "cycle 151: overnight H1 clean (0 LLM rows, 0 new topics), H2 alive, B-017 sample too small (formal 7/3, NOTE corrected baselines pika 58.3%/umb 39.7%). Shipped shadow tier router 0f2565c (log-only). 3/3 ships in flight — validation-only until one graduates."
 }
