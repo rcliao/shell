@@ -959,6 +959,10 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	var videos []Video
 	response = b.parseArtifacts(response, &photos, &videos)
 
+	// No unprompted media: heartbeats never deliver media; user turns must
+	// have asked for it (enforcement behind media_gate_enforce).
+	response += b.gateMedia(userMsg, isHeartbeat, &photos, &videos)
+
 	// Log assistant response. Skip empty/noop responses (parseArtifacts strips
 	// [noop] markers; heartbeats with nothing to report leave response="").
 	// Cycle 83: prevents ~10% of message rows from being empty placeholders

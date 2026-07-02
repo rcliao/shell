@@ -161,6 +161,7 @@ type ClaudeConfig struct {
 	MaxSessionTokens   int               `json:"max_session_tokens"`   // in-place /compact when total input tokens exceed this (0 = disabled)
 	RotateMaxTokens    int               `json:"rotate_max_tokens"`    // full session ROTATION (fresh system prompt: skills+identity+pinned reloaded) once total input tokens exceed this (0 = disabled). Lower = fresher/less drift, at higher cache cost.
 	WriteVerifyEnforce bool              `json:"write_verify_enforce"` // when true, a caught write-claim confabulation triggers a bounded correction turn before delivery
+	MediaGateEnforce   bool              `json:"media_gate_enforce"`   // when true, image/video artifacts are dropped on user turns that didn't ask for media (heartbeat turns always drop media regardless)
 	PermissionMode     string            `json:"permission_mode"`      // --permission-mode for the Claude CLI subprocess (default "bypassPermissions"). "auto" adds a safety classifier but may fall back to prompting (which hangs a headless turn).
 }
 

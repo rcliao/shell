@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/process"
 )
 
@@ -45,7 +48,7 @@ func (b *Bridge) parseArtifacts(response string, photos *[]Photo, videos *[]Vide
 				continue
 			}
 			*photos = append(*photos, Photo{Data: data, Caption: caption})
-			os.Remove(path)
+			b.archiveArtifact(path)
 		case "video":
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -54,7 +57,7 @@ func (b *Bridge) parseArtifacts(response string, photos *[]Photo, videos *[]Vide
 				continue
 			}
 			*videos = append(*videos, Video{Data: data, Caption: caption})
-			os.Remove(path)
+			b.archiveArtifact(path)
 		default:
 			slog.Warn("artifact: unknown type", "type", artifactType, "path", path)
 		}
@@ -63,6 +66,32 @@ func (b *Bridge) parseArtifacts(response string, photos *[]Photo, videos *[]Vide
 	}
 
 	return strings.TrimSpace(clean)
+}
+
+// archiveArtifact moves a delivered artifact into the agent's archive dir
+// instead of deleting it. Regeneration is nondeterministic and costs real API
+// money — deleting originals meant every re-send produced a *different*
+// image/video than the one the user approved. Falls back to leaving the file
+// in place if the move fails.
+func (b *Bridge) archiveArtifact(path string) {
+	dir := filepath.Join(config.DefaultConfigDir(), "artifacts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("artifact archive: mkdir failed, leaving original in place", "error", err)
+		return
+	}
+	// ~/.shell is shared across agent daemons (like worktrees/); prefix with
+	// the agent name so archives stay attributable.
+	dest := filepath.Join(dir, b.agentBotUsername+"-"+time.Now().Format("20060102-150405")+"-"+filepath.Base(path))
+	if err := os.Rename(path, dest); err != nil {
+		// Cross-device or permission issue: copy, then best-effort remove.
+		data, rerr := os.ReadFile(path)
+		if rerr != nil || os.WriteFile(dest, data, 0o644) != nil {
+			slog.Warn("artifact archive: move failed, leaving original in place", "path", path, "error", err)
+			return
+		}
+		os.Remove(path)
+	}
+	slog.Info("artifact archived", "dest", dest)
 }
 
 // stripDirectives removes any legacy directive markers from the response text.
