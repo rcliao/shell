@@ -23,6 +23,32 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 - **measure-by:** 72h after deploy via `shell-bench topic-stats`.
 - **kill-switch:** stickiness or drift-catch regresses vs the cycle-148 table → revert flag.
 
+### V2-H11 — [H] Tiered model routing for conversation turns (owner-requested 7/1)
+- **status:** approved for phases 1-2 (shadow mode); phase 3+ rollout needs owner sign-off
+- **why:** owner wants complexity-tiered routing — fable (most demanding), opus
+  (deep thinking/complex), sonnet (everyday), haiku (simple) — to cut token
+  spend. June interactive spend was ~$1,292 of $1,572, all on the top-tier
+  model regardless of turn complexity. NOTE: distinct from the retired topic
+  classifier (V2-H1) — the router's output is a checkable routing decision,
+  not a topic name, and it must NOT use the 8s CLI-subprocess path (see open
+  proposal haiku-http-or-pool: direct HTTP API, p95 <500ms).
+- **phase 1 — feasibility:** confirm whether stream-json sessions can switch
+  model mid-session (control message / per-message field) or whether routing
+  requires parallel per-tier sessions / rotation. (claude-code-guide agent
+  investigating, cycle 149+.)
+- **phase 2 — shadow router:** heuristic-first classifier (length, question
+  vs memo, keyword class, attachment, code presence) + haiku-HTTP fallback for
+  ambiguous; LOG-ONLY routing decisions into a router ledger (like write-verify
+  before enforcement). Measure: tier distribution, would-be cost savings,
+  disagreement rate between heuristic and haiku tiers.
+- **phase 3 — canary:** umbreon first (same canary pattern as permission-mode),
+  cheapest-viable-tier live routing with per-tier persona consistency checks.
+- **phase 4 — rollout to pikamini** after owner reviews canary quality.
+- **predicted-effect (to validate in shadow):** ≥50% of interactive turns
+  routable below fable; interactive spend down 30-60% at equal perceived quality.
+- **kill-switch:** routing disagreement with owner expectations (wrong-tier
+  complaints) or persona inconsistency → config revert to single-model.
+
 ### V2-H2 — [H] Recall ledger: add the miss path (it cannot currently record failure)
 - **status:** approved
 - **why:** 100% of rows since launch are grounded (no ungrounded
