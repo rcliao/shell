@@ -115,3 +115,10 @@ Each entry is dated and tagged. Newest at bottom.
   toward guards, ledgers, and default-safe APIs.
 - Public-repo rule: owner identifiers (chat IDs) live in runtime config only;
   verify-no-pii is a hard commit gate. Both repo histories scrubbed 7/1.
+
+## 2026-07-02 — cycle 152
+- transcript-v2.db `messages.timestamp` is UNIX **milliseconds**, not seconds.
+  A seconds-based window silently matches every row (looked like a 4.7k-message
+  runaway; content review disproved it before any action). Always
+  `datetime(timestamp/1000,'unixepoch')` on that DB — and always read message
+  CONTENT before acting on a volume anomaly.
