@@ -97,6 +97,12 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		if recent, err := b.taskStore.RecentTasks(5); err == nil && len(recent) > 0 {
 			hasActivity := false
 			for _, t := range recent {
+				// The shared store holds every agent's tasks; only surface
+				// ones this agent sent or received, so one agent's activity
+				// never leaks into another's heartbeat (and from there to chat).
+				if t.FromAgent != b.agentBotUsername && t.ToAgent != b.agentBotUsername {
+					continue
+				}
 				if t.Status == "completed" || t.Status == "failed" {
 					if !hasActivity {
 						sb.WriteString("[Recent task completions]\n")
@@ -200,10 +206,10 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("7. **Task hygiene**: scan recent conversations for in-flight multi-step work that has no task row backing it. Open one so it survives session rotation and shows up in heartbeat context next time:\n")
 		sb.WriteString("     scripts/shell-task add --description \"<work>\"\n")
 		sb.WriteString("   Mark complete with `scripts/shell-task complete --id <id>` when done. The task table is currently underused — most multi-step work evaporates because it never got tracked.\n\n")
-		sb.WriteString("After reflection, send a brief check-in message to the most recently active chat.\n")
+		sb.WriteString("After reflection, only message a chat if you have something genuinely useful or delightful to share (a due reminder, a finding, a follow-up the user expects). Reflection alone is not a reason to send anything — [noop] is the normal outcome for most heartbeats.\n")
 	}
 
-	sb.WriteString("\nIf there is genuinely nothing to do, respond with just: [noop]\n")
+	sb.WriteString("\nIf there is nothing that needs a user-facing message, respond with just: [noop]\n")
 
 	return sb.String()
 }
