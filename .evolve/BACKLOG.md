@@ -32,10 +32,25 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   classifier (V2-H1) — the router's output is a checkable routing decision,
   not a topic name, and it must NOT use the 8s CLI-subprocess path (see open
   proposal haiku-http-or-pool: direct HTTP API, p95 <500ms).
-- **phase 1 — feasibility:** confirm whether stream-json sessions can switch
-  model mid-session (control message / per-message field) or whether routing
-  requires parallel per-tier sessions / rotation. (claude-code-guide agent
-  investigating, cycle 149+.)
+- **phase 1 — feasibility: DONE (cycle 149, claude-code-guide).** stream-json
+  has NO per-message model override; /model is interactive-only; parallel
+  per-tier subprocesses on one session interleave transcripts (not viable);
+  switching model on --resume invalidates the ENTIRE prompt cache (cache key
+  includes model) — the first turn after a switch re-reads full history
+  uncached. Per-turn switching of the persistent session is therefore
+  economically hostile. REVISED DESIGN for phase 2+:
+  (a) **cheap-turn sidecar** — simple/everyday turns answered by a stateless
+      one-shot call (haiku/sonnet, HTTP or fresh `claude -p`) with a compact
+      context pack (last N turns + pinned identity); persistent fable session
+      stays warm and untouched; existing transcript-injection machinery keeps
+      it aware of sidecar exchanges. This attacks the REAL cost driver: June
+      cache-read volume (467M tokens, pika) — a trivial turn currently drags
+      the whole session context through cache-read.
+  (b) **session-tier stickiness** — tier changes only at rotation boundaries
+      (rotation already pays a full cache rebuild ~every 0.7-1.6 days), chosen
+      from the recent traffic mix.
+  (c) escalation: sidecar unsure or follow-up complexity → next turn goes to
+      the persistent session with full history.
 - **phase 2 — shadow router:** heuristic-first classifier (length, question
   vs memo, keyword class, attachment, code presence) + haiku-HTTP fallback for
   ambiguous; LOG-ONLY routing decisions into a router ledger (like write-verify
