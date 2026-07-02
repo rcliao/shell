@@ -1,11 +1,44 @@
 # Shell + Ghost Evolution Loop
 
 Driver: Claude (Opus). Steerers: EV (papi), Jennifer (mami).
-Cadence: ~1 hour, dynamic /loop.
+
+## Cadence — self-pacing rules (cycle 115)
+
+The /loop runs dynamic — Claude picks the next sleep interval. Targets:
+
+| Window | Interval | Rationale |
+|---|---|---|
+| Active hours (7am-10pm PT) with traffic | 1h | Watch new decisions land, validate ships within an hour |
+| Active hours with idle streak ≥3 | 2h | Reduce poll burn when nothing's changing |
+| Quiet hours (10pm-7am PT) | 4h | Heartbeats suppressed; nothing organic to validate |
+| Just shipped, awaiting first signal | 30-60min | Catch validation/rollback quickly |
+| No traffic for 6+ cycles | extend to 4h until traffic resumes | |
+
+**Anti-pattern**: writing cycle-NNN.md files for pure-idle observations. Only
+write a cycle file when shipping, drafting a proposal, or finding a real
+signal worth recording. Idle cycles just bump state.json.last_cycle.
+
+**Anti-pattern**: shipping more than 1 unvalidated change at a time. If 3+
+ships are awaiting production validation, idle next cycle even if tempted.
 
 ## Goal
 Evolve the shell harness, ghost memory, and per-agent behaviors based on actual usage —
 transcripts, skill telemetry, ghost reflections — and capture every change as a git commit.
+
+## Bench dimensions (truth source for "did we evolve?")
+
+All scoring LLM-free. Run via `make bench` → `.evolve/cycles/<date>-bench-*.json`.
+
+| Dim | What it measures | Goal=1.0 means |
+|---|---|---|
+| **WH**                       | memo claim → ghost row landed in correct ns within ±5min | every memo persists synchronously |
+| **RF.flexible_contains**     | every meaningful gold token present in retrieved corpus  | retrieval surfaces all the right facts |
+| RF.token_recall              | continuous: fraction of gold tokens present              | partial-credit RF                       |
+| RF.contains (secondary)      | gold appears as literal substring                        | only meaningful for single-token answers |
+| **CV.pass_rate**             | conversation-seed probes pass against synthetic sandbox  | retrieval infrastructure works         |
+
+**Primary RF metric is `flex_contains`** — `contains` is too strict for list-shape
+gold answers (accepted via pikamini's `proposal-pikamini-2026-05-13T15-41-38Z`).
 
 ## Design rules (do not violate)
 1. **Agent isolation by design.** Each agent owns its transcript + ghost memory + skills dir.

@@ -141,6 +141,9 @@ type ModelRouting struct {
 	Compaction     string `json:"compaction"`      // session compaction
 	PlannerExecute string `json:"planner_execute"` // code changes with tools
 	PlannerReview  string `json:"planner_review"`  // text-only review verdict
+	// TopicClassifier (cycle 66): if non-empty, enables Haiku-based topic
+	// classification per turn. Empty = disabled (keyword fast-path only).
+	TopicClassifier string `json:"topic_classifier"`
 }
 
 type ClaudeConfig struct {
@@ -178,6 +181,8 @@ func (c ClaudeConfig) ResolveModel(taskType string) string {
 			}
 		case "compaction":
 			m = c.ModelRouting.Compaction
+		case "topic_classifier":
+			m = c.ModelRouting.TopicClassifier
 		case "planner_execute":
 			m = c.ModelRouting.PlannerExecute
 		case "planner_review":

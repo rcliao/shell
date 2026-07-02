@@ -17,6 +17,7 @@ import (
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
+	"github.com/rcliao/shell/internal/topic"
 	"github.com/rcliao/shell/internal/transcript"
 )
 
@@ -37,16 +38,16 @@ type PDFInfo struct {
 
 type Bridge struct {
 	proc      process.Agent
-	pool      AgentPool        // optional: multi-agent routing
+	pool      AgentPool // optional: multi-agent routing
 	store     *store.Store
 	memory    *memory.Memory   // nil if disabled
 	plan      *planner.Planner // nil if not configured
 	transport Transport        // optional: push messages/photos to users
 
 	// Worktree isolation for plan execution
-	useWorktree  bool   // whether to create worktrees for plans
-	repoDir      string // main repository working directory
-	worktreeDir  string // base directory for worktree checkouts
+	useWorktree bool   // whether to create worktrees for plans
+	repoDir     string // main repository working directory
+	worktreeDir string // base directory for worktree checkouts
 
 	reactionMap map[string]string // emoji → action (e.g. "👍":"go")
 
@@ -79,7 +80,7 @@ type Bridge struct {
 	agentBotUsername string // this agent's bot username (for transcript filtering)
 
 	// Shared transcript for multi-agent awareness.
-	transcript      *transcript.Store
+	transcript       *transcript.Store
 	transcriptBudget int // token budget for transcript injection (0 = disabled)
 
 	// Shared task store for task decomposition and delegation.
@@ -112,6 +113,10 @@ type Bridge struct {
 
 	// Heartbeat interval for auto-created heartbeats (empty = "1h" default).
 	heartbeatInterval string
+
+	// Topic classifier (cycle 66) — populated when claude.model_routing.
+	// topic_classifier is set in config. nil = disabled.
+	classifier *topic.HybridClassifier
 }
 
 func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
@@ -123,19 +128,19 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		reactionMap = config.DefaultReactionMap()
 	}
 	return &Bridge{
-		proc:         proc,
-		store:        store,
-		memory:       mem,
-		plan:         pl,
-		useWorktree:  useWorktree,
-		repoDir:      repoDir,
-		worktreeDir:  wtDir,
-		reactionMap:  reactionMap,
-		tunnelMgr:    tunnelMgr,
-		pmMgr:        pmMgr,
-		skills:       skills,
-		planRuns:        make(map[int64]*planRun),
-		reviewCache:     make(map[int64][]memory.ReviewEntry),
+		proc:                    proc,
+		store:                   store,
+		memory:                  mem,
+		plan:                    pl,
+		useWorktree:             useWorktree,
+		repoDir:                 repoDir,
+		worktreeDir:             wtDir,
+		reactionMap:             reactionMap,
+		tunnelMgr:               tunnelMgr,
+		pmMgr:                   pmMgr,
+		skills:                  skills,
+		planRuns:                make(map[int64]*planRun),
+		reviewCache:             make(map[int64][]memory.ReviewEntry),
 		systemCancel:            make(map[process.SessionKey]context.CancelFunc),
 		identityChecked:         make(map[int64]bool),
 		consolidationCandidates: make(map[int64]string),
@@ -143,8 +148,37 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 }
 
 // SetClaudeConfig sets the Claude config for per-task model routing.
+// Also initializes the topic classifier when topic_classifier model is
+// configured and memory is available. Safe to call multiple times.
 func (b *Bridge) SetClaudeConfig(cfg config.ClaudeConfig) {
 	b.claudeCfg = cfg
+	b.initTopicClassifier()
+}
+
+// initTopicClassifier wires the hybrid classifier when both a model is
+// configured and ghost memory is available. Idempotent + defensive.
+func (b *Bridge) initTopicClassifier() {
+	if b.memory == nil {
+		return
+	}
+	model := b.claudeCfg.ResolveModel("topic_classifier")
+	if model == "" {
+		b.classifier = nil
+		return
+	}
+	// Per-chat registries are created on demand; the classifier holds a
+	// nil Registry and we attach the right one at classification time.
+	// To keep the cascade simple, we pass a no-op zero-chat registry here
+	// and override via per-classify regs at the call site if needed.
+	// For cycle 66, classifier is shared (chat-agnostic at the cascade
+	// level); upsert uses a per-chat registry in classifyTurnTopic.
+	// Cycle 117: bumped 10s → 12s. Production audit (cycle 105 subtypes)
+	// shows pikamini Haiku calls land in 8.2-9.6s when they succeed; the 10s
+	// ceiling clipped many of them. Umbreon's calls are slower still — 12s
+	// catches the slow tail without blowing up the user-facing latency
+	// (classifier runs blocking in injectPerTurnContext).
+	cli := topic.NewClaudeCLIHaiku(b.claudeCfg.Binary, model, 12*time.Second)
+	b.classifier = topic.NewHybrid(topic.NewRegistry(b.memory.Store(), 0), cli)
 }
 
 // SetHeartbeatInterval overrides the default heartbeat interval for auto-created heartbeats.
@@ -658,8 +692,6 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		slog.Warn("failed to log user message", "error", err)
 	}
 
-
-
 	// Inject memory context if available
 	augmentedMsg := userMsg
 	if b.memory != nil {
@@ -708,7 +740,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 
 	// Inject Channel B: current time + pinned-memory delta + active tasks.
 	// See docs/SESSION-LIFECYCLE.md — this is the fresh layer the cache doesn't hold.
-	augmentedMsg = b.injectPerTurnContext(ctx, chatID, threadID, augmentedMsg)
+	// Cycle 71: pass rawUserMsg separately so classifier sees only the user's
+	// text, not the augmented prefix.
+	augmentedMsg = b.injectPerTurnContextRaw(ctx, chatID, threadID, augmentedMsg, userMsg)
 
 	// Convert image/PDF attachments to typed structs.
 	var imgAttachments []process.ImageAttachment
@@ -899,6 +933,13 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// Strip any legacy directives Claude may have emitted.
 	response = stripDirectives(response)
 
+	// Cycle 68: topic thread state write-path — extract commitments and
+	// update rolling summary from this turn's response. Async-best-effort.
+	// NEVER blocks response delivery.
+	if !isHeartbeat {
+		go b.updateThreadStateFromResponse(context.Background(), chatID, userMsg, response)
+	}
+
 	// Parse task delegation directives ([task to=...], [task-result id=...]).
 	response = b.parseTaskDirectives(chatID, response)
 
@@ -912,9 +953,14 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	var videos []Video
 	response = b.parseArtifacts(response, &photos, &videos)
 
-	// Log assistant response.
-	if err := b.store.LogMessage(sessID, "assistant", response); err != nil {
-		slog.Warn("failed to log assistant message", "error", err)
+	// Log assistant response. Skip empty/noop responses (parseArtifacts strips
+	// [noop] markers; heartbeats with nothing to report leave response="").
+	// Cycle 83: prevents ~10% of message rows from being empty placeholders
+	// that pollute bench counts, retrieval, and storage.
+	if response != "" || len(photos) > 0 || len(videos) > 0 {
+		if err := b.store.LogMessage(sessID, "assistant", response); err != nil {
+			slog.Warn("failed to log assistant message", "error", err)
+		}
 	}
 
 	// Record agent response in shared transcript for peer agent visibility.

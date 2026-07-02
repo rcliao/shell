@@ -1,0 +1,5 @@
+id: weather
+description: "Weather queries should reference temperature, conditions, or forecast"
+skill: weather
+trigger_pattern: "(?i)(weather|forecast|today.{0,10}(temp|temperature)|今天天氣|溫度)"
+output_pattern: "(?i)(°[CF]|\\b\\d+°|sunny|cloudy|rain|snow|今天(天氣|氣溫)|wind)"

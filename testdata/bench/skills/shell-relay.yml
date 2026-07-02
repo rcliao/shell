@@ -1,0 +1,5 @@
+id: shell-relay
+description: "Cross-chat relay requests should result in [Relayed ...] markers"
+skill: shell-relay
+trigger_pattern: "(?i)(relay.{0,10}(to|message)|tell .{0,20} (about|that)|轉.{0,5}(給|到)|傳給)"
+output_pattern: "(?i)(\\[Relayed|relayed|傳了|轉發了|sent to)"

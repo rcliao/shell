@@ -1,0 +1,11 @@
+id: generate-image
+description: "Image generation requests should produce an image artifact, path, or success marker"
+skill: generate-image
+trigger_pattern: "(?i)(draw\\s+(me|a|an|the|us)|generate.{0,15}image|create.{0,15}(image|picture|art)|make.{0,15}(image|picture)|畫(個|張|出|一)|做(張|個).{0,5}圖|生.{0,5}張)"
+# Cycle 54: widened output regex for Chinese success markers ("送出去", "出來了", "重傳了").
+# Cycle 55: max_user_len=200 drops meta-discussion false-positives.
+# Cycle 56: tightened trigger — require article after "draw", drop bare "圖片"
+# (which caught any message mentioning "image" in Chinese). Added做張/做個圖 and
+# 生張 imperative variants. Predicted: drop ~5 false triggers per agent.
+output_pattern: "(?i)(\\[artifact|\\[Relayed photo\\]|\\.png|\\.jpg|here.{0,10}(image|picture)|出來了|送出去|送過去|傳過去|重傳了|圖片好了|送了過去|marker (沒|送)|artwork|藝術 marker)"
+max_user_len: 200

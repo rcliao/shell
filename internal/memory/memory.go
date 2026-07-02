@@ -710,6 +710,12 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 	return strings.TrimSpace(clean)
 }
 
+// Store returns the underlying ghost store. Used by sibling packages that
+// need to share the same DB connection (e.g. internal/topic). Added cycle 66.
+func (m *Memory) Store() agentmemory.Store {
+	return m.store
+}
+
 // StoreDirective stores a memory from an RPC call (equivalent to [remember] directive).
 func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind string) error {
 	prof := m.profileFor(chatID)

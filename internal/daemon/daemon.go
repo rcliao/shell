@@ -10,11 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/rcliao/shell/internal/bridge"
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
@@ -469,7 +470,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	agentCfg := telegram.AgentConfig{
-		BotUsername:           cfg.Agent.BotUsername,
+		BotUsername:          cfg.Agent.BotUsername,
 		Aliases:              cfg.Agent.Aliases,
 		BroadcastProbability: cfg.Agent.BroadcastProbability,
 		PeerBots:             cfg.Agent.PeerBots,
@@ -786,6 +787,13 @@ func discoverPeerAgents(peerBots []string) []config.PeerAgent {
 
 // Run starts the daemon and blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
+	// Cycle 75: refuse to start when an existing daemon is already running.
+	// Prevents the orphan-daemon storm we hit during cycle 73-74 manual
+	// restarts (3 pikamini daemons all polling Telegram simultaneously).
+	if err := checkExistingDaemon(d.cfg.Daemon.PIDFile); err != nil {
+		return err
+	}
+
 	// Write PID file
 	if err := writePID(d.cfg.Daemon.PIDFile); err != nil {
 		slog.Warn("failed to write PID file", "path", d.cfg.Daemon.PIDFile, "error", err)
@@ -930,6 +938,38 @@ func (d *Daemon) cleanupLoop(ctx context.Context) {
 	}
 }
 
+// checkExistingDaemon errors out when the PID file points to a live process
+// that looks like another shell daemon. Idempotent — a stale pidfile (no
+// such pid) or a pid pointing to an unrelated process is treated as OK
+// (we just overwrite). Cycle 75 — adds safety against duplicate startup.
+func checkExistingDaemon(pidFile string) error {
+	if pidFile == "" {
+		return nil
+	}
+	pid, err := ReadPID(pidFile)
+	if err != nil {
+		return nil // no pidfile or unreadable → fine to start
+	}
+	// FindProcess always succeeds on Unix; use Signal(0) for liveness check.
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return nil
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// process is gone (stale pidfile) → OK to start
+		return nil
+	}
+	// pid is alive. Is it actually a shell daemon? Check /proc-equivalent via ps.
+	out, _ := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	cmd := strings.TrimSpace(string(out))
+	if !strings.Contains(cmd, "shell daemon") {
+		// pid is alive but unrelated (pid recycled). Safe to overwrite.
+		return nil
+	}
+	return fmt.Errorf("shell daemon already running (pid %d, command %q); stop it first with `shell stop` or `kill %d`",
+		pid, cmd, pid)
+}
+
 // writePID writes the current process ID to the given path.
 func writePID(path string) error {
 	if path == "" {
@@ -1036,7 +1076,7 @@ func generateAgentSettings(agentNS, dbPath string, ghostEnv map[string]string) m
 	// agents because the bridge already injects memory context via memory.InjectContext()
 	// and memory.SystemPrompt(). Only keep Stop (learning extraction) and non-retrieval hooks.
 	skipEvents := map[string]bool{
-		"SessionStart":    true,
+		"SessionStart":     true,
 		"UserPromptSubmit": true,
 	}
 

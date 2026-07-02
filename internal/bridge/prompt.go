@@ -100,7 +100,21 @@ const pinnedDeltaTokenBudget = 1000
 // rebuild Channel A with a fresh pinned snapshot.
 //
 // ChatID may be 0 (phantom system chat); behavior is identical.
+//
+// Cycle 71: now accepts rawUserMsg separately so topic classification
+// operates on the user's actual text, not the agent-augmented msg
+// (which includes [From: ...] + transcript + task injections — those
+// contain family-name tokens that dominate classification incorrectly).
 func (b *Bridge) injectPerTurnContext(ctx context.Context, chatID, threadID int64, msg string) string {
+	return b.injectPerTurnContextRaw(ctx, chatID, threadID, msg, msg)
+}
+
+// injectPerTurnContextRaw is the explicit form: takes both the augmented
+// msg (returned with the prefix prepended) AND the raw user text (used
+// for topic classification). Existing callers can keep calling
+// injectPerTurnContext; new callers that have the raw text use the Raw
+// variant for accurate classification.
+func (b *Bridge) injectPerTurnContextRaw(ctx context.Context, chatID, threadID int64, msg, rawUserMsg string) string {
 	var blocks []string
 
 	// Block 1: current time (always on when scheduler is enabled).
@@ -160,6 +174,25 @@ func (b *Bridge) injectPerTurnContext(ctx context.Context, chatID, threadID int6
 				// would "accept" the delta silently and future turns would
 				// stop showing it.
 			}
+		}
+	}
+
+	// Block 3b (cycle 66): topic classification.
+	// Cycle 71: uses rawUserMsg (not augmented msg) so classifier sees only
+	// the user's actual text, not transcript/task injections + [From: …]
+	// prefix which contain family-name tokens that bias classification.
+	// Cycle 145: captures the prior sticky-thread pointer BEFORE classify so
+	// we can render a "Continuing: <prior>" block alongside the fresh
+	// classification block. Both go into Channel B for one week so we can
+	// audit which one carries more weight in actual responses.
+	if chatID != 0 && b.topicClassifierEnabled() {
+		priorStickyThread, priorStickyConv := b.readPriorSticky(chatID)
+		result := b.classifyTurnTopic(ctx, chatID, rawUserMsg)
+		if block := b.renderStickyBlock(priorStickyThread, priorStickyConv, result.Topic.Name); block != "" {
+			blocks = append(blocks, block)
+		}
+		if block := b.renderTopicBlock(ctx, chatID, result); block != "" {
+			blocks = append(blocks, block)
 		}
 	}
 

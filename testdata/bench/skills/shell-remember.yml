@@ -1,0 +1,5 @@
+id: shell-remember
+description: "Memo/save requests should be acknowledged with receipt-format response"
+skill: shell-remember
+trigger_pattern: "(?i)(\\bmemo\\b|\\b記下\\b|\\b記錄\\b|save this|幫我記)"
+output_pattern: "(?i)(saved|存好了|記下了|✅|📝|receipt|id:.{0,30}[0-9A-Z]{8})"

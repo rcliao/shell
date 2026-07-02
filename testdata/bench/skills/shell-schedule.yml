@@ -1,0 +1,5 @@
+id: shell-schedule
+description: "Schedule/reminder requests should be acknowledged with scheduled-confirmation language"
+skill: shell-schedule
+trigger_pattern: "(?i)(schedule|remind me|提醒我|排程|set.{0,8}(reminder|alarm))"
+output_pattern: "(?i)(scheduled|set for|reminder.{0,20}(at|for)|提醒.{0,12}(已|好)|排好|schedule.{0,5}(id|created)|\\bcron\\b)"

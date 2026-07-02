@@ -34,3 +34,23 @@ skills/browser/scripts/browser
 
 # Config (contains secrets)
 config.json
+
+# Bench fixtures derived from real family conversations stay local
+# (same privacy rule as .evolve/ below); synthetic skill cases are tracked.
+testdata/bench/cases/
+testdata/bench/conventions/
+testdata/bench/conversations/
+
+# Bench binary + stray local DB
+/shell-bench
+/shell.db
+
+# .evolve/ — production-data privacy (cycle 144)
+# Cycle reports and bench snapshots quote real mami/papi conversations
+# (health, food, family). Keep top-level scaffolding (README, BACKLOG,
+# LEARNINGS, state.json) tracked for the dev record; private artifacts
+# stay local.
+.evolve/cycles/
+.evolve/bench-snapshots/
+.evolve/*-pikamini*.json
+.evolve/*-umbreonmini*.json
