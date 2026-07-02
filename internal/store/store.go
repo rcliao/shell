@@ -248,6 +248,30 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Shadow tier-router ledger (V2-H11 phase 2): per-turn predicted model
+	// tier next to realized complexity. Log-only — grades the routing
+	// heuristics before any live routing exists.
+	tierSchema := `
+	CREATE TABLE IF NOT EXISTS tier_decisions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		session_id INTEGER NOT NULL,
+		source TEXT NOT NULL DEFAULT 'interactive',
+		predicted_tier TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		msg_chars INTEGER NOT NULL DEFAULT 0,
+		tool_calls INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_tier_decisions_created ON tier_decisions(created_at);
+	CREATE INDEX IF NOT EXISTS idx_tier_decisions_tier ON tier_decisions(predicted_tier, created_at);
+	`
+	if _, err := s.db.Exec(tierSchema); err != nil {
+		return err
+	}
+
 	// Phase 4: lifecycle columns on sessions (see docs/SESSION-LIFECYCLE.md).
 	// Idempotent — duplicate-column errors are ignored on legacy DBs.
 	for _, col := range []string{
@@ -1283,6 +1307,33 @@ func (s *Store) GetToolUsageSummary(chatID int64, since time.Time) ([]ToolUsageR
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// TierDecision is one shadow-router observation: the predicted model tier
+// alongside the turn's realized complexity.
+type TierDecision struct {
+	ChatID          int64
+	SessionID       int64
+	Source          string
+	PredictedTier   string // demanding | deep | everyday | simple
+	Reason          string
+	MsgChars        int
+	ToolCalls       int
+	OutputTokens    int
+	CacheReadTokens int
+}
+
+// LogTierDecision records one shadow tier-routing observation.
+// Best-effort: callers log-and-continue on error.
+func (s *Store) LogTierDecision(d TierDecision) error {
+	if d.Source == "" {
+		d.Source = "interactive"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO tier_decisions (chat_id, session_id, source, predicted_tier, reason, msg_chars, tool_calls, output_tokens, cache_read_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, d.ChatID, d.SessionID, d.Source, d.PredictedTier, d.Reason, d.MsgChars, d.ToolCalls, d.OutputTokens, d.CacheReadTokens)
+	return err
 }
 
 // WriteVerification is a single runtime write-hygiene observation.

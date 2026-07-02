@@ -1005,6 +1005,25 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		}
 	}
 
+	// Shadow tier router (V2-H11 phase 2, log-only): predicted tier next to
+	// realized complexity. Runs post-response — zero user-facing latency.
+	{
+		td := classifyTier(userMsg, isHeartbeat, source)
+		rec := store.TierDecision{
+			ChatID: chatID, SessionID: sessID, Source: source,
+			PredictedTier: td.tier, Reason: td.reason,
+			MsgChars:  len([]rune(userMsg)),
+			ToolCalls: len(result.ToolCalls),
+		}
+		if result.Usage != nil {
+			rec.OutputTokens = result.Usage.OutputTokens
+			rec.CacheReadTokens = result.Usage.CacheReadInputTokens
+		}
+		if err := b.store.LogTierDecision(rec); err != nil {
+			slog.Warn("failed to log tier decision", "error", err)
+		}
+	}
+
 	// Log token usage.
 	if result.Usage != nil {
 		if err := b.store.LogUsage(chatID, sessID,
