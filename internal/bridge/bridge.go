@@ -177,7 +177,15 @@ func (b *Bridge) initTopicClassifier() {
 	// ceiling clipped many of them. Umbreon's calls are slower still — 12s
 	// catches the slow tail without blowing up the user-facing latency
 	// (classifier runs blocking in injectPerTurnContext).
-	cli := topic.NewClaudeCLIHaiku(b.claudeCfg.Binary, model, 12*time.Second)
+	// Cycle 149 (V2-H1): topic_keyword_only removes the LLM tier — the
+	// cascade keeps cache→keyword and the sticky pointer keeps thread
+	// continuity. Cycle 148 bench + June production (is_new on 100% of LLM
+	// calls, 92-95% orphan topics, 8.5s p50 on the user path) showed the
+	// per-turn LLM call is a quality regression, not just a latency cost.
+	var cli topic.HaikuClient
+	if !b.claudeCfg.TopicKeywordOnly {
+		cli = topic.NewClaudeCLIHaiku(b.claudeCfg.Binary, model, 12*time.Second)
+	}
 	b.classifier = topic.NewHybrid(topic.NewRegistry(b.memory.Store(), 0), cli)
 }
 
@@ -446,7 +454,7 @@ func (b *Bridge) groupAgentPrompt() string {
 You are **%s** (@%s) in a group conversation with other agents and humans.
 
 **CRITICAL: When to [noop]**
-- If a message starts with another agent's name (e.g., "皮卡..." or "Umbreon..."), it is NOT for you. Respond with [noop].
+- If a message starts with another agent's name (any of the configured peer aliases), it is NOT for you. Respond with [noop].
 - If another agent already answered well, respond with [noop].
 - If the message doesn't seem directed at you, respond with [noop].
 - When in doubt, [noop] is safer than responding as the wrong agent.

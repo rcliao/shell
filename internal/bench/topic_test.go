@@ -16,13 +16,13 @@ func TestClassifyTopics(t *testing.T) {
 		{"can you check the soil moisture? roots may be rotting", TopicPlants},
 
 		// Meals
-		{"皮卡 早餐memo - toast, latte", TopicMeals},
+		{"早餐memo - toast, latte", TopicMeals},
 		{"what did I eat for lunch yesterday?", TopicMeals},
 
 		// Health
 		{"my left foot has been numb for two days", TopicGeneral}, // ambiguous; "numb" not in signals
 		{"is potassium ok with my lisinopril medication?", TopicHealth},
-		{"tracking a dairy sensitivity reaction", TopicHealth},
+		{"tracking an allergy sensitivity reaction", TopicHealth},
 
 		// Fortune
 		{"nova any fortune for tomorrow?", TopicFortune},
@@ -31,7 +31,7 @@ func TestClassifyTopics(t *testing.T) {
 		{"deploy failed again, on-call paged twice", TopicWork},
 
 		// Family
-		{"papi forgot Chonky's birthday", TopicFamily}, // multiple family-entity tokens
+		{"Umbreon forgot Chonky's birthday", TopicFamily}, // multiple family-entity tokens
 
 		// Travel
 		{"booked the flight + hotel for next week", TopicTravel},

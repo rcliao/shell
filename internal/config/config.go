@@ -46,7 +46,7 @@ type NotionConfig struct {
 // AgentIdentity configures a bot's identity for multi-agent group chats.
 type AgentIdentity struct {
 	Name                 string   `json:"name"`                  // display name (e.g. "pikamini")
-	Aliases              []string `json:"aliases"`               // name variants users may use to address this agent (e.g. "pika", "皮卡")
+	Aliases              []string `json:"aliases"`               // name variants users may use to address this agent (e.g. "pika")
 	BotUsername          string   `json:"bot_username"`          // Telegram bot username without @
 	BroadcastProbability float64  `json:"broadcast_probability"` // 0.0-1.0, chance to respond when not @mentioned in groups (legacy mode)
 	PeerBots             []string `json:"peer_bots"`             // other bot usernames (to detect "not for me")
@@ -60,7 +60,7 @@ type AgentIdentity struct {
 // PeerAgent describes a peer agent for multi-agent discovery.
 type PeerAgent struct {
 	Name        string   `json:"name"`
-	Aliases     []string `json:"aliases"` // name variants for this peer (e.g. "pika", "皮卡")
+	Aliases     []string `json:"aliases"` // name variants for this peer (e.g. "pika")
 	BotUsername string   `json:"bot_username"`
 	Skills      []string `json:"skills"`
 }
@@ -162,6 +162,7 @@ type ClaudeConfig struct {
 	RotateMaxTokens    int               `json:"rotate_max_tokens"`    // full session ROTATION (fresh system prompt: skills+identity+pinned reloaded) once total input tokens exceed this (0 = disabled). Lower = fresher/less drift, at higher cache cost.
 	WriteVerifyEnforce bool              `json:"write_verify_enforce"` // when true, a caught write-claim confabulation triggers a bounded correction turn before delivery
 	MediaGateEnforce   bool              `json:"media_gate_enforce"`   // when true, image/video artifacts are dropped on user turns that didn't ask for media (heartbeat turns always drop media regardless)
+	TopicKeywordOnly   bool              `json:"topic_keyword_only"`   // when true, topic classification runs cache→keyword→sticky only, no per-turn LLM call (cycle 148: the LLM tier regressed every focus metric while adding ~8.5s latency)
 	PermissionMode     string            `json:"permission_mode"`      // --permission-mode for the Claude CLI subprocess (default "bypassPermissions"). "auto" adds a safety classifier but may fall back to prompting (which hangs a headless turn).
 }
 

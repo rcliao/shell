@@ -112,7 +112,7 @@ func TestHybridClassifierKeywordFast(t *testing.T) {
 		wantSrc  string
 	}{
 		{"my brazilian wood's leaves are droopy from overwatering", "plants", "keyword"}, // 3+ signals → fast-path
-		{"皮卡 早餐memo - toast, latte and dairy", "meals", "keyword"},
+		{"早餐memo - toast, latte and dairy", "meals", "keyword"},
 		{"hey nova", "general", "fallback"}, // no signal anywhere
 	}
 	for _, c := range cases {
@@ -123,6 +123,38 @@ func TestHybridClassifierKeywordFast(t *testing.T) {
 		if r.Topic.Name != c.wantName {
 			t.Errorf("Classify(%q).topic = %q, want %q (src=%s conf=%.1f)",
 				c.msg, r.Topic.Name, c.wantName, r.Source, r.Confidence)
+		}
+	}
+}
+
+func TestHybridClassifierNilHaiku(t *testing.T) {
+	// topic_keyword_only wires a nil LLM client (cycle 149 / V2-H1): the
+	// cascade must classify keyword-signal messages normally and settle
+	// ambiguous ones as general, never erroring or blocking on the LLM tier.
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	reg := NewRegistry(store, 12345)
+	h := NewHybrid(reg, nil)
+
+	cases := []struct {
+		msg      string
+		wantName string
+	}{
+		{"my brazilian wood's leaves are droopy from overwatering", "plants"},
+		{"早餐memo - toast, latte and dairy", "meals"},
+		{"hmm what do you think about that thing", "general"},
+	}
+	for _, c := range cases {
+		r, err := h.Classify(context.Background(), c.msg)
+		if err != nil {
+			t.Fatalf("Classify(%q) with nil haiku: %v", c.msg, err)
+		}
+		if r.Topic.Name != c.wantName {
+			t.Errorf("Classify(%q).topic = %q, want %q (src=%s)",
+				c.msg, r.Topic.Name, c.wantName, r.Source)
+		}
+		if r.Source == "haiku" {
+			t.Errorf("Classify(%q) reported haiku source with nil client", c.msg)
 		}
 	}
 }
