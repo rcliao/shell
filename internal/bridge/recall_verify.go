@@ -79,13 +79,80 @@ func isReadTool(tc process.ToolCall) bool {
 	return false
 }
 
+// cjkStopwords are CJK fragments stripped before judging what a recall
+// question is ABOUT: temporal cues, aggregates, and generic verbs/particles.
+// What remains after stripping is the subject (e.g. 奶製品 in 今天奶製品總共多少).
+var cjkStopwords = []string{
+	"昨天", "前天", "今天", "上次", "之前", "上週", "上周", "這週", "这周", "這禮拜",
+	"全天", "總共", "总共", "目前", "到現在", "到目前", "還記得", "还记得",
+	"記得", "记得", "幾號", "几号", "什麼時候", "什么时候", "這幾天", "这几天",
+	"多少", "什麼", "什么", "怎麼", "怎么", "哪些", "有沒有", "有没有",
+	"吃了", "喝了", "吃", "喝", "的", "了", "是", "我", "你", "妳", "嗎", "吗", "呢",
+}
+
+// enStopwords are English words that carry the recall FORM, not its subject.
+var enStopwords = map[string]bool{
+	"what": true, "did": true, "was": true, "were": true, "have": true, "has": true,
+	"how": true, "much": true, "many": true, "total": true, "today": true,
+	"yesterday": true, "last": true, "week": true, "night": true, "time": true,
+	"earlier": true, "far": true, "when": true, "remember": true, "recall": true,
+	"the": true, "and": true, "for": true, "log": true, "logged": true, "eat": true,
+	"ate": true, "drink": true, "drank": true, "take": true, "took": true,
+	"this": true, "that": true, "you": true, "your": true,
+}
+
+var enWordRe = regexp.MustCompile(`(?i)\b[a-z]{3,}\b`)
+var cjkRunRe = regexp.MustCompile(`\p{Han}+`)
+
+// salientTokens extracts the subject tokens of a recall question — the parts
+// that name WHAT is being recalled, with temporal/aggregate/form words removed.
+func salientTokens(userMsg string) []string {
+	var out []string
+	for _, w := range enWordRe.FindAllString(userMsg, -1) {
+		lw := strings.ToLower(w)
+		if !enStopwords[lw] {
+			out = append(out, lw)
+		}
+	}
+	for _, run := range cjkRunRe.FindAllString(userMsg, -1) {
+		for _, sw := range cjkStopwords {
+			run = strings.ReplaceAll(run, sw, "\x00")
+		}
+		for _, piece := range strings.Split(run, "\x00") {
+			if len([]rune(piece)) >= 2 {
+				out = append(out, piece)
+			}
+		}
+	}
+	return out
+}
+
+// injectionCoversQuery reports whether the injected ghost context plausibly
+// contains the fact being recalled: at least one subject token of the question
+// appears in the injected text. When the question has no extractable subject
+// (pure temporal form like 今天吃了多少), we cannot judge relevance and
+// conservatively treat the injection as covering.
+func injectionCoversQuery(userMsg, injectedText string) bool {
+	toks := salientTokens(userMsg)
+	if len(toks) == 0 {
+		return true
+	}
+	lower := strings.ToLower(injectedText)
+	for _, tok := range toks {
+		if strings.Contains(lower, tok) {
+			return true
+		}
+	}
+	return false
+}
+
 // recallVerdict is the classified outcome of one turn.
 type recallVerdict struct {
 	classification string // grounded_recall | memory_recall | ""
 	triggered      bool
 	readOK         bool
 	ghostInjected  bool
-	grounding      string // active_read | ghost_inject | none
+	grounding      string // active_read | ghost_inject | inject_irrelevant | none
 	toolNames      string
 }
 
@@ -100,14 +167,17 @@ func (v recallVerdict) isMiss() bool { return v.classification == "memory_recall
 //   - grounded_recall (active_read):  user asked about a stored fact AND a real
 //     read tool succeeded this turn
 //   - grounded_recall (ghost_inject): user asked about a stored fact AND the
-//     bridge injected ghost memories for this turn (no explicit read needed)
-//   - memory_recall:                  recall trigger answered from raw context,
-//     no read and no ghost injection — the ungrounded, risky case
+//     injected ghost context actually mentions the fact's subject
+//   - memory_recall (inject_irrelevant): ghost injected SOMETHING, but nothing
+//     about the recalled subject — presence isn't relevance. Before this check
+//     the miss path could never fire: injection runs on essentially every turn,
+//     so 100% of recalls graded "grounded" and the ledger measured nothing.
+//   - memory_recall (none):           no read, no injection at all
 //   - "" (skip):                      not a recall trigger
-func classifyRecall(userMsg, response string, calls []process.ToolCall, ghostInjected bool) recallVerdict {
+func classifyRecall(userMsg, response string, calls []process.ToolCall, injectedText string) recallVerdict {
 	v := recallVerdict{
 		triggered:     isRecallTrigger(userMsg),
-		ghostInjected: ghostInjected,
+		ghostInjected: injectedText != "",
 	}
 	if !v.triggered {
 		return v
@@ -127,9 +197,12 @@ func classifyRecall(userMsg, response string, calls []process.ToolCall, ghostInj
 	case v.readOK:
 		v.classification = "grounded_recall"
 		v.grounding = "active_read"
-	case v.ghostInjected:
+	case v.ghostInjected && injectionCoversQuery(userMsg, injectedText):
 		v.classification = "grounded_recall"
 		v.grounding = "ghost_inject"
+	case v.ghostInjected:
+		v.classification = "memory_recall"
+		v.grounding = "inject_irrelevant"
 	default:
 		v.classification = "memory_recall"
 		v.grounding = "none"
@@ -140,8 +213,8 @@ func classifyRecall(userMsg, response string, calls []process.ToolCall, ghostInj
 // verifyRecall classifies the turn and logs the verdict to the recall ledger.
 // Log-only for now (mirrors how write-hygiene shipped before enforcement).
 // Best-effort: never fails the user-facing turn.
-func (b *Bridge) verifyRecall(chatID, sessID int64, userMsg, response string, calls []process.ToolCall, ghostInjected bool, source string) {
-	v := classifyRecall(userMsg, response, calls, ghostInjected)
+func (b *Bridge) verifyRecall(chatID, sessID int64, userMsg, response string, calls []process.ToolCall, injectedText string, source string) {
+	v := classifyRecall(userMsg, response, calls, injectedText)
 	if !v.shouldLog() {
 		return
 	}

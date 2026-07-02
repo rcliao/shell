@@ -12,9 +12,9 @@ func TestIsRecallTrigger(t *testing.T) {
 		want bool
 	}{
 		// Chinese recall triggers (retrieval of a logged fact)
-		{"皮卡 今天奶製品總共多少", true},
+		{"今天奶製品總共多少", true},
 		{"昨天晚餐吃什麼", true},
-		{"我之前說的那個過敏反應", true},
+		{"我之前說的那個皮膚反應", true},
 		{"這週喝了幾天的茶", true},
 		{"全天 dairy 到目前多少", true},
 		{"你還記得我上次的備註嗎", true},
@@ -28,7 +28,7 @@ func TestIsRecallTrigger(t *testing.T) {
 		{"Diameter 3/4\" 是多少mm", false},
 		{"幾点了", false},
 		// NOT recall — a logging command, not a question about the past
-		{"皮卡 早餐memo 跟昨天一樣", true}, // contains 昨天 → still a recall (must read yesterday)
+		{"早餐memo 跟昨天一樣", true}, // contains 昨天 → still a recall (must read yesterday)
 		{"今天午餐 yellow curry chips", false},
 		{"幫我查一下這個產品", false},
 	}
@@ -76,7 +76,7 @@ func TestClassifyRecall(t *testing.T) {
 		name          string
 		msg           string
 		calls         []process.ToolCall
-		ghostInjected bool
+		injected      string
 		wantClass     string
 		wantGrounding string
 	}{
@@ -93,9 +93,23 @@ func TestClassifyRecall(t *testing.T) {
 			wantGrounding: "active_read",
 		},
 		{
-			name:          "ghost injection grounds the recall behind the scenes",
+			name:          "relevant ghost injection grounds the recall",
 			msg:           "昨天晚餐吃什麼",
-			ghostInjected: true,
+			injected:      "[Memory] 晚餐 6/30: quinoa salad + salmon",
+			wantClass:     "grounded_recall",
+			wantGrounding: "ghost_inject",
+		},
+		{
+			name:          "IRRELEVANT ghost injection does NOT ground — presence isn't relevance",
+			msg:           "今天奶製品總共多少",
+			injected:      "[Memory] user prefers window seats on flights; birthday is in August",
+			wantClass:     "memory_recall",
+			wantGrounding: "inject_irrelevant",
+		},
+		{
+			name:          "subject-free temporal question: cannot judge relevance → injection grounds conservatively",
+			msg:           "昨天吃了什麼",
+			injected:      "[Memory] some unrelated context",
 			wantClass:     "grounded_recall",
 			wantGrounding: "ghost_inject",
 		},
@@ -103,14 +117,15 @@ func TestClassifyRecall(t *testing.T) {
 			name:          "active read wins even if ghost also injected",
 			msg:           "昨天晚餐吃什麼",
 			calls:         []process.ToolCall{readCall},
-			ghostInjected: true,
+			injected:      "[Memory] anything",
 			wantClass:     "grounded_recall",
 			wantGrounding: "active_read",
 		},
 		{
-			name:      "no read, no injection → ungrounded memory_recall",
-			msg:       "我之前的過敏反應是什麼",
-			wantClass: "memory_recall",
+			name:          "no read, no injection → ungrounded memory_recall",
+			msg:           "我之前的皮膚反應是什麼",
+			wantClass:     "memory_recall",
+			wantGrounding: "none",
 		},
 		{
 			name:      "a failed read does not count as grounding",
@@ -124,10 +139,24 @@ func TestClassifyRecall(t *testing.T) {
 			calls:     []process.ToolCall{writeCall},
 			wantClass: "memory_recall",
 		},
+		{
+			name:          "english recall with relevant injection",
+			msg:           "how much dairy did I have today",
+			injected:      "[Memory] dairy log 7/1: latte (1), cheese toast (1)",
+			wantClass:     "grounded_recall",
+			wantGrounding: "ghost_inject",
+		},
+		{
+			name:          "english recall with irrelevant injection",
+			msg:           "how much dairy did I have today",
+			injected:      "[Memory] the strategy game uses a hex grid",
+			wantClass:     "memory_recall",
+			wantGrounding: "inject_irrelevant",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			v := classifyRecall(c.msg, "some answer", c.calls, c.ghostInjected)
+			v := classifyRecall(c.msg, "some answer", c.calls, c.injected)
 			if v.classification != c.wantClass {
 				t.Errorf("classification = %q, want %q", v.classification, c.wantClass)
 			}
@@ -135,5 +164,39 @@ func TestClassifyRecall(t *testing.T) {
 				t.Errorf("grounding = %q, want %q", v.grounding, c.wantGrounding)
 			}
 		})
+	}
+}
+
+func TestSalientTokens(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want []string // tokens that MUST be present
+		none bool     // expect zero salient tokens
+	}{
+		{msg: "今天奶製品總共多少", want: []string{"奶製品"}},
+		{msg: "how much dairy did I have today", want: []string{"dairy"}},
+		{msg: "昨天吃了什麼", none: true},
+		{msg: "上次的 collagen 補充計畫是什麼", want: []string{"collagen"}},
+	}
+	for _, c := range cases {
+		got := salientTokens(c.msg)
+		if c.none {
+			if len(got) != 0 {
+				t.Errorf("salientTokens(%q) = %v, want none", c.msg, got)
+			}
+			continue
+		}
+		for _, w := range c.want {
+			found := false
+			for _, g := range got {
+				if g == w {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("salientTokens(%q) = %v, missing %q", c.msg, got, w)
+			}
+		}
 	}
 }
