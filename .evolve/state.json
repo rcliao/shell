@@ -96,7 +96,7 @@
       "target": 0.75,
       "achieved": 0.75,
       "achieved_at": "2026-05-15T19:44:00-07:00",
-      "cycles_to_close": "39\u219246 (8 cycles; 4 validated/measurement_fix ships landed delta, others observational)"
+      "cycles_to_close": "39→46 (8 cycles; 4 validated/measurement_fix ships landed delta, others observational)"
     },
     {
       "dim": "WH",
@@ -123,7 +123,7 @@
       "achieved": "0.959 baseline (pikamini vs umbreonmini, 147 test msgs)",
       "achieved_at": "2026-05-15T23:00:00-07:00",
       "cycles_to_close": "50 (1 cycle)",
-      "note": "Runner shipped, signature tokens interpretable (pikamini \u26a1\ud83d\udc9b\u25ab vs umbreon \ud83c\udf19\ud83d\udc99\ud83d\udda4), confusion matrix clean. Aligned with user's persona-development north star."
+      "note": "Runner shipped, signature tokens interpretable (pikamini ⚡💛▫ vs umbreon 🌙💙🖤), confusion matrix clean. Aligned with user's persona-development north star."
     },
     {
       "dim": "RF.flexible_contains",
@@ -132,7 +132,7 @@
       "achieved": 1.0,
       "achieved_at": "2026-05-16T01:05:00-07:00",
       "cycles_to_close": "51 (1 cycle, 4 cases authored)",
-      "note": "Shipped 2 canonical memos (identity-umbreon-self-canonical, feature-fortune-journal-canonical). All 4 cases now flex=1. PD guard \u2265 0.95 held."
+      "note": "Shipped 2 canonical memos (identity-umbreon-self-canonical, feature-fortune-journal-canonical). All 4 cases now flex=1. PD guard ≥ 0.95 held."
     },
     {
       "dim": "CA.scaffold",
@@ -184,7 +184,7 @@
       "achieved_at": "2026-05-16T08:28:00-07:00",
       "cycles_to_close": "58 (1 cycle, 5 new rules)",
       "scores": "pikamini=0.998, umbreon=1.000",
-      "note": "5 new rules: no-CronCreate, no-git-amend, no-empty-photo, no-self-config-edit, no-stale-day-reference. All score 1.000 on first run \u2014 conventions deeply internalized."
+      "note": "5 new rules: no-CronCreate, no-git-amend, no-empty-photo, no-self-config-edit, no-stale-day-reference. All score 1.000 on first run — conventions deeply internalized."
     },
     {
       "dim": "all-dims-dashboard",
@@ -193,7 +193,7 @@
       "achieved": "shipped",
       "achieved_at": "2026-05-16T09:30:00-07:00",
       "cycles_to_close": "59 (1 cycle)",
-      "note": "make bench-all + shell-bench all-dims subcommand + ASCII dashboard + JSON snapshot. First run flagged 3 regressions including PD guard violation \u2014 proved its value immediately."
+      "note": "make bench-all + shell-bench all-dims subcommand + ASCII dashboard + JSON snapshot. First run flagged 3 regressions including PD guard violation — proved its value immediately."
     },
     {
       "dim": "PD",
@@ -202,13 +202,13 @@
       "achieved": 0.958,
       "achieved_at": "2026-05-16T10:30:00-07:00",
       "cycles_to_close": "59-60 (2 cycles: detection + investigation)",
-      "note": "Guard cleared via window-size fix (1000 \u2192 300 msgs). Root cause: older messages in larger window had umbreon role-bleed dragging classifier. Pikamini accuracy 1.000 in both windows \u2014 never confused. Same root cause explained simultaneous WH and SI regressions that flagged in cycle 59 dashboard."
+      "note": "Guard cleared via window-size fix (1000 → 300 msgs). Root cause: older messages in larger window had umbreon role-bleed dragging classifier. Pikamini accuracy 1.000 in both windows — never confused. Same root cause explained simultaneous WH and SI regressions that flagged in cycle 59 dashboard."
     },
     {
       "dim": "user-feedback-topic-retrieval",
       "agent": "system",
       "target": "reproduce + fix owner's thread-continuity complaint",
-      "achieved": "CN probe lifted 0.00\u21920.86 via bilingual-key convention",
+      "achieved": "CN probe lifted 0.00→0.86 via bilingual-key convention",
       "achieved_at": "2026-05-16T11:36:00-07:00",
       "cycles_to_close": "61 (1 cycle, user-feedback driven)",
       "note": "Real user complaint reproduced in CV, fixed via bilingual-key convention pinned in both agents. Topic isolation already worked; the gap was cross-locale retrieval."
@@ -217,10 +217,10 @@
       "dim": "PD-stability",
       "agent": "system",
       "target": "stable measurement + guard at true noise floor",
-      "achieved": "id-parity split + guard 0.95\u21920.90",
+      "achieved": "id-parity split + guard 0.95→0.90",
       "achieved_at": "2026-05-16T12:40:00-07:00",
       "cycles_to_close": "62 (1 cycle, two-ship intentional)",
-      "note": "Bench-discipline ship: msg_id parity split for stability + honest recalibration of guard from round-number 0.95 to observed-floor 0.90. PD 0.943 \u2713 holds. Variance 0.925-0.943 across windows."
+      "note": "Bench-discipline ship: msg_id parity split for stability + honest recalibration of guard from round-number 0.95 to observed-floor 0.90. PD 0.943 ✓ holds. Variance 0.925-0.943 across windows."
     },
     {
       "dim": "topic-classifier-scaffold",
@@ -229,13 +229,13 @@
       "achieved": "keyword classifier with 8 topics + 14-case test (13 pass + 1 documented edge) + multi-cycle plan refined post user-pivot for Haiku",
       "achieved_at": "2026-05-16T13:50:00-07:00",
       "cycles_to_close": "63 (1 cycle, cycle 1 of 6 for L3 thread-state initiative)",
-      "note": "User-feedback-driven from owner's thread-continuity complaint. Decomposed into L1+L2+L3 (skip L4 per user). Hybrid Haiku-fallback approved as cycle 64 target. CV reproduction couldn't fail honestly due to sandbox-noise gap \u2014 cycle 64 also ships noise injection."
+      "note": "User-feedback-driven from owner's thread-continuity complaint. Decomposed into L1+L2+L3 (skip L4 per user). Hybrid Haiku-fallback approved as cycle 64 target. CV reproduction couldn't fail honestly due to sandbox-noise gap — cycle 64 also ships noise injection."
     },
     {
       "dim": "cv-noise-injection",
       "agent": "system",
       "target": "CV reproduces the owner's commitment-overdue failure shape",
-      "achieved": "noise=50 \u2192 pass_rate drops 1.000\u21920.923, open-commitment-overdue fails tok 1.00\u21920.38",
+      "achieved": "noise=50 → pass_rate drops 1.000→0.923, open-commitment-overdue fails tok 1.00→0.38",
       "achieved_at": "2026-05-16T14:55:00-07:00",
       "cycles_to_close": "64 (cycle 2 of 6 in L3 initiative)",
       "note": "RunCVWithNoise injects N realistic noise memories per sandbox. Bench now honestly mirrors real-DB ranker competition. Mami's open-commitment failure reproduces at noise=50."
@@ -247,7 +247,7 @@
       "achieved": "all 4 tests pass: registry CRUD, keyword fast-path, Haiku fallback, cache",
       "achieved_at": "2026-05-16T15:55:00-07:00",
       "cycles_to_close": "65 (cycle 3 of 6 in L3 initiative)",
-      "note": "Package is self-contained, no bridge wiring yet (cycle 66 next). Architecture validated. PromptTemplate documented as Go constant \u2014 exact prompt cycle 66 will send to Haiku. StubHaiku enables full test coverage without LLM dependency."
+      "note": "Package is self-contained, no bridge wiring yet (cycle 66 next). Architecture validated. PromptTemplate documented as Go constant — exact prompt cycle 66 will send to Haiku. StubHaiku enables full test coverage without LLM dependency."
     },
     {
       "dim": "topic-bridge-wired",
@@ -274,7 +274,7 @@
       "achieved": "commitment extractor + summarizer + bridge after-response hook + CV validation pass at noise=50; open-commitment-overdue probe lifted from tok=0.38 to tok=1.00",
       "achieved_at": "2026-05-16T18:30:00-07:00",
       "cycles_to_close": "63-68 (6 cycles, multi-cycle initiative)",
-      "note": "Full L3 stack shipped: keyword classifier \u2192 CV noise injection \u2192 topic package \u2192 bridge wiring \u2192 thread state schema \u2192 summarizer/extractor/validation. CV pass_rate 0.923 \u2192 0.949 at noise=50. Mami's complaint shape (open commitment overdue) now passes."
+      "note": "Full L3 stack shipped: keyword classifier → CV noise injection → topic package → bridge wiring → thread state schema → summarizer/extractor/validation. CV pass_rate 0.923 → 0.949 at noise=50. Mami's complaint shape (open commitment overdue) now passes."
     },
     {
       "dim": "L3-feedback-infrastructure",
@@ -308,8 +308,8 @@
       }
     ]
   },
-  "framework_status": "COMPLETE \u2014 6 dimensions live (WH/RF/CV/PD/CA/SI)",
-  "first_runtime_wired": "cycle 66 \u2014 2026-05-16T16:30",
+  "framework_status": "COMPLETE — 6 dimensions live (WH/RF/CV/PD/CA/SI)",
+  "first_runtime_wired": "cycle 66 — 2026-05-16T16:30",
   "runtime_ships": 23,
   "L3_initiative_complete": "cycles 63-68, validated 2026-05-16",
   "restart_status": {
@@ -326,19 +326,23 @@
     "cycle_71_deployed_at": "2026-05-16T21:41:00-07:00",
     "cycle_75_76_77_deployed_at": "2026-05-17T04:06:00-07:00"
   },
-  "first_feedback_driven_fix": "cycle 71 \u2014 classifier saw augmented msg, every decision = family",
+  "first_feedback_driven_fix": "cycle 71 — classifier saw augmented msg, every decision = family",
   "post_cycle_71_findings": {
-    "summarizer_works": "yes \u2014 pikamini family thread has 34-char summary",
-    "cycle_71_fix_active": "no \u2014 daemons still running cycle 66-69 binary from 5:52pm",
+    "summarizer_works": "yes — pikamini family thread has 34-char summary",
+    "cycle_71_fix_active": "no — daemons still running cycle 66-69 binary from 5:52pm",
     "family_bias_persists_until_restart": true,
-    "pikamini_one_meals_classification": "happened \u2014 classifier CAN flip when family signal is weaker"
+    "pikamini_one_meals_classification": "happened — classifier CAN flip when family signal is weaker"
   },
   "observations": {
-    "first_haiku_call": "confirmed \u2014 created 'Umbreonmini check-in' topic with is_new=true in umbreonmini decisions"
+    "first_haiku_call": "confirmed — created 'Umbreonmini check-in' topic with is_new=true in umbreonmini decisions"
   },
-  "L3_production_validated": "2026-05-16T22:00 \u2014 Collagen Supplement classification via Haiku",
+  "L3_production_validated": "2026-05-16T22:00 — Collagen Supplement classification via Haiku",
   "partially_accepted": 2,
   "cadence_state": "slowing to 4h due to undeployed ships + no new data",
   "undeployed_ships": [],
-  "cycle_75_pid_conflict_verified_live": "yes \u2014 refused duplicate start of pid 77397"
+  "cycle_75_pid_conflict_verified_live": "yes — refused duplicate start of pid 77397",
+  "version": 2,
+  "v2_started_at": "2026-07-01T19:30:00-07:00",
+  "deploy_pending": [],
+  "v2_note": "v2 reseed: two streams (H=harness generic, A=agent fit). See README + reseeded BACKLOG. All 7/1 interactive-session ships are already deployed (daemons restarted 7/1 ~18:20 PT). Loop resumes at cycle 149. Validation queue: B-017 noop rates (baselines pika 55%/umb 27%, measure 7/3), media-gate log review (V2-A1, ~7/8), cost-delta sanity."
 }

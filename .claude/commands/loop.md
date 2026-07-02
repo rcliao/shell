@@ -1,153 +1,102 @@
 ---
-description: Autonomous evolve cycle — picks next action, executes safely, schedules next wakeup
+description: Autonomous evolve cycle (v2) — reads production signals, ships one narrow improvement to the harness or agent-fit layer, schedules next wakeup
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, TaskCreate, TaskUpdate, TaskList, ScheduleWakeup
 ---
 
-# /loop — autonomous evolve cycle
+# /loop — autonomous evolve cycle (v2)
 
-You are running ONE autonomous improvement cycle for the shell + ghost agent OS.
-This command may be invoked manually OR auto-scheduled via ScheduleWakeup. Your
-job is to pick the highest-leverage action, execute it safely, capture the
-delta, then schedule the next wakeup (or halt if guard rails fire).
+You are running ONE improvement cycle for the shell + ghost ecosystem. Charter
+lives in `.evolve/README.md` — read it first if this is your first cycle in
+this session. Mission: shell/ghost become **generic agent infrastructure**
+(stream H); the deployed agents stay **unique owner-fit products** (stream A).
+Pick the highest-leverage action, execute safely, capture the delta, schedule
+the next wakeup (or halt per guard rails).
 
 ## Invocation
 
-`$ARGUMENTS` may be:
-- bare — autonomous mode, pick next action
-- `dry-run` — print pick-next decision, don't execute
-- `status` — print state.json summary + last 3 cycle outcomes
-- `halt` — set state.halted=true (manual stop)
-- `resume` — set state.halted=false (clear halt + reset failure counters)
+`$ARGUMENTS`: bare = autonomous | `dry-run` = print decision only | `status` |
+`halt` | `resume`.
 
-## Step-by-step protocol
+## Protocol
 
-### 1. Decide
+### 0. Environment
+Owner chat IDs never live in source (public repo, history scrubbed 7/1).
+Derive at runtime:
+```
+export SHELL_BENCH_OWNER_CHATS=$(python3 -c "import json;print(','.join(str(u) for u in json.load(open('$HOME/.shell/agents/pikamini/config.json'))['telegram']['allowed_users']))")
+```
 
-Run `./shell-bench pick-next` and parse the JSON. Honor `guard_rail_triggered`:
-if true, STOP — do not execute, do not schedule next wakeup, write a halt note
-to `.evolve/cycles/<today>-loop-halt.md` and exit.
+### 1. Signals (cheap reads FIRST — ledgers and SQL before any transcript text)
+For each agent config (`~/.shell/agents/{pikamini,umbreonmini}/config.json`):
+- `./shell write-hygiene --since 72h --config <cfg>` and `recall-hygiene`, `tool-usage`
+- topic health: `./shell-bench topic-stats` (or SQL on topic_decisions)
+- true cost: `SELECT source, ROUND(SUM(cost_usd),2) FROM usage WHERE created_at >= datetime('now','-3 days') GROUP BY source`
+- heartbeat noop rate; `media gate:` daemon-log lines; agent self-reflection
+  memories (tags behavioral/learning/convention) since last cycle
+- `./shell-bench pick-next` for bench state + open proposals
 
-### 2. Plan
+### 2. Validate before creating
+Any BACKLOG item in `validating` past its `measure-by` → measure and grade
+FIRST (`shipped` | `regressed` | `shipped-but-no-metric-effect`). A regression
+gets an auto-revert proposal, not a shrug.
 
-Read state.json. Look at last 3 cycle reports in `.evolve/cycles/`. Form ONE
-hypothesis for this cycle's action. Note:
-- **action=drain-proposal** → read proposal content, decide accept/defer/reject,
-  update its `status:` field in ghost.
-- **action=close-goal-gap** → look at per-case failures in latest bench JSON;
-  pick the worst-performing case and ship a fix targeted at IT specifically.
-- **action=cv-regression** → diff latest CV report against previous; identify
-  which probe regressed; ship a fix.
-- **action=idle** → no work; bump `idle_streak`, write a 3-line cycle file
-  saying "no actionable signal"; sleep.
+### 3. Decide
+Priority order: (a) grade overdue validations, (b) approved backlog items
+(🟢), (c) a NEW signal-driven finding (file it in BACKLOG — proposed unless
+low-risk), (d) backlog hygiene (merge/close stale), (e) idle.
+Form ONE hypothesis with a stated kill-switch.
 
-### 3. Ship (one change, narrow scope)
+### 4. Ship (one change, narrow scope)
 
-Honor the .evolve/README design rules:
-- ❌ NO git push, NO daemon restart, NO destructive ops without user approval
-- ❌ NO touching live production memory.db without backup first
-- ❌ NO new dependencies, NO schema changes
-- ✅ Bench-layer fixes, convention memos, new test cases, doc updates,
-  pure-function changes — auto-ship OK
-- ✅ Always backup with `cp memory.db memory.db.bak-<date>-<cycle>` before mutation
+**Stream H (shell/ghost Go code)** — gates, all mandatory:
+- `go build ./... && go test ./...` green; bench non-regression on affected dims
+- `make verify-no-pii` clean on the staged diff — HARD GATE; on failure
+  sanitize or keep a local branch and flag for review
+- commit to main and push allowed once gates pass
+- ❌ NEVER restart daemons — append to `state.json.deploy_pending` instead
+- ❌ no new deps, no schema changes without approval, no force-push
 
-If the ship requires anything in the ❌ list, downgrade to "propose-only":
-file the action as a `proposal-loop-<ts>` memory in `loop:proposals` and
-emit an idle cycle.
+**Stream A (agent fit: skills/config/schedules/memories)**:
+- every file change commits to the agent-layer repo at `~/.shell` (git)
+- ❌ identity/persona edits and NEW outbound behavior (schedules/messages to
+  owners) require approval — file as proposed
+- ✅ skill instruction edits, additive conventions (ghost put, non-identity),
+  reflect rules, config tuning within approved items
+- live DB mutation: backup first (`cp <db> <db>.bak-<date>-c<N>`)
 
-### 4. Measure
+If the ship needs anything forbidden → downgrade to propose-only.
 
-Re-run `make bench-pika` (or relevant subset) and compute the delta vs the bench
-that pick-next read. Write a results table in the cycle file.
+### 5. Measure
+Re-run the relevant signal/bench and record before/after. If the effect needs
+production time, set `measure-by` and leave the item `validating`.
 
-### 5. Record
-
-Append a `.evolve/cycles/<today>-cycle-<N>.md` with:
-- action chosen + reason
-- hypothesis
-- ship description (files touched + 1-line per file)
-- bench delta table (before / after / pp delta)
-- counter-explanations considered
-- kill-switch (what would have proved it wrong)
-- next-cycle suggestion
-
-Update `.evolve/state.json`:
-- `last_cycle`, `last_cycle_at`
-- `bench_latest` for affected agents
-- `current_goal.current` if the goal metric moved
-- `track_record`: increment validated|wrong_lever|measurement_fix
-- if idle: increment `idle_streak`, else reset to 0
-- if failed: increment `consecutive_failures`, else reset to 0
-
-### 6. Reflect
-
-Look at the cycle just shipped. If you notice:
-- a pattern across 3+ recent cycles → file a meta-finding in
-  `.evolve/LEARNINGS.md`
-- a behavior the agents could self-author next time → write a convention
-  memo to the affected agent's ghost
+### 6. Record
+- Shipping or real-finding cycles: write `.evolve/cycles/<date>-cycle-<N>.md`
+  (action, hypothesis, files touched, delta table, counter-explanations,
+  kill-switch, next suggestion). Idle cycles: bump state.json only.
+- Update `state.json`: last_cycle/at, track_record, idle_streak,
+  consecutive_failures, deploy_pending.
+- Meta-pattern across 3+ cycles → append `.evolve/LEARNINGS.md`.
 
 ### 7. Schedule next
+Healthy → `ScheduleWakeup` per the cadence table in `.evolve/README.md`
+(1h active / 2h idle-streak / 4h+ quiet hours 10pm-7am PT / 30-60min right
+after a ship). `idle_streak >= 3` → halt WITHOUT wakeup: write a short digest
+note in state.json.v2_note. The daily cron firing un-halts automatically when
+new signals or approved items exist. `consecutive_failures >= 3` → halt with
+diagnostic.
 
-If guard rails are clear (track_record looks healthy, idle_streak < 5, failures < 3):
+## Anti-patterns (v1 LEARNINGS — verbatim discipline)
+- >1 unvalidated ship at once; ≥3 in flight → idle even if tempted
+- shipping multiple changes before re-measuring ("which one moved the number?")
+- moving the target after the ship
+- cycle files for pure-idle observations
+- restarting daemons or bypassing verify-no-pii from inside the loop
+- recursive /loop in-session — use ScheduleWakeup
 
+## Status line (end every cycle with this)
 ```
-ScheduleWakeup(delaySeconds=3600, prompt="/loop", reason="next autonomous cycle, hourly cadence")
+[cycle <N>] stream=<H|A|idle> action=<...> result=<validated|wrong_lever|measurement_fix|idle|failed|proposed>
+signals: WH=<x>% recall_vol=<n> tool_fail=<x>% noop pika/umb=<x>/<x>% topic_single_turn=<x>%
+deploy_pending=<n> next wakeup: <duration|HALTED: reason>
 ```
-
-If `idle_streak >= 3`, slow to 4 hours. If `idle_streak >= 5`, halt (set
-state.halted=true, leave a note for the user, do not re-schedule).
-
-If a ship failed mid-cycle, increment `consecutive_failures`. At 3, halt with
-clear failure diagnostic in the cycle file.
-
-## Anti-patterns (do not do)
-
-- ❌ Shipping multiple changes before re-benching ("everything got better!" —
-   which one moved the number?)
-- ❌ Moving the target after the ship ("0.5 is fine actually")
-- ❌ Restarting daemons or pushing to main from inside /loop — defer to user
-- ❌ Editing skill prompts directly without a convention memo as anchor
-- ❌ Mutating the live memory.db without `cp ... .bak-<date>-c<N>` first
-- ❌ Calling /loop recursively in the same session — use ScheduleWakeup
-- ❌ Skipping the cycle file — even idle cycles get a 3-line note
-
-## Status line shape (always end with this)
-
-```
-[cycle <N>] action=<action> result=<validated|wrong_lever|measurement_fix|idle|failed>
-bench: WH=<x> RF.flex=<x> CV.pass=<x>  goal=<dim> current=<x> target=<x> gap=<x>
-next wakeup: <duration> (or HALTED: <reason>)
-```
-
-## Failure modes the loop is designed to survive
-
-- DB drift between runs — note it in the cycle file, don't treat as regression
-- Open proposals from agents — drain first, always
-- Ghost search behavior change — CV will catch it; CV regression → fix before goal work
-- Context window exhaustion in this command — write cycle file first, schedule
-  next wakeup last so progress isn't lost
-
-## Files this command touches
-
-| File | Why |
-|---|---|
-| `.evolve/state.json`          | source of truth; updated each cycle |
-| `.evolve/cycles/*.md`         | per-cycle report (write-once per run)|
-| `.evolve/LEARNINGS.md`        | append-only meta-findings           |
-| `testdata/bench/cases/**`     | new test cases, edits to expectations |
-| `internal/bench/**`           | bench logic fixes only              |
-| `cmd/shell-bench/**`          | new subcommands, never breaking changes |
-| ghost: `loop:proposals` ns    | proposal state mutation             |
-| ghost: agent ns `convention-*`| new conventions for agents to follow |
-
-This command does NOT touch: `cmd/shell/`, `internal/bridge/`, `internal/daemon/`,
-any live agent shell.db, or any `~/.shell/agents/*/` skills without explicit user
-approval.
-
-## Coupling
-
-- `/loop` and `/goal` are complementary: `/loop` is autonomous, scans for any
-  high-leverage action; `/goal` is steered, focused on one dimension.
-- `/loop` can promote itself into `/goal` mode by setting `state.current_goal`
-  when it detects a sustained gap.
-- Agent `propose-backlog` skill feeds the queue; `/loop` drains it first.

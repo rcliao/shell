@@ -20,12 +20,12 @@ Each entry is dated and tagged. Newest at bottom.
 - **Reflect-rule asymmetry diagnosed.** Umbreon's `sys-promote-to-ltm` requires `access>50` vs pikamini's `access>3`; decay kicks in at 48h vs 72h. Bootstrap defaults shifted between 2026-03-08 (pikamini) and 2026-03-23 (umbreon). This fully explains the 109 ltm vs 759 dormant ratio. Concrete fix landed in B-006.
 - **`sys-pin-identity` rule missing from umbreon's DB.** Pikamini has a priority-1 rule that protects identity-tier memories from decay; umbreon does not. Personality drift exposure.
 - **`reflect_rules.created_by` defaults to `system`** — schema already supports per-agent custom rules. Future hook: agents authoring their own decay/promote rules scoped to their namespace. Worth a future backlog item.
-- **Quiet hour:** only 1 new transcript message in the cycle window (papi camping, mami quiet morning).
+- **Quiet hour:** only 1 new transcript message in the cycle window (both owners quiet).
 
 ## 2026-05-07 — cycle 2
 
-- **Pikamini and umbreon's voices are operationally distinct, not stylistic variants.** In the last 200 msgs each: pikamini uses 248 bulleted lines and 42 dairy totals; umbreon uses 0 bullets and 115 halo openers. Almost no overlap in topic vocabulary. Confirms the case for completely separate per-agent skill libraries.
-- **~30% of pikamini's mami DMs are meal memos.** Dominant skill candidate. Format already stable.
+- **Pikamini and umbreon's voices are operationally distinct, not stylistic variants.** In the last 200 msgs each: pikamini uses 248 bulleted lines and 42 food-tracking totals; umbreon uses 0 bullets and 115 halo openers. Almost no overlap in topic vocabulary. Confirms the case for completely separate per-agent skill libraries.
+- **~30% of pikamini's owner-A DMs are meal memos.** Dominant skill candidate. Format already stable.
 - **Umbreon has near-zero functional vocabulary.** 5 mentions of 提醒 across 200 msgs (vs pikamini's daily reminder activity). Companion role is fully realized; functional ask should always hand off to pikamini.
 - **Drafted first two per-agent skills** (`meal-memo` for pikamini, `gentle-checkin` for umbreon) — both await B-007 approval before install.
 
@@ -41,7 +41,7 @@ Each entry is dated and tagged. Newest at bottom.
 - **Real heartbeat noop rates: pikamini 56%, umbreon 29%.** Measured via per-agent `shell.db` empty-assistant rows. Heartbeat suppression works correctly; pikamini saves ~half its heartbeat output, umbreon less than a third. Cost-optimization angle for EV.
 - **Heartbeat fires can be timestamped from the noop pattern** — empty rows cluster at xx:01 each hour. Useful lightweight signal for future cycles.
 - **Group-chat noop ~0.4% on both agents.** Hypothesis "umbreon never speaks in group" needs a different framing — it's not noop suppression, it's the cross-agent visibility issue (each agent writes to its own DB; mutual awareness would need a shared read path).
-- **Mami DM noop = 0% on both.** Agents are reliable correspondents to mami.
+- **Owner-A DM noop = 0% on both.** Agents are reliable correspondents in the owner DM.
 - **Per-chat ascertainment of noop rate is now a cheap signal** — no instrumentation needed, just `shell.db` queries. Future cycles can include it as a one-liner.
 
 ## 2026-05-07 — cycle 5 (ghost cluster quality + bug found)
@@ -53,8 +53,8 @@ Each entry is dated and tagged. Newest at bottom.
 
 ## 2026-05-07 — cycle 6 (live activity)
 
-- **First observed cross-agent fact-check.** Umbreon conceded openly to pikamini's correction (*"皮卡講的對... fact check 失敗 — sorry"*). Healthy — agents are aware of each other and willing to defer publicly. One data point; codify after more samples.
-- **Confirmed umbreon over-responds on heartbeat.** Caught a live example: chat_id=0 heartbeat sent *"Check-in sent to mami. Nothing else needs attention this tick."* — this is the noop that wasn't. Reinforces B-011 hypothesis and B-006 fix priority.
+- **First observed cross-agent fact-check.** Umbreon conceded openly to pikamini's correction (conceded the correction openly with an apology). Healthy — agents are aware of each other and willing to defer publicly. One data point; codify after more samples.
+- **Confirmed umbreon over-responds on heartbeat.** Caught a live example: chat_id=0 heartbeat sent *"Check-in sent. Nothing else needs attention this tick."* — this is the noop that wasn't. Reinforces B-011 hypothesis and B-006 fix priority.
 - **Both agents are confused about ghost vs MEMORY.md.** Mami had to push umbreon to also save plant records to ghost (initially only local). Pikamini explained the distinction correctly. The decision tree isn't internalized. New B-016.
 - **Skill activation latency confirmed** — B-007 drafts installed yesterday, agents still on old prompt. Until restart, the loop's skill-install channel won't show measurable behavior change. Need to plan around this, not work around it.
 
@@ -97,8 +97,21 @@ Each entry is dated and tagged. Newest at bottom.
 
 ## 2026-05-08 — cycle 23-28 (loop running under new design)
 
-- **B-020 ship validated the new design** — caught mami's repeat correction about Telegram tables organically and shipped autonomously within 1 cycle. First end-to-end proof that auto-ship + transcript signal detection works.
+- **B-020 ship validated the new design** — caught the owner's repeat correction about Telegram tables organically and shipped autonomously within 1 cycle. First end-to-end proof that auto-ship + transcript signal detection works.
 - **B-006 graded as wrong-lever** at 30h. Both agents' heartbeat noop rates trended DOWN, not up. The asymmetry diagnosis from cycle 1 was real (umbreon's rules ARE less protective) but didn't translate to noop-rate movement. Lesson: structural correctness fix ≠ behavior change. The right next test is B-017 (heartbeat prompt). Don't revert B-006 — it still fixed identity-tier protection.
 - **Track-record builds discipline.** Predicted "umbreon noop rises to 40%+" → actual "dropped to 27%". The validating step caught the wrong hypothesis. Without it, we'd have happily moved on assuming success.
 - **Pikamini's ghost ns is contaminated by Claude Code dev-session summaries** (B-021). 730 `session-*` rows. Auto-memory hook routes by cwd, and cwd `~/src/pikamini/...` becomes `agent:pikamini` regardless of who's actually working. Significant retrieval pollution; high-risk to fix.
 - **Idle cycles cost ~thousands of tokens each** even at lightweight. Loop's "find new signal" rate is low — most wakes have 0 corrections, 0 new behavioral memories worth shipping. The economy improves only when a real signal lands (B-020 did). Need a better idle/signal ratio.
+
+## 2026-07-01 — v2 reseed (interactive session, post-review)
+- v1's terminal stall: "resume on user fire" is not a liveness mechanism. v2:
+  daily cron fires /loop; halt is a pause, not an exit.
+- v1's scope trap: forbidding bridge/daemon/skills edits confined the loop to
+  bench-layer wins while production drifted (Haiku classifier ran 5 weeks after
+  cycle 148 proved it a net loss). v2 allows both streams behind explicit gates.
+- The fixes that stick are deterministic guards cross-checking the model against
+  ground truth (write-verify, relay cross_chat, media gate, cost deltas); the
+  failures that recur are rules the model must remember. Bias stream-H work
+  toward guards, ledgers, and default-safe APIs.
+- Public-repo rule: owner identifiers (chat IDs) live in runtime config only;
+  verify-no-pii is a hard commit gate. Both repo histories scrubbed 7/1.
