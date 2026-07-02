@@ -10,7 +10,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ## 🟢 Approved (ready for the loop to ship)
 
 ### V2-H1 — [H] Cut over topic classification to sticky-pointer, retire per-turn Haiku
-- **status:** approved (evidence overwhelming; deploy still gated on owner restart)
+- **status:** validating (shipped cycle 149, commits a15b762 + agent-layer e41ce94; deploy_pending owner restart; measure-by 72h post-deploy)
 - **why:** cycle 148 proved per-turn Haiku classification worse on every focus
   metric; June production: is_new=1 on 1,098/1,098 Haiku calls (it NEVER
   matched an existing topic), 96-99% of ~1,000 topics single-turn, avg 8.5s
@@ -38,6 +38,14 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ---
 
 ## 🟡 Proposed (awaiting owner approval or more evidence)
+
+### V2-H10 — [H] Persist daemon logs (currently discarded to /dev/null)
+- **why:** found in cycle 149 — both daemons write stdout/stderr to /dev/null, so every
+  slog-based signal (sticky audit, media-gate false-positive review V2-A1, write-verify
+  warnings) is unmeasurable. 5 weeks of audit signal already lost.
+- **scope:** log-file config (default ~/.shell/agents/<agent>/logs/daemon.log) with
+  size rotation; or document a launchd/redirect convention.
+
 
 ### V2-H3 — [H] Outbound dedup ledger (scheduler-notify vs agent relay)
 - **why:** duplicate-reminder class (heartbeat re-sends what a notify schedule
