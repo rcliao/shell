@@ -10,7 +10,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ## 🟢 Approved (ready for the loop to ship)
 
 ### V2-H1 — [H] Cut over topic classification to sticky-pointer, retire per-turn Haiku
-- **status:** validating (shipped cycle 149, commits a15b762 + agent-layer e41ce94; deploy_pending owner restart; measure-by 72h post-deploy)
+- **status:** validating (DEPLOYED 2026-07-01 20:31 PT; post-deploy shows zero LLM rows, 0-3ms decisions; measure-by 2026-07-04 20:30 PT)
 - **why:** cycle 148 proved per-turn Haiku classification worse on every focus
   metric; June production: is_new=1 on 1,098/1,098 Haiku calls (it NEVER
   matched an existing topic), 96-99% of ~1,000 topics single-turn, avg 8.5s
@@ -65,7 +65,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   complaints) or persona inconsistency → config revert to single-model.
 
 ### V2-H2 — [H] Recall ledger: add the miss path (it cannot currently record failure)
-- **status:** approved
+- **status:** validating (shipped cycle 150, 3cd8ff8 — injection must cover the question's subject to ground; deploy pending; measure-by 7d post-deploy)
 - **why:** 100% of rows since launch are grounded (no ungrounded
   classification was ever logged) and weekly volume collapsed 38→5 — the
   metric can't detect the failures it was built for.

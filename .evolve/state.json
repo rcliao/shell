@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 149,
-  "last_cycle_at": "2026-07-01T19:55:00-07:00",
+  "last_cycle": 150,
+  "last_cycle_at": "2026-07-01T21:20:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -344,7 +344,7 @@
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
   "deploy_pending": [
-    "restart daemons for topic_keyword_only (V2-H1, cycle 149) — binary built, configs flipped"
+    "restart daemons for V2-H2 recall relevance check (binary built 21:18 PT; log-only feature, no urgency — morning is fine)"
   ],
-  "v2_note": "cycle 149 shipped V2-H1 (LLM topic tier retired, config-driven). Deploy pending owner restart. Next: measure H1 (72h post-deploy), B-017 noop (7/3), then V2-H2 recall miss path."
+  "v2_note": "cycle 150: V2-H1 deploy VERIFIED (zero LLM classifier rows post-20:31, 3ms fast-path), measure-by 7/4. V2-H2 shipped (3cd8ff8): injection grounds recall only when it covers the question subject; deploy pending. Overnight quiet; cycle 151 via 07:19 cron."
 }
