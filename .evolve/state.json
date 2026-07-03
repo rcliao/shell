@@ -343,8 +343,6 @@
   "cycle_75_pid_conflict_verified_live": "yes — refused duplicate start of pid 77397",
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
-  "deploy_pending": [
-    "restart daemons for shadow tier router (V2-H11 p2, cycle 151) — log-only, binary built"
-  ],
-  "v2_note": "cycle 155 (owner-fired): B-017 grade CONFOUNDED by 7/2 birthday/launch traffic — extended to 7/9. H1 trending validated (141 decisions, 0 LLM rows, is_new 0/36, 0 new threads, ≤3.6ms) — formal grade 7/4 20:30 (one-shot cron set). H2 accruing (5 grounded, 0 irrelevant). Shadow router STILL awaits owner restart (rebuild first: make build && kill -HUP). Loop stays halted between events."
+  "deploy_pending": [],
+  "v2_note": "Shadow tier router LIVE 2026-07-03 ~09:15 PT (owner rebuilt+restarted; tier_decisions table created, 0 rows — populates with traffic). 7-day shadow window ends ~7/10: deliverables = tier distribution, heuristic-vs-realized disagreement, projected sidecar savings. H1 formal grade 7/4 20:37 (cron set). H2 grade 7/8. B-017 re-grade 7/9. Loop halted between events."
 }
