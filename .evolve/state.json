@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 154,
-  "last_cycle_at": "2026-07-02T10:30:00-07:00",
+  "last_cycle": 155,
+  "last_cycle_at": "2026-07-03T09:00:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -346,5 +346,5 @@
   "deploy_pending": [
     "restart daemons for shadow tier router (V2-H11 p2, cycle 151) — log-only, binary built"
   ],
-  "v2_note": "HALTED after 3 quiet cycles (152-154), 2026-07-02 10:30 PT. In flight: V2-H1 (grade due 7/4 20:30 — trending strongly validated: is_new 0%, 0-5ms, zero LLM rows), V2-H2 (grade 7/8 — 1 grounded recall so far), V2-H11-p2 shadow router (SHIPPED 0f2565c but NOT DEPLOYED — needs owner daemon restart; tier_decisions table will appear when live). Also due: B-017 formal noop grade 7/3 morning (corrected baselines pika 58.3%/umb 39.7%). Resume: owner re-fires /loop in the shell repo, or asks the assistant."
+  "v2_note": "cycle 155 (owner-fired): B-017 grade CONFOUNDED by 7/2 birthday/launch traffic — extended to 7/9. H1 trending validated (141 decisions, 0 LLM rows, is_new 0/36, 0 new threads, ≤3.6ms) — formal grade 7/4 20:30 (one-shot cron set). H2 accruing (5 grounded, 0 irrelevant). Shadow router STILL awaits owner restart (rebuild first: make build && kill -HUP). Loop stays halted between events."
 }

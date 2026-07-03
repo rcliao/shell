@@ -192,8 +192,7 @@ Test `GHOST_EDGE_MIN_WEIGHT=0.3` env first; mass DELETE only if env test wins.
 
 - **2026-07-01 (interactive session, pre-loop):** ghost GC FK fix; L3 topic WIP
   checkpoint committed; heartbeat task-leak filter; **B-017 heartbeat noop
-  default** (v1 item, finally unblocked — measure noop rates by 7/3: baselines
-  pikamini 55%/umbreon 27%); relay cross_chat guard + WHERE-aware [From]
+  default** (7/3 grade: CONFOUNDED by birthday-day traffic, re-grade 7/9); relay cross_chat guard + WHERE-aware [From]
   prefix; media gate (log-only) + artifact archiving; per-exchange cost deltas
   (true June ≈ $1,572); tool_uses ledger + `shell tool-usage`; duplicate
   morning-fortune schedule disabled; both public repo histories scrubbed.
