@@ -10,7 +10,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ## 🟢 Approved (ready for the loop to ship)
 
 ### V2-H1 — [H] Cut over topic classification to sticky-pointer, retire per-turn Haiku
-- **status:** validating (DEPLOYED 2026-07-01 20:31 PT; post-deploy shows zero LLM rows, 0-3ms decisions; measure-by 2026-07-04 20:30 PT)
+- **status:** SHIPPED-VALIDATED (cycle 156, 72h grade: 0 LLM rows, is_new 0/69, 2 new threads, max 19ms, no owner complaints)
 - **why:** cycle 148 proved per-turn Haiku classification worse on every focus
   metric; June production: is_new=1 on 1,098/1,098 Haiku calls (it NEVER
   matched an existing topic), 96-99% of ~1,000 topics single-turn, avg 8.5s
@@ -79,6 +79,18 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ---
 
 ## 🟡 Proposed (awaiting owner approval or more evidence)
+
+### V2-H12 — [H/ghost] Recall retrieval relevance gap (surfaced by V2-H2)
+- **why:** the newly-working miss path shows 24% (pika) / 44% (umb) of recall
+  turns get ghost injection that does NOT contain the fact asked for
+  (inject_irrelevant). Ghost is injecting SOMETHING every turn but not the
+  right memory for a large share of recall questions — the real grounding
+  quality is well below the old 100% illusion.
+- **scope:** investigate whether recall turns should trigger a targeted
+  ghost_search on the question's salient tokens (vs relying on ambient
+  injection); or boost recall-shaped queries in retrieval scoring. Measure
+  against the inject_irrelevant rate. Ghost-side or bridge-side.
+- **measure-by:** propose after 1wk more H2 data (need volume per agent).
 
 ### V2-H10 — [H] Persist daemon logs (currently discarded to /dev/null)
 - **why:** found in cycle 149 — both daemons write stdout/stderr to /dev/null, so every

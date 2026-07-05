@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 155,
-  "last_cycle_at": "2026-07-03T09:00:00-07:00",
+  "last_cycle": 156,
+  "last_cycle_at": "2026-07-04T20:40:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -21,7 +21,7 @@
     "rationale": "Cycle 69 shipped the feedback machinery. Cycle 70+ uses it to detect L3 regressions and surface them as auto-proposals. Until daemons are restarted with c66-69 binary, no organic data flows."
   },
   "track_record": {
-    "validated": 43,
+    "validated": 44,
     "wrong_lever": 3,
     "in_flight": 1,
     "measurement_fix": 10,
@@ -85,7 +85,7 @@
   },
   "_legacy_notes": "v1 had multiple overwriting writes; bumped to v2. Cycles 36-39 (C36 receipt-first, C37 SessionScope, C38 ns-migration+skill-tiers, C39 bench-driven RF) ran without numbered state updates.",
   "accepted_proposals": 6,
-  "idle_streak": 3,
+  "idle_streak": 0,
   "consecutive_failures": 0,
   "autonomous_loop_v1": "shipped + smoke-tested",
   "deferred_proposals": 2,
@@ -344,5 +344,5 @@
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
   "deploy_pending": [],
-  "v2_note": "Shadow tier router LIVE 2026-07-03 ~09:15 PT (owner rebuilt+restarted; tier_decisions table created, 0 rows — populates with traffic). 7-day shadow window ends ~7/10: deliverables = tier distribution, heuristic-vs-realized disagreement, projected sidecar savings. H1 formal grade 7/4 20:37 (cron set). H2 grade 7/8. B-017 re-grade 7/9. Loop halted between events."
+  "v2_note": "cycle 156: V2-H1 SHIPPED-VALIDATED (0 LLM rows, is_new 0/69, 2 new threads/72h, max 19ms, no complaints). H2 miss-path alive: inject_irrelevant 24%/44% = honest ghost-relevance baseline → filed V2-H12. Shadow router first read: 95-97% everyday, 0 simple (heuristic check needed), everyday avg ~2 tools (not trivially sidecar-able). In flight now 2: H2 (grade 7/8), shadow router (analyze 7/10). B-017 re-grade 7/9. Model switch live 7/4 pika=sonnet umb=opus."
 }
