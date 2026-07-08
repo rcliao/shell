@@ -80,6 +80,22 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟡 Proposed (awaiting owner approval or more evidence)
 
+### V2-H13 — [H] Turn-liveness watchdog: never leave the user on a dead "Analyzing"
+- **status:** proposed (mami bug report 7/7 — the immediate config half shipped as umbreon rotate=90k)
+- **why:** two failure modes leave the placeholder stuck on "Analyzing" with no
+  reply and no error: (a) slow time-to-first-token on a big-context opus turn,
+  (b) a hung MCP tool (Notion/ghost) that blocks until the 5m hard timeout.
+  In both, mami waits, sees nothing, can't tell if it's alive or dead.
+- **scope:** (1) if no stream chunk in N seconds (e.g. 20-30s), edit the
+  placeholder to a "still working…" heartbeat so the turn is visibly alive;
+  (2) per-tool-call timeout so a hung MCP call fails fast with a surfaced
+  message instead of eating the whole 5m budget; (3) on hard timeout, the
+  error IS surfaced today (handler.go:1925) — verify it reads as a retryable
+  message, not a raw stack.
+- **predicted-effect:** zero silent non-responses; "stuck Analyzing" becomes
+  either a fast answer or an honest "I got overloaded, ask again".
+- **measure-by:** watch for repeat mami reports; add a turn-timeout counter.
+
 ### V2-H12 — [H/ghost] Recall retrieval relevance gap (surfaced by V2-H2)
 - **why:** the newly-working miss path shows 24% (pika) / 44% (umb) of recall
   turns get ghost injection that does NOT contain the fact asked for

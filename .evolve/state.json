@@ -343,6 +343,8 @@
   "cycle_75_pid_conflict_verified_live": "yes — refused duplicate start of pid 77397",
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
-  "deploy_pending": [],
-  "v2_note": "cycle 156: V2-H1 SHIPPED-VALIDATED (0 LLM rows, is_new 0/69, 2 new threads/72h, max 19ms, no complaints). H2 miss-path alive: inject_irrelevant 24%/44% = honest ghost-relevance baseline → filed V2-H12. Shadow router first read: 95-97% everyday, 0 simple (heuristic check needed), everyday avg ~2 tools (not trivially sidecar-able). In flight now 2: H2 (grade 7/8), shadow router (analyze 7/10). B-017 re-grade 7/9. Model switch live 7/4 pika=sonnet umb=opus."
+  "deploy_pending": [
+    "restart daemons: umbreon rotate_max_tokens=90000 (mami bug fix)"
+  ],
+  "v2_note": "cycle 156: V2-H1 SHIPPED-VALIDATED (0 LLM rows, is_new 0/69, 2 new threads/72h, max 19ms, no complaints). H2 miss-path alive: inject_irrelevant 24%/44% = honest ghost-relevance baseline → filed V2-H12. Shadow router first read: 95-97% everyday, 0 simple (heuristic check needed), everyday avg ~2 tools (not trivially sidecar-able). In flight now 2: H2 (grade 7/8), shadow router (analyze 7/10). B-017 re-grade 7/9. Model switch live 7/4 pika=sonnet umb=opus. | 7/7 OUT-OF-BAND: mami reported umbreon (1) stuck-Analyzing (2) off-topic. Root cause = umbreon had NO session rotation → 120-200k context, slow+drifty on opus. FIX: umbreon rotate_max_tokens=90000 (agent-layer f566dfe, NEEDS RESTART). Filed V2-H13 turn-liveness watchdog for tool-hang case."
 }
