@@ -116,9 +116,12 @@ Each entry is dated and tagged. Newest at bottom.
 - Public-repo rule: owner identifiers (chat IDs) live in runtime config only;
   verify-no-pii is a hard commit gate. Both repo histories scrubbed 7/1.
 
-## 2026-07-02 — cycle 152
-- transcript-v2.db `messages.timestamp` is UNIX **milliseconds**, not seconds.
-  A seconds-based window silently matches every row (looked like a 4.7k-message
-  runaway; content review disproved it before any action). Always
-  `datetime(timestamp/1000,'unixepoch')` on that DB — and always read message
-  CONTENT before acting on a volume anomaly.
+## 2026-07-02 — cycle 152 (CORRECTED 7/7)
+- CORRECTION: shared/transcript-v2.db `messages.timestamp` is a TEXT column
+  storing Go time.String() ("2026-07-07 17:18:53.5 -0700 PDT m=+..."), NOT a
+  numeric epoch. Filter with string comparison (timestamp >= '2026-07-04') and
+  parse the leading 19 chars for display. The per-agent agents/*/shell.db
+  `created_at` columns ARE datetime text usable with SQLite datetime(). (The
+  cycle-152 "milliseconds" claim was wrong — a numeric divide on TEXT gave
+  garbage 1969 dates.) Always read message CONTENT before acting on a volume
+  anomaly regardless.
