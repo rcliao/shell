@@ -81,7 +81,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ## 🟡 Proposed (awaiting owner approval or more evidence)
 
 ### V2-H13 — [H] Turn-liveness watchdog: never leave the user on a dead "Analyzing"
-- **status:** APPROVED / HIGH PRIORITY (cycle 157: the durable fix for umbreon stuck-Analyzing — rotation only partly helps; root is opus latency, pika carries same context on sonnet fine. Next dedicated cycle.)
+- **status:** SHIPPED cycle 158 (turn-liveness UX: long-wait status + friendly timeout msg; deploy pending). RESIDUAL V2-H13b: per-MCP-tool timeout lives inside the claude subprocess, not shell — needs a shell-side overall-turn soft-timeout knob or upstream. No recurrence of the umbreon bug since 7/7 rotation fix.
 - **why:** two failure modes leave the placeholder stuck on "Analyzing" with no
   reply and no error: (a) slow time-to-first-token on a big-context opus turn,
   (b) a hung MCP tool (Notion/ghost) that blocks until the 5m hard timeout.

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 157,
-  "last_cycle_at": "2026-07-08T09:40:00-07:00",
+  "last_cycle": 158,
+  "last_cycle_at": "2026-07-08T11:15:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -343,6 +343,8 @@
   "cycle_75_pid_conflict_verified_live": "yes — refused duplicate start of pid 77397",
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
-  "deploy_pending": [],
-  "v2_note": "cycle 157 grades: V2-H2 SHIPPED-VALIDATED (miss path works; ungrounded baseline pika 24%/umb 46%). B-017 WRONG-LEVER (noop went DOWN 21-26pp not up; hypothesis disproven, no revert). Shadow router: simple≈0 is GENUINE (real short statements not acks) → routing lever is everyday→cheaper-model not a sidecar; full analysis 7/10. UMBREON-FIX CORRECTION: rotation fires on spikes + cache_read trending 200k→98k (helps drift), but stuck-Analyzing is OPUS LATENCY (pika carries same context on sonnet fine) → V2-H13 priority-bumped. 1 ship in flight (shadow router). Next: dedicated V2-H13 cycle."
+  "deploy_pending": [
+    "restart daemons for V2-H13 turn-liveness UX (binary built)"
+  ],
+  "v2_note": "cycle 158: shipped V2-H13 turn-liveness UX (long-wait status + friendly timeout msg). Umbreon bug NO RECURRENCE since 7/7 rotation fix. Per-tool timeout is out of shell's layer (inside claude subprocess) → V2-H13b note. deploy_pending: restart. Shadow router analysis 7/10."
 }
