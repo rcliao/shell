@@ -1095,7 +1095,7 @@ func TestFormatForTelegram(t *testing.T) {
 
 	t.Run("head-keeping truncation when raw also overflows (cycle 80)", func(t *testing.T) {
 		// Both formatted AND raw exceed maxLen → truncate raw with HEAD
-		// preserved + "..." suffix. Previously kept tail; mami complaint cycle 80.
+		// preserved + "..." suffix. Previously kept tail; owner complaint cycle 80.
 		text := "ABCDEFGHIJ" + strings.Repeat("X", 100)
 		result, ok := formatForTelegram(text, 13)
 		if ok {
@@ -1519,3 +1519,48 @@ func TestSplitMessage_LongCJKRuneSafe(t *testing.T) {
 		t.Errorf("chunks total %d runes, want 5000 (content lost!)", total)
 	}
 }
+
+func TestThinkingMessageLongWait(t *testing.T) {
+	// Early ticks rotate normal phrases; past ~20s and ~60s they switch to
+	// honest long-wait reassurance so a slow turn never reads as dead (V2-H13).
+	early := thinkingMessage(3)
+	if !strings.ContainsAny(early, "Thinking Reasoning Working Processing Analyzing") {
+		t.Errorf("early tick should show a normal phrase, got %q", early)
+	}
+	mid := thinkingMessage(12) // ~24s
+	if !strings.Contains(mid, "Still working") {
+		t.Errorf("tick 12 should show long-wait reassurance, got %q", mid)
+	}
+	long := thinkingMessage(35) // ~70s
+	if !strings.Contains(long, "taking a while") {
+		t.Errorf("tick 35 should show extended-wait reassurance, got %q", long)
+	}
+}
+
+func TestFriendlyTurnError(t *testing.T) {
+	cases := []struct {
+		err  string
+		want bool // expect a friendly (non-empty) message
+	}{
+		{"claude: context deadline exceeded", true},
+		{"request timed out after 5m", true},
+		{"context canceled", true},
+		{"signal: killed", true},
+		{"permission denied writing file", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		var err error
+		if c.err != "" {
+			err = &stringError{c.err}
+		}
+		got := friendlyTurnError(err)
+		if (got != "") != c.want {
+			t.Errorf("friendlyTurnError(%q) = %q, want friendly=%v", c.err, got, c.want)
+		}
+	}
+}
+
+type stringError struct{ s string }
+
+func (e *stringError) Error() string { return e.s }

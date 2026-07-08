@@ -34,12 +34,41 @@ var thinkingPhrases = []string{
 	"Analyzing",
 }
 
-// thinkingMessage returns a Claude Code-style animated status for the given tick.
+// thinkingMessage returns a Claude Code-style animated status for the given
+// tick. The placeholder ticker runs every 2s, so tick doubles as elapsed
+// seconds/2. Past ~20s and ~60s the phrasing switches to honest long-wait
+// reassurance so a slow turn (large context on a heavier model, or a slow
+// tool) reads as "still working" rather than a dead "Analyzing" — the symptom
+// the owner reported for umbreon (V2-H13).
 func thinkingMessage(tick int) string {
 	frame := spinnerFrames[tick%len(spinnerFrames)]
-	phrase := thinkingPhrases[(tick/5)%len(thinkingPhrases)]
 	dots := strings.Repeat(".", (tick%3)+1)
-	return fmt.Sprintf("%s %s%s", frame, phrase, dots)
+	switch {
+	case tick >= 30: // ~60s+
+		return fmt.Sprintf("%s Still working — this one's taking a while, hang tight%s", frame, dots)
+	case tick >= 10: // ~20s+
+		return fmt.Sprintf("%s Still working (loading a lot of context)%s", frame, dots)
+	default:
+		phrase := thinkingPhrases[(tick/5)%len(thinkingPhrases)]
+		return fmt.Sprintf("%s %s%s", frame, phrase, dots)
+	}
+}
+
+// friendlyTurnError maps low-level turn failures (timeouts, cancellations) to a
+// short retryable message. A raw "context deadline exceeded" reads as a crash;
+// a slow/hung turn should tell the user to just ask again (V2-H13).
+func friendlyTurnError(err error) string {
+	if err == nil {
+		return ""
+	}
+	e := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(e, "deadline exceeded"), strings.Contains(e, "timeout"), strings.Contains(e, "timed out"):
+		return "⏳ That one took too long and timed out before I could answer — mind asking again? (usually a heavy-context turn or a slow tool.)"
+	case strings.Contains(e, "context canceled"), strings.Contains(e, "signal: killed"):
+		return "⚠️ That turn got interrupted before I finished — please ask again."
+	}
+	return ""
 }
 
 // albumCollectDelay is how long to wait for additional photos in a media group
@@ -1027,7 +1056,7 @@ type chatLockKey struct {
 // AgentConfig holds agent identity fields passed to the handler.
 type AgentConfig struct {
 	BotUsername          string
-	Aliases              []string // name variants for this agent (e.g. "pika", "皮卡")
+	Aliases              []string // name variants for this agent (e.g. "pika")
 	BroadcastProbability float64
 	PeerBots             []string
 	PeerAliases          []string // name variants for peer agents (e.g. "umbreon", "小傘")
@@ -1083,7 +1112,7 @@ func stripMention(text, username string) string {
 }
 
 // messageAddressedToPeer checks if the message text starts with a peer agent's name or alias.
-// This catches natural language addressing like "皮卡 lunch memo" or "umbreon check this".
+// This catches natural language addressing like "pika lunch memo" or "umbreon check this".
 func (h *Handler) messageAddressedToPeer(text string) bool {
 	lower := strings.ToLower(text)
 	for _, alias := range h.peerAliases {
@@ -1174,7 +1203,7 @@ func (h *Handler) shouldHandleGroupMessage(msg *models.Message, text string) (bo
 	}
 
 	// Name-based routing: check if message starts with a peer's name/alias.
-	// e.g., "皮卡 lunch memo" → skip for umbreonmini because "皮卡" is pika's alias.
+	// e.g., "pika lunch memo" → skip for umbreonmini because "pika" is a peer alias.
 	if h.messageAddressedToPeer(text) && !h.messageAddressedToMe(text) {
 		slog.Debug("group: message addressed to peer by name", "chat_id", msg.Chat.ID, "text_prefix", truncate(text, 30))
 		return false, text
@@ -1925,12 +1954,23 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	if err != nil {
 		slog.Error("bridge handle message failed", "error", err, "chat_id", msg.Chat.ID)
 		setReaction(ctx, b, msg.Chat.ID, msg.ID, "❌")
-		b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    msg.Chat.ID,
-			MessageID: msgID,
-			Text:      formatErrorForMarkdownV2(err.Error()),
-			ParseMode: models.ParseModeMarkdown,
-		})
+		// Prefer a friendly retryable message for timeouts/cancellations
+		// (sent as plain text — it contains () and — that MarkdownV2 rejects);
+		// fall back to the escaped raw error for genuine faults.
+		if friendly := friendlyTurnError(err); friendly != "" {
+			b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    msg.Chat.ID,
+				MessageID: msgID,
+				Text:      friendly,
+			})
+		} else {
+			b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    msg.Chat.ID,
+				MessageID: msgID,
+				Text:      formatErrorForMarkdownV2(err.Error()),
+				ParseMode: models.ParseModeMarkdown,
+			})
+		}
 		return
 	}
 
