@@ -65,7 +65,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   complaints) or persona inconsistency → config revert to single-model.
 
 ### V2-H2 — [H] Recall ledger: add the miss path (it cannot currently record failure)
-- **status:** validating (shipped cycle 150, 3cd8ff8 — injection must cover the question's subject to ground; deploy pending; measure-by 7d post-deploy)
+- **status:** SHIPPED-VALIDATED (cycle 157: miss path works; honest ungrounded baseline pika 24% / umb 46% — feeds V2-H12)
 - **why:** 100% of rows since launch are grounded (no ungrounded
   classification was ever logged) and weekly volume collapsed 38→5 — the
   metric can't detect the failures it was built for.
@@ -81,11 +81,11 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ## 🟡 Proposed (awaiting owner approval or more evidence)
 
 ### V2-H13 — [H] Turn-liveness watchdog: never leave the user on a dead "Analyzing"
-- **status:** proposed (mami bug report 7/7 — the immediate config half shipped as umbreon rotate=90k)
+- **status:** APPROVED / HIGH PRIORITY (cycle 157: the durable fix for umbreon stuck-Analyzing — rotation only partly helps; root is opus latency, pika carries same context on sonnet fine. Next dedicated cycle.)
 - **why:** two failure modes leave the placeholder stuck on "Analyzing" with no
   reply and no error: (a) slow time-to-first-token on a big-context opus turn,
   (b) a hung MCP tool (Notion/ghost) that blocks until the 5m hard timeout.
-  In both, mami waits, sees nothing, can't tell if it's alive or dead.
+  In both, the user waits, sees nothing, can't tell if it's alive or dead.
 - **scope:** (1) if no stream chunk in N seconds (e.g. 20-30s), edit the
   placeholder to a "still working…" heartbeat so the turn is visibly alive;
   (2) per-tool-call timeout so a hung MCP call fails fast with a surfaced
@@ -94,7 +94,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   message, not a raw stack.
 - **predicted-effect:** zero silent non-responses; "stuck Analyzing" becomes
   either a fast answer or an honest "I got overloaded, ask again".
-- **measure-by:** watch for repeat mami reports; add a turn-timeout counter.
+- **measure-by:** watch for repeat owner reports; add a turn-timeout counter.
 
 ### V2-H12 — [H/ghost] Recall retrieval relevance gap (surfaced by V2-H2)
 - **why:** the newly-working miss path shows 24% (pika) / 44% (umb) of recall
@@ -151,6 +151,11 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   (shipped 7/1) now covers actual usage measurement.
 - **scope:** delete or simplify the dead path in internal/skill/runner.go;
   point docs at `shell tool-usage`. Supersedes v1 B-001.
+
+### V2-H11 note (cycle 157): simple-tier ≈0 is GENUINE — these owners send short
+STATEMENTS not bare acks, so ~97% is everyday needing tools. Routing lever =
+everyday→cheaper-model (pika→sonnet already), NOT a simple-turn sidecar. Do not
+game the ack detector. Reassess full economics 7/10 w/ new pricing.
 
 ### V2-A1 — [A] Enable media_gate_enforce after false-positive review
 - **why:** no-unprompted-media rule (owner order 7/1). Gate ships log-only;

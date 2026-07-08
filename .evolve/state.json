@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 156,
-  "last_cycle_at": "2026-07-04T20:40:00-07:00",
+  "last_cycle": 157,
+  "last_cycle_at": "2026-07-08T09:40:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -21,8 +21,8 @@
     "rationale": "Cycle 69 shipped the feedback machinery. Cycle 70+ uses it to detect L3 regressions and surface them as auto-proposals. Until daemons are restarted with c66-69 binary, no organic data flows."
   },
   "track_record": {
-    "validated": 44,
-    "wrong_lever": 3,
+    "validated": 45,
+    "wrong_lever": 4,
     "in_flight": 1,
     "measurement_fix": 10,
     "propose_only": 10,
@@ -344,5 +344,5 @@
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
   "deploy_pending": [],
-  "v2_note": "cycle 156: V2-H1 SHIPPED-VALIDATED (0 LLM rows, is_new 0/69, 2 new threads/72h, max 19ms, no complaints). H2 miss-path alive: inject_irrelevant 24%/44% = honest ghost-relevance baseline → filed V2-H12. Shadow router first read: 95-97% everyday, 0 simple (heuristic check needed), everyday avg ~2 tools (not trivially sidecar-able). In flight now 2: H2 (grade 7/8), shadow router (analyze 7/10). B-017 re-grade 7/9. Model switch live 7/4 pika=sonnet umb=opus. | 7/7 OUT-OF-BAND: owner reported umbreon (1) stuck-Analyzing (2) off-topic. Root cause = umbreon had NO session rotation → 120-200k context, slow+drifty on opus. FIX: umbreon rotate_max_tokens=90000 (agent-layer f566dfe, NEEDS RESTART). Filed V2-H13 turn-liveness watchdog for tool-hang case. | DEPLOYED 7/7: umbreon rotation live (90k). Verify next cycle: session generations incrementing + per-turn context dropping; watch 48h for repeat 卡住/文不對題."
+  "v2_note": "cycle 157 grades: V2-H2 SHIPPED-VALIDATED (miss path works; ungrounded baseline pika 24%/umb 46%). B-017 WRONG-LEVER (noop went DOWN 21-26pp not up; hypothesis disproven, no revert). Shadow router: simple≈0 is GENUINE (real short statements not acks) → routing lever is everyday→cheaper-model not a sidecar; full analysis 7/10. UMBREON-FIX CORRECTION: rotation fires on spikes + cache_read trending 200k→98k (helps drift), but stuck-Analyzing is OPUS LATENCY (pika carries same context on sonnet fine) → V2-H13 priority-bumped. 1 ship in flight (shadow router). Next: dedicated V2-H13 cycle."
 }
