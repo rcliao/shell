@@ -1,8 +1,11 @@
 package process
 
 import (
+	"context"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewManager(t *testing.T) {
@@ -75,6 +78,56 @@ func TestKillProcess_KeepsLogicalSession(t *testing.T) {
 	m.Kill(key)
 	if _, ok := m.Get(key); ok {
 		t.Error("Kill must remove the logical session")
+	}
+}
+
+// Integration proof for P1: KillProcess must terminate a LIVE subprocess (what
+// rotateSession now calls so a rotation's fresh system prompt loads immediately)
+// while leaving the logical session intact.
+func TestKillProcess_TerminatesLiveSubprocess(t *testing.T) {
+	m := NewManager(ManagerConfig{Binary: "sleep"})
+	key := SessionKey{ChatID: 300}
+	m.Register(NewSession(300, 0))
+
+	// Start a real, long-lived subprocess and wrap it as a persistentProc,
+	// mirroring what spawnPersistent produces.
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, "sleep", "60")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	proc := &persistentProc{cmd: cmd, stdin: stdin, key: key, cancel: cancel, idleTimer: time.NewTimer(idleTimeout)}
+	m.mu.Lock()
+	m.persistent[key] = proc
+	m.mu.Unlock()
+
+	// Sanity: the process is running (no exit state yet).
+	if cmd.ProcessState != nil {
+		t.Fatal("subprocess should be running before KillProcess")
+	}
+
+	m.KillProcess(key)
+
+	// The live subprocess is terminated (kill() runs cmd.Wait, setting ProcessState).
+	if cmd.ProcessState == nil {
+		t.Error("KillProcess must terminate the live subprocess")
+	}
+	// The subprocess entry is gone...
+	m.mu.Lock()
+	_, stillThere := m.persistent[key]
+	m.mu.Unlock()
+	if stillThere {
+		t.Error("KillProcess must remove the persistent proc entry")
+	}
+	// ...but the logical session survives (so Get/writeback keep working).
+	if _, ok := m.Get(key); !ok {
+		t.Error("logical session must survive KillProcess")
 	}
 }
 
