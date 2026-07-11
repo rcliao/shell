@@ -97,25 +97,41 @@ func (b *Bridge) maybeEnqueueA2A(chatID int64, replyText string, incomingDepth i
 		"chat_id", chatID, "depth", nextDepth)
 }
 
-// peerAddressedInReply returns the peer whose alias the reply opens with (the
-// agent is speaking TO that peer), or nil. Reuses the same anchored-address
-// matching as group routing.
+// peerAddressedInReply returns the peer the reply is speaking TO, or nil.
+// A hand-off is detected when the reply either (a) opens with the peer's name,
+// (b) @mentions them, or (c) addresses them vocatively — the alias directly
+// followed by vocative punctuation (comma/colon/?/!), which is how one agent
+// actually calls the other ("...Hey Umbreon, you copy?"). A bare mid-sentence
+// mention ("Umbreon usually handles plants") is deliberately NOT a hand-off.
 func (b *Bridge) peerAddressedInReply(replyText string) *peerAddr {
-	lead := addressLeadStrip(replyText)
-	lower := strings.ToLower(lead)
+	lower := strings.ToLower(replyText)
+	leadLower := strings.ToLower(addressLeadStrip(replyText))
+	hasQuestion := strings.ContainsAny(replyText, "?？")
 	for _, p := range b.peerAgents {
 		if p.BotUsername == b.agentBotUsername {
 			continue
 		}
-		aliases := append([]string{p.Name}, p.Aliases...)
-		for _, a := range aliases {
-			a = strings.ToLower(strings.TrimSpace(a))
-			if a != "" && strings.HasPrefix(lower, a) {
-				return &peerAddr{Name: p.Name, BotUsername: p.BotUsername}
+		for _, raw := range append([]string{p.Name}, p.Aliases...) {
+			a := strings.ToLower(strings.TrimSpace(raw))
+			if a == "" {
+				continue
 			}
+			switch {
+			case strings.Contains(lower, "@"+a): // @mention
+			case vocativeAddressRe(a).MatchString(lower): // "…umbreon, …" vocative
+			case strings.HasPrefix(leadLower, a) && hasQuestion: // "哥哥 你覺得…？"
+			default:
+				continue
+			}
+			return &peerAddr{Name: p.Name, BotUsername: p.BotUsername}
 		}
 	}
 	return nil
+}
+
+// vocativeAddressRe matches the alias directly followed by vocative punctuation.
+func vocativeAddressRe(alias string) *regexp.Regexp {
+	return regexp.MustCompile(`(^|[\s\p{P}])` + regexp.QuoteMeta(alias) + `\s*[,，、:：?？!！]`)
 }
 
 type peerAddr struct {

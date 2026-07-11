@@ -51,9 +51,14 @@ func TestPeerAddressedInReply(t *testing.T) {
 		{"哥哥 你覺得這個要怎麼分工？", "umbreon_mini_bot"},
 		{"Umbreon, can you take the plant question?", "umbreon_mini_bot"},
 		{"@小傘 幫我看一下", "umbreon_mini_bot"},
-		{"好的，我來處理這個", ""},                  // addresses a human, not the peer
-		{"這個問題我覺得...", ""},                  // no address
-		{"the umbreon evolution line is cool", ""}, // mention mid-sentence, not leading
+		// vocative address mid-message (the real-world case that was missed)
+		{"Testing it now — Hey Umbreon, you copy?", "umbreon_mini_bot"},
+		{"好，我先回，哥哥，植物那段你補一下？", "umbreon_mini_bot"},
+		{"@umbreon can you confirm?", "umbreon_mini_bot"},
+		{"好的，我來處理這個", ""},                     // addresses a human, not the peer
+		{"這個問題我覺得...", ""},                     // no address
+		{"the umbreon evolution line is cool", ""},    // substring, not addressed
+		{"Umbreon usually handles the plant stuff", ""}, // passing mention, no vocative punctuation
 	}
 	for _, c := range cases {
 		got := b.peerAddressedInReply(c.reply)
