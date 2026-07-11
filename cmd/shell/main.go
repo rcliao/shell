@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/daemon"
 	shellmcp "github.com/rcliao/shell/internal/mcp"
@@ -349,6 +351,82 @@ func main() {
 	toolUsageCmd.Flags().StringVar(&tuSinceFlag, "since", "", "lookback window (e.g. 168h, 24h); empty = all-time")
 	toolUsageCmd.Flags().Int64Var(&tuChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
 	toolUsageCmd.Flags().StringVar(&tuConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
+
+	// a2a command group — develop/test agent-to-agent hand-off detection and
+	// inspect the pipeline WITHOUT touching a live daemon or the family group.
+	a2aCmd := &cobra.Command{Use: "a2a", Short: "Agent-to-agent conversation dev/test tools"}
+
+	var a2aCheckConfig string
+	a2aCheckCmd := &cobra.Command{
+		Use:   "check [reply text]",
+		Short: "Dry-run: would this reply hand off to a peer agent? (no daemon touch)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(a2aCheckConfig)
+			self := cfg.Agent.BotUsername
+			peers := loadPeerAgentsForCLI(cfg.Agent.PeerBots)
+			if len(peers) == 0 {
+				fmt.Printf("⚠ no peer agents found for %s (peer_bots=%v). Check --config points at an agent config.\n", self, cfg.Agent.PeerBots)
+			}
+			text := strings.Join(args, " ")
+			m := bridge.DetectPeerAddress(text, peers, self)
+			fmt.Printf("reply: %q\n", text)
+			fmt.Printf("self:  %s\n", self)
+			fmt.Printf("peers: ")
+			for i, p := range peers {
+				if i > 0 {
+					fmt.Print(", ")
+				}
+				fmt.Printf("%s%v", p.Name, p.Aliases)
+			}
+			fmt.Println()
+			if m == nil {
+				fmt.Println("→ NO hand-off (stays in the group as a normal reply)")
+			} else {
+				fmt.Printf("→ HAND-OFF to %s (@%s) — matched alias %q via %s\n", m.Name, m.BotUsername, m.Alias, m.Reason)
+			}
+			return nil
+		},
+	}
+	a2aCheckCmd.Flags().StringVar(&a2aCheckConfig, "config", "", "agent config path (whose peers/aliases to check against)")
+
+	a2aEventsCmd := &cobra.Command{
+		Use:   "events",
+		Short: "Show recent a2a.message events in the shared store (the hand-off pipeline)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := filepath.Join(config.DefaultConfigDir(), "shared", "tasks.db")
+			db, err := sql.Open("sqlite", path+"?mode=ro")
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			rows, err := db.Query(`SELECT id, target, payload, created_at, consumed_at FROM events WHERE event_type='a2a.message' ORDER BY id DESC LIMIT 20`)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			n := 0
+			for rows.Next() {
+				var id int64
+				var target, payload, created string
+				var consumed sql.NullString
+				if err := rows.Scan(&id, &target, &payload, &created, &consumed); err != nil {
+					return err
+				}
+				status := "PENDING"
+				if consumed.Valid {
+					status = "consumed " + consumed.String
+				}
+				fmt.Printf("#%d → %s [%s]\n   %s\n   at %s\n", id, target, status, payload, created)
+				n++
+			}
+			if n == 0 {
+				fmt.Println("no a2a.message events yet — no hand-off has crossed over.")
+			}
+			return nil
+		},
+	}
+	a2aCmd.AddCommand(a2aCheckCmd, a2aEventsCmd)
 
 	// session command group — persistent --config flag lets all subcommands
 	// target a specific agent's DB (e.g. ~/.shell/agents/pikamini/config.json).
@@ -780,7 +858,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, toolUsageCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -1005,6 +1083,43 @@ func loadSkillRegistryFromConfig(cfg config.Config) *skill.Registry {
 		return nil
 	}
 	return skill.NewRegistry(all)
+}
+
+// loadPeerAgentsForCLI mirrors the daemon's peer discovery for the a2a-check
+// tool: read every agent config under ~/.shell/agents and keep those listed in
+// peerBots.
+func loadPeerAgentsForCLI(peerBots []string) []config.PeerAgent {
+	agentsDir := filepath.Join(config.DefaultConfigDir(), "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return nil
+	}
+	want := make(map[string]bool, len(peerBots))
+	for _, p := range peerBots {
+		want[strings.ToLower(p)] = true
+	}
+	var peers []config.PeerAgent
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(agentsDir, e.Name(), "config.json"))
+		if err != nil {
+			continue
+		}
+		var c config.Config
+		if json.Unmarshal(data, &c) != nil {
+			continue
+		}
+		if !want[strings.ToLower(c.Agent.BotUsername)] {
+			continue
+		}
+		peers = append(peers, config.PeerAgent{
+			Name: c.Agent.Name, Aliases: c.Agent.Aliases,
+			BotUsername: c.Agent.BotUsername, Skills: c.Agent.Skills,
+		})
+	}
+	return peers
 }
 
 func loadConfig() config.Config {

@@ -55,6 +55,10 @@ func TestPeerAddressedInReply(t *testing.T) {
 		{"Testing it now — Hey Umbreon, you copy?", "umbreon_mini_bot"},
 		{"好，我先回，哥哥，植物那段你補一下？", "umbreon_mini_bot"},
 		{"@umbreon can you confirm?", "umbreon_mini_bot"},
+		// em-dash / dash address — the real misses from the family group
+		{"Hey Umbreon — quick one, so I'll ask straight", "umbreon_mini_bot"},
+		{"And Pika — I did catch your message", ""}, // addresses pika, but self IS pika here → no self-match; peer is umbreon, not addressed
+		{"哥哥— 你看這個", "umbreon_mini_bot"},
 		{"好的，我來處理這個", ""},                     // addresses a human, not the peer
 		{"這個問題我覺得...", ""},                     // no address
 		{"the umbreon evolution line is cool", ""},    // substring, not addressed

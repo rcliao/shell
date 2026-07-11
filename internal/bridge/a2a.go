@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/rcliao/shell/internal/config"
 )
 
 // Agent-to-agent (A2A) group conversation.
@@ -104,11 +106,30 @@ func (b *Bridge) maybeEnqueueA2A(chatID int64, replyText string, incomingDepth i
 // actually calls the other ("...Hey Umbreon, you copy?"). A bare mid-sentence
 // mention ("Umbreon usually handles plants") is deliberately NOT a hand-off.
 func (b *Bridge) peerAddressedInReply(replyText string) *peerAddr {
+	return DetectPeerAddress(replyText, b.peerAgents, b.agentBotUsername)
+}
+
+// PeerAddrMatch is one peer whose address DetectPeerAddress found (exported for
+// the a2a-check diagnostic).
+type PeerAddrMatch struct {
+	Name        string
+	BotUsername string
+	Alias       string // the alias that matched
+	Reason      string // mention | vocative | leading-question
+}
+
+// DetectPeerAddress is the pure detection used both by the live bridge and the
+// `shell a2a-check` diagnostic. It returns the peer the reply is speaking TO
+// (and why), or nil. A hand-off is: an @mention, an alias followed by vocative
+// punctuation ("Umbreon, …" / "…哥哥，" / "…Umbreon!"), or the reply opening
+// with the alias plus a question ("哥哥 你覺得…？"). A bare mid-sentence mention
+// ("Umbreon usually handles plants") is deliberately NOT a hand-off.
+func DetectPeerAddress(replyText string, peers []config.PeerAgent, selfBot string) *PeerAddrMatch {
 	lower := strings.ToLower(replyText)
 	leadLower := strings.ToLower(addressLeadStrip(replyText))
 	hasQuestion := strings.ContainsAny(replyText, "?？")
-	for _, p := range b.peerAgents {
-		if p.BotUsername == b.agentBotUsername {
+	for _, p := range peers {
+		if p.BotUsername == selfBot {
 			continue
 		}
 		for _, raw := range append([]string{p.Name}, p.Aliases...) {
@@ -116,28 +137,30 @@ func (b *Bridge) peerAddressedInReply(replyText string) *peerAddr {
 			if a == "" {
 				continue
 			}
+			var reason string
 			switch {
-			case strings.Contains(lower, "@"+a): // @mention
-			case vocativeAddressRe(a).MatchString(lower): // "…umbreon, …" vocative
-			case strings.HasPrefix(leadLower, a) && hasQuestion: // "哥哥 你覺得…？"
+			case strings.Contains(lower, "@"+a):
+				reason = "mention"
+			case vocativeAddressRe(a).MatchString(lower):
+				reason = "vocative"
+			case strings.HasPrefix(leadLower, a) && hasQuestion:
+				reason = "leading-question"
 			default:
 				continue
 			}
-			return &peerAddr{Name: p.Name, BotUsername: p.BotUsername}
+			return &PeerAddrMatch{Name: p.Name, BotUsername: p.BotUsername, Alias: raw, Reason: reason}
 		}
 	}
 	return nil
 }
 
-// vocativeAddressRe matches the alias directly followed by vocative punctuation.
+// vocativeAddressRe matches the alias followed by vocative punctuation — a
+// comma, colon, question, exclamation, or a dash (agents often write "Name —").
 func vocativeAddressRe(alias string) *regexp.Regexp {
-	return regexp.MustCompile(`(^|[\s\p{P}])` + regexp.QuoteMeta(alias) + `\s*[,，、:：?？!！]`)
+	return regexp.MustCompile(`(^|[\s\p{P}])` + regexp.QuoteMeta(alias) + `\s*[,，、:：?？!！—–\-]`)
 }
 
-type peerAddr struct {
-	Name        string
-	BotUsername string
-}
+type peerAddr = PeerAddrMatch
 
 // selfDisplayName is this agent's human-facing name for peer attribution.
 func (b *Bridge) selfDisplayName() string {
