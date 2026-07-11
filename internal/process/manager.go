@@ -371,6 +371,14 @@ func (m *Manager) Kill(key SessionKey) {
 	delete(m.sessions, key)
 }
 
+// KillProcess terminates only the live CLI subprocess for a key, leaving the
+// logical session (m.sessions bookkeeping) intact so Get/writeback keep working.
+// The next Send finds no live proc and spawns fresh — which is how a rotation's
+// rebuilt system prompt actually takes effect on an actively-chatting session.
+func (m *Manager) KillProcess(key SessionKey) {
+	m.killPersistent(key)
+}
+
 // KillAll terminates all sessions.
 func (m *Manager) KillAll() {
 	m.killAllPersistent()

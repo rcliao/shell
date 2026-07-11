@@ -56,6 +56,28 @@ func TestKillAndRemove(t *testing.T) {
 	}
 }
 
+// KillProcess kills only the live subprocess; the logical session must survive
+// so rotation can rebuild the system prompt while Get/writeback keep working.
+// (Contrast with Kill, which removes the logical session entirely.)
+func TestKillProcess_KeepsLogicalSession(t *testing.T) {
+	m := NewManager(ManagerConfig{Binary: "echo"})
+	key := SessionKey{ChatID: 200}
+	m.Register(NewSession(200, 0))
+
+	// No live subprocess spawned in a unit test — KillProcess must be a safe
+	// no-op on the subprocess and leave the logical session intact.
+	m.KillProcess(key)
+	if _, ok := m.Get(key); !ok {
+		t.Error("KillProcess must NOT remove the logical session")
+	}
+
+	// Kill, by contrast, removes it.
+	m.Kill(key)
+	if _, ok := m.Get(key); ok {
+		t.Error("Kill must remove the logical session")
+	}
+}
+
 func TestKillAll(t *testing.T) {
 	m := NewManager(ManagerConfig{Binary: "echo"})
 

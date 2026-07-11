@@ -51,8 +51,14 @@ type Agent interface {
 	// When compacting, incoming messages wait instead of getting "busy".
 	SetCompacting(key SessionKey, compacting bool)
 
-	// Kill terminates a session and removes it.
+	// Kill terminates a session and removes it (subprocess + logical session).
 	Kill(key SessionKey)
+
+	// KillProcess terminates only the live CLI subprocess for a key, leaving the
+	// logical session bookkeeping intact. The next Send re-spawns fresh. Used by
+	// rotation to force the rebuilt system prompt to load immediately instead of
+	// waiting for the idle timeout.
+	KillProcess(key SessionKey)
 
 	// KillAll terminates all sessions.
 	KillAll()

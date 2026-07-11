@@ -139,13 +139,21 @@ func (b *Bridge) rotateSession(ctx context.Context, chatID, threadID int64, sess
 	}
 
 	// Wipe the in-memory process session so the next send is treated as
-	// fresh (no --resume, system prompt re-appended).
+	// fresh (no --resume, system prompt re-appended)...
 	key := process.SessionKey{ChatID: chatID, ThreadID: threadID}
 	if agent := b.resolveAgent(chatID); agent != nil {
 		if ps, _ := agent.Get(key); ps != nil {
 			ps.HasHistory = false
 			ps.ProviderSessionID = ""
 		}
+		// ...and kill the LIVE subprocess. Wiping the logical fields alone is not
+		// enough: the running subprocess keeps its spawn-time system prompt and
+		// old CLI history until it idle-dies (10m) or a model mismatch forces a
+		// respawn, so on an actively-chatting session the "fresh generation"
+		// silently didn't take effect (S3). Killing the subprocess (but not the
+		// logical session) makes the next Send spawn fresh with the rebuilt
+		// system prompt. See docs/MODEL-SESSION-CONFIG.md.
+		agent.KillProcess(key)
 	}
 
 	// Run a reflect cycle on the closed generation — the exchanges that
