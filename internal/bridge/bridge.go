@@ -889,34 +889,18 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	endTrack := b.trackSession(ctx, key, senderName)
 	defer endTrack()
 
-	taskType := "conversation"
-	if isDeepHeartbeat {
-		taskType = "heartbeat_deep"
-	} else if isHeartbeat {
-		taskType = "heartbeat"
-	}
-
-	turnModel := b.claudeCfg.ResolveModel(taskType)
-	// The deep-reflection heartbeat is the agent's highest-effort self-improvement
-	// think — run it at max reasoning effort.
-	turnEffort := ""
-	if isDeepHeartbeat {
-		turnEffort = "max"
-	}
-	// Ephemeral turns run as a fresh one-shot subprocess (no --resume) that never
-	// mutates the persistent session. Two cases:
-	//   - fable keyword: experiment on a distinct model, isolated from the session.
-	//   - deep heartbeat: MUST be ephemeral because --effort is only emitted at
-	//     spawn; the shared persistent process ignores per-turn effort, so a
-	//     one-shot fresh spawn is the only way effort=max actually reaches the CLI.
-	//     It reflects over the curated enrichment blocks (recent exchanges,
-	//     behavioral learnings, skill retro) carried in the augmented message —
-	//     not raw heartbeat history — and can't pollute the persistent session
-	//     (see the fable-heartbeat identity-pollution incident; docs/MODEL-SESSION-CONFIG.md).
-	ephemeralTurn := fableTurn || isDeepHeartbeat
-	if fableTurn {
-		turnModel = fableModel
-	}
+	// One typed decision for model / effort / persistence (Layer 1 of the
+	// model-session architecture). Ephemeral turns (fable, deep heartbeat) run as
+	// a fresh one-shot spawn — the only path where --effort reaches the CLI and
+	// the only way to keep the persistent session unpolluted. See execution.go
+	// and docs/MODEL-SESSION-CONFIG.md.
+	profile := resolveExecutionProfile(b.claudeCfg, turnKind{
+		isHeartbeat:     isHeartbeat,
+		isDeepHeartbeat: isDeepHeartbeat,
+		fableTurn:       fableTurn,
+	})
+	turnModel := profile.Model
+	ephemeralTurn := profile.Ephemeral
 	if ephemeralTurn {
 		claudeSessionID = ""
 	}
@@ -928,9 +912,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		Images:          imgAttachments,
 		PDFs:            pdfAttachments,
 		SystemPrompt:    systemPrompt,
-		Model:           turnModel,
-		Ephemeral:       ephemeralTurn,
-		Effort:          turnEffort,
+		Model:           profile.Model,
+		Ephemeral:       profile.Ephemeral,
+		Effort:          profile.Effort,
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
