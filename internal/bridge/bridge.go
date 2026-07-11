@@ -989,6 +989,14 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		}
 	}
 
+	// A [noop] anywhere means the agent chose not to speak — drop the ENTIRE
+	// turn, not just the marker. Otherwise agents that narrate their silence
+	// ("this is for the other agent, staying quiet [noop]") leak that narration
+	// to the group. Blank it so the autonomous-noop suppression fires.
+	if noopMarkerRe.MatchString(response) {
+		response = ""
+	}
+
 	// Strip any legacy directives Claude may have emitted.
 	response = stripDirectives(response)
 

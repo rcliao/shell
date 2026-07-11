@@ -1114,20 +1114,28 @@ func stripMention(text, username string) string {
 // messageAddressedToPeer checks if the message text starts with a peer agent's name or alias.
 // This catches natural language addressing like "pika lunch memo" or "umbreon check this".
 func (h *Handler) messageAddressedToPeer(text string) bool {
-	lower := strings.ToLower(text)
-	for _, alias := range h.peerAliases {
-		if strings.HasPrefix(lower, alias) {
-			return true
-		}
-	}
-	return false
+	return addressedTo(text, h.peerAliases)
 }
 
 // messageAddressedToMe checks if the message text starts with this agent's name or alias.
 func (h *Handler) messageAddressedToMe(text string) bool {
-	lower := strings.ToLower(text)
-	for _, alias := range h.myAliases {
-		if strings.HasPrefix(lower, alias) {
+	return addressedTo(text, h.myAliases)
+}
+
+// addressLeadRe strips leading punctuation/emoji/whitespace so "@name", "name~",
+// "  Umbreon:" all normalize before we test the leading alias.
+var addressLeadRe = regexp.MustCompile(`^[\s\p{P}\p{S}]+`)
+
+// addressedTo reports whether the message opens by naming one of the aliases.
+// Match is anchored to the start (after stripping lead punctuation/emoji) so a
+// mere mention mid-sentence doesn't count — only an actual address does.
+func addressedTo(text string, aliases []string) bool {
+	lower := strings.ToLower(addressLeadRe.ReplaceAllString(text, ""))
+	for _, alias := range aliases {
+		if alias == "" {
+			continue
+		}
+		if strings.HasPrefix(lower, strings.ToLower(alias)) {
 			return true
 		}
 	}

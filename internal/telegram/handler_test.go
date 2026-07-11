@@ -1564,3 +1564,25 @@ func TestFriendlyTurnError(t *testing.T) {
 type stringError struct{ s string }
 
 func (e *stringError) Error() string { return e.s }
+
+func TestAddressedTo(t *testing.T) {
+	peer := []string{"umbreon", "umbreonmini", "哥哥", "小傘"}
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"Umbreon 幫我看這個", true},          // english address
+		{"umbreon check this", true},
+		{"@小傘 在嗎", true},                 // punctuation/emoji lead stripped
+		{"哥哥你覺得呢", true},
+		{"  Umbreon: hi", true},
+		{"這個問題想問 Umbreon", false},        // mention mid-sentence, not an address
+		{"the umbreon evolution line", false}, // substring, not leading
+		{"這株植物怎麼澆水", false},             // no name
+	}
+	for _, c := range cases {
+		if got := addressedTo(c.text, peer); got != c.want {
+			t.Errorf("addressedTo(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+}

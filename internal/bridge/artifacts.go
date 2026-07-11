@@ -17,6 +17,11 @@ import (
 // artifactRe matches [artifact type="..." path="..." caption="..."] markers from skill scripts.
 var artifactRe = regexp.MustCompile(`\[artifact\s+type="([^"]+)"\s+path="([^"]+)"(?:\s+caption="([^"]*)")?\]`)
 
+// noopMarkerRe matches a [noop] marker anywhere in the response. Its presence
+// means "I chose not to speak" — the whole turn is dropped, so accompanying
+// narration ("staying quiet, this is for the other agent") never reaches chat.
+var noopMarkerRe = regexp.MustCompile(`(?i)\[noop\]`)
+
 // legacyDirectiveRe matches deprecated directive patterns that Claude may still emit.
 // Catches both self-closing ([noop]) and block ([relay ...]...[/relay]) forms.
 var legacyDirectiveRe = regexp.MustCompile(`(?s)\[(?:relay|schedule|remember|browser|pm|tunnel|heartbeat-learning|task-complete|noop)(?:\s[^\]]*)?\](?:.*?\[/(?:relay|schedule|remember|browser|pm|tunnel|heartbeat-learning|task-complete)\])?`)
