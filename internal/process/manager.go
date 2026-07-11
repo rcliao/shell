@@ -192,6 +192,15 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 		}
 	}()
 
+	// Ephemeral (one-shot) turns bypass the persistent process entirely: a
+	// fresh subprocess answers this turn on req.Model and exits, leaving the
+	// chat's persistent session on its default model undisturbed. Used by the
+	// "fable" experiment keyword so a single reply can run on a different model
+	// without a session rotation or cache rebuild for the ongoing conversation.
+	if req.Ephemeral {
+		return m.runClaudeBidirectional(ctx, req, onUpdate)
+	}
+
 	// Try persistent process first (keeps process alive between messages).
 	result, err := m.sendPersistent(ctx, req, onUpdate)
 	if err == nil {

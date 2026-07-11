@@ -26,6 +26,7 @@ type AgentRequest struct {
 	PDFs            []PDFAttachment   // attached PDFs
 	SystemPrompt    string            // appended system prompt
 	Model           string            // per-request model override (empty = use manager default)
+	Ephemeral       bool              // one-shot: bypass the persistent process, don't disturb the chat's session (used for the "fable" experiment keyword)
 }
 
 // Key returns the session key (chat_id + message_thread_id) for this request.

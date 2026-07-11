@@ -680,6 +680,18 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		return AgentResponse{Text: text}, err
 	}
 
+	// "fable" experiment keyword (ultracode-style): if present, strip it and
+	// answer THIS turn on Fable via a one-shot ephemeral process, leaving the
+	// chat's persistent session on its default model untouched (auto-reverts
+	// next turn). Only for real user turns.
+	fableTurn := false
+	if !strings.HasPrefix(userMsg, "[Heartbeat") {
+		if f, stripped := detectFableKeyword(userMsg); f {
+			fableTurn = true
+			userMsg = stripped
+		}
+	}
+
 	sess, err := b.ensureSession(ctx, chatID, threadID)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
@@ -838,6 +850,15 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		taskType = "heartbeat"
 	}
 
+	turnModel := b.claudeCfg.ResolveModel(taskType)
+	if fableTurn {
+		// One-shot on Fable with a FRESH context (no --resume): the augmented
+		// message already carries recent transcript + ghost injection + system
+		// prompt, so Fable answers with continuity while the persistent default
+		// session is left completely untouched.
+		turnModel = fableModel
+		claudeSessionID = ""
+	}
 	result, err := agent.Send(ctx, process.AgentRequest{
 		ChatID:          chatID,
 		MessageThreadID: threadID,
@@ -846,14 +867,17 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		Images:          imgAttachments,
 		PDFs:            pdfAttachments,
 		SystemPrompt:    systemPrompt,
-		Model:           b.claudeCfg.ResolveModel(taskType),
+		Model:           turnModel,
+		Ephemeral:       fableTurn,
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}
 
-	// Track session ID and mark as having history
-	if procSess != nil {
+	// Track session ID and mark as having history — but NOT for a fable
+	// ephemeral turn: its session id must never overwrite the persistent
+	// default session, or the next normal turn would resume onto Fable's fork.
+	if procSess != nil && !fableTurn {
 		if result.SessionID != "" {
 			procSess.ProviderSessionID = result.SessionID
 			if err := b.store.SaveSession(chatID, threadID, result.SessionID); err != nil {
@@ -909,8 +933,16 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		b.verifyRecall(chatID, sess.ID, userMsg, resp.Text, result.ToolCalls, ghostInjectedText, source)
 	}
 
-	// Auto-compact session if token threshold exceeded (uses API-reported usage).
-	go b.compactSessionIfNeeded(ctx, chatID, threadID, result.Usage)
+	// Auto-compact session if token threshold exceeded (uses API-reported
+	// usage). Skipped for a fable ephemeral turn: its usage belongs to the
+	// one-shot process, not the persistent session, so it must not drive the
+	// persistent session's rotate/compact decisions.
+	if !fableTurn {
+		go b.compactSessionIfNeeded(ctx, chatID, threadID, result.Usage)
+	} else if resp.Text != "" {
+		// Legibility for the experiment: make it obvious which reply was Fable.
+		resp.Text = resp.Text + "\n\n— ⚡ Fable 5"
+	}
 
 	return resp, nil
 }
