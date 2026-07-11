@@ -1220,14 +1220,17 @@ func (h *Handler) shouldHandleGroupMessage(msg *models.Message, text string) (bo
 		return false, text
 	}
 
-	// Role-based domain routing (deterministic, both daemons agree): for a
-	// GENERAL human message — not @/name-addressed to me, not a peer-bot (A2A)
-	// message — each agent answers only its own domain, so exactly one replies.
-	// Addressed messages already returned above; A2A messages must pass through.
-	if h.groupDomain != "" && !h.isPeerBot(msg) && !h.messageAddressedToMe(text) {
-		if ClassifyGroupDomain(text) != h.groupDomain {
-			slog.Debug("group: not my domain, yielding to peer",
-				"chat_id", msg.Chat.ID, "domain", ClassifyGroupDomain(text), "mine", h.groupDomain)
+	// Role-based domain routing (deterministic, both daemons agree): a message
+	// that CLEARLY belongs to the other agent's domain is left to them; own-
+	// domain and AMBIGUOUS messages are handled (so neither agent vanishes from
+	// the chat). A2A (peer-bot) messages bypass routing entirely.
+	if h.groupDomain != "" && !h.isPeerBot(msg) {
+		handle, reason := RouteDecision(RouteInput{
+			Text: text, MyAliases: h.myAliases, PeerAliases: h.peerAliases, MyDomain: h.groupDomain,
+		})
+		if !handle {
+			slog.Info("group: yielding per role routing",
+				"chat_id", msg.Chat.ID, "reason", reason, "domain", ClassifyGroupDomain(text), "mine", h.groupDomain)
 			return false, text
 		}
 	}

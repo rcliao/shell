@@ -438,33 +438,42 @@ func main() {
 	}
 	a2aCmd.AddCommand(a2aCheckCmd, a2aEventsCmd)
 
-	// route-check — dry-run role-based group routing: for a general message,
-	// which agent's domain is it, and would THIS agent answer?
+	// route-check — full e2e dry-run: runs the REAL RouteDecision for BOTH
+	// agents against a message and shows who actually responds (name-address,
+	// @mention, and 3-way domain routing all together). No daemon touch.
 	var routeConfig string
 	routeCheckCmd := &cobra.Command{
 		Use:   "route-check [message]",
-		Short: "Dry-run: which agent answers this general group message? (no daemon touch)",
+		Short: "Dry-run: exactly which agent(s) answer this group message? (no daemon touch)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfigFrom(routeConfig)
 			text := strings.Join(args, " ")
-			domain := telegram.ClassifyGroupDomain(text)
-			mine := cfg.Agent.GroupDomain
+			agents := loadAllAgentConfigsForCLI() // name, aliases, group_domain per agent
 			fmt.Printf("message: %q\n", text)
-			fmt.Printf("classified domain: %s\n", domain)
-			fmt.Printf("this agent (%s) domain: %s\n", cfg.Agent.Name, mine)
-			switch {
-			case mine == "":
-				fmt.Println("→ no group_domain set — this agent may answer (no routing)")
-			case domain == mine:
-				fmt.Printf("→ THIS agent (%s) answers; peer stays quiet\n", cfg.Agent.Name)
-			default:
-				fmt.Printf("→ THIS agent stays quiet; the %s-domain agent answers\n", domain)
+			fmt.Printf("classified domain: %s\n", telegram.ClassifyGroupDomain(text))
+			var responders []string
+			for _, a := range agents {
+				var peerAliases []string
+				for _, other := range agents {
+					if other.name != a.name {
+						peerAliases = append(peerAliases, lowerAll(other.aliases)...)
+					}
+				}
+				handle, reason := telegram.RouteDecision(telegram.RouteInput{
+					Text: text, MyAliases: lowerAll(a.aliases), PeerAliases: peerAliases, MyDomain: a.domain,
+				})
+				mark := "quiet "
+				if handle {
+					mark = "ANSWER"
+					responders = append(responders, a.name)
+				}
+				fmt.Printf("  %-14s [%s]  (%s)\n", a.name, mark, reason)
 			}
+			fmt.Printf("→ responders: %s\n", strings.Join(responders, ", "))
 			return nil
 		},
 	}
-	routeCheckCmd.Flags().StringVar(&routeConfig, "config", "", "agent config path")
+	routeCheckCmd.Flags().StringVar(&routeConfig, "config", "", "agent config path (an agent whose peers to load)")
 	a2aCmd.AddCommand(routeCheckCmd)
 
 	// session command group — persistent --config flag lets all subcommands
@@ -1199,6 +1208,47 @@ func setupDaemonLogging(override, configPath string, verbose bool) (*os.File, er
 	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})))
 	slog.Info("daemon logging to file", "path", logPath, "level", level.String())
 	return f, nil
+}
+
+// cliAgent is the routing-relevant slice of an agent config for a2a route-check.
+type cliAgent struct {
+	name    string
+	aliases []string
+	domain  string
+}
+
+// loadAllAgentConfigsForCLI reads every ~/.shell/agents/*/config.json for the
+// route-check dry-run so it shows the real multi-agent outcome.
+func loadAllAgentConfigsForCLI() []cliAgent {
+	agentsDir := filepath.Join(config.DefaultConfigDir(), "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return nil
+	}
+	var out []cliAgent
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(agentsDir, e.Name(), "config.json"))
+		if err != nil {
+			continue
+		}
+		var c config.Config
+		if json.Unmarshal(data, &c) != nil || c.Agent.Name == "" {
+			continue
+		}
+		out = append(out, cliAgent{name: c.Agent.Name, aliases: c.Agent.Aliases, domain: c.Agent.GroupDomain})
+	}
+	return out
+}
+
+func lowerAll(ss []string) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, strings.ToLower(s))
+	}
+	return out
 }
 
 func loadConfig() config.Config {
