@@ -897,20 +897,27 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	}
 
 	turnModel := b.claudeCfg.ResolveModel(taskType)
-	// The deep-reflection heartbeat is the agent's highest-effort
-	// self-improvement think — run it at max reasoning effort. It already
-	// runs on a distinct model (fable) so it spawns fresh (not the shared
-	// persistent process), where a per-turn --effort is honored.
+	// The deep-reflection heartbeat is the agent's highest-effort self-improvement
+	// think — run it at max reasoning effort.
 	turnEffort := ""
 	if isDeepHeartbeat {
 		turnEffort = "max"
 	}
+	// Ephemeral turns run as a fresh one-shot subprocess (no --resume) that never
+	// mutates the persistent session. Two cases:
+	//   - fable keyword: experiment on a distinct model, isolated from the session.
+	//   - deep heartbeat: MUST be ephemeral because --effort is only emitted at
+	//     spawn; the shared persistent process ignores per-turn effort, so a
+	//     one-shot fresh spawn is the only way effort=max actually reaches the CLI.
+	//     It reflects over the curated enrichment blocks (recent exchanges,
+	//     behavioral learnings, skill retro) carried in the augmented message —
+	//     not raw heartbeat history — and can't pollute the persistent session
+	//     (see the fable-heartbeat identity-pollution incident; docs/MODEL-SESSION-CONFIG.md).
+	ephemeralTurn := fableTurn || isDeepHeartbeat
 	if fableTurn {
-		// One-shot on Fable with a FRESH context (no --resume): the augmented
-		// message already carries recent transcript + ghost injection + system
-		// prompt, so Fable answers with continuity while the persistent default
-		// session is left completely untouched.
 		turnModel = fableModel
+	}
+	if ephemeralTurn {
 		claudeSessionID = ""
 	}
 	result, err := agent.Send(ctx, process.AgentRequest{
@@ -922,17 +929,18 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		PDFs:            pdfAttachments,
 		SystemPrompt:    systemPrompt,
 		Model:           turnModel,
-		Ephemeral:       fableTurn,
+		Ephemeral:       ephemeralTurn,
 		Effort:          turnEffort,
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}
 
-	// Track session ID and mark as having history — but NOT for a fable
-	// ephemeral turn: its session id must never overwrite the persistent
-	// default session, or the next normal turn would resume onto Fable's fork.
-	if procSess != nil && !fableTurn {
+	// Track session ID and mark as having history — but NOT for an ephemeral
+	// turn (fable / deep heartbeat): its session id must never overwrite the
+	// persistent default session, or the next normal turn would resume onto the
+	// one-shot's fork.
+	if procSess != nil && !ephemeralTurn {
 		if result.SessionID != "" {
 			procSess.ProviderSessionID = result.SessionID
 			if err := b.store.SaveSession(chatID, threadID, result.SessionID); err != nil {
@@ -967,7 +975,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 				"cache_create", result.Usage.CacheCreationInputTokens,
 				"cost_usd", result.Usage.CostUSD,
 				"turns", result.Usage.NumTurns,
-				"model", b.claudeCfg.ResolveModel("heartbeat"),
+				"model", turnModel,
+				"deep", isDeepHeartbeat,
 			)
 		}
 	} else if isSystemSender(senderName) {
@@ -989,12 +998,13 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	}
 
 	// Auto-compact session if token threshold exceeded (uses API-reported
-	// usage). Skipped for a fable ephemeral turn: its usage belongs to the
-	// one-shot process, not the persistent session, so it must not drive the
-	// persistent session's rotate/compact decisions.
-	if !fableTurn {
+	// usage). Skipped for an ephemeral turn (fable / deep heartbeat): its usage
+	// belongs to the one-shot process, not the persistent session, so it must
+	// not drive the persistent session's rotate/compact decisions.
+	if !ephemeralTurn {
 		go b.compactSessionIfNeeded(ctx, chatID, threadID, result.Usage)
-	} else if resp.Text != "" {
+	}
+	if fableTurn && resp.Text != "" {
 		// Legibility for the experiment: make it obvious which reply was Fable.
 		resp.Text = resp.Text + "\n\n— ⚡ Fable 5"
 	}

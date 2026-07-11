@@ -221,49 +221,10 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 
 func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
 	claudeSessionID := req.SessionID
-	systemPrompt := req.SystemPrompt
 	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 
-	args := []string{
-		"-p",
-		"--output-format", "stream-json",
-		"--input-format", "stream-json",
-		"--verbose",
-		"--include-partial-messages",
-	}
-	if claudeSessionID != "" {
-		args = append(args, "--resume", claudeSessionID)
-	}
-	model := req.Model
-	if model == "" {
-		model = m.model
-	}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	if req.Effort != "" {
-		args = append(args, "--effort", req.Effort)
-	}
-	// Only append system prompt on fresh sessions — resumed sessions
-	// already have the system prompt in their conversation history.
-	if systemPrompt != "" && claudeSessionID == "" {
-		args = append(args, "--append-system-prompt", systemPrompt)
-	}
-	if len(m.allowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(m.allowedTools, ","))
-	}
-	if len(m.settingSources) > 0 {
-		args = append(args, "--setting-sources", strings.Join(m.settingSources, ","))
-	}
-	if m.settingsPath != "" {
-		args = append(args, "--settings", m.settingsPath)
-	}
-	args = append(args, "--permission-mode", m.permissionMode)
-	if m.mcpConfigPath != "" {
-		args = append(args, "--mcp-config", m.mcpConfigPath)
-	}
-	args = append(args, m.extraArgs...)
+	args, _ := buildClaudeArgs(req, m.claudeArgOpts())
 
 	hasAttachments := len(req.Images) > 0 || len(req.PDFs) > 0
 	slog.Info("claude send", "resume", claudeSessionID != "", "multimodal", hasAttachments)
