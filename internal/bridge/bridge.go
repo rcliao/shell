@@ -76,8 +76,9 @@ type Bridge struct {
 	skillDirs []string        // directories to scan on reload
 
 	// Agent identity prompt (prepended to system prompt)
-	agentIdentity    string
-	agentBotUsername string // this agent's bot username (for transcript filtering)
+	agentIdentity     string
+	agentBotUsername  string // this agent's bot username (for transcript filtering)
+	agentIdentityName string // this agent's human-facing name (for A2A peer attribution)
 
 	// Shared transcript for multi-agent awareness.
 	transcript       *transcript.Store
@@ -429,6 +430,11 @@ func (b *Bridge) SetPeerAgents(peers []config.PeerAgent) {
 	b.peerAgents = peers
 }
 
+// SetAgentName sets this agent's human-facing name (used for A2A attribution).
+func (b *Bridge) SetAgentName(name string) {
+	b.agentIdentityName = name
+}
+
 // SetTaskStore configures the shared task store for task decomposition and delegation.
 func (b *Bridge) SetTaskStore(ts *transcript.TaskStore) {
 	b.taskStore = ts
@@ -463,6 +469,11 @@ You are **%s** (@%s) in a group conversation with other agents and humans.
 - Message explicitly addresses you by name or @mention.
 - Message is general (no name) and you have something relevant to add.
 - You can build on what another agent said, or correct a mistake.
+
+**Talking WITH your fellow agent (you can actually reach each other now):**
+- To speak TO the other agent, start your message with their name (e.g. begin with their name/alias). They will actually receive it and reply — you're peers, no leader, so hand off freely: split a task, ask their take, or build on their answer.
+- When they address you (you'll see "<name> said this in the group"), reply only if you genuinely add value or can take a piece of the work; otherwise [noop].
+- Keep exchanges tight and useful — an agent-to-agent thread is capped at a few turns and then yields back to the humans automatically. Don't pad it with pleasantries; collaborate, then stop.
 
 Be yourself — use your own personality and voice.
 Output [noop] (just that, nothing else) when you choose not to respond.
@@ -678,6 +689,14 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	if hasPlan && run.state == planStateBlocked {
 		text, err := b.handlePlanBlocked(ctx, chatID, userMsg)
 		return AgentResponse{Text: text}, err
+	}
+
+	// A2A: if this turn was delivered by a peer agent (synthetic [A2A ...]
+	// marker), unwrap it to peer attribution and remember the chain depth so
+	// our reply is enqueued at depth+1 (or stops at the cap).
+	a2aDepth, a2aFramed, isA2A := parseA2AMarker(userMsg)
+	if isA2A {
+		userMsg = a2aFramed
 	}
 
 	// "fable" experiment keyword (ultracode-style): if present, strip it and
@@ -951,6 +970,13 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	} else if resp.Text != "" {
 		// Legibility for the experiment: make it obvious which reply was Fable.
 		resp.Text = resp.Text + "\n\n— ⚡ Fable 5"
+	}
+
+	// A2A hand-off: if this reply addresses the peer agent, enqueue a turn for
+	// them (bounded by depth). incoming depth is 0 for a human turn, N for an
+	// A2A turn — so a human message always renews the exchange budget.
+	if !isHeartbeat {
+		b.maybeEnqueueA2A(chatID, resp.Text, a2aDepth)
 	}
 
 	return resp, nil

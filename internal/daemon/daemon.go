@@ -434,6 +434,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			slog.Info("shared transcript enabled", "path", transcriptPath, "budget", budget)
 		}
 
+		br.SetAgentName(cfg.Agent.Name)
 		if len(peers) > 0 {
 			br.SetPeerAgents(peers)
 			for _, p := range peers {
@@ -610,6 +611,33 @@ func New(cfg config.Config) (*Daemon, error) {
 					for _, e := range events {
 						if e.EventType == "task.created" {
 							payloads = append(payloads, e.Payload)
+						}
+						// A2A: a peer addressed us in a group. Run a turn on that
+						// group and post our reply there (bounded by depth via the
+						// marker). Fire async so the poll isn't blocked.
+						if e.EventType == bridge.A2AEventType {
+							var p bridge.A2APayload
+							if err := json.Unmarshal([]byte(e.Payload), &p); err != nil {
+								slog.Warn("a2a: bad payload", "error", err)
+								continue
+							}
+							slog.Info("a2a: received peer turn", "from", p.From, "chat_id", p.ChatID, "depth", p.Depth)
+							go func(pl bridge.A2APayload) {
+								prompt := bridge.A2ADeliveryPrompt(pl.From, pl.Depth, pl.Text)
+								resp, err := br.HandleMessageStreaming(context.Background(), pl.ChatID, 0, prompt, pl.From, nil, nil, nil)
+								if err != nil {
+									slog.Error("a2a: turn failed", "chat_id", pl.ChatID, "error", err)
+									return
+								}
+								// [noop] / empty → the peer chose not to reply; end the chain silently.
+								if strings.TrimSpace(resp.Text) == "" {
+									return
+								}
+								for _, photo := range resp.Photos {
+									bot.SendPhoto(pl.ChatID, 0, photo.Data, photo.Caption)
+								}
+								bot.SendText(pl.ChatID, 0, resp.Text)
+							}(p)
 						}
 						// task.completed and task.failed are informational —
 						// the originating agent sees them in next heartbeat context.
