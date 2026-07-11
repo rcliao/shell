@@ -161,6 +161,7 @@ type ClaudeConfig struct {
 	SettingSources     []string          `json:"setting_sources"`      // e.g. ["user", "project"] for --setting-sources
 	MaxSessionTokens   int               `json:"max_session_tokens"`   // in-place /compact when total input tokens exceed this (0 = disabled)
 	RotateMaxTokens    int               `json:"rotate_max_tokens"`    // full session ROTATION (fresh system prompt: skills+identity+pinned reloaded) once total input tokens exceed this (0 = disabled). Lower = fresher/less drift, at higher cache cost.
+	RotateMaxContextTokens int           `json:"rotate_max_context_tokens"` // rotate when TOTAL resumed context (input+cache-creation+cache-read) exceeds this — latency guard so long sessions don't bloat to ~1M tokens and crawl (0 = disabled)
 	WriteVerifyEnforce bool              `json:"write_verify_enforce"` // when true, a caught write-claim confabulation triggers a bounded correction turn before delivery
 	MediaGateEnforce   bool              `json:"media_gate_enforce"`   // when true, image/video artifacts are dropped on user turns that didn't ask for media (heartbeat turns always drop media regardless)
 	TopicKeywordOnly   bool              `json:"topic_keyword_only"`   // when true, topic classification runs cache→keyword→sticky only, no per-turn LLM call (cycle 148: the LLM tier regressed every focus metric while adding ~8.5s latency)

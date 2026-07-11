@@ -59,7 +59,8 @@ type Bridge struct {
 	maxSessionTokens int
 	// Session rotation: full fresh rebuild (reloads skills/identity/pinned) when
 	// total input tokens exceed this. Lower = fresher context / less drift. (0 = disabled)
-	rotateMaxTokens int
+	rotateMaxTokens        int
+	rotateMaxContextTokens int // rotate when total resumed context (incl cache-read) exceeds this — latency guard (0 = disabled)
 
 	// Scheduler
 	schedulerEnabled bool
@@ -558,6 +559,12 @@ func (b *Bridge) SetRotateMaxTokens(maxTokens int) {
 	b.rotateMaxTokens = maxTokens
 }
 
+// SetRotateMaxContextTokens configures the total-context latency guard: rotate
+// when input+cache-creation+cache-read exceeds maxTokens (0 = disabled).
+func (b *Bridge) SetRotateMaxContextTokens(maxTokens int) {
+	b.rotateMaxContextTokens = maxTokens
+}
+
 // compactionSoftRatio is the fraction of maxSessionTokens that triggers
 // proactive, background compaction. Below this threshold nothing runs; between
 // this and the hard threshold, compaction runs in the background while the
@@ -569,8 +576,28 @@ const compactionSoftRatio = 0.6
 // should run based on current token usage, and dispatches accordingly.
 // Called from the write-back path after every send.
 func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID int64, usage *process.Usage) {
-	if usage == nil || (b.maxSessionTokens <= 0 && b.rotateMaxTokens <= 0) {
+	if usage == nil || (b.maxSessionTokens <= 0 && b.rotateMaxTokens <= 0 && b.rotateMaxContextTokens <= 0) {
 		return
+	}
+
+	// Latency guard (separate from the cost-based token trigger below): the
+	// TOTAL resumed context the model must attend each turn = input + cache
+	// creation + cache read. Cache reads are cheap in $ but NOT in latency — a
+	// session that grows to ~1M cache-read tokens makes every Opus turn crawl
+	// (a real 40s DM was traced to a 1.07M-token context × 10 tool rounds).
+	// Rotate on total context so a long-lived session never bloats.
+	if b.rotateMaxContextTokens > 0 {
+		totalContext := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+		if totalContext > b.rotateMaxContextTokens {
+			if err := b.store.SetRotatePending(chatID, threadID, true); err != nil {
+				slog.Warn("set rotate_pending (context trigger) failed", "chat_id", chatID, "error", err)
+			} else {
+				slog.Info("session flagged for rotation (total-context latency guard)",
+					"chat_id", chatID, "thread_id", threadID,
+					"total_context_tokens", totalContext, "cap", b.rotateMaxContextTokens)
+			}
+			return
+		}
 	}
 
 	// Exclude CacheReadInputTokens: cache reads are cheap ($0.30/MTok vs $15/MTok)

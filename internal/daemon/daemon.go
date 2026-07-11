@@ -383,6 +383,10 @@ func New(cfg config.Config) (*Daemon, error) {
 		slog.Info("session compaction enabled", "max_tokens", cfg.Claude.MaxSessionTokens)
 	}
 	// Configure token-based full rotation (fresh system-prompt rebuild).
+	if cfg.Claude.RotateMaxContextTokens > 0 {
+		br.SetRotateMaxContextTokens(cfg.Claude.RotateMaxContextTokens)
+		slog.Info("session context-rotation (latency guard) enabled", "rotate_max_context_tokens", cfg.Claude.RotateMaxContextTokens)
+	}
 	if cfg.Claude.RotateMaxTokens > 0 {
 		br.SetRotateMaxTokens(cfg.Claude.RotateMaxTokens)
 		slog.Info("session token-rotation enabled", "rotate_max_tokens", cfg.Claude.RotateMaxTokens)
