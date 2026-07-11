@@ -211,6 +211,41 @@ game the ack detector. Reassess full economics 7/10 w/ new pricing.
 
 ---
 
+### V2-H14 — [H/A] Close the skill self-authoring loop (agents build their own skills)
+- **status:** approved (owner ask 7/10). Capability ~80% built, broken at 3 wiring points.
+- **why:** agents CAN write to their skills dir (perms OK) but: (a) shell-reload
+  + shell-skill scripts are coded but NOT installed (no agent-invokable reload);
+  (b) a reloaded skill doesn't activate until the session rotates
+  (--append-system-prompt is fresh-session-only); (c) the deep-heartbeat retro
+  tells them to write to playground/ which LoadDir deliberately SKIPS.
+- **scope:** (1) install shell-reload + shell-skill globally + add to Makefile
+  install-skills; (2) add an always-on `author-skill` skill teaching the real
+  procedure (write skills/<slug>/SKILL.md status:draft → run shell-reload);
+  (3) fix buildSkillRetroBlock to point at skills/ not playground/; (4) after a
+  /skills-reload RPC, flag the caller session rotate_pending so the new skill
+  activates next turn (or inject a skills-catalog delta in Channel B).
+- **ties to:** the Fable max-effort deep heartbeat (7/10) is exactly where
+  'I keep doing X → codify it as a skill' should fire.
+- **measure-by:** an agent authors + activates a skill with zero human steps.
+
+### V2-H15 — [H] Real agent-to-agent conversation channel + loop guard (owner ask 7/10)
+- **status:** proposed (design; bigger feature — build after V2-H14).
+- **why:** Telegram never delivers one bot's message to the other, so the
+  existing isPeerBot/botExchangeLimit loop-guard is DEAD CODE and agents can
+  only 'converse' when a human re-triggers them. Owner wants them to actually
+  talk to each other.
+- **scope:** when agent A posts a message addressed to the peer (leading peer
+  alias or a [to:peer] marker), the bridge enqueues a synthetic turn to B's
+  daemon socket with the shared transcript injected, so B 'hears' A. LOOP GUARD
+  (reuse the existing counters on this REAL path): per-conversation a2a_depth in
+  shared transcript, hard cap (botExchangeLimit=3), reset on any human message,
+  botCooldown spacing, terminal [noop]/[done] ends it, only the initiator opens
+  a thread. Keeps chatter finite (≤3 exchanges then yield to human).
+- **also (optional):** claim-lock to stop 87% double-answering on un-named
+  messages — first agent to insert claims(msg_id,agent) UNIQUE wins, other
+  [noop]s. Only build if owner finds double-answers annoying (some family-group
+  duplication may be intentional — confirm first).
+
 ## Carried from v1 (still valid)
 
 ### B-021 — [A/H] Stop polluting agent ns with dev-session summaries *(needs approval)*
