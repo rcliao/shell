@@ -157,14 +157,15 @@ STATEMENTS not bare acks, so ~97% is everyday needing tools. Routing lever =
 everyday→cheaper-model (pika→sonnet already), NOT a simple-turn sidecar. Do not
 game the ack detector. Reassess full economics 7/10 w/ new pricing.
 
-### V2-A6 — [A] Route umbreon heartbeat off Opus (cost, surfaced cycle 160)
-- **why:** heartbeat is ~24% of spend (~$65/wk combined), pure internal
-  reflection with no user-facing quality bar. umbreon's heartbeat/heartbeat_deep
-  run OPUS. Routing them to sonnet (or haiku for the light heartbeat) saves more
-  than the rejected tier-router with zero UX risk.
-- **scope:** agent-layer config — set umbreonmini model_routing.heartbeat=sonnet-5
-  (keep heartbeat_deep=opus only if deep reflection quality matters, else sonnet).
-  Measure heartbeat $ before/after over 1wk. OWNER call.
+### V2-A6 — [A/H] Heartbeat tier split — DONE 7/10 (corrected per owner intent)
+- **outcome:** owner corrected the framing — the DEEP heartbeat is a FEATURE
+  (highest-effort self-improvement think), not a cost to cut. Shipped: light
+  heartbeat (5/6) → sonnet-5 (cheap 'anything urgent?'); deep heartbeat (1/6,
+  ~4x/day) → fable-5 + `--effort max` + ultrathink directive (thinks as hard as
+  possible about improving). New AgentRequest.Effort plumbs --effort on fresh
+  spawns. Config commit b7a9dc4 (agent-layer) + code on main. Needs restart.
+  measure-by: 1wk — deep-heartbeat quality (behavioral memories written) + net
+  heartbeat $ (light savings vs deep fable cost).
 
 ### V2-A1 — [A] Enable media_gate_enforce after false-positive review
 - **why:** no-unprompted-media rule (owner order 7/1). Gate ships log-only;
