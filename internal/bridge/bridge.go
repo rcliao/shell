@@ -851,6 +851,14 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	}
 
 	turnModel := b.claudeCfg.ResolveModel(taskType)
+	// The deep-reflection heartbeat is the agent's highest-effort
+	// self-improvement think — run it at max reasoning effort. It already
+	// runs on a distinct model (fable) so it spawns fresh (not the shared
+	// persistent process), where a per-turn --effort is honored.
+	turnEffort := ""
+	if isDeepHeartbeat {
+		turnEffort = "max"
+	}
 	if fableTurn {
 		// One-shot on Fable with a FRESH context (no --resume): the augmented
 		// message already carries recent transcript + ghost injection + system
@@ -869,6 +877,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		SystemPrompt:    systemPrompt,
 		Model:           turnModel,
 		Ephemeral:       fableTurn,
+		Effort:          turnEffort,
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)

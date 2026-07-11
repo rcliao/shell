@@ -242,6 +242,9 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	if model != "" {
 		args = append(args, "--model", model)
 	}
+	if req.Effort != "" {
+		args = append(args, "--effort", req.Effort)
+	}
 	// Only append system prompt on fresh sessions — resumed sessions
 	// already have the system prompt in their conversation history.
 	if systemPrompt != "" && claudeSessionID == "" {
