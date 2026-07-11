@@ -199,6 +199,30 @@ func (c ClaudeConfig) ResolveModel(taskType string) string {
 	return c.Model
 }
 
+// Validate returns human-readable warnings about model/session settings that are
+// silently wrong or self-defeating. Non-fatal by design — surfaced at startup so
+// a mis-tuned config is visible instead of failing quietly. See
+// docs/MODEL-SESSION-CONFIG.md (S4, S5).
+func (c ClaudeConfig) Validate() []string {
+	var warnings []string
+
+	// S5 — empty resolved model → no --model flag → the CLI silently picks its
+	// own default. Conversation always runs, so an empty conversation model is
+	// the dangerous case.
+	if c.ResolveModel("conversation") == "" {
+		warnings = append(warnings, "claude.model (conversation) resolves to empty — the CLI will silently pick its own default model; set claude.model or claude.model_routing.conversation")
+	}
+
+	// S4 — a rotation cap below the compaction cap means rotation always fires
+	// first, so in-place compaction never runs. Not necessarily wrong (rotation
+	// is often preferable), but the operator should know compaction is dead.
+	if c.RotateMaxTokens > 0 && c.MaxSessionTokens > 0 && c.RotateMaxTokens < c.MaxSessionTokens {
+		warnings = append(warnings, fmt.Sprintf("rotate_max_tokens (%d) < max_session_tokens (%d): session rotation always preempts in-place compaction, so compaction never runs", c.RotateMaxTokens, c.MaxSessionTokens))
+	}
+
+	return warnings
+}
+
 type StoreConfig struct {
 	DBPath string `json:"db_path"`
 }
@@ -423,6 +447,10 @@ func Load(path string) (Config, error) {
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parsing config %s: %w", absPath, err)
+	}
+
+	for _, w := range cfg.Claude.Validate() {
+		slog.Warn("config: "+w, "path", absPath)
 	}
 
 	return cfg, nil
