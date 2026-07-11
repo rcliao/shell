@@ -1032,6 +1032,7 @@ type Handler struct {
 	peerBotUsernames     map[string]bool
 	peerAliases          []string // name variants for peer agents (lowercased)
 	groupMode            string   // "autonomous" = always deliver, agent decides via [noop]
+	groupDomain          string   // role-based routing domain for this agent ("practical"|"companionship"|"")
 
 	// Bot-to-bot exchange tracking (per chat)
 	botExchangeMu    sync.Mutex
@@ -1061,6 +1062,7 @@ type AgentConfig struct {
 	PeerBots             []string
 	PeerAliases          []string // name variants for peer agents (e.g. "umbreon", "小傘")
 	GroupMode            string   // "autonomous" = agent decides, "" = legacy probability
+	GroupDomain          string   // "practical" | "companionship" — role-based routing for general messages (empty = no routing)
 }
 
 func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
@@ -1085,6 +1087,7 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 		peerBotUsernames:     peers,
 		peerAliases:          peerAliases,
 		groupMode:            agentCfg.GroupMode,
+		groupDomain:          agentCfg.GroupDomain,
 		botExchangeCount:     make(map[int64]int),
 		botLastResponse:      make(map[int64]time.Time),
 		albums:               make(map[string]*albumEntry),
@@ -1215,6 +1218,18 @@ func (h *Handler) shouldHandleGroupMessage(msg *models.Message, text string) (bo
 	if h.messageAddressedToPeer(text) && !h.messageAddressedToMe(text) {
 		slog.Debug("group: message addressed to peer by name", "chat_id", msg.Chat.ID, "text_prefix", truncate(text, 30))
 		return false, text
+	}
+
+	// Role-based domain routing (deterministic, both daemons agree): for a
+	// GENERAL human message — not @/name-addressed to me, not a peer-bot (A2A)
+	// message — each agent answers only its own domain, so exactly one replies.
+	// Addressed messages already returned above; A2A messages must pass through.
+	if h.groupDomain != "" && !h.isPeerBot(msg) && !h.messageAddressedToMe(text) {
+		if ClassifyGroupDomain(text) != h.groupDomain {
+			slog.Debug("group: not my domain, yielding to peer",
+				"chat_id", msg.Chat.ID, "domain", ClassifyGroupDomain(text), "mine", h.groupDomain)
+			return false, text
+		}
 	}
 
 	// Autonomous mode: deliver all non-@peer messages to the agent.

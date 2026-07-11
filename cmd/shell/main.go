@@ -428,6 +428,35 @@ func main() {
 	}
 	a2aCmd.AddCommand(a2aCheckCmd, a2aEventsCmd)
 
+	// route-check — dry-run role-based group routing: for a general message,
+	// which agent's domain is it, and would THIS agent answer?
+	var routeConfig string
+	routeCheckCmd := &cobra.Command{
+		Use:   "route-check [message]",
+		Short: "Dry-run: which agent answers this general group message? (no daemon touch)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(routeConfig)
+			text := strings.Join(args, " ")
+			domain := telegram.ClassifyGroupDomain(text)
+			mine := cfg.Agent.GroupDomain
+			fmt.Printf("message: %q\n", text)
+			fmt.Printf("classified domain: %s\n", domain)
+			fmt.Printf("this agent (%s) domain: %s\n", cfg.Agent.Name, mine)
+			switch {
+			case mine == "":
+				fmt.Println("→ no group_domain set — this agent may answer (no routing)")
+			case domain == mine:
+				fmt.Printf("→ THIS agent (%s) answers; peer stays quiet\n", cfg.Agent.Name)
+			default:
+				fmt.Printf("→ THIS agent stays quiet; the %s-domain agent answers\n", domain)
+			}
+			return nil
+		},
+	}
+	routeCheckCmd.Flags().StringVar(&routeConfig, "config", "", "agent config path")
+	a2aCmd.AddCommand(routeCheckCmd)
+
 	// session command group — persistent --config flag lets all subcommands
 	// target a specific agent's DB (e.g. ~/.shell/agents/pikamini/config.json).
 	// Without it, session commands load ~/.shell/config.json which in a

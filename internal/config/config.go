@@ -52,6 +52,7 @@ type AgentIdentity struct {
 	PeerBots             []string `json:"peer_bots"`             // other bot usernames (to detect "not for me")
 	SystemPrompt         string   `json:"system_prompt"`         // personality/identity prompt prepended to all messages
 	GroupMode            string   `json:"group_mode"`            // "autonomous" = agent decides via [noop], "" = legacy probability
+	GroupDomain          string   `json:"group_domain"`          // "practical" | "companionship" — role-based routing for general group messages (empty = both may answer)
 	TranscriptPath       string   `json:"transcript_path"`       // path to shared transcript DB (default: ~/.shell/shared/transcript.db)
 	TranscriptBudget     int      `json:"transcript_budget"`     // token budget for shared transcript injection (default: 2000)
 	Skills               []string `json:"skills"`                // declared capabilities for task delegation (e.g. "code-review", "research")

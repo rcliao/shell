@@ -477,6 +477,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		PeerBots:             cfg.Agent.PeerBots,
 		PeerAliases:          peerAliases,
 		GroupMode:            cfg.Agent.GroupMode,
+		GroupDomain:          cfg.Agent.GroupDomain,
 	}
 	bot, err := telegram.NewBot(token, auth, br, agentCfg)
 	if err != nil {
