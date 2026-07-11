@@ -221,6 +221,10 @@ func (s *Store) migrate() error {
 	// cost_usd_total keeps the CLI's raw cumulative session cost; cost_usd
 	// holds the per-exchange delta so SUM(cost_usd) is meaningful.
 	s.db.Exec("ALTER TABLE usage ADD COLUMN cost_usd_total REAL NOT NULL DEFAULT 0")
+	// model records which model actually served each turn — so per-turn model
+	// routing (conversation vs heartbeat vs deep vs fable-keyword) is visible
+	// instead of inferred. Added after a cross-model identity-pollution bug.
+	s.db.Exec("ALTER TABLE usage ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 	// Backfill: pre-migration rows stored the cumulative total in cost_usd.
 	// Copy it over so the first post-migration delta doesn't book a whole
 	// session's running total. Idempotent — post-migration rows always have
@@ -1207,7 +1211,7 @@ type UsageSummary struct {
 // cost_usd, so SUM(cost_usd) reports true spend. A delta below zero means the
 // CLI session restarted (fresh running total); the reported value then IS the
 // exchange cost.
-func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source string) error {
+func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source, model string) error {
 	if source == "" {
 		source = "interactive"
 	}
@@ -1223,9 +1227,9 @@ func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cac
 		delta = costUSD
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source, cost_usd_total)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD)
+		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source, cost_usd_total, model)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD, model)
 	return err
 }
 

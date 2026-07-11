@@ -947,7 +947,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		source = "scheduler"
 	}
 
-	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source)
+	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source, turnModel)
 
 	// Runtime write-hygiene: cross-check persistence claims vs actual tool
 	// calls, optionally issue a bounded correction turn, and log the verdict.
@@ -985,7 +985,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 // processResponse is the post-processing pipeline for HandleMessageStreaming.
 // It parses all response directives (relay, heartbeat, memory, schedule, artifacts),
 // logs the exchange, and returns a typed AgentResponse with collected photos.
-func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source string) AgentResponse {
+func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source, turnModel string) AgentResponse {
 	response := strings.TrimSpace(result.Text)
 
 	// Run memory maintenance during heartbeats.
@@ -1104,7 +1104,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		if err := b.store.LogUsage(chatID, sessID,
 			result.Usage.InputTokens, result.Usage.OutputTokens,
 			result.Usage.CacheCreationInputTokens, result.Usage.CacheReadInputTokens,
-			result.Usage.CostUSD, result.Usage.NumTurns, source,
+			result.Usage.CostUSD, result.Usage.NumTurns, source, turnModel,
 		); err != nil {
 			slog.Warn("failed to log usage", "error", err)
 		}

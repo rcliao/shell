@@ -13,7 +13,7 @@ func TestLogUsageStoresCostDelta(t *testing.T) {
 
 	log := func(sessID int64, cumulative float64) {
 		t.Helper()
-		if err := s.LogUsage(1, sessID, 10, 5, 0, 0, cumulative, 1, "interactive"); err != nil {
+		if err := s.LogUsage(1, sessID, 10, 5, 0, 0, cumulative, 1, "interactive", "claude-opus-4-8"); err != nil {
 			t.Fatal(err)
 		}
 	}
