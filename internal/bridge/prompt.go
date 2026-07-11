@@ -162,7 +162,7 @@ func (b *Bridge) injectPerTurnContextRaw(ctx context.Context, chatID, threadID i
 			switch {
 			case tokens > pinnedDeltaTokenBudget:
 				// Budget blown — don't inject; flag for rotation instead.
-				if err := b.store.SetRotatePending(chatID, threadID, true); err != nil {
+				if err := b.store.SetRotatePending(chatID, threadID, "pinned_overflow"); err != nil {
 					slog.Warn("set rotate_pending failed", "chat_id", chatID, "error", err)
 				}
 				slog.Info("pinned delta over budget, flagging rotation",

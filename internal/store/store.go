@@ -29,11 +29,15 @@ type Session struct {
 	// Channel A contents (identity + skills + pinned memory snapshot) at
 	// generation start — drift from the current live value triggers rotation.
 	// `CompactState` is '' (idle) or 'compacting' (proactive compaction in
-	// flight). `RotatePending` is a boolean flag set by soft triggers.
+	// flight). `RotatePending` is a boolean flag set by soft triggers;
+	// `RotateReason` records WHICH trigger set it (cost | latency |
+	// pinned_overflow | manual) so logs attribute the cause instead of a generic
+	// "rotate_pending" — see docs/MODEL-SESSION-CONFIG.md (S4).
 	Generation          int64
 	PrefixHash          string
 	GenerationStartedAt time.Time
 	RotatePending       bool
+	RotateReason        string
 	CompactState        string
 }
 
@@ -284,6 +288,7 @@ func (s *Store) migrate() error {
 		"ALTER TABLE sessions ADD COLUMN generation_started_at DATETIME",
 		"ALTER TABLE sessions ADD COLUMN rotate_pending INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE sessions ADD COLUMN compact_state TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sessions ADD COLUMN rotate_reason TEXT NOT NULL DEFAULT ''",
 	} {
 		s.db.Exec(col)
 	}
@@ -597,6 +602,7 @@ func (s *Store) BumpGeneration(chatID, threadID int64, newPrefixHash string) (in
 			claude_session_id = '',
 			prefix_hash = ?,
 			rotate_pending = 0,
+			rotate_reason = '',
 			compact_state = '',
 			updated_at = CURRENT_TIMESTAMP
 		WHERE chat_id = ? AND message_thread_id = ?
@@ -607,18 +613,21 @@ func (s *Store) BumpGeneration(chatID, threadID int64, newPrefixHash string) (in
 	return gen, tx.Commit()
 }
 
-// SetRotatePending flags a session for rotation on its next turn. Soft
-// triggers (7-day age, pinned delta over budget) call this; the bridge
-// checks the flag before each Send and calls BumpGeneration if set.
-func (s *Store) SetRotatePending(chatID, threadID int64, pending bool) error {
+// SetRotatePending flags a session for rotation on its next turn and records the
+// cause. Soft triggers call this with a reason (cost | latency | pinned_overflow
+// | manual); the bridge checks the flag before each Send and calls
+// BumpGeneration if set. An empty reason clears the flag. Recording the cause
+// (vs a bare boolean) lets rotation logs attribute WHY — see
+// docs/MODEL-SESSION-CONFIG.md (S4).
+func (s *Store) SetRotatePending(chatID, threadID int64, reason string) error {
 	v := 0
-	if pending {
+	if reason != "" {
 		v = 1
 	}
 	_, err := s.db.Exec(`
-		UPDATE sessions SET rotate_pending = ?, updated_at = CURRENT_TIMESTAMP
+		UPDATE sessions SET rotate_pending = ?, rotate_reason = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE chat_id = ? AND message_thread_id = ?
-	`, v, chatID, threadID)
+	`, v, reason, chatID, threadID)
 	return err
 }
 
@@ -684,14 +693,14 @@ func (s *Store) SessionThreadID(sessionID int64) int64 {
 func (s *Store) GetSession(chatID, threadID int64) (*Session, error) {
 	row := s.db.QueryRow(`
 		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
-		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason
 		FROM sessions WHERE chat_id = ? AND message_thread_id = ?
 	`, chatID, threadID)
 	return scanSession(row)
 }
 
 // scanSession extracts a Session from a row including lifecycle fields.
-// Accepts anything with a Scan method matching the 12-column SELECT used by
+// Accepts anything with a Scan method matching the 13-column SELECT used by
 // GetSession and ListActiveSessions.
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
@@ -701,6 +710,7 @@ func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 		&sess.ID, &sess.ChatID, &sess.MessageThreadID, &sess.ProviderSessionID,
 		&sess.Status, &sess.CreatedAt, &sess.UpdatedAt,
 		&sess.Generation, &sess.PrefixHash, &genStarted, &rotatePending, &sess.CompactState,
+		&sess.RotateReason,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -926,7 +936,7 @@ func (s *Store) UpdateSessionStatus(chatID, threadID int64, status string) error
 func (s *Store) ListActiveSessions() ([]Session, error) {
 	rows, err := s.db.Query(`
 		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
-		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason
 		FROM sessions WHERE status = 'active' ORDER BY updated_at DESC
 	`)
 	if err != nil {

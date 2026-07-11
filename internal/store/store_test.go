@@ -362,7 +362,7 @@ func TestSession_SaveSessionPreservesLifecycleFields(t *testing.T) {
 	if err := s.SetPrefixHash(100, 0, "hash-abc"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetRotatePending(100, 0, true); err != nil {
+	if err := s.SetRotatePending(100, 0, "cost"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetCompactState(100, 0, "compacting"); err != nil {
@@ -387,6 +387,9 @@ func TestSession_SaveSessionPreservesLifecycleFields(t *testing.T) {
 	if !sess.RotatePending {
 		t.Error("rotate_pending clobbered")
 	}
+	if sess.RotateReason != "cost" {
+		t.Errorf("rotate_reason not persisted: got %q, want cost", sess.RotateReason)
+	}
 	if sess.CompactState != "compacting" {
 		t.Errorf("compact_state clobbered: got %q", sess.CompactState)
 	}
@@ -396,7 +399,7 @@ func TestSession_BumpGeneration(t *testing.T) {
 	s := testStore(t)
 	s.SaveSession(100, 0, "sess-1")
 	s.SetPrefixHash(100, 0, "old-hash")
-	s.SetRotatePending(100, 0, true)
+	s.SetRotatePending(100, 0, "manual")
 	s.SetCompactState(100, 0, "compacting")
 
 	newGen, err := s.BumpGeneration(100, 0, "new-hash")
@@ -419,6 +422,9 @@ func TestSession_BumpGeneration(t *testing.T) {
 	}
 	if sess.RotatePending {
 		t.Error("expected rotate_pending cleared on rotation")
+	}
+	if sess.RotateReason != "" {
+		t.Errorf("expected rotate_reason cleared on rotation, got %q", sess.RotateReason)
 	}
 	if sess.CompactState != "" {
 		t.Error("expected compact_state cleared on rotation")

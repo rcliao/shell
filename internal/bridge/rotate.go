@@ -72,7 +72,12 @@ func (b *Bridge) maybeRotate(ctx context.Context, chatID, threadID int64) bool {
 	reason := "soft_trigger"
 	switch {
 	case sess.RotatePending:
-		reason = "rotate_pending"
+		// The specific cause (cost | latency | pinned_overflow | manual) was
+		// recorded when the flag was set — attribute it instead of a generic label.
+		reason = sess.RotateReason
+		if reason == "" {
+			reason = "rotate_pending"
+		}
 	case age >= rotationMaxAge:
 		reason = "age"
 	case dayChanged:

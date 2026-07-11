@@ -589,7 +589,7 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID in
 	if b.rotateMaxContextTokens > 0 {
 		totalContext := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
 		if totalContext > b.rotateMaxContextTokens {
-			if err := b.store.SetRotatePending(chatID, threadID, true); err != nil {
+			if err := b.store.SetRotatePending(chatID, threadID, "latency"); err != nil {
 				slog.Warn("set rotate_pending (context trigger) failed", "chat_id", chatID, "error", err)
 			} else {
 				slog.Info("session flagged for rotation (total-context latency guard)",
@@ -611,7 +611,7 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID in
 	// Flag rotate_pending so the NEXT turn's maybeRotate rebuilds fresh, and
 	// skip compaction (rotation resets the token count anyway).
 	if b.rotateMaxTokens > 0 && totalInput > b.rotateMaxTokens {
-		if err := b.store.SetRotatePending(chatID, threadID, true); err != nil {
+		if err := b.store.SetRotatePending(chatID, threadID, "cost"); err != nil {
 			slog.Warn("set rotate_pending (token trigger) failed", "chat_id", chatID, "error", err)
 		} else {
 			slog.Info("session flagged for token-based rotation",
