@@ -108,7 +108,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   against the inject_irrelevant rate. Ghost-side or bridge-side.
 - **measure-by:** propose after 1wk more H2 data (need volume per agent).
 
-### V2-H10 — [H] Persist daemon logs (currently discarded to /dev/null)
+### V2-H10 — [H] Persist daemon logs — DONE 7/11 (~/.shell/agents/<name>/daemon.log)
 - **why:** found in cycle 149 — both daemons write stdout/stderr to /dev/null, so every
   slog-based signal (sticky audit, media-gate false-positive review V2-A1, write-verify
   warnings) is unmeasurable. 5 weeks of audit signal already lost.
