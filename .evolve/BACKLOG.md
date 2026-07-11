@@ -229,7 +229,7 @@ game the ack detector. Reassess full economics 7/10 w/ new pricing.
 - **measure-by:** an agent authors + activates a skill with zero human steps.
 
 ### V2-H15 — [H] Real agent-to-agent conversation channel + loop guard (owner ask 7/10)
-- **status:** proposed (design; bigger feature — build after V2-H14).
+- **status:** SHIPPED cycle-adjacent 7/10 (via shared-store a2a.message events + per-daemon poll; depth cap 3, human-reset, [noop]-terminal, 1/min pace). Needs restart of BOTH daemons. measure-by: watch group for a real pika↔umbreon exchange after a human triggers one; confirm it caps at ~3 hops and yields to humans.
 - **why:** Telegram never delivers one bot's message to the other, so the
   existing isPeerBot/botExchangeLimit loop-guard is DEAD CODE and agents can
   only 'converse' when a human re-triggers them. Owner wants them to actually
