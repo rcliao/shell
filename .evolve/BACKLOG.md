@@ -24,7 +24,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 - **kill-switch:** stickiness or drift-catch regresses vs the cycle-148 table → revert flag.
 
 ### V2-H11 — [H] Tiered model routing for conversation turns (owner-requested 7/1)
-- **status:** phase 2 SHIPPED cycle 151 (0f2565c, validating — 7d shadow data after deploy); phase 3+ rollout needs owner sign-off
+- **status:** phase 2 SHIPPED-VALIDATED (cycle 160 decision doc). Phase 3 NOT PURSUED: savings ~8%/~$90mo, safely-routable population ~0 (simple=0), mis-route risk = the umbreon off-topic bug. Sidecar infra exists (Ephemeral) if traffic 5×'s. Better lever = V2-A6 heartbeat model routing.
 - **why:** owner wants complexity-tiered routing — fable (most demanding), opus
   (deep thinking/complex), sonnet (everyday), haiku (simple) — to cut token
   spend. June interactive spend was ~$1,292 of $1,572, all on the top-tier
@@ -156,6 +156,15 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 STATEMENTS not bare acks, so ~97% is everyday needing tools. Routing lever =
 everyday→cheaper-model (pika→sonnet already), NOT a simple-turn sidecar. Do not
 game the ack detector. Reassess full economics 7/10 w/ new pricing.
+
+### V2-A6 — [A] Route umbreon heartbeat off Opus (cost, surfaced cycle 160)
+- **why:** heartbeat is ~24% of spend (~$65/wk combined), pure internal
+  reflection with no user-facing quality bar. umbreon's heartbeat/heartbeat_deep
+  run OPUS. Routing them to sonnet (or haiku for the light heartbeat) saves more
+  than the rejected tier-router with zero UX risk.
+- **scope:** agent-layer config — set umbreonmini model_routing.heartbeat=sonnet-5
+  (keep heartbeat_deep=opus only if deep reflection quality matters, else sonnet).
+  Measure heartbeat $ before/after over 1wk. OWNER call.
 
 ### V2-A1 — [A] Enable media_gate_enforce after false-positive review
 - **why:** no-unprompted-media rule (owner order 7/1). Gate ships log-only;

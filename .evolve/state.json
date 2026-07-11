@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_cycle": 159,
-  "last_cycle_at": "2026-07-08T12:20:00-07:00",
+  "last_cycle": 160,
+  "last_cycle_at": "2026-07-10T18:30:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -21,7 +21,7 @@
     "rationale": "Cycle 69 shipped the feedback machinery. Cycle 70+ uses it to detect L3 regressions and surface them as auto-proposals. Until daemons are restarted with c66-69 binary, no organic data flows."
   },
   "track_record": {
-    "validated": 45,
+    "validated": 46,
     "wrong_lever": 4,
     "in_flight": 1,
     "measurement_fix": 10,
@@ -85,7 +85,7 @@
   },
   "_legacy_notes": "v1 had multiple overwriting writes; bumped to v2. Cycles 36-39 (C36 receipt-first, C37 SessionScope, C38 ns-migration+skill-tiers, C39 bench-driven RF) ran without numbered state updates.",
   "accepted_proposals": 6,
-  "idle_streak": 1,
+  "idle_streak": 0,
   "consecutive_failures": 0,
   "autonomous_loop_v1": "shipped + smoke-tested",
   "deferred_proposals": 2,
@@ -344,7 +344,8 @@
   "version": 2,
   "v2_started_at": "2026-07-01T19:30:00-07:00",
   "deploy_pending": [
-    "restart daemons for V2-H13 turn-liveness UX (binary built)"
+    "restart daemons for V2-H13 turn-liveness UX (binary built)",
+    "restart daemons for fable keyword feature (shipped 7/10) + V2-H13 UX (both in the current binary)"
   ],
-  "v2_note": "cycle 159 (lightweight): umbreon bug still NO recurrence, context 143k→119k, rotation firing. Shadow router 488 turns accrued (7/3-7/8). V2-H13 deploy_pending (low-urgency UX, restart when convenient). PARKED until 7/10 shadow-router full economics analysis (cron set). Nothing actionable before then."
+  "v2_note": "cycle 160 ROUTING DECISION: DO NOT build phase-3 tiered routing (savings ~8%/~$90mo, safely-routable pop ~0 since simple=0, mis-route risk = the umbreon off-topic bug). Better lever: route umbreon HEARTBEAT off opus (24% of spend, no UX risk) → filed V2-A6. V2-H11-p2 SHIPPED-VALIDATED (negative result). fable keyword + V2-H13 still deploy_pending. umbreon bug resolved (ctx 200k→75k). H2 stable (pika 21%/umb 43% ungrounded, V2-H12 open)."
 }
