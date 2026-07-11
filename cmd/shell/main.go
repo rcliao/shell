@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -78,6 +79,15 @@ func main() {
 			}
 
 			cfg := loadConfigFrom(configFlag)
+
+			// Daemon file logging: the daemon writes its own log file so slog
+			// is captured even when the process was launched with stdout/stderr
+			// → /dev/null. Survives HUP re-exec (main() re-runs, reopens append).
+			if logF, err := setupDaemonLogging(cfg.Daemon.LogFile, configFlag, verbose); err != nil {
+				slog.Warn("daemon file logging setup failed", "error", err)
+			} else if logF != nil {
+				defer logF.Close()
+			}
 
 			if watch {
 				cfg.Reload.Enabled = true
@@ -1149,6 +1159,46 @@ func loadPeerAgentsForCLI(peerBots []string) []config.PeerAgent {
 		})
 	}
 	return peers
+}
+
+// daemonLogPath resolves the daemon log file: explicit config override, else
+// next to the agent's config (so ~/.shell/agents/<name>/daemon.log), else the
+// default config dir.
+func daemonLogPath(override, configPath string) string {
+	if override != "" {
+		return override
+	}
+	if configPath != "" {
+		return filepath.Join(filepath.Dir(configPath), "daemon.log")
+	}
+	return filepath.Join(config.DefaultConfigDir(), "daemon.log")
+}
+
+// setupDaemonLogging points slog at a real file (plus stderr for interactive
+// runs). Rotates on startup when the current log exceeds 20 MB, keeping two
+// backups — no external dependency, and restarts happen often enough that
+// startup rotation bounds growth. Returns the open file to close on shutdown.
+func setupDaemonLogging(override, configPath string, verbose bool) (*os.File, error) {
+	logPath := daemonLogPath(override, configPath)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return nil, err
+	}
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() > 20*1024*1024 {
+		_ = os.Rename(logPath+".1", logPath+".2")
+		_ = os.Rename(logPath, logPath+".1")
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	level := slog.LevelInfo
+	if verbose {
+		level = slog.LevelDebug
+	}
+	w := io.MultiWriter(f, os.Stderr)
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})))
+	slog.Info("daemon logging to file", "path", logPath, "level", level.String())
+	return f, nil
 }
 
 func loadConfig() config.Config {

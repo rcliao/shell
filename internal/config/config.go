@@ -205,6 +205,7 @@ type StoreConfig struct {
 
 type DaemonConfig struct {
 	PIDFile string `json:"pid_file"`
+	LogFile string `json:"log_file"` // path for daemon logs (default: <agent config dir>/daemon.log). Empty = use default.
 }
 
 type Profile struct {
