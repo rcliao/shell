@@ -395,6 +395,55 @@ func TestSession_SaveSessionPreservesLifecycleFields(t *testing.T) {
 	}
 }
 
+func TestKV_RoundTripAndUpsert(t *testing.T) {
+	s := testStore(t)
+
+	if _, ok, err := s.GetKV("absent"); err != nil || ok {
+		t.Errorf("absent key: ok=%v err=%v, want ok=false", ok, err)
+	}
+	if err := s.SetKV("k", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	v, ok, err := s.GetKV("k")
+	if err != nil || !ok || v != "v1" {
+		t.Fatalf("GetKV = %q ok=%v err=%v, want v1/true", v, ok, err)
+	}
+	if err := s.SetKV("k", "v2"); err != nil { // upsert
+		t.Fatal(err)
+	}
+	if v, _, _ := s.GetKV("k"); v != "v2" {
+		t.Errorf("upsert failed: got %q, want v2", v)
+	}
+}
+
+// FlagActiveSessionsForRotation must flag only sessions with a live UUID that
+// aren't already pending, and preserve an existing pending reason.
+func TestFlagActiveSessionsForRotation(t *testing.T) {
+	s := testStore(t)
+	s.SaveSession(100, 0, "uuid-a") // active → should be flagged
+	s.SaveSession(200, 0, "uuid-b") // active but already pending → left as-is
+	s.SaveSession(300, 0, "")       // no UUID → must NOT be flagged
+	s.SetRotatePending(200, 0, "cost")
+
+	n, err := s.FlagActiveSessionsForRotation("prompt_changed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("expected exactly 1 newly-flagged session, got %d", n)
+	}
+
+	if a, _ := s.GetSession(100, 0); !a.RotatePending || a.RotateReason != "prompt_changed" {
+		t.Errorf("session 100: pending=%v reason=%q, want true/prompt_changed", a.RotatePending, a.RotateReason)
+	}
+	if b, _ := s.GetSession(200, 0); b.RotateReason != "cost" {
+		t.Errorf("already-pending session 200 reason=%q, want cost (unchanged)", b.RotateReason)
+	}
+	if c, _ := s.GetSession(300, 0); c.RotatePending {
+		t.Error("session 300 (no UUID) must not be flagged")
+	}
+}
+
 func TestSession_BumpGeneration(t *testing.T) {
 	s := testStore(t)
 	s.SaveSession(100, 0, "sess-1")

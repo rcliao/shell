@@ -330,6 +330,11 @@ func (s *Store) migrate() error {
 		completed_at DATETIME
 	);
 	CREATE INDEX IF NOT EXISTS idx_tasks_chat_status ON tasks(chat_id, status);
+	CREATE TABLE IF NOT EXISTS kv (
+		key        TEXT PRIMARY KEY,
+		value      TEXT NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
 	`
 	if _, err := s.db.Exec(taskSchema); err != nil {
 		return err
@@ -1071,6 +1076,47 @@ func (s *Store) UpdateScheduleNextRun(id int64, nextRun time.Time, lastRun time.
 func (s *Store) DisableSchedule(id int64) error {
 	_, err := s.db.Exec(`UPDATE schedules SET enabled = 0 WHERE id = ?`, id)
 	return err
+}
+
+// GetKV returns a stored value and whether it was present.
+func (s *Store) GetKV(key string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM kv WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
+}
+
+// SetKV upserts a key/value pair.
+func (s *Store) SetKV(key, value string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO kv (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+		key, value,
+	)
+	return err
+}
+
+// FlagActiveSessionsForRotation flags every active session (one that has a live
+// provider UUID and isn't already pending) to rotate on its next turn, with the
+// given reason. Used to force sessions onto a changed system prompt (skills /
+// identity / prompt text) instead of serving the stale cached prompt until an
+// unrelated rotation. Returns the number of sessions flagged.
+func (s *Store) FlagActiveSessionsForRotation(reason string) (int, error) {
+	res, err := s.db.Exec(
+		`UPDATE sessions SET rotate_pending = 1, rotate_reason = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE claude_session_id != '' AND rotate_pending = 0`,
+		reason,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // BumpHeartbeatCount atomically increments and returns a schedule's persisted

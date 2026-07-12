@@ -447,6 +447,12 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 	}
 
+	// Now that identity, skills, and group context are wired, detect whether the
+	// static system prompt changed since last run (new binary / prompt edit) and,
+	// if so, flag active sessions to rotate onto it — so prompt changes propagate
+	// without a manual `shell rotate`. See internal/bridge/prompt_fingerprint.go.
+	br.ReconcilePromptFingerprint()
+
 	// Open shared task store for task decomposition and delegation.
 	var taskStore *transcript.TaskStore
 	{

@@ -368,6 +368,9 @@ func (b *Bridge) ReloadSkills() (int, error) {
 
 	b.skills = skill.NewRegistry(allSkills)
 	slog.Info("skills reloaded", "count", len(allSkills))
+	// The skills catalog is part of the static system prompt — a reload changes
+	// it, so flag active sessions to rotate onto the new prompt.
+	b.ReconcilePromptFingerprint()
 	return len(allSkills), nil
 }
 
