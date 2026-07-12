@@ -25,6 +25,36 @@ func testBridge(t *testing.T) *Bridge {
 	return New(proc, s, nil, nil, false, "", nil, nil, nil, nil)
 }
 
+// A change to the static system prompt (here: identity) must flag active sessions
+// to rotate onto it; an unchanged prompt must not. First run only records a
+// baseline. This is the long-term fix for prompt/skill changes not propagating
+// to live sessions.
+func TestReconcilePromptFingerprint(t *testing.T) {
+	b := testBridge(t)
+	b.SetAgentIdentity("identity v1")
+	if err := b.store.SaveSession(-100, 0, "uuid-x"); err != nil { // active session
+		t.Fatal(err)
+	}
+
+	// First run: baseline recorded, nothing flagged.
+	b.ReconcilePromptFingerprint()
+	if s, _ := b.store.GetSession(-100, 0); s.RotatePending {
+		t.Fatal("first run must not flag (no prior fingerprint)")
+	}
+	// Unchanged prompt → still no flag.
+	b.ReconcilePromptFingerprint()
+	if s, _ := b.store.GetSession(-100, 0); s.RotatePending {
+		t.Fatal("unchanged prompt must not flag")
+	}
+	// Change the static prompt → active session flagged prompt_changed.
+	b.SetAgentIdentity("identity v2 — CHANGED")
+	b.ReconcilePromptFingerprint()
+	s, _ := b.store.GetSession(-100, 0)
+	if !s.RotatePending || s.RotateReason != "prompt_changed" {
+		t.Errorf("changed prompt should flag prompt_changed; got pending=%v reason=%q", s.RotatePending, s.RotateReason)
+	}
+}
+
 func TestHandleReaction_NoPlan(t *testing.T) {
 	b := testBridge(t)
 	ctx := context.Background()

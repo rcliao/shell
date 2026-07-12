@@ -44,3 +44,7 @@ func (a *StoreAdapter) UpdateScheduleNextRun(id int64, nextRun time.Time, lastRu
 func (a *StoreAdapter) DisableSchedule(id int64) error {
 	return a.s.DisableSchedule(id)
 }
+
+func (a *StoreAdapter) BumpHeartbeatCount(id int64) (int, error) {
+	return a.s.BumpHeartbeatCount(id)
+}

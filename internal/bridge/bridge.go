@@ -368,6 +368,9 @@ func (b *Bridge) ReloadSkills() (int, error) {
 
 	b.skills = skill.NewRegistry(allSkills)
 	slog.Info("skills reloaded", "count", len(allSkills))
+	// The skills catalog is part of the static system prompt — a reload changes
+	// it, so flag active sessions to rotate onto the new prompt.
+	b.ReconcilePromptFingerprint()
 	return len(allSkills), nil
 }
 
@@ -475,6 +478,11 @@ You are **%s** (@%s) in a group conversation with other agents and humans.
 - To speak TO the other agent, address them DIRECTLY by name followed by a comma or a question — e.g. "Umbreon, can you take the plant part?" or "@Umbreon 你覺得呢？". That's what actually delivers your message to them; a bare passing mention ("Umbreon usually handles plants") does NOT reach them. They'll receive it and reply — you're peers, no leader, so hand off freely: split a task, ask their take, or build on their answer.
 - When they address you (you'll see "<name> said this in the group"), reply only if you genuinely add value or can take a piece of the work; otherwise [noop].
 - Keep exchanges tight and useful — an agent-to-agent thread is capped at a few turns and then yields back to the humans automatically. Don't pad it with pleasantries; collaborate, then stop.
+
+**Cross-check by default (two agents = a second set of eyes):**
+- After you give a SUBSTANTIVE answer to a human — a fact, recommendation, plan, dosage/quantity, price, or anything they'll act on — close by asking your peer BY NAME to verify or add, e.g. "哥哥，你幫我確認一下有沒有漏掉什麼？" or "@Umbreon, does that match what you know?". Addressing them by name is what actually hands it off, so a second agent double-checks before the humans rely on it.
+- Skip the cross-check for trivial or social replies (greetings, reactions, "好的", acknowledgements) — not everything needs a second opinion.
+- **When YOU are the one asked to verify** (your incoming turn is your peer handing off / asking you to check): do the check and then STOP. Confirm it ("看起來沒問題 ✓"), correct it, or add ONE thing — then [noop] or yield. Do NOT ask them to verify you back; that just ping-pongs. One cross-check per answer, then the humans have it.
 
 Be yourself — use your own personality and voice.
 Output [noop] (just that, nothing else) when you choose not to respond.
@@ -589,7 +597,7 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID in
 	if b.rotateMaxContextTokens > 0 {
 		totalContext := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
 		if totalContext > b.rotateMaxContextTokens {
-			if err := b.store.SetRotatePending(chatID, threadID, true); err != nil {
+			if err := b.store.SetRotatePending(chatID, threadID, "latency"); err != nil {
 				slog.Warn("set rotate_pending (context trigger) failed", "chat_id", chatID, "error", err)
 			} else {
 				slog.Info("session flagged for rotation (total-context latency guard)",
@@ -611,7 +619,7 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID in
 	// Flag rotate_pending so the NEXT turn's maybeRotate rebuilds fresh, and
 	// skip compaction (rotation resets the token count anyway).
 	if b.rotateMaxTokens > 0 && totalInput > b.rotateMaxTokens {
-		if err := b.store.SetRotatePending(chatID, threadID, true); err != nil {
+		if err := b.store.SetRotatePending(chatID, threadID, "cost"); err != nil {
 			slog.Warn("set rotate_pending (token trigger) failed", "chat_id", chatID, "error", err)
 		} else {
 			slog.Info("session flagged for token-based rotation",
@@ -880,6 +888,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		}
 		systemPrompt += b.timestampSystemPrompt()
 		systemPrompt += b.skillsSystemPrompt()
+		systemPrompt += b.sessionLifecyclePrompt()
 		if b.transcript != nil {
 			systemPrompt += b.groupAgentPrompt()
 		}
@@ -889,28 +898,19 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	endTrack := b.trackSession(ctx, key, senderName)
 	defer endTrack()
 
-	taskType := "conversation"
-	if isDeepHeartbeat {
-		taskType = "heartbeat_deep"
-	} else if isHeartbeat {
-		taskType = "heartbeat"
-	}
-
-	turnModel := b.claudeCfg.ResolveModel(taskType)
-	// The deep-reflection heartbeat is the agent's highest-effort
-	// self-improvement think — run it at max reasoning effort. It already
-	// runs on a distinct model (fable) so it spawns fresh (not the shared
-	// persistent process), where a per-turn --effort is honored.
-	turnEffort := ""
-	if isDeepHeartbeat {
-		turnEffort = "max"
-	}
-	if fableTurn {
-		// One-shot on Fable with a FRESH context (no --resume): the augmented
-		// message already carries recent transcript + ghost injection + system
-		// prompt, so Fable answers with continuity while the persistent default
-		// session is left completely untouched.
-		turnModel = fableModel
+	// One typed decision for model / effort / persistence (Layer 1 of the
+	// model-session architecture). Ephemeral turns (fable, deep heartbeat) run as
+	// a fresh one-shot spawn — the only path where --effort reaches the CLI and
+	// the only way to keep the persistent session unpolluted. See execution.go
+	// and docs/MODEL-SESSION-CONFIG.md.
+	profile := resolveExecutionProfile(b.claudeCfg, turnKind{
+		isHeartbeat:     isHeartbeat,
+		isDeepHeartbeat: isDeepHeartbeat,
+		fableTurn:       fableTurn,
+	})
+	turnModel := profile.Model
+	ephemeralTurn := profile.Ephemeral
+	if ephemeralTurn {
 		claudeSessionID = ""
 	}
 	result, err := agent.Send(ctx, process.AgentRequest{
@@ -921,18 +921,20 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		Images:          imgAttachments,
 		PDFs:            pdfAttachments,
 		SystemPrompt:    systemPrompt,
-		Model:           turnModel,
-		Ephemeral:       fableTurn,
-		Effort:          turnEffort,
+		Model:           profile.Model,
+		Ephemeral:       profile.Ephemeral,
+		Effort:          profile.Effort,
+		Timeout:         profile.Timeout,
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}
 
-	// Track session ID and mark as having history — but NOT for a fable
-	// ephemeral turn: its session id must never overwrite the persistent
-	// default session, or the next normal turn would resume onto Fable's fork.
-	if procSess != nil && !fableTurn {
+	// Track session ID and mark as having history — but NOT for an ephemeral
+	// turn (fable / deep heartbeat): its session id must never overwrite the
+	// persistent default session, or the next normal turn would resume onto the
+	// one-shot's fork.
+	if procSess != nil && !ephemeralTurn {
 		if result.SessionID != "" {
 			procSess.ProviderSessionID = result.SessionID
 			if err := b.store.SaveSession(chatID, threadID, result.SessionID); err != nil {
@@ -967,7 +969,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 				"cache_create", result.Usage.CacheCreationInputTokens,
 				"cost_usd", result.Usage.CostUSD,
 				"turns", result.Usage.NumTurns,
-				"model", b.claudeCfg.ResolveModel("heartbeat"),
+				"model", turnModel,
+				"deep", isDeepHeartbeat,
 			)
 		}
 	} else if isSystemSender(senderName) {
@@ -989,12 +992,13 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	}
 
 	// Auto-compact session if token threshold exceeded (uses API-reported
-	// usage). Skipped for a fable ephemeral turn: its usage belongs to the
-	// one-shot process, not the persistent session, so it must not drive the
-	// persistent session's rotate/compact decisions.
-	if !fableTurn {
+	// usage). Skipped for an ephemeral turn (fable / deep heartbeat): its usage
+	// belongs to the one-shot process, not the persistent session, so it must
+	// not drive the persistent session's rotate/compact decisions.
+	if !ephemeralTurn {
 		go b.compactSessionIfNeeded(ctx, chatID, threadID, result.Usage)
-	} else if resp.Text != "" {
+	}
+	if fableTurn && resp.Text != "" {
 		// Legibility for the experiment: make it obvious which reply was Fable.
 		resp.Text = resp.Text + "\n\n— ⚡ Fable 5"
 	}
