@@ -432,6 +432,33 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 	if err != nil {
 		slog.Warn("failed to log exchange to memory", "error", err)
 	}
+
+	// B1 — same-day recall. The raw exchange above lives at the sensory tier,
+	// which ghost excludes from default search, so a fact the user just stated is
+	// invisible to the very next recall query. Distill salient statements from the
+	// user's turn (LLM-free capture; pure chatter yields nothing) into the
+	// searchable stm tier so same-day facts are recallable. Deduped and idempotent.
+	for _, c := range agentmemory.Capture(userMsg, agentmemory.CaptureOptions{MaxCandidates: 3}) {
+		factTTL := "" // durable facts/preferences persist (decay via reflect)
+		if c.Kind == "episodic" {
+			factTTL = ttl // same-day events keep the exchange TTL
+		}
+		factTags := append(append([]string{}, tags...), "same-day")
+		if _, ferr := m.store.Put(ctx, agentmemory.PutParams{
+			NS:         ns,
+			Key:        c.Key,
+			Content:    c.Content,
+			Kind:       c.Kind,
+			Tags:       factTags,
+			Tier:       "stm",
+			Priority:   c.Priority,
+			Importance: c.Importance,
+			TTL:        factTTL,
+			Dedup:      true,
+		}); ferr != nil {
+			slog.Warn("failed to store distilled same-day fact", "error", ferr)
+		}
+	}
 }
 
 // Remember stores a user-provided memory as semantic memory.
