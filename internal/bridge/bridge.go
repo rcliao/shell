@@ -885,6 +885,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		}
 		systemPrompt += b.timestampSystemPrompt()
 		systemPrompt += b.skillsSystemPrompt()
+		systemPrompt += b.sessionLifecyclePrompt()
 		if b.transcript != nil {
 			systemPrompt += b.groupAgentPrompt()
 		}

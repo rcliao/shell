@@ -44,6 +44,26 @@ func (b *Bridge) skillOverrides(name string) bool {
 	return b.skills != nil && b.skills.Has(name)
 }
 
+// sessionLifecyclePrompt frames WHY scheduling and memory must be persistent:
+// the Claude session is ephemeral, so any deferred or timed intent held only
+// in-conversation evaporates when the session compacts, rotates, or idle-dies.
+// This is the general principle behind the tool-specific scheduling rule in
+// skillsSystemPrompt — agents that understand it generalize to all deferred work.
+func (b *Bridge) sessionLifecyclePrompt() string {
+	return "\n\n## Your session is not long-lived\n\n" +
+		"This conversation is EPHEMERAL. It gets compacted, rotated to a fresh start, and shut " +
+		"down after a short idle period (~minutes) or whenever the daemon restarts — you cannot " +
+		"count on it still being alive later. Anything you plan to do \"later\" by holding it in " +
+		"this conversation, waiting, or promising to check back WILL be lost.\n\n" +
+		"So for ANY future or timed action — a reminder, a follow-up, \"check on X later\", " +
+		"\"in 30 minutes / tonight / tomorrow / every morning\", or a recurring routine — schedule " +
+		"it NOW with the `scripts/shell-schedule` skill, which persists to the database and fires " +
+		"reliably across restarts and rotations. Do NOT rely on native/session timers, self " +
+		"check-backs, in-session waiting, or \"I'll remember to…\" — those die with the session. " +
+		"To retain a FACT across sessions, use `scripts/shell-remember` (persistent memory), not " +
+		"your own recall.\n"
+}
+
 // timestampSystemPrompt returns guidance about where to find the current time.
 // It deliberately does NOT include a specific date — on resumed sessions the
 // system prompt is cached, so any hardcoded date would become stale. The
