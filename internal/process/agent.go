@@ -1,6 +1,9 @@
 package process
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ImageAttachment represents an image file to include in the message.
 type ImageAttachment struct {
@@ -26,8 +29,9 @@ type AgentRequest struct {
 	PDFs            []PDFAttachment   // attached PDFs
 	SystemPrompt    string            // appended system prompt
 	Model           string            // per-request model override (empty = use manager default)
-	Ephemeral       bool              // one-shot: bypass the persistent process, don't disturb the chat's session (used for the "fable" experiment keyword)
-	Effort          string            // --effort level for this turn (e.g. "max"); empty = CLI default. Only applied on fresh/ephemeral spawns, not the shared persistent process.
+	Ephemeral       bool              // one-shot: bypass the persistent process, don't disturb the chat's session (fable keyword; deep-reflection heartbeat)
+	Effort          string            // --effort level for this turn (e.g. "high"); empty = CLI default. Emitted at spawn — the bridge only sets it on ephemeral turns, which always spawn fresh.
+	Timeout         time.Duration     // per-request timeout override for the one-shot spawn (0 = manager default). Used to give background deep reflection more room than a user turn.
 }
 
 // Key returns the session key (chat_id + message_thread_id) for this request.
@@ -51,8 +55,14 @@ type Agent interface {
 	// When compacting, incoming messages wait instead of getting "busy".
 	SetCompacting(key SessionKey, compacting bool)
 
-	// Kill terminates a session and removes it.
+	// Kill terminates a session and removes it (subprocess + logical session).
 	Kill(key SessionKey)
+
+	// KillProcess terminates only the live CLI subprocess for a key, leaving the
+	// logical session bookkeeping intact. The next Send re-spawns fresh. Used by
+	// rotation to force the rebuilt system prompt to load immediately instead of
+	// waiting for the idle timeout.
+	KillProcess(key SessionKey)
 
 	// KillAll terminates all sessions.
 	KillAll()

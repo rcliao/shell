@@ -42,6 +42,11 @@ func TestGroupRoutingE2E(t *testing.T) {
 		{"Umbreon 你今天還好嗎", []string{"umbreon"}, "addressed umbreon"},
 		{"哥哥 這個鍋能洗嗎", []string{"umbreon"}, "addressed umbreon (practical content, but named)"},
 		{"@小傘 幫我看", []string{"umbreon"}, "@mention umbreon"},
+		// BOTH agents named in one message → both respond (order/position agnostic)
+		{"妹妹 哥哥 你們看這個", []string{"pika", "umbreon"}, "both named (CJK) → both"},
+		{"哥哥 妹妹 過來", []string{"pika", "umbreon"}, "both named, peer-first → both"},
+		{"umbreon pika what do you think", []string{"pika", "umbreon"}, "both named (EN) → both"},
+		{"這個鍋 妹妹 跟 哥哥 都看看", []string{"pika", "umbreon"}, "both named mid-sentence, practical content → both"},
 		// ambiguous / social / reaction → BOTH present (neither vanishes)
 		{"ahhh", []string{"pika", "umbreon"}, "reaction → both"},
 		{"hi babies", []string{"pika", "umbreon"}, "greeting → both"},

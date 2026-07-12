@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 )
@@ -86,42 +85,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	key := req.Key()
 	procCtx, cancel := context.WithCancel(ctx)
 
-	args := []string{
-		"-p",
-		"--output-format", "stream-json",
-		"--input-format", "stream-json",
-		"--verbose",
-		"--include-partial-messages",
-	}
-	if req.SessionID != "" {
-		args = append(args, "--resume", req.SessionID)
-	}
-	model := req.Model
-	if model == "" {
-		model = m.model
-	}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	// Only append system prompt on fresh sessions — resumed sessions
-	// already have the system prompt in their conversation history.
-	if req.SystemPrompt != "" && req.SessionID == "" {
-		args = append(args, "--append-system-prompt", req.SystemPrompt)
-	}
-	if len(m.allowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(m.allowedTools, ","))
-	}
-	if len(m.settingSources) > 0 {
-		args = append(args, "--setting-sources", strings.Join(m.settingSources, ","))
-	}
-	if m.settingsPath != "" {
-		args = append(args, "--settings", m.settingsPath)
-	}
-	args = append(args, "--permission-mode", m.permissionMode)
-	if m.mcpConfigPath != "" {
-		args = append(args, "--mcp-config", m.mcpConfigPath)
-	}
-	args = append(args, m.extraArgs...)
+	args, model := buildClaudeArgs(req, m.claudeArgOpts())
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
 	env := filterEnv(os.Environ(), "CLAUDECODE")

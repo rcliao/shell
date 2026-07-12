@@ -12,6 +12,9 @@ type ScheduleStore interface {
 	GetDueSchedules(now time.Time) ([]ScheduleEntry, error)
 	UpdateScheduleNextRun(id int64, nextRun time.Time, lastRun time.Time) error
 	DisableSchedule(id int64) error
+	// BumpHeartbeatCount atomically increments and returns a schedule's persisted
+	// heartbeat count, so deep-reflection cadence survives restarts.
+	BumpHeartbeatCount(id int64) (int, error)
 }
 
 // ScheduleEntry mirrors store.Schedule but avoids a circular import.
@@ -240,9 +243,17 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 			return
 		}
 
-		// Track heartbeat count for check-in cadence.
-		s.heartbeatCounts[sc.ChatID]++
-		count := s.heartbeatCounts[sc.ChatID]
+		// Track heartbeat count for check-in + deep-reflection cadence. Persist
+		// it so the count (and thus the "every Nth heartbeat is deep" cadence)
+		// survives daemon restarts — an in-memory counter reset on every re-exec
+		// and starved deep reflection entirely. Fall back to in-memory if the
+		// persistent bump fails, so heartbeats keep working.
+		count, err := s.store.BumpHeartbeatCount(sc.ID)
+		if err != nil {
+			s.heartbeatCounts[sc.ChatID]++
+			count = s.heartbeatCounts[sc.ChatID]
+			slog.Warn("scheduler: persistent heartbeat count failed, using in-memory", "id", sc.ID, "chat_id", sc.ChatID, "error", err)
+		}
 
 		// Determine deep reflection interval.
 		deepInterval := s.deepReflectInterval

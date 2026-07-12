@@ -818,7 +818,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 				}
 			}
 
-			if err := st.SetRotatePending(chatID, threadID, true); err != nil {
+			if err := st.SetRotatePending(chatID, threadID, "manual"); err != nil {
 				return err
 			}
 			fmt.Printf("Flagged chat %d thread %d for rotation on next turn.\n", chatID, threadID)

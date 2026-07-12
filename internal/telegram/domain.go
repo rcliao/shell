@@ -73,11 +73,35 @@ type RouteInput struct {
 	MyDomain    string   // "practical" | "companionship" | "" (routing off)
 }
 
+// namedIn reports whether any alias appears ANYWHERE in the text (a mention, not
+// necessarily a leading address). Used to detect messages that name BOTH agents
+// so both respond, and distinct from addressedTo (which is prefix-anchored).
+func namedIn(text string, aliases []string) bool {
+	lower := strings.ToLower(text)
+	for _, a := range aliases {
+		if a == "" {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(a)) {
+			return true
+		}
+	}
+	return false
+}
+
 // RouteDecision reports whether THIS agent should handle the message and why.
-// Order: addressed-to-me wins; addressed-to-peer skips; then domain routing —
-// skip only when the message CLEARLY belongs to the other domain; ambiguous or
-// own-domain messages are handled. Both daemons run this identically.
+// Order: both-named wins (both respond); then addressed-to-me; addressed-to-peer
+// skips; then domain routing — skip only when the message CLEARLY belongs to the
+// other domain; ambiguous or own-domain messages are handled. A plural address
+// ("babies", 你們) is caught later as DomainSocial → both. Both daemons run this
+// identically.
 func RouteDecision(in RouteInput) (handle bool, reason string) {
+	// Both agents named in one message → both respond, each from its own vantage.
+	// This must precede the addressed-to-peer yield: with prefix-only addressing,
+	// "妹妹 哥哥 過來" would otherwise let only the first-named agent answer.
+	if namedIn(in.Text, in.MyAliases) && namedIn(in.Text, in.PeerAliases) {
+		return true, "both-named"
+	}
 	if addressedTo(in.Text, in.MyAliases) {
 		return true, "addressed-to-me"
 	}
