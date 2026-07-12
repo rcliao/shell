@@ -1,6 +1,9 @@
 package process
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ImageAttachment represents an image file to include in the message.
 type ImageAttachment struct {
@@ -27,7 +30,8 @@ type AgentRequest struct {
 	SystemPrompt    string            // appended system prompt
 	Model           string            // per-request model override (empty = use manager default)
 	Ephemeral       bool              // one-shot: bypass the persistent process, don't disturb the chat's session (fable keyword; deep-reflection heartbeat)
-	Effort          string            // --effort level for this turn (e.g. "max"); empty = CLI default. Emitted at spawn — the bridge only sets it on ephemeral turns, which always spawn fresh.
+	Effort          string            // --effort level for this turn (e.g. "high"); empty = CLI default. Emitted at spawn — the bridge only sets it on ephemeral turns, which always spawn fresh.
+	Timeout         time.Duration     // per-request timeout override for the one-shot spawn (0 = manager default). Used to give background deep reflection more room than a user turn.
 }
 
 // Key returns the session key (chat_id + message_thread_id) for this request.

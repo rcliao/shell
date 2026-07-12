@@ -924,6 +924,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		Model:           profile.Model,
 		Ephemeral:       profile.Ephemeral,
 		Effort:          profile.Effort,
+		Timeout:         profile.Timeout,
 	}, onUpdate)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)

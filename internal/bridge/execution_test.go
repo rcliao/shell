@@ -30,9 +30,9 @@ func TestResolveExecutionProfile(t *testing.T) {
 			want: ExecutionProfile{Model: "claude-sonnet-5", Effort: "", Ephemeral: false, TaskType: "heartbeat"},
 		},
 		{
-			name: "deep heartbeat → max effort AND ephemeral (the S1 fix)",
+			name: "deep heartbeat → high effort, ephemeral, longer timeout (S1 + timeout fix)",
 			kind: turnKind{isHeartbeat: true, isDeepHeartbeat: true},
-			want: ExecutionProfile{Model: "claude-opus-4-8", Effort: "max", Ephemeral: true, TaskType: "heartbeat_deep"},
+			want: ExecutionProfile{Model: "claude-opus-4-8", Effort: "high", Ephemeral: true, Timeout: deepHeartbeatTimeout, TaskType: "heartbeat_deep"},
 		},
 		{
 			name: "fable keyword → fable model, ephemeral, isolated",
@@ -40,9 +40,9 @@ func TestResolveExecutionProfile(t *testing.T) {
 			want: ExecutionProfile{Model: fableModel, Effort: "", Ephemeral: true, TaskType: "conversation"},
 		},
 		{
-			name: "fable overrides even a deep heartbeat's model, stays ephemeral+max",
+			name: "fable overrides even a deep heartbeat's model, stays ephemeral+high+timeout",
 			kind: turnKind{isHeartbeat: true, isDeepHeartbeat: true, fableTurn: true},
-			want: ExecutionProfile{Model: fableModel, Effort: "max", Ephemeral: true, TaskType: "heartbeat_deep"},
+			want: ExecutionProfile{Model: fableModel, Effort: "high", Ephemeral: true, Timeout: deepHeartbeatTimeout, TaskType: "heartbeat_deep"},
 		},
 	}
 

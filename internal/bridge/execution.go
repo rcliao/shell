@@ -1,5 +1,17 @@
 package bridge
 
+import "time"
+
+const (
+	// deepHeartbeatEffort: the deep-reflection heartbeat's reasoning effort. Set
+	// to "high" (not "max") — max effort on opus reliably overran the 5m timeout
+	// and produced nothing; "high" is much deeper than a normal turn yet finishes.
+	deepHeartbeatEffort = "high"
+	// deepHeartbeatTimeout: background reflection isn't user-facing, so it gets a
+	// longer budget than the 5m user-turn timeout as a safety margin.
+	deepHeartbeatTimeout = 12 * time.Minute
+)
+
 // ExecutionProfile is the resolved per-turn execution decision: which model, at
 // what reasoning effort, and whether the turn runs as an isolated one-shot
 // (ephemeral, fresh spawn) or on the chat's persistent session. It exists so the
@@ -7,10 +19,11 @@ package bridge
 // scattered `if isDeepHeartbeat` / `if fableTurn` branches across the send path.
 // See docs/MODEL-SESSION-CONFIG.md (Layer 1: Execution Profile).
 type ExecutionProfile struct {
-	Model     string // resolved model for this turn
-	Effort    string // "" = CLI default; "max" for deep reflection
-	Ephemeral bool   // one-shot fresh spawn that never mutates the persistent session
-	TaskType  string // for cost attribution / logging (conversation|heartbeat|heartbeat_deep)
+	Model     string        // resolved model for this turn
+	Effort    string        // "" = CLI default; "high" for deep reflection
+	Ephemeral bool          // one-shot fresh spawn that never mutates the persistent session
+	Timeout   time.Duration // per-request timeout override (0 = manager default); honored on ephemeral spawns
+	TaskType  string        // for cost attribution / logging (conversation|heartbeat|heartbeat_deep)
 }
 
 // turnKind classifies a turn enough to determine its execution profile.
@@ -52,8 +65,9 @@ func resolveExecutionProfile(r modelResolver, k turnKind) ExecutionProfile {
 		TaskType: taskType,
 	}
 	if k.isDeepHeartbeat {
-		p.Effort = "max"
+		p.Effort = deepHeartbeatEffort
 		p.Ephemeral = true
+		p.Timeout = deepHeartbeatTimeout
 	}
 	if k.fableTurn {
 		p.Model = fableModel

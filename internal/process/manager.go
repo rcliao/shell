@@ -221,7 +221,11 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 
 func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
 	claudeSessionID := req.SessionID
-	procCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	timeout := m.timeout
+	if req.Timeout > 0 {
+		timeout = req.Timeout // per-request override (e.g. background deep reflection)
+	}
+	procCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	args, _ := buildClaudeArgs(req, m.claudeArgOpts())
