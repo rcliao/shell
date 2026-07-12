@@ -2,16 +2,18 @@ package scheduler
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 type mockStore struct {
-	mu        sync.Mutex
-	schedules []ScheduleEntry
-	disabled  map[int64]bool
-	nextRuns  map[int64]time.Time
+	mu         sync.Mutex
+	schedules  []ScheduleEntry
+	disabled   map[int64]bool
+	nextRuns   map[int64]time.Time
+	hbCounts   map[int64]int // schedule id → persisted heartbeat count (survives "restart")
 }
 
 func newMockStore(entries []ScheduleEntry) *mockStore {
@@ -19,6 +21,7 @@ func newMockStore(entries []ScheduleEntry) *mockStore {
 		schedules: entries,
 		disabled:  make(map[int64]bool),
 		nextRuns:  make(map[int64]time.Time),
+		hbCounts:  make(map[int64]int),
 	}
 }
 
@@ -46,6 +49,55 @@ func (m *mockStore) DisableSchedule(id int64) error {
 	defer m.mu.Unlock()
 	m.disabled[id] = true
 	return nil
+}
+
+// BumpHeartbeatCount simulates the persisted counter. Because hbCounts lives on
+// the store (not the Scheduler), a fresh Scheduler sharing this store continues
+// the count — modeling survival across a daemon restart.
+func (m *mockStore) BumpHeartbeatCount(id int64) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hbCounts[id]++
+	return m.hbCounts[id], nil
+}
+
+// Deep reflection fires every Nth heartbeat, and that cadence must SURVIVE a
+// daemon restart. Because the count is persisted on the store, a fresh Scheduler
+// (in-memory counter reset to 0) sharing the same store continues counting — so
+// the 3rd heartbeat is deep even though a "restart" happened after the 2nd.
+// Before the fix, the restart reset the counter and deep reflection never fired.
+func TestDeepReflectionCadenceSurvivesRestart(t *testing.T) {
+	store := newMockStore(nil)
+	hb := ScheduleEntry{ID: 7, ChatID: 100, Message: "check", Type: "heartbeat", Mode: "prompt", Timezone: "UTC"}
+
+	fired := 0
+	var deepAt []int // 1-based heartbeat ordinals where a deep reflection fired
+	newSched := func() *Scheduler {
+		s := New(store, nil, nil, "UTC")
+		s.SetQuietHours(0, 0) // disable quiet-hours suppression for the test
+		s.SetDeepReflectInterval(3)
+		s.SetHeartbeatPrompt(func(chatID int64, msg string) (string, error) {
+			fired++
+			if strings.HasPrefix(msg, "[Heartbeat:deep] ") {
+				deepAt = append(deepAt, fired)
+			}
+			return "", nil
+		})
+		return s
+	}
+
+	s := newSched()
+	s.execute(hb) // count 1 → light
+	s.execute(hb) // count 2 → light
+
+	// Simulate a daemon restart: brand-new Scheduler (in-memory counter = 0),
+	// same store (persisted count = 2).
+	s = newSched()
+	s.execute(hb) // persisted count 3 → MUST be deep
+
+	if len(deepAt) != 1 || deepAt[0] != 3 {
+		t.Fatalf("deep reflection should fire on the 3rd persisted heartbeat across a restart; got deepAt=%v (fired=%d)", deepAt, fired)
+	}
 }
 
 func TestSchedulerOneShotDisables(t *testing.T) {

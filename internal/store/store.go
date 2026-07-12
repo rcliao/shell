@@ -289,6 +289,10 @@ func (s *Store) migrate() error {
 		"ALTER TABLE sessions ADD COLUMN rotate_pending INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE sessions ADD COLUMN compact_state TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE sessions ADD COLUMN rotate_reason TEXT NOT NULL DEFAULT ''",
+		// Persist the heartbeat count so deep-reflection cadence (every Nth
+		// heartbeat) survives daemon restarts — an in-memory counter reset on
+		// every re-exec, starving deep reflection. See docs/MODEL-SESSION-CONFIG.md.
+		"ALTER TABLE schedules ADD COLUMN heartbeat_count INTEGER NOT NULL DEFAULT 0",
 	} {
 		s.db.Exec(col)
 	}
@@ -1067,6 +1071,19 @@ func (s *Store) UpdateScheduleNextRun(id int64, nextRun time.Time, lastRun time.
 func (s *Store) DisableSchedule(id int64) error {
 	_, err := s.db.Exec(`UPDATE schedules SET enabled = 0 WHERE id = ?`, id)
 	return err
+}
+
+// BumpHeartbeatCount atomically increments and returns a schedule's persisted
+// heartbeat count. Persisting the count (vs an in-memory counter) keeps the
+// deep-reflection cadence — every Nth heartbeat — intact across daemon restarts,
+// which previously reset the counter and starved deep reflection.
+func (s *Store) BumpHeartbeatCount(id int64) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`UPDATE schedules SET heartbeat_count = heartbeat_count + 1 WHERE id = ? RETURNING heartbeat_count`,
+		id,
+	).Scan(&count)
+	return count, err
 }
 
 // GetHeartbeat returns the heartbeat schedule for a chat, or nil if none exists.
