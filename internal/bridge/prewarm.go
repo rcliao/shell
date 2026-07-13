@@ -102,6 +102,38 @@ func (b *Bridge) PrewarmDueSessions(ctx context.Context, idle time.Duration) {
 	}
 }
 
+// WarmActiveSessionsAfterBoot re-warms sessions with recent real activity
+// immediately after a daemon restart. A restart kills every persistent
+// subprocess, so the next message per chat paid spawn + full API cache
+// re-creation (~15-20s to first words — the most-active owner ate this after
+// most of 7/13's seven deploys). Runs once, shortly after boot; busy
+// sessions are skipped (a real turn is already doing the warming).
+func (b *Bridge) WarmActiveSessionsAfterBoot(ctx context.Context) {
+	if b.store == nil {
+		return
+	}
+	sessions, err := b.store.ListPrewarmableSessions()
+	if err != nil {
+		return
+	}
+	for i := range sessions {
+		sess := &sessions[i]
+		if IsSystemChat(sess.ChatID) || sess.ProviderSessionID == "" {
+			continue
+		}
+		lastUser, err := b.store.LastUserMessageAt(sess.ID)
+		if err != nil || lastUser.IsZero() || time.Since(lastUser) > 2*time.Hour {
+			continue // only chats in active use
+		}
+		start := time.Now()
+		if _, err := b.HandleMessageStreaming(ctx, sess.ChatID, sess.MessageThreadID, prewarmPrompt, "prewarm", nil, nil, nil); err != nil {
+			continue // busy = a real turn is warming it; other errors non-fatal
+		}
+		slog.Info("prewarm: post-boot session warm", "chat_id", sess.ChatID, "thread_id", sess.MessageThreadID,
+			"secs", int(time.Since(start).Seconds()))
+	}
+}
+
 // maybeKeepAlive pings a session whose prompt cache is about to expire, so
 // the owner's next message lands warm instead of paying a full rebuild.
 func (b *Bridge) maybeKeepAlive(ctx context.Context, sess *store.Session) {
