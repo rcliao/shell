@@ -38,6 +38,7 @@ type turnKind struct {
 // without a full Bridge/config.
 type modelResolver interface {
 	ResolveModel(taskType string) string
+	ResolveEffort(taskType string) string
 }
 
 // resolveExecutionProfile derives the ExecutionProfile from a turn's kind. This
@@ -62,6 +63,7 @@ func resolveExecutionProfile(r modelResolver, k turnKind) ExecutionProfile {
 
 	p := ExecutionProfile{
 		Model:    r.ResolveModel(taskType),
+		Effort:   r.ResolveEffort(taskType), // spawn-bound; applies from each generation's first turn
 		TaskType: taskType,
 	}
 	if k.isDeepHeartbeat {

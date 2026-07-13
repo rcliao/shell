@@ -1908,6 +1908,14 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// model-side seconds read as "on it", not "did it hear me?".
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, "👀")
 
+	// Receipt lag: Telegram send time → our handler. Long-poll delays and
+	// getUpdates backlogs show up here and nowhere else.
+	if msg.Date > 0 {
+		if lag := time.Since(time.Unix(int64(msg.Date), 0)); lag > 3*time.Second {
+			slog.Info("turn: receipt lag", "chat_id", msg.Chat.ID, "lag_ms", lag.Milliseconds())
+		}
+	}
+
 	// Serialize messages per (chat, thread) so concurrent sends in different
 	// topics run in parallel and only same-topic messages queue.
 	chatMu := h.getChatLock(msg.Chat.ID, threadID)
