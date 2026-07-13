@@ -586,3 +586,28 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   degenerate tier-router investigation.
 - **measure-by:** v2.0 definition-of-done in design; March-July backfill
   baseline pass before any goal enforcement.
+
+### V2-H33 — [H] Rotation-thrash fix + speed program — APPROVED 7/13 (incident)
+- **status:** approved (owner 7/13, live incident: 2-minute single-question
+  turns). CONFIG MITIGATION DEPLOYED 7/13 morning (agent-layer commit):
+  rotate_max_tokens 60k/90k → 300k, rotate_max_context_tokens 500k/350k →
+  250k. Code fix + program below for the loop.
+- **root cause:** the token-based rotation trigger compares CUMULATIVE
+  input+cache_creation against rotate_max_tokens, but a fresh generation's
+  FIRST turn creates the entire base context (~90-170k, grown past the 60k
+  threshold as prompt/pinned/skills grew) — so every generation was flagged
+  for rotation on turn one. Generations lived MINUTES (observed age 3m15s);
+  every turn paid rotation summary (~48s) + full cache re-creation (40-90s).
+  V2-A3's June churn (309 rotations/mo) was the early symptom.
+- **scope (code fix):** rotation trigger must measure GROWTH since generation
+  start (cumulative minus first-turn creation), not absolute totals; startup
+  validation must error (not warn) when rotate_max_tokens < observed base
+  creation; alert on low generation age.
+- **eval tie-in:** add `generation_age_p50` (harness, SQL) to OwnerEval v2 —
+  rotation thrash becomes a graded regression, never a mystery again. Grade
+  this fix by: cold-turn share falling, latency_p95 < 60s, generation age
+  p50 > 12h.
+- **rest of speed program (owner discussion 7/13):** (1) post-rotation cache
+  pre-warm in quiet hours; (2) first-event vs first-text TTFT split; (3)
+  answer-first-persist-after prompt rule; (4) instant receipt reaction; (5)
+  casual-turn thinking-cap experiment (watch factual_corrections).
