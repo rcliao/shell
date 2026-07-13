@@ -335,6 +335,17 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 		chatProfiles := cfg.Memory.ChatProfileMap()
 
+		// Apply ghost_env to the daemon process BEFORE opening the embedded
+		// store: ghost reads its tuning knobs (GHOST_RERANKER, GHOST_MIN_SCORE,
+		// GHOST_RERANK_*) from the environment at store-open and query time.
+		// Without this, ghost_env only reached the ghost MCP subprocess and the
+		// in-process retrieval path (context injection) ran FTS-only defaults.
+		for k, v := range cfg.Memory.GhostEnv {
+			if err := os.Setenv(k, v); err != nil {
+				slog.Warn("ghost_env: failed to set", "key", k, "error", err)
+			}
+		}
+
 		mem, err = memory.New(cfg.Memory.DBPath, cfg.Memory.Budget, cfg.Memory.GlobalNamespaces, cfg.Memory.GlobalBudget, cfg.Memory.SystemNamespaces, cfg.Memory.SystemBudget, profiles, chatProfiles)
 		if err != nil {
 			st.Close()
