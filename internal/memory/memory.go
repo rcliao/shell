@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -33,6 +34,9 @@ type ProfileConfig struct {
 
 // Memory wraps a ghost store for shell use.
 type Memory struct {
+	reflectMu    sync.Mutex
+	lastBgReflect time.Time
+
 	store            agentmemory.Store
 	budget           int
 	globalNamespaces []string
@@ -228,22 +232,73 @@ func legacyNamespace(chatID int64) string {
 // InjectContext fetches relevant memories and prepends them to the user message.
 // When AgentNS is set, queries the agent namespace with chat tag filtering.
 // Falls back to the legacy namespace-per-chat approach when AgentNS is empty.
+// ghostFetchBudget bounds per-turn memory retrieval: a slow store costs one
+// turn's recall, never user-facing latency (V2-H37 seam contract).
+const ghostFetchBudget = 3 * time.Second
+
+// minReflectInterval rate-limits compaction-triggered background reflects —
+// the always-true compaction hint fired 183 reflects/day, each a write txn
+// contending with turn reads. Heartbeat-driven reflects are unaffected.
+const minReflectInterval = time.Hour
+
+// maybeBackgroundReflect runs a reflect at most once per minReflectInterval.
+func (m *Memory) maybeBackgroundReflect(ns string, skipped int) {
+	m.reflectMu.Lock()
+	due := time.Since(m.lastBgReflect) >= minReflectInterval
+	if due {
+		m.lastBgReflect = time.Now()
+	}
+	m.reflectMu.Unlock()
+	if !due {
+		return
+	}
+	slog.Info("memory compaction suggested, triggering background reflect", "ns", ns, "skipped", skipped)
+	go m.RunReflect(context.Background())
+}
+
 func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string) string {
 	prof := m.profileFor(chatID)
 	var sb strings.Builder
 
 	if prof.AgentNS != "" {
-		// Chat-scoped recall: memories tagged with this specific chat
+		// V2-H37: the chat-scoped and cross-chat retrievals are independent —
+		// run them concurrently (the embedder serializes inference internally;
+		// the scans parallelize). A latency budget bounds the whole fetch: a
+		// slow memory store costs recall for one turn, never user-facing
+		// latency. Degraded turns are logged for the eval.
+		fetchCtx, cancel := context.WithTimeout(ctx, ghostFetchBudget)
+		defer cancel()
+
 		chatBudget := prof.Budget * 2 / 3 // 2/3 for chat-specific
-		result, err := m.store.Context(ctx, agentmemory.ContextParams{
-			NS:     prof.AgentNS,
-			Query:  userMsg,
-			Tags:   []string{chatTag(chatID)},
-			Budget: chatBudget,
-			Scope:  sessionScopeFor(chatID),
-		})
-		if err != nil {
-			slog.Warn("memory context fetch failed", "error", err)
+		crossBudget := prof.Budget / 3    // 1/3 for cross-chat
+		var result, crossResult *agentmemory.ContextResult
+		var chatErr, crossErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			result, chatErr = m.store.Context(fetchCtx, agentmemory.ContextParams{
+				NS:     prof.AgentNS,
+				Query:  userMsg,
+				Tags:   []string{chatTag(chatID)},
+				Budget: chatBudget,
+				Scope:  sessionScopeFor(chatID),
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			crossResult, crossErr = m.store.Context(fetchCtx, agentmemory.ContextParams{
+				NS:            prof.AgentNS,
+				Query:         userMsg,
+				Budget:        crossBudget,
+				ExcludePinned: true, // pinned already in system prompt
+			})
+		}()
+		wg.Wait()
+
+		if chatErr != nil || result == nil {
+			slog.Warn("memory context fetch failed (degrading to no injection)", "error", chatErr)
+			result = nil
 		} else {
 			if len(result.Memories) > 0 {
 				sb.WriteString("[Relevant memories from this chat]\n")
@@ -255,21 +310,12 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 				sb.WriteString("[End of chat memories]\n\n")
 			}
 			if result.CompactionSuggested {
-				slog.Info("memory compaction suggested, triggering background reflect", "ns", prof.AgentNS, "skipped", result.Skipped)
-				go m.RunReflect(ctx)
+				m.maybeBackgroundReflect(prof.AgentNS, result.Skipped)
 			}
 		}
 
-		// Cross-chat recall: agent-wide knowledge relevant to this message
-		crossBudget := prof.Budget / 3 // 1/3 for cross-chat
-		crossResult, err := m.store.Context(ctx, agentmemory.ContextParams{
-			NS:            prof.AgentNS,
-			Query:         userMsg,
-			Budget:        crossBudget,
-			ExcludePinned: true, // pinned already in system prompt
-		})
-		if err != nil {
-			slog.Warn("cross-chat context fetch failed", "error", err)
+		if crossErr != nil || crossResult == nil {
+			slog.Warn("cross-chat context fetch failed (degrading)", "error", crossErr)
 		} else if len(crossResult.Memories) > 0 {
 			// Deduplicate against chat-scoped results
 			chatKeys := map[string]bool{}
