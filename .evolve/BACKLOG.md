@@ -743,3 +743,20 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   latency profile overnight with no gate. The testbed smoke suite (V2-H36)
   must include a latency budget assertion (context query <2s) so a slow
   retrieval upgrade fails the deploy gate instead of reaching the family.
+
+### V2-H37 — [H] Ghost-seam performance: parallel + bounded + async — SHIPPED 7/13
+- **status:** SHIPPED across three commits (c0766f0, 12c2051 + guard fix
+  9536836), all deployed. Owner-driven live performance day.
+- **shipped:** (1) InjectContext's two retrievals concurrent under a 3s
+  budget — slow memory costs one turn's recall, never latency; (2) full
+  context fan-out — ghost ∥ transcript ∥ task store ∥ Channel B computed
+  concurrently, assembled in exact original prompt order; (3) async
+  LogExchange (post-turn embedding off the busy window); (4) background
+  reflect rate-limited 183/day → 1/hour; (5) zero-usage-empty resume retry;
+  (6) latency-guard per-step context fix.
+- **deferred to loop:** pinned render dedupe on spawn turns (SystemPrompt +
+  PinnedDelta both assemble pinned; ~200-500ms on generation starts only);
+  first-event vs first-text TTFT split.
+- **measure-by:** context_fanout step <1.5s warm; end-to-end simple turns
+  <15s sustained (owner target); recall_grounded must NOT fall (degradation
+  events logged if the 3s budget ever trips).
