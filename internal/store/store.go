@@ -1002,6 +1002,34 @@ func (s *Store) UpdateSessionStatus(chatID, threadID int64, status string) error
 	return err
 }
 
+// ListPrewarmableSessions returns sessions eligible for eager rotation +
+// cache prewarm: active AND stale. The hourly stale-cleanup marks any session
+// idle >1h as 'stale' — which is exactly the population prewarm exists to
+// serve; listing only 'active' left flagged sessions invisible for ~21h
+// (7/13 topic-thread incident).
+func (s *Store) ListPrewarmableSessions() ([]Session, error) {
+	rows, err := s.db.Query(`
+		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason
+		FROM sessions WHERE status IN ('active','stale') ORDER BY updated_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []Session
+	for rows.Next() {
+		sess, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		if sess != nil {
+			sessions = append(sessions, *sess)
+		}
+	}
+	return sessions, nil
+}
+
 func (s *Store) ListActiveSessions() ([]Session, error) {
 	rows, err := s.db.Query(`
 		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,

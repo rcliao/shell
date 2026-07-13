@@ -30,7 +30,7 @@ func (b *Bridge) PrewarmDueSessions(ctx context.Context, idle time.Duration) {
 	if b.store == nil {
 		return
 	}
-	sessions, err := b.store.ListActiveSessions()
+	sessions, err := b.store.ListPrewarmableSessions()
 	if err != nil {
 		slog.Warn("prewarm: list sessions failed", "error", err)
 		return
