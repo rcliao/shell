@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rcliao/shell/internal/bench"
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/daemon"
@@ -308,6 +309,47 @@ func main() {
 	recallHygieneCmd.Flags().StringVar(&rhSinceFlag, "since", "", "lookback window (e.g. 168h, 24h); empty = all-time")
 	recallHygieneCmd.Flags().Int64Var(&rhChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
 	recallHygieneCmd.Flags().StringVar(&rhConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
+
+	// eval command — the owner-fitness scorecard (V2-H31).
+	var evSinceFlag, evConfigFlag string
+	var evJSONFlag bool
+	evalCmd := &cobra.Command{
+		Use:   "eval",
+		Short: "Owner-fitness scorecard: corrections, brevity, recall, delivery, latency (numbers only)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(evConfigFlag)
+			window := 7 * 24 * time.Hour
+			if evSinceFlag != "" {
+				d, perr := time.ParseDuration(evSinceFlag)
+				if perr != nil {
+					return fmt.Errorf("invalid --since %q: %w", evSinceFlag, perr)
+				}
+				window = d
+			}
+			until := time.Now()
+			agent := cfg.Agent.BotUsername
+			if agent == "" {
+				agent = "default"
+			}
+			rep, err := bench.OwnerEval(cfg.Store.DBPath, agent, until.Add(-window), until)
+			if err != nil {
+				return err
+			}
+			if evJSONFlag {
+				out, err := bench.OwnerEvalJSON(rep)
+				if err != nil {
+					return err
+				}
+				fmt.Println(string(out))
+				return nil
+			}
+			fmt.Print(bench.FormatOwnerEval(rep))
+			return nil
+		},
+	}
+	evalCmd.Flags().StringVar(&evSinceFlag, "since", "", "lookback window (default 168h)")
+	evalCmd.Flags().BoolVar(&evJSONFlag, "json", false, "emit redaction-safe JSON snapshot")
+	evalCmd.Flags().StringVar(&evConfigFlag, "config", "", "agent config path (default ~/.shell/config.json)")
 
 	// tool-usage command — read the per-exchange tool-call ledger.
 	var tuSinceFlag string
@@ -906,7 +948,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, evalCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

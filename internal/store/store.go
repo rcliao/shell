@@ -234,6 +234,11 @@ func (s *Store) migrate() error {
 	// session's running total. Idempotent — post-migration rows always have
 	// cost_usd_total set at insert.
 	s.db.Exec("UPDATE usage SET cost_usd_total = cost_usd WHERE cost_usd_total = 0 AND cost_usd > 0")
+	// Per-turn phase timings (V2-H18 latency attribution): queue wait before
+	// dispatch, time-to-first-token, and total Send wall clock, in ms.
+	s.db.Exec("ALTER TABLE usage ADD COLUMN queue_ms INTEGER NOT NULL DEFAULT 0")
+	s.db.Exec("ALTER TABLE usage ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0")
+	s.db.Exec("ALTER TABLE usage ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
 
 	// Per-exchange tool-call log. One row per tool_use block observed in the
 	// Claude stream — powers usage analysis (which tools/skills actually get
@@ -482,6 +487,43 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_recall_verif_class ON recall_verifications(classification);
 	`
 	if _, err := s.db.Exec(recallVerifySchema); err != nil {
+		return err
+	}
+
+	// outbound_sends is the proactive-send dedup ledger (V2-H3) — see
+	// internal/store/outbound.go for semantics.
+	outboundSchema := `
+	CREATE TABLE IF NOT EXISTS outbound_sends (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id    INTEGER NOT NULL,
+		thread_id  INTEGER NOT NULL DEFAULT 0,
+		source     TEXT NOT NULL DEFAULT '',
+		text_hash  TEXT NOT NULL,
+		suppressed INTEGER NOT NULL DEFAULT 0,
+		sent_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_outbound_sends_lookup ON outbound_sends(chat_id, text_hash, sent_at);
+	`
+	if _, err := s.db.Exec(outboundSchema); err != nil {
+		return err
+	}
+
+	// media is the inbound-photo archive ledger (V2-H19) — see
+	// internal/store/media.go for semantics.
+	mediaSchema := `
+	CREATE TABLE IF NOT EXISTS media (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id     INTEGER NOT NULL,
+		thread_id   INTEGER NOT NULL DEFAULT 0,
+		msg_id      INTEGER NOT NULL DEFAULT 0,
+		path        TEXT NOT NULL,
+		caption     TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT '',
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_media_chat ON media(chat_id, thread_id, id);
+	`
+	if _, err := s.db.Exec(mediaSchema); err != nil {
 		return err
 	}
 
@@ -1284,7 +1326,7 @@ type UsageSummary struct {
 // cost_usd, so SUM(cost_usd) reports true spend. A delta below zero means the
 // CLI session restarted (fresh running total); the reported value then IS the
 // exchange cost.
-func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source, model string) error {
+func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source, model string, queueMs, ttftMs, durationMs int64) error {
 	if source == "" {
 		source = "interactive"
 	}
@@ -1300,9 +1342,9 @@ func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cac
 		delta = costUSD
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source, cost_usd_total, model)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD, model)
+		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source, cost_usd_total, model, queue_ms, ttft_ms, duration_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD, model, queueMs, ttftMs, durationMs)
 	return err
 }
 

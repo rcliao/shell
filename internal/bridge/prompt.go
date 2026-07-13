@@ -197,6 +197,26 @@ func (b *Bridge) injectPerTurnContextRaw(ctx context.Context, chatID, threadID i
 		}
 	}
 
+	// Block 3c (V2-H19): recent inbound photos, re-readable by path. This is
+	// what makes 「剛剛那張照片」 work across turns, rotations, and days — the
+	// agent Reads the archived file instead of apologizing about expired temps.
+	if b.store != nil && chatID != 0 {
+		if rows, err := b.store.RecentMedia(chatID, threadID, 5); err == nil && len(rows) > 0 {
+			var lines []string
+			for _, r := range rows {
+				label := r.Description
+				if label == "" {
+					label = r.Caption
+				}
+				if label == "" {
+					label = "no description"
+				}
+				lines = append(lines, fmt.Sprintf("- %s — %s (%s)", r.Path, label, humanAge(time.Since(r.CreatedAt))))
+			}
+			blocks = append(blocks, "[Recent photos in this chat — use the Read tool on a path to view one again:\n"+strings.Join(lines, "\n")+"]")
+		}
+	}
+
 	// Block 3b (cycle 66): topic classification.
 	// Cycle 71: uses rawUserMsg (not augmented msg) so classifier sees only
 	// the user's actual text, not transcript/task injections + [From: …]

@@ -1,11 +1,14 @@
 package telegram
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
 
@@ -1584,5 +1587,158 @@ func TestAddressedTo(t *testing.T) {
 		if got := addressedTo(c.text, peer); got != c.want {
 			t.Errorf("addressedTo(%q) = %v, want %v", c.text, got, c.want)
 		}
+	}
+}
+
+func TestWithFloodRetry(t *testing.T) {
+	// Capture waits instead of sleeping.
+	var waits []time.Duration
+	origWait := floodWait
+	floodWait = func(ctx context.Context, d time.Duration) bool {
+		waits = append(waits, d)
+		return true
+	}
+	defer func() { floodWait = origWait }()
+
+	t.Run("success first try", func(t *testing.T) {
+		waits = nil
+		calls := 0
+		err := withFloodRetry(context.Background(), func() error {
+			calls++
+			return nil
+		})
+		if err != nil || calls != 1 || len(waits) != 0 {
+			t.Fatalf("err=%v calls=%d waits=%v", err, calls, waits)
+		}
+	})
+
+	t.Run("non-flood error returns immediately", func(t *testing.T) {
+		waits = nil
+		calls := 0
+		wantErr := errors.New("can't parse entities")
+		err := withFloodRetry(context.Background(), func() error {
+			calls++
+			return wantErr
+		})
+		if !errors.Is(err, wantErr) || calls != 1 || len(waits) != 0 {
+			t.Fatalf("err=%v calls=%d waits=%v", err, calls, waits)
+		}
+	})
+
+	t.Run("flood retried with server retry_after, then succeeds", func(t *testing.T) {
+		waits = nil
+		calls := 0
+		err := withFloodRetry(context.Background(), func() error {
+			calls++
+			if calls == 1 {
+				return &bot.TooManyRequestsError{Message: "too many requests", RetryAfter: 7}
+			}
+			return nil
+		})
+		if err != nil || calls != 2 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+		if len(waits) != 1 || waits[0] != 7*time.Second {
+			t.Fatalf("waits=%v, want [7s]", waits)
+		}
+	})
+
+	t.Run("zero retry_after waits a floor second", func(t *testing.T) {
+		waits = nil
+		calls := 0
+		_ = withFloodRetry(context.Background(), func() error {
+			calls++
+			if calls == 1 {
+				return &bot.TooManyRequestsError{Message: "too many requests"}
+			}
+			return nil
+		})
+		if len(waits) != 1 || waits[0] != time.Second {
+			t.Fatalf("waits=%v, want [1s]", waits)
+		}
+	})
+
+	t.Run("persistent flood gives up after bounded attempts", func(t *testing.T) {
+		waits = nil
+		calls := 0
+		err := withFloodRetry(context.Background(), func() error {
+			calls++
+			return &bot.TooManyRequestsError{Message: "too many requests", RetryAfter: 3}
+		})
+		var flood *bot.TooManyRequestsError
+		if !errors.As(err, &flood) {
+			t.Fatalf("want TooManyRequestsError, got %v", err)
+		}
+		if calls != 3 || len(waits) != 2 {
+			t.Fatalf("calls=%d waits=%v, want 3 calls / 2 waits", calls, waits)
+		}
+	})
+
+	t.Run("huge retry_after gives up instead of hanging", func(t *testing.T) {
+		waits = nil
+		calls := 0
+		err := withFloodRetry(context.Background(), func() error {
+			calls++
+			return &bot.TooManyRequestsError{Message: "too many requests", RetryAfter: 300}
+		})
+		if err == nil || calls != 1 || len(waits) != 0 {
+			t.Fatalf("err=%v calls=%d waits=%v — must give up without waiting", err, calls, waits)
+		}
+	})
+
+	t.Run("cancelled context stops retrying", func(t *testing.T) {
+		floodWait = func(ctx context.Context, d time.Duration) bool { return false }
+		calls := 0
+		err := withFloodRetry(context.Background(), func() error {
+			calls++
+			return &bot.TooManyRequestsError{Message: "too many requests", RetryAfter: 2}
+		})
+		floodWait = func(ctx context.Context, d time.Duration) bool {
+			waits = append(waits, d)
+			return true
+		}
+		if err == nil || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+}
+
+// Regression: 7/12 an owner message "Pika and Umbreon, ..." got
+// only one reply — the prefix-anchored addressed-to-peer skip fired for
+// umbreon before the both-named branch in RouteDecision could run. Both-named
+// must be honored at the shouldHandleGroupMessage layer.
+func TestShouldHandleGroupMessage_BothNamed(t *testing.T) {
+	// Configured from umbreon's perspective: pika is the peer.
+	h := &Handler{
+		botUsername:          "umbreonmini_bot",
+		broadcastProbability: 0, // force name/domain routing, no broadcast luck
+		peerBotUsernames:     map[string]bool{"pikamini_bot": true},
+		botExchangeCount:     make(map[int64]int),
+		botLastResponse:      make(map[int64]time.Time),
+		myAliases:            []string{"umbreon", "brother"},
+		peerAliases:          []string{"pika", "sister"},
+		groupDomain:          "companionship",
+	}
+	tests := []struct {
+		name       string
+		text       string
+		wantHandle bool
+	}{
+		{"both named, peer first (the 7/12 miss)", "Pika and Umbreon, give us a friendly changelog on what changed", true},
+		{"both named mixed", "pika brother 你們看這個", true},
+		{"peer-only prefix still yields", "Pika lunch memo 三明治", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &models.Message{
+				From: &models.User{Username: "human"},
+				Text: tt.text,
+				Chat: models.Chat{Type: "group"},
+			}
+			got, _ := h.shouldHandleGroupMessage(msg, tt.text)
+			if got != tt.wantHandle {
+				t.Errorf("shouldHandleGroupMessage(%q) = %v, want %v", tt.text, got, tt.wantHandle)
+			}
+		})
 	}
 }

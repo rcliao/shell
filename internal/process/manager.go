@@ -3,6 +3,7 @@ package process
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,8 +11,14 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ErrSessionBusy reports that the target session is mid-turn. Synthetic
+// callers (a2a events, scheduler prompts) should retry on a backoff instead
+// of dropping their message (V2-H16).
+var ErrSessionBusy = errors.New("session busy")
 
 // StreamFunc is called with a text delta as Claude generates it.
 type StreamFunc func(delta string)
@@ -41,6 +48,16 @@ type SendResult struct {
 	Artifacts []Artifact
 	ToolCalls []ToolCall // tool calls observed during execution
 	Usage     *Usage     // token usage from result event (nil if absent)
+	Timings   Timings    // per-turn phase timings (V2-H18 latency attribution)
+}
+
+// Timings breaks a turn's wall clock into attributable phases so the >60s
+// long tail can be diagnosed from the usage ledger instead of guessed at
+// (V2-H18). All values in milliseconds.
+type Timings struct {
+	QueueMs int64 // waiting to start (compaction/busy wait) before dispatch
+	TTFTMs  int64 // dispatch → first streamed text delta (0 = nothing streamed)
+	TotalMs int64 // Send entry → return
 }
 
 type Manager struct {
@@ -126,6 +143,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 // Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
 // If the session is busy due to compaction, waits for compaction to finish before proceeding.
 func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+	sendStart := time.Now()
 	key := req.Key()
 	m.mu.Lock()
 	sess, exists := m.sessions[key]
@@ -160,7 +178,7 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 
 	if exists && sess.Status == StatusBusy {
 		m.mu.Unlock()
-		return SendResult{}, fmt.Errorf("session for chat %d thread %d is busy", req.ChatID, req.MessageThreadID)
+		return SendResult{}, fmt.Errorf("session for chat %d thread %d is busy: %w", req.ChatID, req.MessageThreadID, ErrSessionBusy)
 	}
 
 	// Check concurrency limit
@@ -192,31 +210,53 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 		}
 	}()
 
+	// V2-H18: attribute the turn's wall clock. Queue = time before dispatch
+	// (compaction wait); TTFT = dispatch → first streamed text delta.
+	dispatchStart := time.Now()
+	queueMs := dispatchStart.Sub(sendStart).Milliseconds()
+	var ttftOnce sync.Once
+	var ttftMs atomic.Int64
+	wrapped := func(delta string) {
+		ttftOnce.Do(func() { ttftMs.Store(time.Since(dispatchStart).Milliseconds()) })
+		if onUpdate != nil {
+			onUpdate(delta)
+		}
+	}
+	stamp := func(r SendResult) SendResult {
+		r.Timings = Timings{
+			QueueMs: queueMs,
+			TTFTMs:  ttftMs.Load(),
+			TotalMs: time.Since(sendStart).Milliseconds(),
+		}
+		return r
+	}
+
 	// Ephemeral (one-shot) turns bypass the persistent process entirely: a
 	// fresh subprocess answers this turn on req.Model and exits, leaving the
 	// chat's persistent session on its default model undisturbed. Used by the
 	// "fable" experiment keyword so a single reply can run on a different model
 	// without a session rotation or cache rebuild for the ongoing conversation.
 	if req.Ephemeral {
-		return m.runClaudeBidirectional(ctx, req, onUpdate)
+		result, err := m.runClaudeBidirectional(ctx, req, wrapped)
+		return stamp(result), err
 	}
 
 	// Try persistent process first (keeps process alive between messages).
-	result, err := m.sendPersistent(ctx, req, onUpdate)
+	result, err := m.sendPersistent(ctx, req, wrapped)
 	if err == nil {
-		return result, nil
+		return stamp(result), nil
 	}
 
 	// Fall back to spawn-per-message.
 	slog.Debug("falling back to spawn-per-message", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "reason", err)
-	result, err = m.runClaudeBidirectional(ctx, req, onUpdate)
+	result, err = m.runClaudeBidirectional(ctx, req, wrapped)
 	if err != nil && req.SessionID != "" {
 		slog.Warn("resume failed, retrying as fresh session", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
 		freshReq := req
 		freshReq.SessionID = ""
-		result, err = m.runClaudeBidirectional(ctx, freshReq, onUpdate)
+		result, err = m.runClaudeBidirectional(ctx, freshReq, wrapped)
 	}
-	return result, err
+	return stamp(result), err
 }
 
 func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
