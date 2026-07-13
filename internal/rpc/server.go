@@ -60,6 +60,7 @@ type Server struct {
 	skillsLoad     SkillsLoadFunc
 	timezone       string
 	botUsername    string // this agent's bot username
+	contextManifest func(ctx context.Context, chatID int64) (any, string)
 }
 
 // Config holds the dependencies for the RPC server.
@@ -78,6 +79,25 @@ type Config struct {
 	SkillsLoad    SkillsLoadFunc
 	Timezone      string
 	BotUsername   string // this agent's bot username
+	// ContextManifest returns the live composed system-prompt components
+	// (and full text) for a chat — the `shell context` instrument.
+	ContextManifest func(ctx context.Context, chatID int64) (any, string)
+}
+
+// handleContext serves the live system-prompt manifest (GET /context?chat_id=N&full=1).
+func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
+	if s.contextManifest == nil {
+		writeError(w, http.StatusServiceUnavailable, "context manifest not wired")
+		return
+	}
+	var chatID int64
+	fmt.Sscanf(r.URL.Query().Get("chat_id"), "%d", &chatID)
+	parts, full := s.contextManifest(r.Context(), chatID)
+	resp := map[string]any{"components": parts}
+	if r.URL.Query().Get("full") == "1" {
+		resp["full_text"] = full
+	}
+	writeJSON(w, resp)
 }
 
 // DefaultSocketPath returns the default Unix socket path.
@@ -106,6 +126,7 @@ func New(cfg Config) *Server {
 		skillsLoad:    cfg.SkillsLoad,
 		timezone:  cfg.Timezone,
 		botUsername: cfg.BotUsername,
+		contextManifest: cfg.ContextManifest,
 	}
 }
 
@@ -140,6 +161,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /skills-reload", s.handleSkillsReload)
 	mux.HandleFunc("POST /skills-load", s.handleSkillsLoad)
 	mux.HandleFunc("POST /heartbeat-log", s.handleHeartbeatLog)
+	mux.HandleFunc("GET /context", s.handleContext)
 
 	s.server = &http.Server{Handler: mux}
 	slog.Info("rpc server starting", "socket", s.sockPath)

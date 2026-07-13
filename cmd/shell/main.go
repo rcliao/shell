@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -350,6 +352,58 @@ func main() {
 	evalCmd.Flags().StringVar(&evSinceFlag, "since", "", "lookback window (default 168h)")
 	evalCmd.Flags().BoolVar(&evJSONFlag, "json", false, "emit redaction-safe JSON snapshot")
 	evalCmd.Flags().StringVar(&evConfigFlag, "config", "", "agent config path (default ~/.shell/config.json)")
+
+	// context command — live system-prompt manifest from the running daemon.
+	var cxChatFlag int64
+	var cxFullFlag bool
+	var cxConfigFlag string
+	contextCmd := &cobra.Command{
+		Use:   "context",
+		Short: "Show the live composed system prompt per component (from the running daemon)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(cxConfigFlag)
+			sockPath := filepath.Join(filepath.Dir(cfg.Daemon.PIDFile), "bridge.sock")
+			client := &http.Client{Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+				},
+			}}
+			url := fmt.Sprintf("http://unix/context?chat_id=%d", cxChatFlag)
+			if cxFullFlag {
+				url += "&full=1"
+			}
+			resp, err := client.Get(url)
+			if err != nil {
+				return fmt.Errorf("daemon not reachable at %s: %w", sockPath, err)
+			}
+			defer resp.Body.Close()
+			var out struct {
+				Components []struct {
+					Name      string `json:"name"`
+					Chars     int    `json:"chars"`
+					EstTokens int    `json:"est_tokens"`
+				} `json:"components"`
+				FullText string `json:"full_text"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				return err
+			}
+			fmt.Printf("Live system-prompt manifest (chat %d):\n\n", cxChatFlag)
+			fmt.Printf("  %-22s %10s %12s\n", "COMPONENT", "CHARS", "EST TOKENS")
+			for _, c := range out.Components {
+				fmt.Printf("  %-22s %10d %12d\n", c.Name, c.Chars, c.EstTokens)
+			}
+			fmt.Println("\n  (excludes CLI baseline + MCP tool schemas — not shell-authored)")
+			if cxFullFlag {
+				fmt.Println("\n===== FULL TEXT =====")
+				fmt.Println(out.FullText)
+			}
+			return nil
+		},
+	}
+	contextCmd.Flags().Int64Var(&cxChatFlag, "chat", 0, "chat ID to compose for (0 = default profile)")
+	contextCmd.Flags().BoolVar(&cxFullFlag, "full", false, "print the full composed text")
+	contextCmd.Flags().StringVar(&cxConfigFlag, "config", "", "agent config path")
 
 	// tool-usage command — read the per-exchange tool-call ledger.
 	var tuSinceFlag string
@@ -948,7 +1002,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, evalCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

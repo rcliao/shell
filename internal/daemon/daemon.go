@@ -589,6 +589,10 @@ func New(cfg config.Config) (*Daemon, error) {
 		SendPhoto: func(chatID, threadID int64, data []byte, caption string) {
 			bot.SendPhoto(chatID, threadID, data, caption)
 		},
+		ContextManifest: func(ctx context.Context, chatID int64) (any, string) {
+			parts, full := br.ContextManifest(ctx, chatID)
+			return parts, full
+		},
 		RelayToBridge: func(ctx context.Context, chatID, threadID int64, message string) {
 			// Log the relay message to the target chat's session so Claude
 			// has context when the recipient replies. Don't run a full Claude
