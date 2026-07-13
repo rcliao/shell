@@ -1904,6 +1904,10 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		senderName = msg.From.Username
 	}
 
+	// Instant receipt (V2-H33): react before any work so the unavoidable
+	// model-side seconds read as "on it", not "did it hear me?".
+	setReaction(ctx, b, msg.Chat.ID, msg.ID, "👀")
+
 	// Serialize messages per (chat, thread) so concurrent sends in different
 	// topics run in parallel and only same-topic messages queue.
 	chatMu := h.getChatLock(msg.Chat.ID, threadID)

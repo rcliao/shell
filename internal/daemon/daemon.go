@@ -1021,11 +1021,17 @@ func (d *Daemon) cleanupLoop(ctx context.Context) {
 	defer sessionTicker.Stop()
 	dbTicker := time.NewTicker(6 * time.Hour)
 	defer dbTicker.Stop()
+	// Eager rotation + cache pre-warm (V2-H33): pay the rotation/cache bill in
+	// the background on idle sessions so the owner's next message never does.
+	prewarmTicker := time.NewTicker(10 * time.Minute)
+	defer prewarmTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-prewarmTicker.C:
+			d.bridge.PrewarmDueSessions(ctx, 10*time.Minute)
 		case <-sessionTicker.C:
 			if err := d.bridge.CleanupStaleSessions(1 * time.Hour); err != nil {
 				slog.Warn("stale session cleanup failed", "error", err)

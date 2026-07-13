@@ -607,10 +607,19 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   rotation thrash becomes a graded regression, never a mystery again. Grade
   this fix by: cold-turn share falling, latency_p95 < 60s, generation age
   p50 > 12h.
-- **rest of speed program (owner discussion 7/13):** (1) post-rotation cache
-  pre-warm in quiet hours; (2) first-event vs first-text TTFT split; (3)
-  answer-first-persist-after prompt rule; (4) instant receipt reaction; (5)
-  casual-turn thinking-cap experiment (watch factual_corrections).
+- **speed program status (7/13 afternoon):** SHIPPED same day — (1) eager
+  rotation + cache pre-warm (bridge PrewarmDueSessions, 10-min daemon tick,
+  idle-guarded; warm-up turn source=prewarm, excluded from memory exchange
+  log); (3) answer-first-persist-after + casual-turn no-deliberation pinned
+  as behavioral-speed-contract in both agents; (4) instant 👀 receipt
+  reaction pre-lock. REMAINING for loop: (2) first-event vs first-text TTFT
+  split (diagnostic); NOTE: handler per-chat lock wait happens BEFORE
+  manager.Send so it is INVISIBLE to H18 queue_ms — 🕐 reaction marks it;
+  fold a handler-level timestamp into the TTFT-split item.
+- **combined 7/13 speed fixes:** rotation thresholds (morning) + Notion MCP
+  removal (~30-40k base, V2-H34) + eager prewarm + speed contract. measure:
+  normal-message time-to-first-content <15s; cold-turn share ~0 during
+  waking hours; latency_p95 <60s.
 
 ### V2-H34 — [H/A] Notion skill replaces Notion MCP server — SHIPPED 7/13
 - **status:** SHIPPED + DEPLOYED 7/13 (repo: skills/notion + write-verify
