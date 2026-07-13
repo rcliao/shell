@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 )
 
 // ToolCall represents a tool invocation seen during streaming.
@@ -207,6 +208,7 @@ func parseBidirectionalEvents(r io.Reader, stdin io.Writer, onUpdate StreamFunc)
 // bytes between turns.
 func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, onUpdate StreamFunc) SendResult {
 	var result SendResult
+	parseStart := time.Now()
 	// Track whether we've received any stream_event text deltas.
 	// When streaming is active, assistant events duplicate the same text
 	// that was already delivered incrementally, so we skip forwarding
@@ -240,6 +242,12 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
+		}
+		// First-event timing (V2-H33): the first stdout event marks the end of
+		// network + server prefill; the gap to the first TEXT delta is thinking.
+		if result.FirstEventAt.IsZero() {
+			result.FirstEventAt = time.Now()
+			_ = parseStart // reference point kept for future relative timing
 		}
 
 		var event stdoutEvent

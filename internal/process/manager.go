@@ -43,21 +43,23 @@ type Usage struct {
 
 // SendResult contains the response text, session ID, and any binary artifacts.
 type SendResult struct {
-	Text      string
-	SessionID string
-	Artifacts []Artifact
-	ToolCalls []ToolCall // tool calls observed during execution
-	Usage     *Usage     // token usage from result event (nil if absent)
-	Timings   Timings    // per-turn phase timings (V2-H18 latency attribution)
+	Text        string
+	SessionID   string
+	Artifacts   []Artifact
+	ToolCalls   []ToolCall // tool calls observed during execution
+	Usage       *Usage     // token usage from result event (nil if absent)
+	Timings     Timings    // per-turn phase timings (V2-H18 latency attribution)
+	FirstEventAt time.Time  // wall time of the first stdout event this turn (protocol layer)
 }
 
 // Timings breaks a turn's wall clock into attributable phases so the >60s
 // long tail can be diagnosed from the usage ledger instead of guessed at
 // (V2-H18). All values in milliseconds.
 type Timings struct {
-	QueueMs int64 // waiting to start (compaction/busy wait) before dispatch
-	TTFTMs  int64 // dispatch → first streamed text delta (0 = nothing streamed)
-	TotalMs int64 // Send entry → return
+	QueueMs      int64 // waiting to start (compaction/busy wait) before dispatch
+	FirstEventMs int64 // dispatch → first stdout event (network + server prefill)
+	TTFTMs       int64 // dispatch → first streamed text delta (prefill + thinking)
+	TotalMs      int64 // Send entry → return
 }
 
 type Manager struct {
@@ -227,6 +229,11 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 			QueueMs: queueMs,
 			TTFTMs:  ttftMs.Load(),
 			TotalMs: time.Since(sendStart).Milliseconds(),
+		}
+		if !r.FirstEventAt.IsZero() {
+			if fe := r.FirstEventAt.Sub(dispatchStart).Milliseconds(); fe > 0 {
+				r.Timings.FirstEventMs = fe
+			}
 		}
 		return r
 	}
