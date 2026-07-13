@@ -82,10 +82,20 @@ func isPersistenceTool(tc process.ToolCall) bool {
 	case name == "bash" || strings.HasSuffix(name, "__bash"):
 		cmd, _ := tc.Input["command"].(string)
 		cmd = strings.ToLower(cmd)
-		return strings.Contains(cmd, "shell-remember") ||
+		if strings.Contains(cmd, "shell-remember") ||
 			strings.Contains(cmd, "ghost put") ||
-			strings.Contains(cmd, "gog docs") ||
-			strings.Contains(cmd, "notion")
+			strings.Contains(cmd, "gog docs") {
+			return true
+		}
+		// The notion skill script: only WRITE subcommands are persistence
+		// (get-page / query-db are reads and must not verify a save claim).
+		if strings.Contains(cmd, "notion") {
+			return strings.Contains(cmd, "patch-prop") ||
+				strings.Contains(cmd, "append") ||
+				strings.Contains(cmd, "create") ||
+				strings.Contains(cmd, "curl")
+		}
+		return false
 	}
 	return false
 }

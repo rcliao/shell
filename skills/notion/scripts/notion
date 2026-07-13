@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""notion — minimal Notion REST client for agent skills (replaces the 30-40k-token
+MCP server with ~4 purpose-built operations). NOTION_TOKEN from env.
+
+Usage:
+  notion get-page <page_id>                       # properties as plain text
+  notion query-db <db_id> [--date <prop>=<val>]   # rows; filter adapts to prop type (title/text/date)
+  notion patch-prop <page_id> <prop_name> <value> # set a property, then READ BACK as receipt
+  notion append <page_id> <text>                  # append a paragraph block
+
+patch-prop auto-detects the property type (title/rich_text/select/number/date)
+from the page schema. Always verify the printed read-back matches your intent
+before telling the user it saved.
+"""
+import os, sys, json, urllib.request
+
+TOK = os.environ.get("NOTION_TOKEN", "")
+API = "https://api.notion.com/v1"
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr); sys.exit(code)
+
+def req(method, path, body=None):
+    if not TOK:
+        die("NOTION_TOKEN not set", 2)
+    r = urllib.request.Request(
+        f"{API}{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        method=method,
+        headers={"Authorization": f"Bearer {TOK}",
+                 "Notion-Version": "2022-06-28",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        die(f"notion {method} {path} failed: {e.code} {e.read().decode()[:300]}", 4)
+
+def prop_text(p):
+    t = p.get("type")
+    if t == "title":
+        return "".join(x.get("plain_text", "") for x in p.get("title", []))
+    if t == "rich_text":
+        return "".join(x.get("plain_text", "") for x in p.get("rich_text", []))
+    if t == "select":
+        return (p.get("select") or {}).get("name", "")
+    if t == "number":
+        v = p.get("number")
+        return "" if v is None else str(v)
+    if t == "date":
+        return (p.get("date") or {}).get("start", "")
+    if t == "checkbox":
+        return str(p.get("checkbox"))
+    return f"<{t}>"
+
+def show_page(page):
+    print(f"page {page['id']}  url={page.get('url','')}")
+    for name, p in page.get("properties", {}).items():
+        txt = prop_text(p)
+        if txt:
+            print(f"  {name} [{p.get('type')}]: {txt}")
+
+def main():
+    if len(sys.argv) < 2:
+        die(__doc__)
+    cmd = sys.argv[1]
+
+    if cmd == "get-page":
+        show_page(req("GET", f"/pages/{sys.argv[2]}"))
+
+    elif cmd == "query-db":
+        db = sys.argv[2]
+        body = {"page_size": 10}
+        if len(sys.argv) > 4 and sys.argv[3] == "--date":
+            prop, _, val = sys.argv[4].partition("=")
+            # Auto-detect the property's actual type for the filter (a "date"
+            # column is often a title/rich_text in family databases).
+            schema = req("GET", f"/databases/{db}").get("properties", {})
+            ptype = schema.get(prop, {}).get("type", "date")
+            if ptype == "title":
+                body["filter"] = {"property": prop, "title": {"equals": val}}
+            elif ptype == "rich_text":
+                body["filter"] = {"property": prop, "rich_text": {"equals": val}}
+            else:
+                body["filter"] = {"property": prop, "date": {"equals": val}}
+        for row in req("POST", f"/databases/{db}/query", body).get("results", []):
+            show_page(row)
+            print("---")
+
+    elif cmd == "patch-prop":
+        page_id, prop_name, value = sys.argv[2], sys.argv[3], " ".join(sys.argv[4:])
+        page = req("GET", f"/pages/{page_id}")
+        p = page.get("properties", {}).get(prop_name)
+        if p is None:
+            die(f"property {prop_name!r} not found; page has: {list(page.get('properties', {}))}", 3)
+        t = p.get("type")
+        if t == "title":
+            body = {prop_name: {"title": [{"text": {"content": value}}]}}
+        elif t == "rich_text":
+            body = {prop_name: {"rich_text": [{"text": {"content": value}}]}}
+        elif t == "select":
+            body = {prop_name: {"select": {"name": value}}}
+        elif t == "number":
+            body = {prop_name: {"number": float(value)}}
+        elif t == "date":
+            body = {prop_name: {"date": {"start": value}}}
+        else:
+            die(f"unsupported property type {t!r} for patch-prop", 3)
+        req("PATCH", f"/pages/{page_id}", {"properties": body})
+        # Read-back receipt: what the row ACTUALLY says now.
+        after = req("GET", f"/pages/{page_id}")
+        print(f"WROTE {prop_name} — read-back:")
+        print(f"  {prop_name}: {prop_text(after['properties'][prop_name])}")
+
+    elif cmd == "append":
+        page_id, text = sys.argv[2], " ".join(sys.argv[3:])
+        req("PATCH", f"/blocks/{page_id}/children",
+            {"children": [{"object": "block", "type": "paragraph",
+                           "paragraph": {"rich_text": [{"text": {"content": text}}]}}]})
+        print(f"APPENDED paragraph to {page_id}")
+
+    else:
+        die(__doc__)
+
+main()
