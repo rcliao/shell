@@ -1039,6 +1039,16 @@ func (d *Daemon) cleanupLoop(ctx context.Context) {
 	// the background on idle sessions so the owner's next message never does.
 	prewarmTicker := time.NewTicker(10 * time.Minute)
 	defer prewarmTicker.Stop()
+	// Post-boot warm: a restart killed every persistent proc; re-warm the
+	// actively-used sessions now instead of taxing the next family message.
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(20 * time.Second):
+			d.bridge.WarmActiveSessionsAfterBoot(ctx)
+		}
+	}()
 
 	for {
 		select {
