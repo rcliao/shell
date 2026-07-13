@@ -760,3 +760,20 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **measure-by:** context_fanout step <1.5s warm; end-to-end simple turns
   <15s sustained (owner target); recall_grounded must NOT fall (degradation
   events logged if the 3s budget ever trips).
+
+### V2-H39 — [H] System-prompt compose runs EVERY turn — cache per generation — APPROVED-CANDIDATE 7/13
+- **finding (live traffic, rerank-on):** system_prompt_compose costs 2.2-3.2s
+  on EVERY turn (not just spawns): the bridge composes Channel A
+  unconditionally (identity + pinned assembly + skills + lifecycle) because
+  the prompt FINGERPRINT check reads it per-turn; the manager only uses it at
+  spawn. Under the reranked store, pinned assembly makes this ~2.5s/turn —
+  ~40% of current prework on every family message.
+- **scope:** cache the composed prompt + fingerprint per generation;
+  recompute only (a) at spawn/rotation, (b) on a slow tick (the 10-min
+  prewarm tick is natural) for change-detection — trading instant
+  prompt-change rotation for ≤10min delayed detection, which the eager
+  prewarm absorbs invisibly anyway. Expected: warm prework 6s → ~3.5s,
+  reranker-off prework → sub-second.
+- **caution:** touches fingerprint/rotation semantics — ship fresh with
+  tests, NOT at the tail of a marathon session (7/13 lesson: two of today's
+  incidents were deploy-fatigue-adjacent). Top of the loop queue with H32.
