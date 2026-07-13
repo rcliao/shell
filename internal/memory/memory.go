@@ -257,6 +257,7 @@ func (m *Memory) maybeBackgroundReflect(ns string, skipped int) {
 }
 
 func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string) string {
+	start := time.Now()
 	prof := m.profileFor(chatID)
 	var sb strings.Builder
 
@@ -378,6 +379,13 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 	// Behavioral guidelines are loaded via pinned memories in the system prompt
 	// (see systemPromptFromAgent), not via per-turn injection. This avoids duplication
 	// and ensures they're present on every turn regardless of semantic match.
+
+	// Per-turn retrieval latency: the number that decides whether the
+	// reranker stays affordable (ghostFetchBudget cancels fetches at 3s and
+	// silently degrades recall — before this log, budget blowouts were
+	// invisible). Grep "memory inject" for p50/p95 over any window.
+	slog.Info("memory inject", "chat", chatID,
+		"ms", time.Since(start).Milliseconds(), "injected_bytes", sb.Len())
 
 	if sb.Len() == 0 {
 		return userMsg
