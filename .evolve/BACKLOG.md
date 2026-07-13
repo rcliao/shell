@@ -1,5 +1,22 @@
 # Backlog (v2 — reseeded 2026-07-01 from the full shell/ghost review)
 
+## 🎯 CURRENT GOAL (owner-set 2026-07-13): EVAL + QUALITY/RELIABILITY FIRST
+Build toward comprehensive measurement of the harness, then use it to drive
+quality/reliability. Feature work queues BEHIND measurement work.
+**Priority order for the loop:**
+1. **V2-H32 phase v2.0** — OwnerEval v2 deterministic core + pillar field +
+   maturity ladder (L0-L4) + March-July backfill baseline (design:
+   .evolve/designs/ownereval-v2.md + docs/HARNESS.md pillar map)
+2. **V2-H36 phases 1-2** — testbed e2e + smoke deploy gate
+3. **V2-H24** — send-gate (quality invariant)
+4. **V2-H30** — self-healing reliability
+5. **V2-H33 remainder** — rotation growth-based trigger code fix + TTFT split
+6. Then: H20 flush, H12 recall relevance, H14 autonomous skills (H27/H29),
+   H23 backups, H28 inspect, H26 remainder.
+Grading rule: every ship names its eval dimension(s); validation = dimension
+movement vs baseline. Pillar maturity ladder is the progress scoreboard.
+
+
 **Status flow** (per README): `proposed` → (`approved` for high-risk, owner
 flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 `superseded`. Each item is tagged **[H]** harness (shell/ghost generic) or
@@ -661,3 +678,31 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **eval tie-in:** base_context_tokens (V2-H33) reads the manifest TOTAL;
   add pinned_dead_ns_count as a ledger-liveness-style check.
 - **measure-by:** manifest TOTAL trend weekly; zero dead-ns pins.
+
+### V2-H36 — [H] Testbed: agent-driven e2e harness eval — APPROVED 7/13
+- **status:** approved (owner 7/13). Priority slot 2 under the eval-first goal.
+- **why:** production eval detects failures AFTER the family experiences
+  them — the owners are currently the QA department. The harness's promises
+  are mechanically verifiable, so they can be proven pre-deploy.
+- **design:** `shell testbed` builds the FULL real stack (store, ghost,
+  claude subprocess, skills, rotation, ledgers) for a disposable test agent
+  (~/.shell/testbed/, cheap model, fresh DBs per run) with a CAPTURE
+  transport replacing Telegram — delivery reconciliation = generated vs
+  captured, exact. Bridge already has the Transport interface; routing e2e
+  tests already construct the stack directly.
+- **phases:** (1) testbed runtime + capture transport + memory-round-trip
+  scenario (send fact → assert write ledger → force rotation → recall →
+  assert grounded); (2) smoke suite (delivery/truncation/dedup/error-gate)
+  + `make testbed-smoke` as the pre-SIGHUP deploy gate; (3) dual-agent a2a +
+  media round-trip scenarios; (4) `claude -p` adversarial examiner (mission:
+  make it drop/contradict/confabulate/leak; confirmed finds frozen into the
+  scripted suite) + realistic-user driver (bilingual, rapid-fire, photos,
+  corrections). Examiner budget-capped like the judge tier.
+- **rails:** haiku-class test agent, hard turn caps, fully separate DB tree
+  (assert it never touches family data), scenarios model-independent by
+  design (they test the seam, not the soul).
+- **eval tie-in:** maturity L4 requires production goals held AND e2e
+  scenarios green. Testbed proves promises; production eval measures
+  experience.
+- **measure-by:** memory-round-trip scenario runs green end-to-end; smoke
+  gate blocks a deliberately-broken build.

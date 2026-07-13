@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "last_cycle": 167,
-  "last_cycle_at": "2026-07-12T20:20:00-07:00",
+  "last_cycle_at": "2026-07-13T09:30:00-07:00",
   "cycle_148_finding": "FC bench eval: Haiku-augmented REGRESSES every metric vs keyword-only (stickiness 1.00→0.80, recall 0.67→0.17, uncaught 3→13). Cycle-145 sticky-pointer architecture validated as quality win, not just latency win. Haiku per-turn = wrong lever.",
   "cycle_147_baseline": "FC eval extended 7→17 probes. stickiness=1.00, drift=0.00, recall=0.67, uncaught=3/21 (14%). Inertia hypothesis confirmed on long-inertia + no-anchor-continuation probes.",
   "cycle_146_baseline": "FC dimension: stickiness=1.00, drift_mean=0.00, recall=0.33, uncaught_drifts=4/9 (44%). Keyword cascade nails clean cases; ~44% of drifts need Haiku.",
@@ -13,12 +13,12 @@
   "cycle_105_validated": "subtype audit reveals umbreon haiku=100% error, pikamini=38% error + 25% skip-short; hypothesis: umbreonmini work_dir issue or registry-load problem; investigate next cycle when bash classifier is back",
   "cycle_81_validated": "2026-05-19T11:23 — pikamini meals thread, health-watch commitment action validated, due_at=+24h",
   "current_goal": {
-    "dim": "post-L3-organic-validation",
+    "dim": "eval-first",
     "agent": "system",
-    "target": "first organic data accumulates after restart; anomalies (if any) surface as proposals",
-    "current": "infrastructure ready; awaiting daemon restart for first data",
-    "target_date": "2026-05-23",
-    "rationale": "Cycle 69 shipped the feedback machinery. Cycle 70+ uses it to detect L3 regressions and surface them as auto-proposals. Until daemons are restarted with c66-69 binary, no organic data flows."
+    "target": "comprehensive harness eval (OwnerEval v2.0 + pillar maturity ladder + testbed e2e) driving quality/reliability; features queue behind measurement",
+    "current": "design complete (ownereval-v2.md, HARNESS.md, H36); v1 eval live with baselines; implementation not started",
+    "target_date": "2026-08-01",
+    "rationale": "owner-set 7/13: 'build toward eval so we can start measuring how shell performs, and better quality/reliability first'. Stop using the family as QA."
   },
   "track_record": {
     "validated": 46,
