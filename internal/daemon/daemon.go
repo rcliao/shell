@@ -361,6 +361,16 @@ func New(cfg config.Config) (*Daemon, error) {
 			"profiles", len(profiles),
 			"chat_profiles", len(chatProfiles),
 		)
+		// Embedder warm-up (V2-H33): the ONNX embedding (and reranker) models
+		// lazy-load on first query, so every daemon restart made the next
+		// family message pay ~8s of model loading (observed three times on
+		// 7/13). A throwaway query at boot moves that cost to startup, off
+		// anyone's turn. Async — boot isn't blocked.
+		go func() {
+			start := time.Now()
+			mem.InjectContext(context.Background(), 0, "warmup")
+			slog.Info("memory embedder warmed", "secs", int(time.Since(start).Seconds()))
+		}()
 	}
 
 	// Initialize planner if enabled
