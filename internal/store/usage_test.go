@@ -13,7 +13,7 @@ func TestLogUsageStoresCostDelta(t *testing.T) {
 
 	log := func(sessID int64, cumulative float64) {
 		t.Helper()
-		if err := s.LogUsage(1, sessID, 10, 5, 0, 0, cumulative, 1, "interactive", "claude-opus-4-8", 0, 0, 0); err != nil {
+		if err := s.LogUsage(1, sessID, 10, 5, 0, 0, cumulative, 1, "interactive", "claude-opus-4-8", 0, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -69,7 +69,7 @@ func TestLogUsageStoresTimings(t *testing.T) {
 	s, cleanup := newTestStore(t)
 	defer cleanup()
 
-	if err := s.LogUsage(1, 100, 10, 5, 0, 0, 0.5, 1, "interactive", "claude-opus-4-8", 1200, 8500, 72000); err != nil {
+	if err := s.LogUsage(1, 100, 10, 5, 0, 0, 0.5, 1, "interactive", "claude-opus-4-8", 1200, 8500, 72000, 4200); err != nil {
 		t.Fatal(err)
 	}
 	var queue, ttft, dur int64

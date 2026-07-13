@@ -237,6 +237,7 @@ func (s *Store) migrate() error {
 	// Per-turn phase timings (V2-H18 latency attribution): queue wait before
 	// dispatch, time-to-first-token, and total Send wall clock, in ms.
 	s.db.Exec("ALTER TABLE usage ADD COLUMN queue_ms INTEGER NOT NULL DEFAULT 0")
+	s.db.Exec("ALTER TABLE usage ADD COLUMN first_event_ms INTEGER NOT NULL DEFAULT 0")
 	s.db.Exec("ALTER TABLE usage ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0")
 	s.db.Exec("ALTER TABLE usage ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
 
@@ -1326,7 +1327,7 @@ type UsageSummary struct {
 // cost_usd, so SUM(cost_usd) reports true spend. A delta below zero means the
 // CLI session restarted (fresh running total); the reported value then IS the
 // exchange cost.
-func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source, model string, queueMs, ttftMs, durationMs int64) error {
+func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cacheCreation, cacheRead int, costUSD float64, numTurns int, source, model string, queueMs, ttftMs, durationMs, firstEventMs int64) error {
 	if source == "" {
 		source = "interactive"
 	}
@@ -1342,9 +1343,9 @@ func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cac
 		delta = costUSD
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source, cost_usd_total, model, queue_ms, ttft_ms, duration_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD, model, queueMs, ttftMs, durationMs)
+		INSERT INTO usage (chat_id, session_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, num_turns, source, cost_usd_total, model, queue_ms, ttft_ms, duration_ms, first_event_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, chatID, sessionID, inputTokens, outputTokens, cacheCreation, cacheRead, delta, numTurns, source, costUSD, model, queueMs, ttftMs, durationMs, firstEventMs)
 	return err
 }
 

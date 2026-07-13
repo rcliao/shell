@@ -834,6 +834,15 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		wg.Wait()
 	}
 	step("context_fanout")
+	// V2-H33: per-block context sizes — the data for the Channel B diet.
+	// ~4 chars/token; these blocks are the fresh (uncached) prefill the API
+	// pays on every turn before the first token.
+	slog.Info("turn: context sizes",
+		"chat_id", chatID,
+		"ghost_chars", len(ghostAug)-len(userMsg),
+		"transcript_chars", len(transcriptBlock),
+		"tasks_chars", len(tasksBlock)+len(activityBlock),
+		"channel_b_chars", len(channelBPrefix))
 
 	augmentedMsg := userMsg
 	if ghostAug != "" {
@@ -1234,7 +1243,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 			result.Usage.InputTokens, result.Usage.OutputTokens,
 			result.Usage.CacheCreationInputTokens, result.Usage.CacheReadInputTokens,
 			result.Usage.CostUSD, result.Usage.NumTurns, source, turnModel,
-			result.Timings.QueueMs, result.Timings.TTFTMs, result.Timings.TotalMs,
+			result.Timings.QueueMs, result.Timings.TTFTMs, result.Timings.TotalMs, result.Timings.FirstEventMs,
 		); err != nil {
 			slog.Warn("failed to log usage", "error", err)
 		}
