@@ -1904,25 +1904,33 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		senderName = msg.From.Username
 	}
 
+	// E2E clock (V2-H33): everything below is measured from handler entry so
+	// the message_map row records what the OWNER experienced, not just the
+	// model process.
+	e2eStart := time.Now()
+	var e2eRecvLagMs int64
+	if msg.Date > 0 {
+		if lag := time.Since(time.Unix(int64(msg.Date), 0)); lag > 0 {
+			e2eRecvLagMs = lag.Milliseconds()
+			if lag > 3*time.Second {
+				slog.Info("turn: receipt lag", "chat_id", msg.Chat.ID, "lag_ms", e2eRecvLagMs)
+			}
+		}
+	}
+
 	// Instant receipt (V2-H33): react before any work so the unavoidable
 	// model-side seconds read as "on it", not "did it hear me?".
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, "👀")
 
-	// Receipt lag: Telegram send time → our handler. Long-poll delays and
-	// getUpdates backlogs show up here and nowhere else.
-	if msg.Date > 0 {
-		if lag := time.Since(time.Unix(int64(msg.Date), 0)); lag > 3*time.Second {
-			slog.Info("turn: receipt lag", "chat_id", msg.Chat.ID, "lag_ms", lag.Milliseconds())
-		}
-	}
-
 	// Serialize messages per (chat, thread) so concurrent sends in different
 	// topics run in parallel and only same-topic messages queue.
 	chatMu := h.getChatLock(msg.Chat.ID, threadID)
+	e2ePreLock := time.Now()
 	if !chatMu.TryLock() {
 		setReaction(ctx, b, msg.Chat.ID, msg.ID, "🕐")
 		chatMu.Lock()
 	}
+	e2eLockWaitMs := time.Since(e2ePreLock).Milliseconds()
 	defer chatMu.Unlock()
 
 	// React with 👀 to acknowledge receipt.
@@ -1978,6 +1986,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	markdownFailed := false   // set when MarkdownV2 is rejected during streaming
 	lastSentContent := ""     // raw text of last successful streaming edit
 	lastUsedMarkdown := false // whether last streaming edit used MarkdownV2
+	var e2eFirstVisible time.Time // when the owner first saw real content
 
 	// Streaming edit loop: a separate goroutine periodically flushes
 	// accumulated text to Telegram. This keeps onUpdate non-blocking
@@ -2011,6 +2020,11 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 					if editErr == nil {
 						lastSentContent = current
 						lastUsedMarkdown = true
+						mu.Lock()
+						if e2eFirstVisible.IsZero() {
+							e2eFirstVisible = time.Now()
+						}
+						mu.Unlock()
 						continue
 					}
 					slog.Debug("streaming markdown edit failed, disabling for remaining edits", "error", editErr)
@@ -2035,6 +2049,11 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			} else {
 				lastSentContent = current
 				lastUsedMarkdown = false
+				mu.Lock()
+				if e2eFirstVisible.IsZero() {
+					e2eFirstVisible = time.Now()
+				}
+				mu.Unlock()
 			}
 		}
 	}()
@@ -2187,6 +2206,24 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			slog.Warn("failed to save message map", "error", err, "chat_id", msg.Chat.ID, "thread_id", threadID)
 		}
 	}
+
+	// E2E stamp (V2-H33): what the owner experienced, handler-relative.
+	// first_visible falls back to final-delivery when nothing streamed.
+	mu.Lock()
+	fv := e2eFirstVisible
+	mu.Unlock()
+	e2eTotalMs := time.Since(e2eStart).Milliseconds()
+	e2eFirstVisibleMs := e2eTotalMs
+	if !fv.IsZero() {
+		e2eFirstVisibleMs = fv.Sub(e2eStart).Milliseconds()
+	}
+	h.bridge.SaveTurnE2E(msg.Chat.ID, msg.ID, e2eRecvLagMs, e2eLockWaitMs, e2eFirstVisibleMs, e2eTotalMs)
+	slog.Info("turn: e2e",
+		"chat_id", msg.Chat.ID,
+		"recv_lag_ms", e2eRecvLagMs,
+		"lock_wait_ms", e2eLockWaitMs,
+		"first_visible_s", float64(e2eFirstVisibleMs)/1000,
+		"total_s", float64(e2eTotalMs)/1000)
 
 	// Pick a finishing reaction: 🤔 when Claude is asking for clarification, ✅ otherwise.
 	finalEmoji := "✅"

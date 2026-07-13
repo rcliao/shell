@@ -30,6 +30,16 @@ func (b *Bridge) SaveMessageMap(chatID, threadID int64, userMessageID, botMessag
 	return b.store.SaveMessageMap(chatID, userMessageID, botMessageID, sess.ID, userMessage, botResponse)
 }
 
+// SaveTurnE2E stamps owner-experienced timings onto the exchange's map row.
+func (b *Bridge) SaveTurnE2E(chatID int64, userMessageID int, recvLagMs, lockWaitMs, firstVisibleMs, totalMs int64) {
+	if b.store == nil {
+		return
+	}
+	if err := b.store.SaveTurnE2E(chatID, userMessageID, recvLagMs, lockWaitMs, firstVisibleMs, totalMs); err != nil {
+		slog.Warn("failed to save e2e timings", "chat_id", chatID, "error", err)
+	}
+}
+
 // GetMessageMapByBotMsg looks up a message mapping by bot response message ID.
 func (b *Bridge) GetMessageMapByBotMsg(chatID int64, botMessageID int) (*store.MessageMap, error) {
 	return b.store.GetMessageMapByBotMsg(chatID, botMessageID)
