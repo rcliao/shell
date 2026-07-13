@@ -714,6 +714,15 @@ func (b *Bridge) runCompaction(ctx context.Context, chatID, threadID int64, tota
 // included in the message sent to Claude (e.g. downloaded Telegram documents).
 func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (AgentResponse, error) {
 	preworkStart := time.Now()
+	// step() logs any prework phase slower than 500ms so the 18-40s prework
+	// mystery decomposes into named consumers (V2-H33 instrumentation).
+	stepStart := time.Now()
+	step := func(name string) {
+		if d := time.Since(stepStart); d > 500*time.Millisecond {
+			slog.Info("turn: prework step", "chat_id", chatID, "step", name, "ms", d.Milliseconds())
+		}
+		stepStart = time.Now()
+	}
 	key := process.SessionKey{ChatID: chatID, ThreadID: threadID}
 	// Check for active plan draft — intercept the message (no streaming needed).
 	b.planMu.Lock()
@@ -748,6 +757,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		}
 	}
 
+	step("plan_fable_a2a")
 	sess, err := b.ensureSession(ctx, chatID, threadID)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
@@ -757,6 +767,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// return means we just bumped generation — the process session is wiped
 	// and the next Send will go fresh with a rebuilt Channel A. Reload the
 	// row so downstream code sees the post-rotation state.
+	step("ensure_session")
 	if b.maybeRotate(ctx, chatID, threadID) {
 		if fresh, rerr := b.store.GetSession(chatID, threadID); rerr == nil && fresh != nil {
 			sess = fresh
@@ -772,6 +783,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	augmentedMsg := userMsg
 	if b.memory != nil {
 		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
+		step("ghost_inject_context")
 	}
 	// ghostInjectedText: the context ghost supplied this turn (empty = none).
 	// Captured here, before heartbeat/transcript enrichment also mutate
@@ -788,6 +800,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	isDeepHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
 	if isHeartbeat && b.memory != nil {
 		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg, isDeepHeartbeat)
+		step("heartbeat_enrich")
 	}
 
 	// Inject shared transcript for multi-agent group awareness.
@@ -828,7 +841,9 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// See docs/SESSION-LIFECYCLE.md — this is the fresh layer the cache doesn't hold.
 	// Cycle 71: pass rawUserMsg separately so classifier sees only the user's
 	// text, not the augmented prefix.
+	step("transcript_inject")
 	augmentedMsg = b.injectPerTurnContextRaw(ctx, chatID, threadID, augmentedMsg, userMsg)
+	step("channel_b")
 
 	// V2-H19: photo turns get the media-note contract so the archive becomes
 	// searchable — the agent's own one-liner is stored as the description.
@@ -895,6 +910,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 
 	// Build system prompt from agent identity + memory.
 	// If no identity memories exist and sender is not a system process, inject onboarding.
+	step("media_note_contract")
 	systemPrompt := ""
 	if !isSystemSender(senderName) && b.needsOnboarding(ctx, chatID) {
 		slog.Info("onboarding: no identity found, injecting onboarding prompt", "chat_id", chatID)
@@ -913,6 +929,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 			systemPrompt += b.groupAgentPrompt()
 		}
 	}
+	step("system_prompt_compose")
 
 	// Track session in pm for /pm list visibility.
 	endTrack := b.trackSession(ctx, key, senderName)
