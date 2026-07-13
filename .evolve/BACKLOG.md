@@ -659,6 +659,16 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   rotations); base_context_tokens dimension (V2-H33) trends down; meal-memo
   writes keep verifying (write_confabulation must not rise); zero notion
   tool failures in tool_uses.
+- **GAP (7/13 16:37 evidence):** owner-A's supplement-log turn took 116s total
+  because the agent used the CLI-account-level claude.ai Notion connector
+  (`mcp__claude_ai_Notion__notion-update-page`, ~95s for one page update)
+  instead of the installed REST skill. Disabling shell's Notion MCP did not
+  remove the account connector's tools from the subprocess. Fix options:
+  (a) skill/pinned instruction "notion writes go through skills/notion
+  scripts, never mcp__claude_ai_Notion__* tools"; (b) disallow the connector
+  tools via config for agent sessions; (c) owner disconnects the connector
+  for the agents' CLI account. Until fixed, meal/supplement logging pays the
+  slow path and the H34 latency win is partial.
 
 ### V2-H35 — [H] Context manifest instrument + pinned audit — SHIPPED 7/13
 - **status:** SHIPPED + DEPLOYED. `shell context [--chat N] [--full]` reads the
