@@ -243,6 +243,15 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 
 	// Try persistent process first (keeps process alive between messages).
 	result, err := m.sendPersistent(ctx, req, wrapped)
+	if err == nil && result.Text == "" && result.Usage == nil && len(result.Artifacts) == 0 {
+		// Zero-usage empty result: the subprocess produced NOTHING — no API
+		// call, no tokens, no error. Seen when resuming a transcript that a
+		// restart killed mid-tool-call (7/13: owner-A's memo turn returned
+		// "(empty response)"). A legitimate [noop] still reports usage, so
+		// this shape is safe to treat as a resume failure and retry fresh.
+		err = fmt.Errorf("persistent send returned zero-usage empty result (corrupt resume?)")
+		slog.Warn("empty zero-usage result from persistent session, retrying", "chat_id", req.ChatID, "thread_id", req.MessageThreadID)
+	}
 	if err == nil {
 		return stamp(result), nil
 	}
