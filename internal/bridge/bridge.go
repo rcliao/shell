@@ -596,7 +596,17 @@ func (b *Bridge) compactSessionIfNeeded(ctx context.Context, chatID, threadID in
 	// (a real 40s DM was traced to a 1.07M-token context × 10 tool rounds).
 	// Rotate on total context so a long-lived session never bloats.
 	if b.rotateMaxContextTokens > 0 {
-		totalContext := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+		// The CLI reports usage SUMMED across the turn's internal tool-steps:
+		// a 20-step memo turn reads ~82k of context 20 times and reports 1.6M
+		// cache-read. Dividing by NumTurns recovers the actual per-step
+		// context size — comparing the raw sum against a context-size cap
+		// flagged every multi-tool turn for rotation (7/13, same threshold
+		// bug class as the rotate_max_tokens thrash).
+		steps := usage.NumTurns
+		if steps < 1 {
+			steps = 1
+		}
+		totalContext := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens/steps
 		if totalContext > b.rotateMaxContextTokens {
 			if err := b.store.SetRotatePending(chatID, threadID, "latency"); err != nil {
 				slog.Warn("set rotate_pending (context trigger) failed", "chat_id", chatID, "error", err)
