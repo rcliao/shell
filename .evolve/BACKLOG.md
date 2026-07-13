@@ -563,3 +563,26 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **future:** unverified-claim rate needs a checkable-claim detector (hard
   LLM-free; A8's effect shows up in factual_corrections for now); photo
   dimensions activate as H19 data accumulates.
+
+### V2-H32 — [H] OwnerEval v2: trend-first comprehensive harness eval — APPROVED 7/12 (design complete)
+- **status:** design SHIPPED (.evolve/designs/ownereval-v2.md, ultracode
+  workflow 7/12: 5 transcript-mining lenses + 4 peer-research agents +
+  synthesis + 2 adversarial critics). Implementation phased: v2.0
+  deterministic core → v2.1 trend engine + cross-DB → v2.2 judge tier.
+- **headline mining findings (numbers only; details in private
+  ~/.shell/evolve-reviews/):** complaint rate +53% into July while gratitude
+  fell ~64%; question re-sends grew ~49x March→June; resignation-shaped
+  markers tripled; thread abandonment after dissatisfied endings doubled in
+  July; engagement depth −40-55% off mid-June peak (retention intact —
+  shallower, not churned); owner-B DM flatlined; agent-switching after
+  failures grew 5x. v1's flat correction rate masked ALL of this.
+- **peer finding:** NO surveyed harness (OpenClaw/Hermes/OpenHuman/field)
+  measures owner satisfaction longitudinally — behavioral-CSAT from a private
+  deployment's own transcripts is novel territory.
+- **also files 7 harness prerequisites** (design §6): usage.model attribution
+  on long-lived sessions, sender attribution on group message_map rows,
+  shared exchange id usage↔message_map, per-message timestamps, outbound
+  message-id retention + schedule-id stamping, duration_ms population check,
+  degenerate tier-router investigation.
+- **measure-by:** v2.0 definition-of-done in design; March-July backfill
+  baseline pass before any goal enforcement.
