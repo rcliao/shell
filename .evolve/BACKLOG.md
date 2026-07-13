@@ -706,3 +706,20 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   experience.
 - **measure-by:** memory-round-trip scenario runs green end-to-end; smoke
   gate blocks a deliberately-broken build.
+
+### V2-H33 addendum — 7/13 midday: the 82-second arithmetic turn
+- **finding:** a 4-word arithmetic answer took 82s wall: ~40s BRIDGE PREWORK
+  (invisible to H18 — timer starts at manager.Send) + ~40s silent model
+  thinking (no tools) + ~1s generation. Prewarm itself is working (background
+  rotations 52-67s, invisible to owners).
+- **shipped:** (a) prework instrumentation — bridge logs turn prework_ms >2s;
+  handler logs Telegram receipt lag >3s. The full pipeline is now visible:
+  receipt lag | prework | ttft | stream. (b) `model_routing.
+  conversation_effort` — spawn-bound --effort for conversation turns;
+  CANARY: agent-A at "low" (cut silent deliberation), agent-B unchanged.
+  Grade by TTFT distribution + factual_corrections (quality must hold).
+- **next if insufficient:** identify the 40s prework consumer from the new
+  logs (suspects: ghost context assembly, transcript injection); and REVISIT
+  the ephemeral fast-path sidecar with the LATENCY lens — cycle 160 rejected
+  it on cost grounds ($90/mo), but it remains the only path to ~2-4s total
+  for simple turns. Owner expectation is anchored at "2 seconds".

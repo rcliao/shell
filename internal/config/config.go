@@ -145,6 +145,11 @@ type ModelRouting struct {
 	// TopicClassifier (cycle 66): if non-empty, enables Haiku-based topic
 	// classification per turn. Empty = disabled (keyword fast-path only).
 	TopicClassifier string `json:"topic_classifier"`
+	// ConversationEffort sets --effort for conversation turns, bound at each
+	// generation's fresh spawn (persistent procs ignore per-turn effort).
+	// "low" cuts silent pre-answer thinking on simple turns (V2-H33: a
+	// 4-word arithmetic answer spent 40s thinking). Empty = CLI default.
+	ConversationEffort string `json:"conversation_effort"`
 }
 
 type ClaudeConfig struct {
@@ -166,6 +171,14 @@ type ClaudeConfig struct {
 	MediaGateEnforce   bool              `json:"media_gate_enforce"`   // when true, image/video artifacts are dropped on user turns that didn't ask for media (heartbeat turns always drop media regardless)
 	TopicKeywordOnly   bool              `json:"topic_keyword_only"`   // when true, topic classification runs cache→keyword→sticky only, no per-turn LLM call (cycle 148: the LLM tier regressed every focus metric while adding ~8.5s latency)
 	PermissionMode     string            `json:"permission_mode"`      // --permission-mode for the Claude CLI subprocess (default "bypassPermissions"). "auto" adds a safety classifier but may fall back to prompting (which hangs a headless turn).
+}
+
+// ResolveEffort returns the reasoning effort for a task type ("" = CLI default).
+func (c ClaudeConfig) ResolveEffort(taskType string) string {
+	if c.ModelRouting != nil && taskType == "conversation" {
+		return c.ModelRouting.ConversationEffort
+	}
+	return ""
 }
 
 // ResolveModel returns the model for a given task type, falling back to

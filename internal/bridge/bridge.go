@@ -713,6 +713,7 @@ func (b *Bridge) runCompaction(ctx context.Context, chatID, threadID int64, tota
 // pdfs optionally contains downloaded PDF metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram documents).
 func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (AgentResponse, error) {
+	preworkStart := time.Now()
 	key := process.SessionKey{ChatID: chatID, ThreadID: threadID}
 	// Check for active plan draft — intercept the message (no streaming needed).
 	b.planMu.Lock()
@@ -931,6 +932,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	ephemeralTurn := profile.Ephemeral
 	if ephemeralTurn {
 		claudeSessionID = ""
+	}
+	// V2-H33 instrumentation: everything between bridge entry and dispatch
+	// (rotation, ghost/context assembly, Channel B) — the gap H18's manager
+	// timings cannot see. A 4-word answer once spent ~40s here, unmeasured.
+	if pw := time.Since(preworkStart); pw > 2*time.Second {
+		slog.Info("turn: prework", "chat_id", chatID, "prework_ms", pw.Milliseconds(), "sender", senderName)
 	}
 	result, err := agent.Send(ctx, process.AgentRequest{
 		ChatID:          chatID,
