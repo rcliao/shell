@@ -1995,9 +1995,15 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	editDone := make(chan struct{})
 	go func() {
 		defer close(editDone)
+		firstFlush := true
 		for range dirty {
-			// Throttle: wait for the edit interval.
-			time.Sleep(streamEditInterval)
+			// Throttle: wait for the edit interval — EXCEPT the first flush,
+			// which goes out immediately so first-visible = TTFT + one edit
+			// call instead of + up to a full throttle interval (V2-H33).
+			if !firstFlush {
+				time.Sleep(streamEditInterval)
+			}
+			firstFlush = false
 
 			mu.Lock()
 			current := accumulated.String()
