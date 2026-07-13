@@ -279,11 +279,12 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 		go func() {
 			defer wg.Done()
 			result, chatErr = m.store.Context(fetchCtx, agentmemory.ContextParams{
-				NS:     prof.AgentNS,
-				Query:  userMsg,
-				Tags:   []string{chatTag(chatID)},
-				Budget: chatBudget,
-				Scope:  sessionScopeFor(chatID),
+				NS:            prof.AgentNS,
+				Query:         userMsg,
+				Tags:          []string{chatTag(chatID)},
+				Budget:        chatBudget,
+				Scope:         sessionScopeFor(chatID),
+				ExcludePinned: true, // pinned already in system prompt — injecting them per turn duplicated ~6 slots + tokens every turn
 			})
 		}()
 		go func() {
