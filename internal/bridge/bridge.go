@@ -789,51 +789,79 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		slog.Warn("failed to log user message", "error", err)
 	}
 
-	// Inject memory context if available
+	// V2-H37: the four context producers — ghost retrieval, shared transcript,
+	// task store, and Channel B — are independent reads. Compute them
+	// concurrently, then assemble in the exact original order (Channel B |
+	// task activity | pending tasks | transcript | ghost | message). SQLite
+	// WAL supports the concurrent readers; the embedder serializes internally.
+	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ") || strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
+	isDeepHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
+
+	var ghostAug, transcriptBlock, tasksBlock, activityBlock, channelBPrefix string
+	{
+		var wg sync.WaitGroup
+		run := func(f func()) {
+			wg.Add(1)
+			go func() { defer wg.Done(); f() }()
+		}
+		if b.memory != nil {
+			run(func() { ghostAug = b.memory.InjectContext(ctx, chatID, userMsg) })
+		}
+		if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
+			run(func() {
+				if entries, err := b.transcript.RecentByTokenBudget(chatID, b.transcriptBudget); err != nil {
+					slog.Warn("failed to fetch transcript", "error", err)
+				} else {
+					transcriptBlock = transcript.FormatTranscript(entries, b.agentBotUsername)
+				}
+			})
+		}
+		if b.taskStore != nil && !isSystemSender(senderName) {
+			run(func() {
+				if pending, err := b.taskStore.PendingTasksFor(b.agentBotUsername); err != nil {
+					slog.Warn("failed to fetch pending tasks", "error", err)
+				} else {
+					tasksBlock = transcript.FormatPendingTasksForAgent(pending)
+				}
+				if recent, err := b.taskStore.RecentTasks(10); err != nil {
+					slog.Warn("failed to fetch recent tasks", "error", err)
+				} else {
+					activityBlock = transcript.FormatTaskActivity(recent, b.agentBotUsername)
+				}
+			})
+		}
+		run(func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, userMsg) })
+		wg.Wait()
+	}
+	step("context_fanout")
+
 	augmentedMsg := userMsg
-	if b.memory != nil {
-		augmentedMsg = b.memory.InjectContext(ctx, chatID, userMsg)
-		step("ghost_inject_context")
+	if ghostAug != "" {
+		augmentedMsg = ghostAug
 	}
 	// ghostInjectedText: the context ghost supplied this turn (empty = none).
-	// Captured here, before heartbeat/transcript enrichment also mutate
-	// augmentedMsg, so the recall ledger can judge not just THAT ghost injected
-	// but whether the injection actually covers the fact being recalled.
+	// Captured before the other blocks stack on, so the recall ledger can judge
+	// whether the injection actually covers the fact being recalled.
 	ghostInjectedText := ""
 	if augmentedMsg != userMsg {
 		ghostInjectedText = strings.Replace(augmentedMsg, userMsg, "", 1)
 	}
 
 	// Enrich heartbeat messages with conversation history and previous insights.
-	// Deep heartbeats use [Heartbeat:deep] prefix for behavioral reflection.
-	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ") || strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
-	isDeepHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
+	// Serial: system-path shape, and it mutates the ghost-augmented message.
 	if isHeartbeat && b.memory != nil {
 		augmentedMsg = b.enrichHeartbeatPrompt(ctx, chatID, augmentedMsg, isDeepHeartbeat)
 		step("heartbeat_enrich")
 	}
 
-	// Inject shared transcript for multi-agent group awareness.
-	if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
-		if entries, err := b.transcript.RecentByTokenBudget(chatID, b.transcriptBudget); err != nil {
-			slog.Warn("failed to fetch transcript", "error", err)
-		} else if block := transcript.FormatTranscript(entries, b.agentBotUsername); block != "" {
-			augmentedMsg = block + "\n" + augmentedMsg
-		}
+	if transcriptBlock != "" {
+		augmentedMsg = transcriptBlock + "\n" + augmentedMsg
 	}
-
-	// Inject pending tasks and recent task activity from shared task store.
-	if b.taskStore != nil && !isSystemSender(senderName) {
-		if pending, err := b.taskStore.PendingTasksFor(b.agentBotUsername); err != nil {
-			slog.Warn("failed to fetch pending tasks", "error", err)
-		} else if block := transcript.FormatPendingTasksForAgent(pending); block != "" {
-			augmentedMsg = block + "\n" + augmentedMsg
-		}
-		if recent, err := b.taskStore.RecentTasks(10); err != nil {
-			slog.Warn("failed to fetch recent tasks", "error", err)
-		} else if block := transcript.FormatTaskActivity(recent, b.agentBotUsername); block != "" {
-			augmentedMsg = block + "\n" + augmentedMsg
-		}
+	if tasksBlock != "" {
+		augmentedMsg = tasksBlock + "\n" + augmentedMsg
+	}
+	if activityBlock != "" {
+		augmentedMsg = activityBlock + "\n" + augmentedMsg
 	}
 
 	// Tag the message with sender identity AND location so Claude knows who
@@ -847,13 +875,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		augmentedMsg = fmt.Sprintf("[From: %s | %s]\n%s", senderName, where, augmentedMsg)
 	}
 
-	// Inject Channel B: current time + pinned-memory delta + active tasks.
-	// See docs/SESSION-LIFECYCLE.md — this is the fresh layer the cache doesn't hold.
-	// Cycle 71: pass rawUserMsg separately so classifier sees only the user's
-	// text, not the augmented prefix.
-	step("transcript_inject")
-	augmentedMsg = b.injectPerTurnContextRaw(ctx, chatID, threadID, augmentedMsg, userMsg)
-	step("channel_b")
+	// Channel B prefix (current time + pinned delta + sticky topic + media +
+	// carry-forward) — computed in the fan-out above from the RAW user text
+	// (cycle 71), assembled here in its original outermost position.
+	if channelBPrefix != "" {
+		augmentedMsg = channelBPrefix + "\n" + augmentedMsg
+	}
 
 	// V2-H19: photo turns get the media-note contract so the archive becomes
 	// searchable — the agent's own one-liner is stored as the description.
@@ -1214,8 +1241,10 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	}
 
 	// Log exchange to memory (never for cache warm-ups — they carry no signal).
+	// Async (V2-H37): the write computes an embedding (~1s) and must not hold
+	// the session busy — a rapid follow-up message shouldn't queue behind it.
 	if b.memory != nil && source != "prewarm" {
-		b.memory.LogExchange(ctx, chatID, userMsg, response)
+		go b.memory.LogExchange(context.Background(), chatID, userMsg, response)
 	}
 
 	// Update session timestamp.
