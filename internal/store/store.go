@@ -238,6 +238,12 @@ func (s *Store) migrate() error {
 	// dispatch, time-to-first-token, and total Send wall clock, in ms.
 	s.db.Exec("ALTER TABLE usage ADD COLUMN queue_ms INTEGER NOT NULL DEFAULT 0")
 	s.db.Exec("ALTER TABLE usage ADD COLUMN first_event_ms INTEGER NOT NULL DEFAULT 0")
+	// True end-to-end timings on message_map (V2-H33): what the OWNER
+	// experienced, Telegram send → first visible words → final delivery.
+	s.db.Exec("ALTER TABLE message_map ADD COLUMN e2e_recv_lag_ms INTEGER NOT NULL DEFAULT 0")
+	s.db.Exec("ALTER TABLE message_map ADD COLUMN e2e_lock_wait_ms INTEGER NOT NULL DEFAULT 0")
+	s.db.Exec("ALTER TABLE message_map ADD COLUMN e2e_first_visible_ms INTEGER NOT NULL DEFAULT 0")
+	s.db.Exec("ALTER TABLE message_map ADD COLUMN e2e_total_ms INTEGER NOT NULL DEFAULT 0")
 	s.db.Exec("ALTER TABLE usage ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0")
 	s.db.Exec("ALTER TABLE usage ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
 
@@ -822,6 +828,17 @@ func (s *Store) SaveMessageMap(chatID int64, userMessageID, botMessageID int, se
 		INSERT INTO message_map (chat_id, user_message_id, bot_message_id, session_id, user_message, bot_response)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`, chatID, userMessageID, botMessageID, sessionID, userMessage, botResponse)
+	return err
+}
+
+// SaveTurnE2E stamps the owner-experienced timings onto the just-saved
+// message_map row: receive lag (Telegram → handler), per-chat lock wait,
+// first visible content, and final delivery — all relative to handler entry.
+func (s *Store) SaveTurnE2E(chatID int64, userMessageID int, recvLagMs, lockWaitMs, firstVisibleMs, totalMs int64) error {
+	_, err := s.db.Exec(`
+		UPDATE message_map SET e2e_recv_lag_ms=?, e2e_lock_wait_ms=?, e2e_first_visible_ms=?, e2e_total_ms=?
+		WHERE id = (SELECT MAX(id) FROM message_map WHERE chat_id=? AND user_message_id=?)
+	`, recvLagMs, lockWaitMs, firstVisibleMs, totalMs, chatID, userMessageID)
 	return err
 }
 
