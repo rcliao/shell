@@ -277,7 +277,7 @@ func IsSystemChat(chatID int64) bool {
 
 // isSystemSender returns true if the sender is a system process (heartbeat, scheduler).
 func isSystemSender(sender string) bool {
-	return sender == "heartbeat" || sender == "scheduler"
+	return sender == "heartbeat" || sender == "scheduler" || sender == "prewarm"
 }
 
 // preemptSystemSession cancels any running system (heartbeat/scheduler) session for the key
@@ -992,6 +992,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 				"deep", isDeepHeartbeat,
 			)
 		}
+	} else if senderName == "prewarm" {
+		source = "prewarm"
 	} else if isSystemSender(senderName) {
 		source = "scheduler"
 	}
@@ -1177,8 +1179,8 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		}
 	}
 
-	// Log exchange to memory.
-	if b.memory != nil {
+	// Log exchange to memory (never for cache warm-ups — they carry no signal).
+	if b.memory != nil && source != "prewarm" {
 		b.memory.LogExchange(ctx, chatID, userMsg, response)
 	}
 
