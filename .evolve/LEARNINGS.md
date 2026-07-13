@@ -55,7 +55,7 @@ Each entry is dated and tagged. Newest at bottom.
 
 - **First observed cross-agent fact-check.** Umbreon conceded openly to pikamini's correction (conceded the correction openly with an apology). Healthy — agents are aware of each other and willing to defer publicly. One data point; codify after more samples.
 - **Confirmed umbreon over-responds on heartbeat.** Caught a live example: chat_id=0 heartbeat sent *"Check-in sent. Nothing else needs attention this tick."* — this is the noop that wasn't. Reinforces B-011 hypothesis and B-006 fix priority.
-- **Both agents are confused about ghost vs MEMORY.md.** Mami had to push umbreon to also save plant records to ghost (initially only local). Pikamini explained the distinction correctly. The decision tree isn't internalized. New B-016.
+- **Both agents are confused about ghost vs MEMORY.md.** Owner-A had to push umbreon to also save plant records to ghost (initially only local). Pikamini explained the distinction correctly. The decision tree isn't internalized. New B-016.
 - **Skill activation latency confirmed** — B-007 drafts installed yesterday, agents still on old prompt. Until restart, the loop's skill-install channel won't show measurable behavior change. Need to plan around this, not work around it.
 
 ## 2026-05-07 — cycle 7 (heartbeat prompt diff)
