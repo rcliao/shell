@@ -135,6 +135,17 @@ func (b *Bridge) injectPerTurnContext(ctx context.Context, chatID, threadID int6
 // injectPerTurnContext; new callers that have the raw text use the Raw
 // variant for accurate classification.
 func (b *Bridge) injectPerTurnContextRaw(ctx context.Context, chatID, threadID int64, msg, rawUserMsg string) string {
+	blocks := b.buildPerTurnBlocks(ctx, chatID, threadID, rawUserMsg)
+	if blocks == "" {
+		return msg
+	}
+	return blocks + "\n" + msg
+}
+
+// buildPerTurnBlocks computes the Channel B block prefix independently of the
+// message body, so it can run concurrently with the other context producers
+// (V2-H37). Returns "" when no blocks apply.
+func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID int64, rawUserMsg string) string {
 	var blocks []string
 
 	// Block 1: current time (always on when scheduler is enabled).
@@ -253,9 +264,9 @@ func (b *Bridge) injectPerTurnContextRaw(ctx context.Context, chatID, threadID i
 	}
 
 	if len(blocks) == 0 {
-		return msg
+		return ""
 	}
-	return strings.Join(blocks, "\n") + "\n" + msg
+	return strings.Join(blocks, "\n")
 }
 
 // buildCarryForwardBlock returns the "Previously in this chat" + relevant-
