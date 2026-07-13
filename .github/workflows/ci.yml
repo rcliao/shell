@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # shell's go.mod has `replace github.com/rcliao/ghost => ../ghost`,
+      # so both repos are checked out side by side.
+      - uses: actions/checkout@v4
+        with:
+          path: shell
+      - uses: actions/checkout@v4
+        with:
+          repository: rcliao/ghost
+          path: ghost
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: shell/go.mod
+      - name: Vet
+        working-directory: shell
+        run: go vet ./...
+      - name: Build
+        working-directory: shell
+        run: go build ./...
+      - name: Tests
+        working-directory: shell
+        run: go test ./... -count=1
