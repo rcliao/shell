@@ -9,8 +9,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      # shell's go.mod has `replace github.com/rcliao/ghost => ../ghost`,
-      # so both repos are checked out side by side.
+      # shell's go.mod replaces six sibling repos with local paths, so all
+      # of them are checked out side by side with the shell checkout.
       - uses: actions/checkout@v4
         with:
           path: shell
@@ -18,6 +18,26 @@ jobs:
         with:
           repository: rcliao/ghost
           path: ghost
+      - uses: actions/checkout@v4
+        with:
+          repository: rcliao/shell-imagen
+          path: shell-imagen
+      - uses: actions/checkout@v4
+        with:
+          repository: rcliao/shell-browser
+          path: shell-browser
+      - uses: actions/checkout@v4
+        with:
+          repository: rcliao/shell-secrets
+          path: shell-secrets
+      - uses: actions/checkout@v4
+        with:
+          repository: rcliao/shell-pm
+          path: shell-pm
+      - uses: actions/checkout@v4
+        with:
+          repository: rcliao/shell-tunnel
+          path: shell-tunnel
       - uses: actions/setup-go@v5
         with:
           go-version-file: shell/go.mod
