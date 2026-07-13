@@ -328,7 +328,12 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   past the stated reset time (don't burn the window), interactive turns get a
   short honest reply; (3) busy_timeout pragma on every sqlite open; (4) on
   startup/restart, reap orphaned persistent procs cleanly (no broken-pipe
-  noise); (5) ledger row per self-heal event so reliability is measurable.
+  noise); (5) ledger row per self-heal event so reliability is measurable;
+  (6) in-flight turn survives SIGHUP re-exec — 7/13 16:09 evidence: a deploy
+  landed while a group turn was generating; the zero-usage retry FIRED (11ms
+  after signal) but syscall.Exec swallowed the retry, so one agent's reply to
+  owner-A was silently lost. Either drain in-flight turns before exec (bounded
+  wait) or persist a pending-turn marker that the new process replays on boot.
 - **measure-by:** zero manual session-rotate interventions; zero raw
   limit/auth error text reaching any chat; self-heal ledger shows
   detect→recover pairs.
