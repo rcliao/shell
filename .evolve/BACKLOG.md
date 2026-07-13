@@ -611,3 +611,20 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   pre-warm in quiet hours; (2) first-event vs first-text TTFT split; (3)
   answer-first-persist-after prompt rule; (4) instant receipt reaction; (5)
   casual-turn thinking-cap experiment (watch factual_corrections).
+
+### V2-H34 — [H/A] Notion skill replaces Notion MCP server — SHIPPED 7/13
+- **status:** SHIPPED + DEPLOYED 7/13 (repo: skills/notion + write-verify
+  precision; agent-layer: skill installed, meal-memo updated, notion MCP
+  disabled; daemons restarted — mcp.json now ghost+shell-bridge only).
+- **why:** the official Notion MCP server's tool schemas cost ~30-40k tokens
+  of base context per session — the single largest lump in the 48-77k base
+  that caused the V2-H33 rotation thrash. The deployment uses ~4 operations.
+- **what:** `skills/notion` REST script (get-page, query-db with
+  type-adaptive filter, patch-prop with READ-BACK receipt, append). Validated
+  live against the real food-log DB (read path). patch-prop's read-back line
+  doubles as the write-verification receipt (H27 synergy). write_verify Bash
+  matcher tightened: notion reads no longer count as persistence.
+- **measure-by:** cache_create on fresh spawns drops ~30-40k (watch next
+  rotations); base_context_tokens dimension (V2-H33) trends down; meal-memo
+  writes keep verifying (write_confabulation must not rise); zero notion
+  tool failures in tool_uses.

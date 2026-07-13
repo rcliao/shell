@@ -103,3 +103,30 @@ func TestClassifyWrite(t *testing.T) {
 		})
 	}
 }
+
+// The notion skill script replaced the MCP server: only its write subcommands
+// count as persistence; reads must not verify a save claim.
+func TestNotionScriptWriteClassification(t *testing.T) {
+	writes := []string{
+		"~/.shell/skills/notion/scripts/notion patch-prop abc123 午餐 '▫️ item'",
+		"scripts/notion append abc123 note text",
+		"curl -X PATCH https://api.notion.com/v1/pages/abc",
+	}
+	reads := []string{
+		"~/.shell/skills/notion/scripts/notion get-page abc123",
+		"scripts/notion query-db dbid --date Date=2026-07-13",
+		"skills/meal-memo/scripts/food-log get-day 2026-07-13",
+	}
+	for _, cmd := range writes {
+		tc := process.ToolCall{Name: "Bash", Input: map[string]any{"command": cmd}}
+		if !isPersistenceTool(tc) {
+			t.Fatalf("write not classified as persistence: %q", cmd)
+		}
+	}
+	for _, cmd := range reads {
+		tc := process.ToolCall{Name: "Bash", Input: map[string]any{"command": cmd}}
+		if isPersistenceTool(tc) {
+			t.Fatalf("read falsely classified as persistence: %q", cmd)
+		}
+	}
+}
