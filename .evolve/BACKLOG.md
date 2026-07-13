@@ -723,3 +723,23 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   the ephemeral fast-path sidecar with the LATENCY lens — cycle 160 rejected
   it on cost grounds ($90/mo), but it remains the only path to ~2-4s total
   for simple turns. Owner expectation is anchored at "2 seconds".
+
+### V2-H33 addendum 2 — 7/13 midday: reranker regression found + disabled
+- **root cause of today's slowness:** ghost PR #2 (merged 7/12 21:00) applied
+  GHOST_RERANKER=local to the DAEMON process — an in-process ONNX
+  cross-encoder on every retrieval. MEASURED: 11.2s per context query with
+  reranker vs 1.0s without (34s CPU). Every turn paid it in prework;
+  first-post-restart turns paid it multiple times (inject + pinned + spawn
+  compose) = the observed 18s prework / 82s worst case.
+- **action:** GHOST_RERANKER=none for both agents (config, deployed 12:03).
+  Embeddings KEPT (1s scans, preserves recall). Owner decision: revisit when
+  ghost-side makes reranking fast (async/top-k-only/quantized/cached) —
+  quality benefit should be re-proven via recall_grounded once latency is
+  paid for. HANDED TO GHOST SESSION.
+- **remaining shell-side prework work (queued):** dedupe pinned render on
+  spawn turns; rate-limit background reflect (183/day, V2-H7 threshold noise);
+  async LogExchange embedding. Step timer live for attribution.
+- **process lesson:** a dependency merge into the daemon changed the
+  latency profile overnight with no gate. The testbed smoke suite (V2-H36)
+  must include a latency budget assertion (context query <2s) so a slow
+  retrieval upgrade fails the deploy gate instead of reaching the family.
