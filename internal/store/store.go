@@ -831,6 +831,23 @@ func (s *Store) SaveMessageMap(chatID int64, userMessageID, botMessageID int, se
 	return err
 }
 
+// LastUserMessageAt returns the newest user-message time for a session
+// (zero time if none) — used to scope cache keep-alives to chats with
+// recent real activity, not chats kept alive only by the pings themselves.
+func (s *Store) LastUserMessageAt(sessionID int64) (time.Time, error) {
+	var ts sql.NullString
+	err := s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE session_id = ? AND role = 'user'`, sessionID).Scan(&ts)
+	if err != nil || !ts.Valid {
+		return time.Time{}, err
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339} {
+		if t, perr := time.Parse(layout, ts.String); perr == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, nil
+}
+
 // SaveTurnE2E stamps the owner-experienced timings onto the just-saved
 // message_map row: receive lag (Telegram → handler), per-chat lock wait,
 // first visible content, and final delivery — all relative to handler entry.
