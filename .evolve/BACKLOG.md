@@ -637,3 +637,27 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   rotations); base_context_tokens dimension (V2-H33) trends down; meal-memo
   writes keep verifying (write_confabulation must not rise); zero notion
   tool failures in tool_uses.
+
+### V2-H35 — [H] Context manifest instrument + pinned audit — SHIPPED 7/13
+- **status:** SHIPPED + DEPLOYED. `shell context [--chat N] [--full]` reads the
+  LIVE composed system prompt from the running daemon (new GET /context RPC →
+  Bridge.ContextManifest) with per-component char/token sizes.
+- **first-run findings (both agents):**
+  1. Shell-authored Channel A ≈ only 8k tokens (pinned ~3.7k, skills ~2.9k,
+     group ~1k, lifecycle/timestamp small) — the rest of cache creation is
+     CLI baseline + MCP schemas. Bounds what prompt-trimming can achieve.
+  2. `identity` component = 0 by design (persona lives in pinned identity
+     memories; agent.system_prompt intentionally empty). Documented.
+  3. agent-B pinned audit: one lesson stored as FIVE pinned post-mortems
+     (agent-A: diary date grounding) → consolidated to ONE rule, originals
+     unpinned (~800 tokens reclaimed).
+  4. **NAMESPACE DRIFT (serious):** 10 memories incl 4 pins lived in a dead
+     ns variant the profile never loads — among them the 7/5 privacy-scope
+     lesson (never injected!) and trip/allergy details. Migrated to the live
+     ns; completed-op residue unpinned. ROOT CAUSE: direct ghost CLI writes
+     with a hand-typed wrong -n; a 309-token pinned "remember your ns" memory
+     demonstrably did NOT prevent it → mechanical fix belongs ghost-side
+     (reject/warn unknown ns on put) — HANDED TO GHOST SESSION via owner.
+- **eval tie-in:** base_context_tokens (V2-H33) reads the manifest TOTAL;
+  add pinned_dead_ns_count as a ledger-liveness-style check.
+- **measure-by:** manifest TOTAL trend weekly; zero dead-ns pins.
