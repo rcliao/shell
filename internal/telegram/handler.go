@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -989,6 +990,57 @@ func isNotModified(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "not modified")
 }
 
+// maxFloodRetryAfter bounds how long a single flood-control wait may be —
+// beyond this the handler gives up rather than hanging on one edit.
+const maxFloodRetryAfter = 65 * time.Second
+
+// floodWait pauses for a flood-control retry window; overridable in tests.
+var floodWait = func(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// withFloodRetry runs fn, retrying through Telegram flood-control (429)
+// windows using the server-provided retry_after. Streaming edits are throttled
+// best-effort, but the FINAL reconcile edit must land: if it is dropped the
+// user is left looking at the last streamed partial — a user-visible
+// truncation (7/12 「回答被截掉了」).
+func withFloodRetry(ctx context.Context, fn func() error) error {
+	const attempts = 3
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		err = fn()
+		var flood *bot.TooManyRequestsError
+		if err == nil || !errors.As(err, &flood) {
+			return err
+		}
+		if attempt == attempts-1 {
+			break // out of retries — don't wait for a window we won't use
+		}
+		wait := time.Duration(flood.RetryAfter) * time.Second
+		if wait <= 0 {
+			wait = time.Second
+		}
+		if wait > maxFloodRetryAfter || !floodWait(ctx, wait) {
+			return err
+		}
+	}
+	return err
+}
+
+// editFinal is withFloodRetry around a message edit, for final reconcile
+// edits that must not be silently dropped.
+func editFinal(ctx context.Context, b *bot.Bot, params *bot.EditMessageTextParams) error {
+	return withFloodRetry(ctx, func() error {
+		_, err := b.EditMessageText(ctx, params)
+		return err
+	})
+}
+
 // tailKeepTelegramLen returns the longest rune-aligned SUFFIX of s whose
 // telegramLen is <= max (used by streaming edits that keep the latest content).
 func tailKeepTelegramLen(s string, max int) string {
@@ -1213,10 +1265,19 @@ func (h *Handler) shouldHandleGroupMessage(msg *models.Message, text string) (bo
 		return false, text
 	}
 
+	// Both agents named anywhere in the message → both respond. Must precede
+	// the prefix-anchored addressed-to-peer skip below: "Pika and Umbreon, ..."
+	// starts with the peer's name, so without this check the second-named agent
+	// yields here and the both-named branch in RouteDecision never runs (this
+	// exact gap ate an owner both-agents ask on 7/12).
+	if namedIn(text, h.myAliases) && namedIn(text, h.peerAliases) {
+		return true, text
+	}
+
 	// Name-based routing: check if message starts with a peer's name/alias.
 	// e.g., "pika lunch memo" → skip for umbreonmini because "pika" is a peer alias.
 	if h.messageAddressedToPeer(text) && !h.messageAddressedToMe(text) {
-		slog.Debug("group: message addressed to peer by name", "chat_id", msg.Chat.ID, "text_prefix", truncate(text, 30))
+		slog.Info("group: yielding, message addressed to peer by name", "chat_id", msg.Chat.ID, "text_prefix", truncate(text, 30))
 		return false, text
 	}
 
@@ -1643,25 +1704,31 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID, thre
 	formatted := formatForMarkdownV2(response)
 
 	if telegramLen(formatted) <= maxMessageLength {
-		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		editErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 			ChatID:    chatID,
 			MessageID: botMessageID,
 			Text:      formatted,
 			ParseMode: models.ParseModeMarkdown,
 		})
 		if editErr != nil && !isNotModified(editErr) {
-			b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			slog.Warn("final markdown edit failed, falling back to plain (regenerate)", "error", editErr, "chat_id", chatID, "msg_id", botMessageID)
+			plainErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 				ChatID:    chatID,
 				MessageID: botMessageID,
 				Text:      response,
 			})
+			if plainErr != nil && !isNotModified(plainErr) {
+				slog.Warn("final reconcile edit failed — streamed partial left on screen (regenerate)", "error", plainErr, "chat_id", chatID, "msg_id", botMessageID)
+			}
 		}
 	} else if telegramLen(response) <= maxMessageLength {
-		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		if editErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 			ChatID:    chatID,
 			MessageID: botMessageID,
 			Text:      response,
-		})
+		}); editErr != nil && !isNotModified(editErr) {
+			slog.Warn("final reconcile edit failed — streamed partial left on screen (regenerate)", "error", editErr, "chat_id", chatID, "msg_id", botMessageID)
+		}
 	} else {
 		// Response too long — delete original and send chunked.
 		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
@@ -1729,7 +1796,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			setReaction(ctx, b, msg.Chat.ID, msg.ID, "❌")
 			return
 		}
-		defer func() { os.Remove(img.Path) }()
+		// V2-H19: archive before the turn (mutates img.Path to the persistent
+		// dest). Only unarchived temps are cleaned up after the turn.
+		h.bridge.ArchiveInboundMedia(msg.Chat.ID, threadID, msg.ID, strings.TrimSpace(msg.Caption), &img)
+		if img.MediaID == 0 {
+			defer func() { os.Remove(img.Path) }()
+		}
 		images = []bridge.ImageInfo{img}
 	} else if msg.Sticker != nil {
 		if text == "" {
@@ -1800,7 +1872,10 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			setReaction(ctx, b, msg.Chat.ID, msg.ID, "❌")
 			return
 		}
-		defer func() { os.Remove(img.Path) }()
+		h.bridge.ArchiveInboundMedia(msg.Chat.ID, threadID, msg.ID, strings.TrimSpace(msg.Caption), &img)
+		if img.MediaID == 0 {
+			defer func() { os.Remove(img.Path) }()
+		}
 		images = []bridge.ImageInfo{img}
 	} else if IsPDFDocument(msg.Document) {
 		if text == "" {
@@ -2052,7 +2127,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	var botMsgIDs []int
 
 	if telegramLen(formatted) <= maxMessageLength {
-		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		editErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
 			Text:      formatted,
@@ -2060,21 +2135,27 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		})
 		if editErr != nil && !isNotModified(editErr) {
 			// Fallback: try without markdown formatting
+			slog.Warn("final markdown edit failed, falling back to plain", "error", editErr, "chat_id", msg.Chat.ID, "msg_id", msgID)
 			setReaction(ctx, b, msg.Chat.ID, msg.ID, "🔄")
-			b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			plainErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 				ChatID:    msg.Chat.ID,
 				MessageID: msgID,
 				Text:      response,
 			})
+			if plainErr != nil && !isNotModified(plainErr) {
+				slog.Warn("final reconcile edit failed — streamed partial left on screen", "error", plainErr, "chat_id", msg.Chat.ID, "msg_id", msgID)
+			}
 		}
 		botMsgIDs = []int{msgID}
 	} else if telegramLen(response) <= maxMessageLength {
 		// Formatted text exceeds the limit but raw text fits — send unformatted.
-		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		if editErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 			ChatID:    msg.Chat.ID,
 			MessageID: msgID,
 			Text:      response,
-		})
+		}); editErr != nil && !isNotModified(editErr) {
+			slog.Warn("final reconcile edit failed — streamed partial left on screen", "error", editErr, "chat_id", msg.Chat.ID, "msg_id", msgID)
+		}
 		botMsgIDs = []int{msgID}
 	} else {
 		// Delete placeholder and send chunked formatted response.
@@ -2207,11 +2288,14 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 			slog.Error("failed to download album photo", "error", err, "chat_id", first.Chat.ID)
 			continue
 		}
+		h.bridge.ArchiveInboundMedia(first.Chat.ID, msgThreadID(first), m.ID, strings.TrimSpace(m.Caption), &img)
 		images = append(images, img)
 	}
 	defer func() {
 		for _, img := range images {
-			os.Remove(img.Path)
+			if img.MediaID == 0 {
+				os.Remove(img.Path)
+			}
 		}
 	}()
 
@@ -2393,27 +2477,33 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 	var botMsgIDs []int
 
 	if telegramLen(formatted) <= maxMessageLength {
-		_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		editErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 			ChatID:    first.Chat.ID,
 			MessageID: msgID,
 			Text:      formatted,
 			ParseMode: models.ParseModeMarkdown,
 		})
 		if editErr != nil && !isNotModified(editErr) {
+			slog.Warn("final markdown edit failed, falling back to plain (album)", "error", editErr, "chat_id", first.Chat.ID, "msg_id", msgID)
 			setReaction(ctx, b, first.Chat.ID, first.ID, "🔄")
-			b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			plainErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 				ChatID:    first.Chat.ID,
 				MessageID: msgID,
 				Text:      response,
 			})
+			if plainErr != nil && !isNotModified(plainErr) {
+				slog.Warn("final reconcile edit failed — streamed partial left on screen (album)", "error", plainErr, "chat_id", first.Chat.ID, "msg_id", msgID)
+			}
 		}
 		botMsgIDs = []int{msgID}
 	} else if telegramLen(response) <= maxMessageLength {
-		b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		if editErr := editFinal(ctx, b, &bot.EditMessageTextParams{
 			ChatID:    first.Chat.ID,
 			MessageID: msgID,
 			Text:      response,
-		})
+		}); editErr != nil && !isNotModified(editErr) {
+			slog.Warn("final reconcile edit failed — streamed partial left on screen (album)", "error", editErr, "chat_id", first.Chat.ID, "msg_id", msgID)
+		}
 		botMsgIDs = []int{msgID}
 	} else {
 		_, delErr := b.DeleteMessage(ctx, &bot.DeleteMessageParams{

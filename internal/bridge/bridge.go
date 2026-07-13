@@ -24,10 +24,11 @@ import (
 // ImageInfo holds a downloaded image file path together with optional metadata
 // from the Telegram API (dimensions and file size).
 type ImageInfo struct {
-	Path   string // local file path
-	Width  int    // image width in pixels (0 if unknown)
-	Height int    // image height in pixels (0 if unknown)
-	Size   int64  // file size in bytes (0 if unknown)
+	Path    string // local file path
+	Width   int    // image width in pixels (0 if unknown)
+	Height  int    // image height in pixels (0 if unknown)
+	Size    int64  // file size in bytes (0 if unknown)
+	MediaID int64  // media-ledger row id when archived (0 = not archived, e.g. stickers)
 }
 
 // PDFInfo holds a downloaded PDF file path together with optional metadata.
@@ -828,6 +829,24 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// text, not the augmented prefix.
 	augmentedMsg = b.injectPerTurnContextRaw(ctx, chatID, threadID, augmentedMsg, userMsg)
 
+	// V2-H19: photo turns get the media-note contract so the archive becomes
+	// searchable — the agent's own one-liner is stored as the description.
+	archivedCount := 0
+	for _, img := range images {
+		if img.MediaID != 0 {
+			archivedCount++
+		}
+	}
+	if archivedCount > 0 {
+		augmentedMsg += "\n\n" + mediaNoteInstruction(archivedCount)
+	}
+
+	// V2-H26: system-initiated turns that publish into a group get the
+	// public-post provenance contract (DM facts stay out of public posts).
+	if isSystemSender(senderName) && chatID < 0 {
+		augmentedMsg += "\n\n" + publicPostContract
+	}
+
 	// Convert image/PDF attachments to typed structs.
 	var imgAttachments []process.ImageAttachment
 	for _, img := range images {
@@ -975,6 +994,22 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		}
 	} else if isSystemSender(senderName) {
 		source = "scheduler"
+	}
+
+	// V2-H19: capture the agent's [media-note] description for this turn's
+	// archived photos, then strip the marker before any delivery/logging.
+	if archivedCount > 0 {
+		cleaned, note := extractMediaNote(result.Text)
+		result.Text = cleaned
+		if note != "" && b.store != nil {
+			for _, img := range images {
+				if img.MediaID != 0 {
+					if err := b.store.SetMediaDescription(img.MediaID, note); err != nil {
+						slog.Warn("media-note: description update failed", "media_id", img.MediaID, "error", err)
+					}
+				}
+			}
+		}
 	}
 
 	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source, turnModel)
@@ -1136,6 +1171,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 			result.Usage.InputTokens, result.Usage.OutputTokens,
 			result.Usage.CacheCreationInputTokens, result.Usage.CacheReadInputTokens,
 			result.Usage.CostUSD, result.Usage.NumTurns, source, turnModel,
+			result.Timings.QueueMs, result.Timings.TTFTMs, result.Timings.TotalMs,
 		); err != nil {
 			slog.Warn("failed to log usage", "error", err)
 		}

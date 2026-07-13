@@ -13,7 +13,7 @@ func TestLogUsageStoresCostDelta(t *testing.T) {
 
 	log := func(sessID int64, cumulative float64) {
 		t.Helper()
-		if err := s.LogUsage(1, sessID, 10, 5, 0, 0, cumulative, 1, "interactive", "claude-opus-4-8"); err != nil {
+		if err := s.LogUsage(1, sessID, 10, 5, 0, 0, cumulative, 1, "interactive", "claude-opus-4-8", 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -60,5 +60,24 @@ func TestLogUsageStoresCostDelta(t *testing.T) {
 	}
 	if i != len(want) {
 		t.Fatalf("got %d rows, want %d", i, len(want))
+	}
+}
+
+// V2-H18: per-turn phase timings must persist so the >60s long tail can be
+// attributed from the ledger.
+func TestLogUsageStoresTimings(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	if err := s.LogUsage(1, 100, 10, 5, 0, 0, 0.5, 1, "interactive", "claude-opus-4-8", 1200, 8500, 72000); err != nil {
+		t.Fatal(err)
+	}
+	var queue, ttft, dur int64
+	if err := s.db.QueryRow(`SELECT queue_ms, ttft_ms, duration_ms FROM usage WHERE session_id = 100`).
+		Scan(&queue, &ttft, &dur); err != nil {
+		t.Fatal(err)
+	}
+	if queue != 1200 || ttft != 8500 || dur != 72000 {
+		t.Fatalf("got queue=%d ttft=%d dur=%d", queue, ttft, dur)
 	}
 }

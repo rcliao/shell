@@ -16,6 +16,17 @@ type Bot struct {
 	auth    *Auth
 	bridge  *bridge.Bridge
 	handler *Handler
+	// dedup, when set, is consulted before every proactive SendText; returning
+	// true suppresses the send (V2-H3 outbound dedup ledger).
+	dedup func(chatID, threadID int64, text string) bool
+}
+
+// SetOutboundDedup installs the proactive-send dedup check. SendText carries
+// only proactive traffic (scheduler notify, relay, a2a, prompt-schedule
+// results) — conversational replies go through the message-edit path — so
+// this is the single chokepoint for the duplicate-reminder guard.
+func (b *Bot) SetOutboundDedup(check func(chatID, threadID int64, text string) bool) {
+	b.dedup = check
 }
 
 func NewBot(token string, auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) (*Bot, error) {
@@ -112,6 +123,9 @@ func (b *Bot) Start(ctx context.Context) {
 // Used for async notifications like plan progress. threadID is the Telegram
 // forum topic ID (0 = main chat / no topic).
 func (b *Bot) SendText(chatID, threadID int64, text string) {
+	if b.dedup != nil && b.dedup(chatID, threadID, text) {
+		return
+	}
 	ctx := context.Background()
 	chunks := splitMessage(text, maxMessageLength)
 	for _, chunk := range chunks {

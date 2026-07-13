@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,6 +43,38 @@ type Daemon struct {
 	tunnelMgr *tunnel.Manager      // nil if disabled
 	pmMgr     *pm.Manager          // nil if disabled
 	rpcServer *rpc.Server          // nil if no RPC endpoints
+}
+
+// busyRetryDelays paces synthetic-turn retries when the target session is
+// mid-turn (V2-H16): an a2a hand-off or scheduler prompt that collides with a
+// human turn must wait its turn, not vanish (7/12: a2a turn dropped on
+// "session busy").
+var busyRetryDelays = []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second}
+
+// busySleep pauses between busy retries; overridable in tests.
+var busySleep = time.Sleep
+
+// syntheticTurn runs a bridge turn for a non-human caller, retrying through
+// busy-session collisions on a short backoff. After the delays are exhausted
+// the last error is returned — the caller is expected to log it loudly.
+func syntheticTurn(br *bridge.Bridge, chatID int64, msg, sender string) (bridge.AgentResponse, error) {
+	return retryBusySend(chatID, sender, func() (bridge.AgentResponse, error) {
+		return br.HandleMessageStreaming(context.Background(), chatID, 0, msg, sender, nil, nil, nil)
+	})
+}
+
+// retryBusySend is the retry loop behind syntheticTurn, split out for testing.
+func retryBusySend(chatID int64, sender string, run func() (bridge.AgentResponse, error)) (bridge.AgentResponse, error) {
+	resp, err := run()
+	for _, delay := range busyRetryDelays {
+		if err == nil || !errors.Is(err, process.ErrSessionBusy) {
+			return resp, err
+		}
+		slog.Info("synthetic turn hit busy session, retrying", "chat_id", chatID, "sender", sender, "delay", delay)
+		busySleep(delay)
+		resp, err = run()
+	}
+	return resp, err
 }
 
 func New(cfg config.Config) (*Daemon, error) {
@@ -501,6 +534,32 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Wire transport: plan progress, relay photos → Telegram
 	br.SetTransport(&telegramTransport{bot: bot})
 
+	// Outbound dedup guard (V2-H3): suppress a proactive send whose text
+	// matches a send to the same chat within the window. Ledger rows (including
+	// suppressed ones) land in outbound_sends for measurement.
+	if !cfg.Daemon.OutboundDedupDisabled {
+		window := cfg.Daemon.OutboundDedupWindow()
+		bot.SetOutboundDedup(func(chatID, threadID int64, text string) bool {
+			hash := store.OutboundTextHash(text)
+			if hash == "" {
+				return false // too short to dedup safely
+			}
+			seen, err := st.SeenOutboundSince(chatID, threadID, hash, time.Now().Add(-window))
+			if err != nil {
+				slog.Warn("outbound dedup: ledger check failed", "error", err)
+				return false
+			}
+			if err := st.RecordOutboundSend(chatID, threadID, "sendtext", hash, seen); err != nil {
+				slog.Warn("outbound dedup: ledger write failed", "error", err)
+			}
+			if seen {
+				slog.Warn("outbound dedup: suppressed duplicate proactive send",
+					"chat_id", chatID, "thread_id", threadID, "hash", hash[:12], "window", window)
+			}
+			return seen
+		})
+	}
+
 	// Register cron parser for bridge schedule commands.
 	bridge.SetCronParser(func(expr string) (interface{ Next(time.Time) time.Time }, error) {
 		return scheduler.ParseCron(expr)
@@ -563,8 +622,9 @@ func New(cfg config.Config) (*Daemon, error) {
 			bot.SendText(chatID, 0, msg)
 		}
 		onPrompt := func(chatID int64, msg string) {
-			// Route through bridge as if user sent it
-			resp, err := br.HandleMessageStreaming(context.Background(), chatID, 0, msg, "scheduler", nil, nil, nil)
+			// Route through bridge as if user sent it; wait out a busy session
+			// instead of dropping the scheduled prompt (V2-H16).
+			resp, err := syntheticTurn(br, chatID, msg, "scheduler")
 			if err != nil {
 				slog.Error("scheduler prompt failed", "chat_id", chatID, "error", err)
 				return
@@ -635,7 +695,9 @@ func New(cfg config.Config) (*Daemon, error) {
 							slog.Info("a2a: received peer turn", "from", p.From, "chat_id", p.ChatID, "depth", p.Depth)
 							go func(pl bridge.A2APayload) {
 								prompt := bridge.A2ADeliveryPrompt(pl.From, pl.Depth, pl.Text)
-								resp, err := br.HandleMessageStreaming(context.Background(), pl.ChatID, 0, prompt, pl.From, nil, nil, nil)
+								// Busy session (e.g. the group is mid-human-turn) →
+								// retry on a backoff rather than losing the hand-off (V2-H16).
+								resp, err := syntheticTurn(br, pl.ChatID, prompt, pl.From)
 								if err != nil {
 									slog.Error("a2a: turn failed", "chat_id", pl.ChatID, "error", err)
 									return
@@ -958,10 +1020,14 @@ func (d *Daemon) cleanupLoop(ctx context.Context) {
 				slog.Warn("stale session cleanup failed", "error", err)
 			}
 		case <-dbTicker.C:
-			if n, err := d.store.CleanupOldMessages(7 * 24 * time.Hour); err != nil {
-				slog.Warn("message cleanup failed", "error", err)
-			} else if n > 0 {
-				slog.Info("cleaned up old messages", "deleted", n)
+			// V2-H25: retention is config-driven (default 365d, negative =
+			// never) — the old hardcoded 7-day prune destroyed family history.
+			if retention, ok := d.cfg.Store.MessageRetention(); ok {
+				if n, err := d.store.CleanupOldMessages(retention); err != nil {
+					slog.Warn("message cleanup failed", "error", err)
+				} else if n > 0 {
+					slog.Info("cleaned up old messages", "deleted", n, "retention", retention)
+				}
 			}
 			if n, err := d.store.CleanupCompletedTasks(3 * 24 * time.Hour); err != nil {
 				slog.Warn("task cleanup failed", "error", err)

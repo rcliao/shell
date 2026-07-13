@@ -225,11 +225,43 @@ func (c ClaudeConfig) Validate() []string {
 
 type StoreConfig struct {
 	DBPath string `json:"db_path"`
+	// MessageRetentionDays bounds the periodic messages-table prune. The old
+	// hardcoded 7-day prune silently destroyed conversation history (V2-H25:
+	// June 2026 is unrecoverable). 0/absent = default 365. Negative = never
+	// prune.
+	MessageRetentionDays int `json:"message_retention_days"`
+}
+
+// MessageRetention returns the prune age, defaulting to 365 days.
+// A negative configured value disables pruning entirely (returns 0, false).
+func (s StoreConfig) MessageRetention() (time.Duration, bool) {
+	if s.MessageRetentionDays < 0 {
+		return 0, false
+	}
+	days := s.MessageRetentionDays
+	if days == 0 {
+		days = 365
+	}
+	return time.Duration(days) * 24 * time.Hour, true
 }
 
 type DaemonConfig struct {
 	PIDFile string `json:"pid_file"`
 	LogFile string `json:"log_file"` // path for daemon logs (default: <agent config dir>/daemon.log). Empty = use default.
+	// Outbound dedup (V2-H3): a proactive send (scheduler notify, relay, a2a,
+	// prompt-schedule result) whose text matches a send to the same chat within
+	// the window is suppressed — deterministic guard against duplicate
+	// reminders. On by default; outbound_dedup_disabled is the kill-switch.
+	OutboundDedupDisabled   bool `json:"outbound_dedup_disabled"`
+	OutboundDedupWindowMins int  `json:"outbound_dedup_window_mins"` // default 60
+}
+
+// OutboundDedupWindow returns the dedup window, defaulting to 60 minutes.
+func (d DaemonConfig) OutboundDedupWindow() time.Duration {
+	if d.OutboundDedupWindowMins > 0 {
+		return time.Duration(d.OutboundDedupWindowMins) * time.Minute
+	}
+	return 60 * time.Minute
 }
 
 type Profile struct {

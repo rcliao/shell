@@ -46,7 +46,7 @@ testdata/bench/conversations/
 /shell.db
 
 # .evolve/ — production-data privacy (cycle 144)
-# Cycle reports and bench snapshots quote real mami/papi conversations
+# Cycle reports and bench snapshots quote real owner conversations
 # (health, food, family). Keep top-level scaffolding (README, BACKLOG,
 # LEARNINGS, state.json) tracked for the dev record; private artifacts
 # stay local.
@@ -54,3 +54,4 @@ testdata/bench/conversations/
 .evolve/bench-snapshots/
 .evolve/*-pikamini*.json
 .evolve/*-umbreonmini*.json
+.evolve/reviews/

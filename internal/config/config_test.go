@@ -151,3 +151,23 @@ func TestTelegramToken(t *testing.T) {
 		t.Errorf("expected test-token-123, got %s", got)
 	}
 }
+
+// V2-H25: the messages prune must default to a year and be fully disableable —
+// the old hardcoded 7-day prune silently destroyed conversation history.
+func TestStoreMessageRetention(t *testing.T) {
+	cases := []struct {
+		days    int
+		want    time.Duration
+		enabled bool
+	}{
+		{0, 365 * 24 * time.Hour, true},   // absent → 1 year default
+		{30, 30 * 24 * time.Hour, true},   // explicit window
+		{-1, 0, false},                    // negative → never prune
+	}
+	for _, c := range cases {
+		got, ok := (StoreConfig{MessageRetentionDays: c.days}).MessageRetention()
+		if ok != c.enabled || got != c.want {
+			t.Fatalf("days=%d: got (%v,%v), want (%v,%v)", c.days, got, ok, c.want, c.enabled)
+		}
+	}
+}

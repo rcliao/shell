@@ -697,7 +697,10 @@ func (m *Memory) ParseMemoryDirectives(ctx context.Context, chatID int64, respon
 	var tags []string
 	if prof.AgentNS != "" {
 		ns = prof.AgentNS
-		tags = []string{"learning"}
+		// Provenance (V2-H26): record WHERE the fact was learned. A memory
+		// from a private DM must be distinguishable from group knowledge —
+		// public composers (diary/占卜/小思考) filter on this (7/5 kimchi leak).
+		tags = []string{"learning", chatTag(chatID)}
 	}
 	if ns == "" {
 		return response
@@ -754,7 +757,10 @@ func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind
 	var tags []string
 	if prof.AgentNS != "" {
 		ns = prof.AgentNS
-		tags = []string{"learning"}
+		// Provenance (V2-H26): record WHERE the fact was learned. A memory
+		// from a private DM must be distinguishable from group knowledge —
+		// public composers (diary/占卜/小思考) filter on this (7/5 kimchi leak).
+		tags = []string{"learning", chatTag(chatID)}
 	}
 	if ns == "" {
 		return fmt.Errorf("no target namespace configured for chat %d", chatID)
@@ -930,7 +936,7 @@ func (m *Memory) StoreBehavioralLearning(ctx context.Context, chatID int64, cont
 	if ns == "" {
 		ns = legacyNamespace(chatID)
 	}
-	tags := []string{"behavioral"}
+	tags := []string{"behavioral", chatTag(chatID)}
 
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
 		NS:         ns,
