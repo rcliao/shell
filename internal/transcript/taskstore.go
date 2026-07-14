@@ -30,9 +30,19 @@ type TaskStore struct {
 
 // OpenTaskStore opens (or creates) the shared task database.
 func OpenTaskStore(path string) (*TaskStore, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open task store: %w", err)
+	}
+	// Explicit pragmas — the old DSN params were mattn-style and silently
+	// ignored by modernc.org/sqlite (see transcript.Open).
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("task store WAL mode: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("task store busy_timeout: %w", err)
 	}
 	if err := migrateTaskStore(db); err != nil {
 		db.Close()

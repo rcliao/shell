@@ -25,7 +25,7 @@ type Entry struct {
 	TelegramMsgID int
 	Timestamp     time.Time
 	SenderType    string // "human" or "agent"
-	SenderName    string // display name (e.g. "mami", "pikamini")
+	SenderName    string // display name (e.g. an owner nickname or "pikamini")
 	AgentUsername string // bot username for agent messages, empty for humans
 	Text          string
 	ReplyToMsgID  int // 0 if not a reply
@@ -61,9 +61,22 @@ const (
 
 // Open opens (or creates) the shared transcript database.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open transcript db: %w", err)
+	}
+	// Explicit pragmas: the old `?_journal_mode=WAL&_busy_timeout=5000` DSN
+	// params are mattn/go-sqlite3 syntax that modernc.org/sqlite silently
+	// ignores — the shared transcript DB (written by BOTH daemons) ran in
+	// rollback-journal mode with no busy wait, producing SQLITE_BUSY failures
+	// under concurrent family-chat bursts (observed 7/13).
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("transcript db WAL mode: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("transcript db busy_timeout: %w", err)
 	}
 	if err := migrate(db); err != nil {
 		db.Close()
