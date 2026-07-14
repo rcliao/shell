@@ -555,7 +555,7 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 		ns = legacyNamespace(chatID)
 	}
 
-	_, err := m.store.Put(ctx, agentmemory.PutParams{
+	err := m.putWithRetry(ctx, agentmemory.PutParams{
 		NS:         ns,
 		Key:        fmt.Sprintf("exchange-%d", time.Now().UnixMilli()),
 		Content:    content,
@@ -580,7 +580,7 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 			factTTL = ttl // same-day events keep the exchange TTL
 		}
 		factTags := append(append([]string{}, tags...), "same-day")
-		if _, ferr := m.store.Put(ctx, agentmemory.PutParams{
+		if ferr := m.putWithRetry(ctx, agentmemory.PutParams{
 			NS:         ns,
 			Key:        c.Key,
 			Content:    c.Content,
@@ -595,6 +595,26 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 			slog.Warn("failed to store distilled same-day fact", "error", ferr)
 		}
 	}
+}
+
+// putWithRetry wraps store.Put with a short backoff retry on SQLITE_BUSY.
+// Post-restart bursts (prewarms + reflect + exchange logging in the same
+// minute) exceed the 5s busy_timeout writer queue and were dropping writes —
+// including same-day distilled facts (observed 7/14 10:02). All callers are
+// fire-and-forget background writes, so waiting a few seconds is free.
+func (m *Memory) putWithRetry(ctx context.Context, p agentmemory.PutParams) error {
+	var err error
+	for attempt, wait := 0, 500*time.Millisecond; attempt < 4; attempt, wait = attempt+1, wait*2 {
+		if _, err = m.store.Put(ctx, p); err == nil || !strings.Contains(err.Error(), "database is locked") {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+	}
+	return err
 }
 
 // RememberMedia stores a photo turn's [media-note] description as a searchable
