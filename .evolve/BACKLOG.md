@@ -39,6 +39,18 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### ⚠️ INCIDENT 7/14 14:02-14:37: umbreon daemon panic — MY hand-inserted task
+- Loop session inserted a Seattle-write task with a 10-char id directly into
+  shared tasks.db; heartbeat enrichment's unguarded `t.ID[:12]` panicked the
+  whole daemon. Down 35min until this session noticed (owner-A saw the silence
+  first — pika A2A-poked, no answer). Recovery: lengthen id, env-restart,
+  bounds-fix both [:12] sites, replay-retry-on-busy (boot replay had hit the
+  prewarm lock and gave up). LESSONS: (1) never hand-insert rows matching only
+  the schema — match the GENERATOR's invariants (16-hex ids) or use the RPC
+  path; (2) a single malformed row must never kill a daemon — panic surface in
+  enrichment now bounds-checked; consider recover() around scheduler turns
+  (H30 candidate); (3) replay v1 gave up on busy — fixed same day.
+
 ### 7/14 midday: fanout >10s spikes — slow member is NOT ghost inject
 - Two 11-12s context_fanout spikes (12:16 pika, 12:18 umbreon) while memory
   inject was only ~3.2s — the fanout's slowest member gates prework and it's

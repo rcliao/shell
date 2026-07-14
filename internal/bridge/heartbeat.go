@@ -124,7 +124,11 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 					if len(result) > 100 {
 						result = result[:100] + "..."
 					}
-					sb.WriteString(fmt.Sprintf("- %s %s (%s): %s → %s\n", icon, t.ID[:12], arrow, t.Description, result))
+					rid := t.ID
+					if len(rid) > 12 {
+						rid = rid[:12]
+					}
+					sb.WriteString(fmt.Sprintf("- %s %s (%s): %s → %s\n", icon, rid, arrow, t.Description, result))
 				}
 			}
 			if hasActivity {
