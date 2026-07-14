@@ -38,6 +38,7 @@ func (b *Bridge) ContextManifest(ctx context.Context, chatID int64) ([]ContextCo
 	}
 	add("timestamp", b.timestampSystemPrompt())
 	add("skills_catalog", b.skillsSystemPrompt())
+	add("environment", b.environmentPrompt())
 	add("session_lifecycle", b.sessionLifecyclePrompt())
 	if b.transcript != nil {
 		add("group_agent", b.groupAgentPrompt())

@@ -77,6 +77,14 @@ type Bridge struct {
 	skills    *skill.Registry // nil if disabled
 	skillDirs []string        // directories to scan on reload
 
+	// Environment facts rendered into the system prompt so agents stop
+	// re-deriving infra layout by trial and error (observed: repeated failed
+	// sqlite calls against guessed DB paths, cd-ing into the wrong repo to
+	// satisfy relative script paths, workspaces never used because never
+	// mentioned).
+	agentHomeDir string // per-agent config/data dir (shell.db, memory.db)
+	workspaceDir string // persistent agent scratch space
+
 	// Agent identity prompt (prepended to system prompt)
 	agentIdentity     string
 	agentBotUsername  string // this agent's bot username (for transcript filtering)
@@ -344,6 +352,13 @@ func (b *Bridge) GetSkillRegistry() *skill.Registry {
 // SetSkillDirs sets the directories to scan when reloading skills.
 func (b *Bridge) SetSkillDirs(dirs []string) {
 	b.skillDirs = dirs
+}
+
+// SetEnvironment wires the agent's real filesystem facts into the system
+// prompt (see environmentPrompt). workspaceDir should already exist.
+func (b *Bridge) SetEnvironment(agentHomeDir, workspaceDir string) {
+	b.agentHomeDir = agentHomeDir
+	b.workspaceDir = workspaceDir
 }
 
 // ReloadSkills rescans all skill directories and rebuilds the registry.
@@ -970,6 +985,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		}
 		systemPrompt += b.timestampSystemPrompt()
 		systemPrompt += b.skillsSystemPrompt()
+		systemPrompt += b.environmentPrompt()
 		systemPrompt += b.sessionLifecyclePrompt()
 		if b.transcript != nil {
 			systemPrompt += b.groupAgentPrompt()

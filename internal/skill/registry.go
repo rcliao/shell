@@ -153,7 +153,10 @@ func (r *Registry) CatalogPrompt() string {
 	sb.WriteString("**Skills are Bash scripts you invoke by file path**, NOT native MCP tools. ")
 	sb.WriteString("Each entry below shows a `Usage:` one-liner — that is the invocation. ")
 	sb.WriteString("Do not search for skills in your tool list; they live in the filesystem at the paths shown. ")
-	sb.WriteString("If a one-liner isn't enough detail, run `scripts/shell-skill load <name>` to load the full SKILL.md body for that turn.\n\n")
+	sb.WriteString("Always invoke scripts by ABSOLUTE path — relative `scripts/...` forms resolve against your working directory and will fail. ")
+	sb.WriteString("If a one-liner isn't enough detail, read the skill's SKILL.md at the path shown.\n\n")
+	sb.WriteString("**When a local skill and a remote/connector MCP tool can do the same job, use the skill** — ")
+	sb.WriteString("local scripts run in seconds; remote connector tools have been measured at 90s+ for single operations.\n\n")
 	sb.WriteString("**Artifact markers:** When a skill script outputs `[artifact type=\"...\" path=\"...\" caption=\"...\"]`, ")
 	sb.WriteString("include them verbatim in your response — the bridge sends them as images/files to the user.\n\n")
 
@@ -172,7 +175,7 @@ func (r *Registry) CatalogPrompt() string {
 
 	// Lazy tier — compact catalog, capped.
 	if len(lazy) > 0 {
-		sb.WriteString("### Lazy skills (use the `Usage:` line; run `scripts/shell-skill load <name>` for more detail)\n\n")
+		sb.WriteString("### Lazy skills (use the `Usage:` line; read the SKILL.md path for more detail)\n\n")
 		lazyUsed := 0
 		shown := 0
 		for _, s := range lazy {
@@ -237,6 +240,14 @@ func renderLazyLine(s *Skill) string {
 	sb.WriteString(s.Description)
 	if s.Usage != "" {
 		sb.WriteString(" — Usage: `")
+		// Usage lines are authored with relative `scripts/...` paths, but the
+		// subprocess runs from work_dir, not the skill dir — agents were
+		// observed cd-ing into the wrong repo to satisfy the relative path.
+		// Absolutize at render time so the one-liner is copy-paste runnable.
+		if strings.HasPrefix(s.Usage, "scripts/") {
+			sb.WriteString(s.Dir)
+			sb.WriteString("/")
+		}
 		sb.WriteString(s.Usage)
 		sb.WriteString("`")
 	}

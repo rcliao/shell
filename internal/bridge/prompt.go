@@ -26,9 +26,10 @@ func (b *Bridge) skillsSystemPrompt() string {
 		"**CRITICAL:** NEVER run long-running processes (servers, watchers) directly via Bash. " +
 		"Always use `shell_pm` so they are tracked, have logs, and can be stopped.\n\n" +
 		"**IMPORTANT — Scheduling:** CronCreate is SESSION-ONLY and dies on every session restart. " +
-		"NEVER use CronCreate for reminders. ALWAYS use `scripts/shell-schedule` instead — it persists to SQLite.\n" +
-		"Example: `scripts/shell-schedule once --at \"21:00\" --message \"Flonase time!\" --mode notify`\n" +
-		"Example: `scripts/shell-schedule cron --expr \"0 21 * * *\" --message \"Daily Flonase\" --mode notify`\n"
+		"NEVER use CronCreate for reminders. ALWAYS use the shell-schedule skill script instead — it persists to SQLite. " +
+		"Invoke it by the ABSOLUTE path shown in the Skills catalog above.\n" +
+		"Example: `<shell-schedule scripts dir>/shell-schedule once --at \"21:00\" --message \"Flonase time!\" --mode notify`\n" +
+		"Example: `<shell-schedule scripts dir>/shell-schedule cron --expr \"0 21 * * *\" --message \"Daily Flonase\" --mode notify`\n"
 
 	// Playground directory info (if configured).
 	if b.claudeCfg.PlaygroundDir != "" {
@@ -44,6 +45,39 @@ func (b *Bridge) skillOverrides(name string) bool {
 	return b.skills != nil && b.skills.Has(name)
 }
 
+// environmentPrompt states the agent's real filesystem layout. Before this
+// existed, agents re-derived it every session by trial and error: umbreon's
+// failed-Bash ledger is dominated by sqlite calls against guessed DB paths,
+// and pika cd'd into the shell REPO to satisfy a relative `scripts/...` path.
+// Facts the agent needs every session belong in Channel A, stated once.
+func (b *Bridge) environmentPrompt() string {
+	if b.agentHomeDir == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n## Your environment\n\n")
+	sb.WriteString("- **Home (data dir):** `" + b.agentHomeDir + "` — your databases live here: ")
+	sb.WriteString("`shell.db` (sessions, schedules, ledgers) and `memory.db` (ghost memory). ")
+	sb.WriteString("Inspect with `sqlite3 -readonly`; these are THE paths — do not guess others like `~/.shell/shell.db`.\n")
+	if b.workspaceDir != "" {
+		sb.WriteString("- **Workspace:** `" + b.workspaceDir + "` — your persistent scratch space. ")
+		sb.WriteString("Notes, helper scripts, drafts, and experiments belong here; it survives restarts and rotations. ")
+		sb.WriteString("Prefer it over /tmp for anything you may want again.\n")
+	}
+	if len(b.skillDirs) > 0 {
+		sb.WriteString("- **Skill roots:** ")
+		for i, d := range b.skillDirs {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString("`" + d + "`")
+		}
+		sb.WriteString(" — installed skills load from these; invoke their scripts by absolute path.\n")
+	}
+	sb.WriteString("- **Shared task store:** `~/.shell/shared/tasks.db` — use the shell-task skill, not raw SQL, to mutate it.\n")
+	return sb.String()
+}
+
 // sessionLifecyclePrompt frames WHY scheduling and memory must be persistent:
 // the Claude session is ephemeral, so any deferred or timed intent held only
 // in-conversation evaporates when the session compacts, rotates, or idle-dies.
@@ -57,11 +91,11 @@ func (b *Bridge) sessionLifecyclePrompt() string {
 		"this conversation, waiting, or promising to check back WILL be lost.\n\n" +
 		"So for ANY future or timed action — a reminder, a follow-up, \"check on X later\", " +
 		"\"in 30 minutes / tonight / tomorrow / every morning\", or a recurring routine — schedule " +
-		"it NOW with the `scripts/shell-schedule` skill, which persists to the database and fires " +
-		"reliably across restarts and rotations. Do NOT rely on native/session timers, self " +
-		"check-backs, in-session waiting, or \"I'll remember to…\" — those die with the session. " +
-		"To retain a FACT across sessions, use `scripts/shell-remember` (persistent memory), not " +
-		"your own recall.\n"
+		"it NOW with the shell-schedule skill script (absolute path in the Skills catalog), which " +
+		"persists to the database and fires reliably across restarts and rotations. Do NOT rely on " +
+		"native/session timers, self check-backs, in-session waiting, or \"I'll remember to…\" — " +
+		"those die with the session. To retain a FACT across sessions, use the shell-remember " +
+		"skill script (persistent memory), not your own recall.\n"
 }
 
 // timestampSystemPrompt returns guidance about where to find the current time.

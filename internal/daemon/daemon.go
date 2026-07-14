@@ -431,6 +431,17 @@ func New(cfg config.Config) (*Daemon, error) {
 	skillDirs = append(skillDirs, agentSkillsDir)
 	br.SetSkillDirs(skillDirs)
 
+	// Environment facts for the system prompt: the per-agent home and a
+	// persistent workspace. Created here so the prompt never advertises a
+	// directory that doesn't exist.
+	agentHome := filepath.Dir(agentSkillsDir)
+	workspaceDir := filepath.Join(agentHome, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		slog.Warn("workspace dir create failed", "dir", workspaceDir, "error", err)
+		workspaceDir = ""
+	}
+	br.SetEnvironment(agentHome, workspaceDir)
+
 	// Configure in-place compaction by token count.
 	if cfg.Claude.MaxSessionTokens > 0 {
 		br.SetMaxSessionTokens(cfg.Claude.MaxSessionTokens)

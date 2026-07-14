@@ -29,6 +29,42 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### V2-H41 — [H] Context-behavior audit: fix the affordance gaps — SHIPPED 7/13
+- **status:** shipped 7/13 evening (owner: "run through agentic evaluation
+  around context set for the agent … see if this is a context issue leading
+  to their behavior").
+- **method:** dumped both agents' LIVE composed prompts (`shell context
+  --full`) and cross-referenced against the execution ledgers (tool_uses
+  30d, failed-Bash details, workspace state).
+- **verdict: YES — the behavior gaps are context gaps.** Evidence:
+  (a) catalog told agents to run `scripts/shell-skill load` — that script
+      DOES NOT EXIST anywhere on disk (dangling affordance);
+  (b) Usage one-liners used relative `scripts/...` paths while the subprocess
+      runs from work_dir — ledger shows an agent cd-ing into the shell REPO
+      to satisfy the path, another executing the repo copy of shell-schedule;
+  (c) infra layout never stated → failed-Bash ledger dominated by sqlite
+      calls against guessed DB paths/schemas, re-derived every session;
+  (d) workspace: 0 mentions in either prompt → 0 usage ever;
+  (e) counter-evidence that context WORKS when granted: skill scripts = 49%
+      of all Bash calls, ghost_put 75×/30d, relay-via-MCP 24× with zero
+      legacy-directive failures since pinning.
+  Also observed: identity component composes to 0 chars for BOTH agents
+  (persona lives in work_dir CLAUDE.md, outside shell's accountable seam) —
+  flagged, not changed.
+- **shipped:** (1) registry: lazy-skill loader text now says read SKILL.md
+  (no dangling script), Usage lines absolutized at render time, "invoke by
+  ABSOLUTE path" rule, "prefer local skill over remote connector MCP tool"
+  rule (generalizes the 95s Notion-connector lesson); (2) new `environment`
+  prompt component: agent home + real DB paths + persistent workspace dir
+  (daemon now creates it) + skill roots + shared task store; visible in
+  `shell context` manifest; (3) Bridge Rules / lifecycle examples no longer
+  teach relative paths. Deliberately NOT granted: skill authoring (waits for
+  H14's lint gate — a bare mention would auto-activate unlinted skills on
+  rotation).
+- **measure-by:** failed-Bash rate on sqlite/path-guess classes trends to ~0
+  over 2 weeks; first workspace file appears; zero wrong-dir skill
+  invocations in tool_uses detail; connector-tool share of Notion ops → 0.
+
 ### V2-H40 — [H] Shell as concurrent tool infra: measure + harden execution — APPROVED 7/13
 - **status:** approved (owner 7/13: expand monitoring beyond telegram→Claude
   to tool use + shell ecosystem usage; "go for concurrency and build stable
