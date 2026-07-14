@@ -52,6 +52,15 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   two pre-A2A isolation pins contradicted the group protocol → rewritten,
   skill-inventory unpinned. Orange-cat tension kept deliberately (owner:
   watch personality develop).
+- **⚠️ INCIDENT 7/14 08:07-09:41: drain v1 race killed pika's daemon.** Drain's
+  poller-cancel made Run() return; main's exit path raced the SIGHUP exec —
+  umbreon won its race, pika exited and stayed DOWN 90min (owner-A noticed,
+  umbreon A2A-poked, backlog of 4 turns replayed on restart — Telegram
+  redelivery worked as designed). Fixed f72d4b3 (RestartPending parks main).
+  Recovery runbook: daemon start needs secrets — keychain is locked to
+  headless sessions; source env from the surviving daemon (ps eww <pid>),
+  export, nohup start. LESSON: restart-path changes need a same-machine
+  restart test before deploy, not just unit tests.
 - **Graceful drain on SIGHUP (2cb4511):** poller stops, in-flight turns
   finish (turn ctx detached via WithoutCancel), 120s bound, then exec.
   Verified live 08:07 ("drain: idle, safe to restart"). Fixes deploy-
