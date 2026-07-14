@@ -34,7 +34,7 @@ type ProfileConfig struct {
 
 // Memory wraps a ghost store for shell use.
 type Memory struct {
-	reflectMu    sync.Mutex
+	reflectMu     sync.Mutex
 	lastBgReflect time.Time
 
 	store            agentmemory.Store
@@ -163,16 +163,74 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 		return ghostSearchInstruction
 	}
 
-	var sb strings.Builder
+	// Layered persona render (V2-H42, shell side of the ghost protected-memory
+	// contract): pinned memories group by shell's layer tags. Charter — the
+	// locked, owner-only core — renders first and most prominently; then
+	// personality, then lore (budgeted), then remaining pinned operating
+	// knowledge. Ghost stores the tags but never interprets them; the meaning
+	// lives here. Per-layer hashes are logged so the identity_stability eval
+	// dimension can diff layers across generations — a charter hash change
+	// without an owner edit is a finding.
+	layers := map[string][]string{}
+	order := []struct{ tag, header string }{
+		{"layer:charter", "[Core identity — unchangeable]"},
+		{"layer:personality", "[Personality]"},
+		{"layer:lore", "[Lore & shared memories]"},
+		{"", "[Operating knowledge]"},
+	}
+	// ContextMemory carries no tags, so build a key→layer map with one List
+	// call (rotation-time only; local sqlite).
+	layerByKey := map[string]string{}
+	if listed, lerr := m.store.List(ctx, agentmemory.ListParams{NS: prof.AgentNS, Limit: 500}); lerr == nil {
+		for _, lm := range listed {
+			for _, t := range lm.Tags {
+				if strings.HasPrefix(t, "layer:") {
+					layerByKey[lm.Key] = t
+					break
+				}
+			}
+		}
+	} else {
+		slog.Warn("identity layer list failed — flat render", "error", lerr)
+	}
 	for _, mem := range result.Memories {
-		sb.WriteString("- ")
-		sb.WriteString(mem.Content)
+		layers[layerByKey[mem.Key]] = append(layers[layerByKey[mem.Key]], mem.Content)
+	}
+
+	var sb strings.Builder
+	for _, sec := range order {
+		contents := layers[sec.tag]
+		if len(contents) == 0 {
+			continue
+		}
+		var layer strings.Builder
+		for _, c := range contents {
+			layer.WriteString("- ")
+			layer.WriteString(c)
+			layer.WriteString("\n")
+		}
+		text := layer.String()
+		h := sha256.Sum256([]byte(text))
+		slog.Info("identity layer", "layer", sec.header, "n", len(contents),
+			"chars", len(text), "hash", hex.EncodeToString(h[:])[:12])
+		if sec.tag == "layer:lore" && len(text)/4 > loreTokenBudget {
+			slog.Warn("identity lore over budget — consolidation candidate",
+				"tokens", len(text)/4, "budget", loreTokenBudget)
+		}
+		sb.WriteString(sec.header)
+		sb.WriteString("\n")
+		sb.WriteString(text)
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\n")
 	sb.WriteString(ghostSearchInstruction)
 	return strings.TrimSpace(sb.String())
 }
+
+// loreTokenBudget caps how much accreted lore should ride in every prompt
+// before the reflect/consolidation loop is expected to compress it. Soft
+// limit: over-budget logs a consolidation candidate, never silently drops
+// persona (quality > tokens).
+const loreTokenBudget = 1500
 
 // systemPromptFromNamespaces is the legacy path: List() per system namespace.
 func (m *Memory) systemPromptFromNamespaces(ctx context.Context, prof ProfileConfig) string {
@@ -572,7 +630,7 @@ func (m *Memory) Remember(ctx context.Context, chatID int64, content string) err
 		Kind:       "semantic",
 		Tags:       tags,
 		Priority:   "high",
-		Importance: 0.8, // user-remembered facts are high importance
+		Importance: 0.8,   // user-remembered facts are high importance
 		Tier:       "ltm", // explicitly saved by user — skip stm
 	})
 	return err
@@ -1804,10 +1862,10 @@ func (m *Memory) ConsolidationCandidates(ctx context.Context, reflectResult *age
 type HealthResult struct {
 	QueriesTested  int     `json:"queries_tested"`
 	AvgResults     float64 `json:"avg_results"`
-	NoiseRatio     float64 `json:"noise_ratio"`      // fraction of results with importance < 0.3
-	PinnedPresent  bool    `json:"pinned_present"`    // at least one pinned memory in context
-	SuppressedOK   bool    `json:"suppressed_ok"`     // no child returned alongside its parent summary
-	CompactionHint bool    `json:"compaction_hint"`   // any query triggered compaction_suggested
+	NoiseRatio     float64 `json:"noise_ratio"`     // fraction of results with importance < 0.3
+	PinnedPresent  bool    `json:"pinned_present"`  // at least one pinned memory in context
+	SuppressedOK   bool    `json:"suppressed_ok"`   // no child returned alongside its parent summary
+	CompactionHint bool    `json:"compaction_hint"` // any query triggered compaction_suggested
 	Diagnosis      string  `json:"diagnosis"`
 }
 
