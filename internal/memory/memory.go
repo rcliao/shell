@@ -149,17 +149,19 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 		budget = 3000
 	}
 
-	// Context() Phase 1 loads pinned memories automatically
-	result, err := m.store.Context(ctx, agentmemory.ContextParams{
-		NS:     prof.AgentNS,
-		Query:  "", // empty query = pinned memories only
-		Budget: budget,
+	// Pinned-only fetch. Context(query="") was used here before, but it
+	// backfills leftover budget with unpinned memories — production prompts
+	// were carrying dormant episodic exchanges ("compare it to the …
+	// chocolate") as if they were operating rules. The system prompt is the
+	// always-on set: pinned only, by contract.
+	pinnedAll, err := m.store.List(ctx, agentmemory.ListParams{
+		NS: prof.AgentNS, PinnedOnly: true, Limit: 500,
 	})
 	if err != nil {
-		slog.Warn("system prompt context failed", "ns", prof.AgentNS, "error", err)
+		slog.Warn("system prompt pinned list failed", "ns", prof.AgentNS, "error", err)
 		return ghostSearchInstruction
 	}
-	if len(result.Memories) == 0 {
+	if len(pinnedAll) == 0 {
 		return ghostSearchInstruction
 	}
 
@@ -178,36 +180,44 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 		{"layer:lore", "[Lore & shared memories]"},
 		{"", "[Operating knowledge]"},
 	}
-	// Identity layers are FORCE-INCLUDED from tag-filtered List calls
-	// (rotation-time only; local sqlite), not taken from the Context result:
-	// ghost's Context packs pinned memories by score under SystemBudget and
-	// silently drops overflow — production logs showed 4/5 charter, 2/5
-	// personality, 1/6 lore surviving the pack (B2). The charter is locked
-	// and lifecycle-immune in the store; the prompt must give it the same
-	// guarantee. The budget still governs the unlayered operating tail,
-	// which is where the real bulk lives.
-	layerByKey := map[string]string{}
-	for _, lt := range []string{"layer:charter", "layer:personality", "layer:lore"} {
-		listed, lerr := m.store.List(ctx, agentmemory.ListParams{NS: prof.AgentNS, Tags: []string{lt}, Limit: 100})
-		if lerr != nil {
-			slog.Warn("identity layer list failed — layer omitted this rotation", "layer", lt, "error", lerr)
-			continue
-		}
-		for _, lm := range listed {
-			if !lm.Pinned {
-				continue // layer tags belong on pinned identity only
+	// Identity layers (charter/personality/lore) are FORCE-INCLUDED — never
+	// budget-trimmed (B2): the charter is locked and lifecycle-immune in the
+	// store; the prompt gives it the same guarantee. The unlayered operating
+	// tail is packed under SystemBudget, newest-first, with drops logged —
+	// never silent.
+	layerOf := map[string]string{}
+	for _, mem := range pinnedAll {
+		for _, tag := range mem.Tags {
+			if strings.HasPrefix(tag, "layer:") {
+				layerOf[mem.Key] = tag
+				break
 			}
-			layerByKey[lm.Key] = lt
-			layers[lt] = append(layers[lt], lm.Content)
 		}
 	}
-	// Operating knowledge: budget-packed pinned memories, minus identity
-	// keys already force-rendered above.
-	for _, mem := range result.Memories {
-		if _, isIdentity := layerByKey[mem.Key]; isIdentity {
+	var operating []agentmemory.Memory
+	for _, mem := range pinnedAll {
+		if lt, ok := layerOf[mem.Key]; ok {
+			layers[lt] = append(layers[lt], mem.Content)
+		} else {
+			operating = append(operating, mem)
+		}
+	}
+	// Pack operating knowledge under the budget (identity layers ride free —
+	// they're small and guaranteed). List returns newest-first; keep that
+	// order so recent corrections win the budget over stale rules.
+	opCharBudget := budget * 4
+	opChars, dropped := 0, 0
+	for _, mem := range operating {
+		if opChars+len(mem.Content) > opCharBudget {
+			dropped++
 			continue
 		}
+		opChars += len(mem.Content)
 		layers[""] = append(layers[""], mem.Content)
+	}
+	if dropped > 0 {
+		slog.Warn("operating knowledge over budget — oldest pins dropped this rotation",
+			"dropped", dropped, "kept", len(layers[""]), "budget_tokens", budget)
 	}
 
 	var sb strings.Builder
