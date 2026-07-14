@@ -55,10 +55,14 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 - Two 11-12s context_fanout spikes (12:16 pika, 12:18 umbreon) while memory
   inject was only ~3.2s — the fanout's slowest member gates prework and it's
   one of: shared tasks.db read, transcript read, or Channel B assembly.
-  UPDATE 15:02: member timing live — spike NOT in the members (inject 3.2s,
-  others <2s) but total 10.6s: ~7s is in code between the previous step
-  marker and the wg block (suspect: synchronous store.LogMessage user-msg
-  write). ACTION: add a pre_fanout step marker to isolate it. ALSO: tasks_chars=11,340 injected EVERY turn
+  RESOLVED 15:14: not a defect. The step window between ensure_session and
+  context_fanout contains maybeRotate — the "spikes" are SESSION ROTATIONS
+  (generation close + tail summarization, ~8-12s) mislabeled as fanout.
+  Every spike today matches a rotation trigger (deploy or pin-edit changed
+  the prompt fingerprint → each session rotates once on its next turn).
+  Remaining action (cosmetic, next batch): step("rotate_and_log") after
+  maybeRotate/LogMessage so the metric names it; consider counting
+  rotation turns separately in e2e stats so p95 excludes them. ALSO: tasks_chars=11,340 injected EVERY turn
   — shared task store needs pruning/curation (probably old completed tasks
   rendering forever); that's both tokens and possibly the latency.
 
