@@ -32,7 +32,10 @@ func (b *Bridge) ContextManifest(ctx context.Context, chatID int64) ([]ContextCo
 		parts = append(parts, ContextComponent{Name: name, Chars: len(s), EstTokens: skill.EstimateTokens(s)})
 		full += s
 	}
-	add("identity", b.agentIdentity)
+	// Legacy config `system_prompt` slot — empty for both agents since persona
+	// moved to ghost pinned identity memories (rendered under pinned_memories).
+	// Labeled explicitly so a 0 here doesn't read as "agent has no identity".
+	add("config_system_prompt (legacy)", b.agentIdentity)
 	if b.memory != nil {
 		add("pinned_memories", b.memory.SystemPrompt(ctx, chatID))
 	}
