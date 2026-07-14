@@ -48,9 +48,12 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   (e) counter-evidence that context WORKS when granted: skill scripts = 49%
       of all Bash calls, ghost_put 75×/30d, relay-via-MCP 24× with zero
       legacy-directive failures since pinning.
-  Also observed: identity component composes to 0 chars for BOTH agents
-  (persona lives in work_dir CLAUDE.md, outside shell's accountable seam) —
-  flagged, not changed.
+  Also observed: the manifest's `identity` row is 0 for both agents — this is
+  the LEGACY config system_prompt slot, NOT missing persona. Verified 7/13
+  evening: persona lives in ghost pinned identity-tagged memories
+  (identity-preamble/voice/vibe etc.) and renders under pinned_memories,
+  exactly once (PR #4 dedup confirmed). Manifest row relabeled
+  `config_system_prompt (legacy)` to stop the misread (commit a899093).
 - **shipped:** (1) registry: lazy-skill loader text now says read SKILL.md
   (no dangling script), Usage lines absolutized at render time, "invoke by
   ABSOLUTE path" rule, "prefer local skill over remote connector MCP tool"
