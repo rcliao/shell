@@ -1098,6 +1098,20 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 				}
 			}
 		}
+		// Vision memory Phase 1: the note also becomes a searchable ghost
+		// memory with file refs to the archived photo(s), so photos are
+		// retrievable through the full memory stack, not just the ledger.
+		if note != "" && b.memory != nil {
+			var paths []string
+			for _, img := range images {
+				if img.MediaID != 0 && img.Path != "" {
+					paths = append(paths, img.Path)
+				}
+			}
+			if len(paths) > 0 {
+				go b.memory.RememberMedia(context.Background(), chatID, note, paths)
+			}
+		}
 	}
 
 	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source, turnModel)

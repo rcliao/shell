@@ -516,6 +516,43 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 	}
 }
 
+// RememberMedia stores a photo turn's [media-note] description as a searchable
+// episodic memory carrying file refs to the archived image(s) — vision memory
+// Phase 1: photos become first-class, retrievable memories instead of ledger
+// rows. The caption author is the VLM that saw the image at turn time, so this
+// costs zero extra inference.
+func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, paths []string) {
+	if note == "" || len(paths) == 0 {
+		return
+	}
+	prof := m.profileFor(chatID)
+	ns := prof.AgentNS
+	var tags []string
+	if ns != "" {
+		tags = []string{chatTag(chatID)}
+	} else {
+		ns = legacyNamespace(chatID)
+	}
+	tags = append(tags, "media", "photo")
+
+	files := make([]agentmemory.FileParam, 0, len(paths))
+	for _, p := range paths {
+		files = append(files, agentmemory.FileParam{Path: p, Rel: "created"})
+	}
+	if _, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS:         ns,
+		Key:        fmt.Sprintf("media-note-%d", time.Now().UnixMilli()),
+		Content:    "[photo] " + note,
+		Kind:       "episodic",
+		Tags:       tags,
+		Tier:       "stm", // searchable immediately; lifecycle governs from here
+		Importance: 0.5,
+		Files:      files,
+	}); err != nil {
+		slog.Warn("failed to store media-note memory", "error", err)
+	}
+}
+
 // Remember stores a user-provided memory as semantic memory.
 func (m *Memory) Remember(ctx context.Context, chatID int64, content string) error {
 	prof := m.profileFor(chatID)

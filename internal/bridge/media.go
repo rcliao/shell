@@ -66,7 +66,7 @@ func (b *Bridge) ArchiveInboundMedia(chatID, threadID int64, msgID int, caption 
 // photo(s) so the archive becomes searchable. The marker is stripped before
 // delivery.
 func mediaNoteInstruction(n int) string {
-	return fmt.Sprintf("[This message includes %d archived photo(s). After your answer, append one line exactly like: [media-note: one concise line describing what the photo shows] — it is stripped before delivery and saved so you can recognize this photo in later conversations.]", n)
+	return fmt.Sprintf("[This message includes %d archived photo(s). After your answer, append one line exactly like: [media-note: <dense one-line description: main subject, setting/scene, any text visible in the image, people by name if you recognize them, and what is happening or why it was shared>] — it is stripped before delivery and saved as a memory so you and future sessions can find and recognize this photo later.]", n)
 }
 
 // humanAge renders a duration as a compact age ("35m ago", "6h ago", "3d ago").
