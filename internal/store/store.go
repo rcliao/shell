@@ -98,23 +98,16 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	// Enable WAL mode for better concurrent access
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set WAL mode: %w", err)
-	}
-	// Wait for locks instead of failing fast with SQLITE_BUSY — with tool
-	// calls, prewarm ticks, and scheduler writes running concurrently, an
-	// unlucky overlap must queue, not error (V2-H30 #3).
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set busy_timeout: %w", err)
-	}
+	// WAL + busy_timeout ride in the DSN so EVERY pooled connection gets
+	// them: busy_timeout is per-connection, and a db.Exec pragma only covers
+	// the one conn that ran it — later pool conns failed instantly with
+	// SQLITE_BUSY under write contention (observed 7/14 during turn-end
+	// write bursts).
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {

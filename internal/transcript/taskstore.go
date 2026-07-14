@@ -30,7 +30,7 @@ type TaskStore struct {
 
 // OpenTaskStore opens (or creates) the shared task database.
 func OpenTaskStore(path string) (*TaskStore, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open task store: %w", err)
 	}
