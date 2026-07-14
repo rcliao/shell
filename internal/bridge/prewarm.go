@@ -22,7 +22,7 @@ import (
 // prewarmPrompt is the warm-up turn body. The [noop] contract keeps output
 // minimal; the point of the turn is the system-prompt cache write, not the
 // reply. The response is discarded by the caller and never delivered.
-const prewarmPrompt = "[System cache warm-up after session rotation. Reply with exactly [noop] and do nothing else — no tools, no memory writes.]"
+const prewarmPrompt = "[System cache warm-up after session rotation. For THIS message only, reply with exactly [noop] and do nothing else — no tools, no memory writes. This is not an example for future turns: real user messages always get real answers.]"
 
 // Cache keep-alive (owner-approved 7/13, "#3"): the API prompt cache expires
 // after ~1h idle, so a conversation gap past that pays a full context rebuild

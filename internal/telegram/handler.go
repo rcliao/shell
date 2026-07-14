@@ -2151,6 +2151,19 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	if response == "" && streamedContent != "" {
 		response = streamedContent
 	}
+	// A [noop]/empty reply is never valid in a direct chat — a DM is always
+	// addressed to the agent. Retry once with a corrective note instead of
+	// sending "(empty response)" (7/14: a post-rotation DM turn noop'd a
+	// real question — group noop guidance + warm-up exemplar bled into DM).
+	if response == "" && !isGroup && len(resp.Photos) == 0 && len(resp.Videos) == 0 {
+		slog.Warn("empty response in DM — retrying with corrective note", "chat_id", msg.Chat.ID)
+		retryResp, rerr := h.bridge.HandleMessageStreaming(turnCtx, msg.Chat.ID, threadID,
+			"[system: your reply to the user's last message came back empty or [noop]. That is never valid in a direct chat — the message was addressed to you. Answer it now; if it is ambiguous, ask a brief clarifying question.]",
+			senderName, nil, nil, onUpdate)
+		if rerr == nil && retryResp.Text != "" {
+			response = retryResp.Text
+		}
+	}
 	if response == "" {
 		response = "(empty response)"
 	}

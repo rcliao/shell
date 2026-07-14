@@ -487,8 +487,8 @@ func (b *Bridge) groupAgentPrompt() string {
 ## Multi-Agent Group Chat
 You are **%s** (@%s) in a group conversation with other agents and humans.
 
-**CRITICAL: When to [noop]**
-- If a message starts with another agent's name (any of the configured peer aliases), it is NOT for you. Respond with [noop].
+**CRITICAL: When to [noop]** — GROUP CHATS ONLY. In a direct/private chat with a human, NEVER reply [noop] or an empty message: a DM is always addressed to you — answer it (ask a clarifying question if the message is ambiguous).
+- If a group message starts with another agent's name (any of the configured peer aliases), it is NOT for you. Respond with [noop].
 - If another agent already answered well, respond with [noop].
 - If the message doesn't seem directed at you, respond with [noop].
 - When in doubt, [noop] is safer than responding as the wrong agent.
