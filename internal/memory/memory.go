@@ -178,20 +178,20 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 		{"layer:lore", "[Lore & shared memories]"},
 		{"", "[Operating knowledge]"},
 	}
-	// ContextMemory carries no tags, so build a key→layer map with one List
-	// call (rotation-time only; local sqlite).
+	// ContextMemory carries no tags, so build a key→layer map with one
+	// tag-filtered List per layer (rotation-time only; local sqlite). A
+	// recency-limited unfiltered List misses the point: identity keys are
+	// among the OLDEST rows in a namespace of thousands.
 	layerByKey := map[string]string{}
-	if listed, lerr := m.store.List(ctx, agentmemory.ListParams{NS: prof.AgentNS, Limit: 500}); lerr == nil {
-		for _, lm := range listed {
-			for _, t := range lm.Tags {
-				if strings.HasPrefix(t, "layer:") {
-					layerByKey[lm.Key] = t
-					break
-				}
-			}
+	for _, lt := range []string{"layer:charter", "layer:personality", "layer:lore"} {
+		listed, lerr := m.store.List(ctx, agentmemory.ListParams{NS: prof.AgentNS, Tags: []string{lt}, Limit: 100})
+		if lerr != nil {
+			slog.Warn("identity layer list failed — flat render for layer", "layer", lt, "error", lerr)
+			continue
 		}
-	} else {
-		slog.Warn("identity layer list failed — flat render", "error", lerr)
+		for _, lm := range listed {
+			layerByKey[lm.Key] = lt
+		}
 	}
 	for _, mem := range result.Memories {
 		layers[layerByKey[mem.Key]] = append(layers[layerByKey[mem.Key]], mem.Content)
