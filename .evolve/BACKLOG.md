@@ -423,6 +423,34 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟡 Proposed (awaiting owner approval or more evidence)
 
+### V2-H42 — [H/A] Identity constitution: persistent core, evolvable edges — PROPOSED 7/13
+- **status:** proposed (owner design question 7/13: "how do we design so that
+  identity is persistent yet evolve-able?"). Sequenced AFTER H14 — reuses its
+  notify-and-revoke plumbing.
+- **current state:** identity = pinned identity-tagged ghost memories (ltm,
+  decay-exempt), frozen into the prompt at generation start, ghost-versioned.
+  Persistence and within-generation stability already work; what's missing is
+  structure — one undifferentiated blob, no rules for who may change what,
+  no budget on accretion.
+- **design (3 layers):**
+  L0 **Charter** — name/creature/family/boundaries (core-truths, boundaries,
+     identity-preamble). Owner-only. ~500 tokens. Eval detector diffs L0
+     across generations; any non-owner change = finding.
+  L1 **Personality** — voice/vibe/preferences. Agent PROPOSES edits in
+     workshop deep-beats via notify-and-revoke (ghost version history = the
+     rollback store), rate-limited ~1/week, effective only at next rotation
+     (no mid-conversation shifts).
+  L2 **Lore** — inside jokes, episodic identity. Accretes freely (already
+     works) under a pinned-token budget; overflow consolidates via ghost
+     summarization, never silently drops.
+- **scope:** (1) layer tag on existing identity memories (one curation pass);
+  (2) identity_stability eval dimension — L0 diff across generations +
+  pinned budget utilization; (3) workshop-beat proposal flow for L1 (H14
+  pattern); (4) pinned budget cap with consolidate-on-overflow.
+- **measure-by:** L0 diff = zero non-owner changes ever; pinned tokens stay
+  under budget; at least one agent-proposed L1 change survives
+  notify-and-revoke within a month of shipping.
+
 ### V2-H13 — [H] Turn-liveness watchdog: never leave the user on a dead "Analyzing"
 - **status:** SHIPPED cycle 158 (turn-liveness UX: long-wait status + friendly timeout msg; deploy pending). RESIDUAL V2-H13b: per-MCP-tool timeout lives inside the claude subprocess, not shell — needs a shell-side overall-turn soft-timeout knob or upstream. No recurrence of the umbreon bug since 7/7 rotation fix.
 - **why:** two failure modes leave the placeholder stuck on "Analyzing" with no
