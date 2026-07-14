@@ -39,6 +39,14 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### 7/14 15:52: write-verify cross-turn FP confirmed (the predicted residual class)
+- Reply referenced the PREVIOUS turn's successful Notion write ("晚餐已經寫進
+  Notion囉" — explaining why that turn was slow); turn-scoped verifier flagged
+  verbal_save + fired a wasted correction. FIX (small): before classifying
+  verbal_save, check whether the same chat had a successful persistence tool
+  in the previous turn / last ~3min — if so, classify verified-carryover.
+  Post-fix precision so far: 11:38 TP, 14:42 unchecked, 15:52 FP.
+
 ### 7/14: '[noop]' paraphrase leak (cosmetic, queued)
 - Pika answered a peer-addressed group message with the literal text "No
   response requested." instead of the exact [noop] token — the bridge only
