@@ -39,6 +39,14 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### 7/14: '[noop]' paraphrase leak (cosmetic, queued)
+- Pika answered a peer-addressed group message with the literal text "No
+  response requested." instead of the exact [noop] token — the bridge only
+  suppresses exact [noop], so the internal decision leaked as a visible
+  group message. FIX (small): normalize a tiny set of noop-equivalents
+  (case-insensitive "no response requested/needed/necessary.") to noop in
+  group mode; or per-turn reminder that noop must be EXACTLY [noop].
+
 ### ⚠️ INCIDENT 7/14 14:02-14:37: umbreon daemon panic — MY hand-inserted task
 - Loop session inserted a Seattle-write task with a 10-char id directly into
   shared tasks.db; heartbeat enrichment's unguarded `t.ID[:12]` panicked the
