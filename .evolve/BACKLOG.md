@@ -463,6 +463,13 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ### V2-H13 — [H] Turn-liveness watchdog: never leave the user on a dead "Analyzing"
 - **status:** SHIPPED cycle 158 (turn-liveness UX: long-wait status + friendly timeout msg; deploy pending). RESIDUAL V2-H13b: per-MCP-tool timeout lives inside the claude subprocess, not shell — needs a shell-side overall-turn soft-timeout knob or upstream. No recurrence of the umbreon bug since 7/7 rotation fix.
+- **H13b evidence (7/13 19:25, first catch by the new tool-duration ledger):**
+  a WebFetch in a Shopping-topic research turn hung 60s then FAILED —
+  owner-A's answer took 121.8s total, of which half was waiting on a dead
+  fetch. Pure waste, not deliberation: a per-fetch timeout (~15-20s) would
+  have cut the turn in half with zero quality cost. Elevates H13b from
+  "residual" to worth scheduling; the tool_uses duration column now measures
+  exactly how much these hangs cost per week.
 - **why:** two failure modes leave the placeholder stuck on "Analyzing" with no
   reply and no error: (a) slow time-to-first-token on a big-context opus turn,
   (b) a hung MCP tool (Notion/ghost) that blocks until the 5m hard timeout.
