@@ -557,8 +557,32 @@ game the ack detector. Reassess full economics 7/10 w/ new pricing.
   day-scoped correction ops (「加到晚餐不是早餐」 as one op) + hard write
   receipt; H29 — umbreon authors shopping-research. Agents draft, owner-B
   approves.
+- **BASELINE AUDIT 7/13 (owner asked to verify agents are "properly building
+  their tool/skill and evolving"):** agent-authored skills = **ZERO**. Every
+  live skill was installed by operators or the loop (notion 7/13,
+  generate-video 7/1, meal-memo/gentle-checkin = loop-promoted May drafts);
+  agent workspace dirs are empty; the two .evolve/skill-drafts survive
+  unpromoted. Root cause confirmed in code: skill/registry.go SystemPrompt()
+  only LISTS existing skills — no text anywhere tells the agent it may CREATE
+  one, where SKILL.md goes, or that skills-reload exists. Not an agent
+  failure; the affordance was never granted. Scope item (2) is the unlock.
+- **measurement (wired 7/13 via V2-H40 instrumentation, ready before the
+  feature ships):**
+  - `agent_authored_skills`: count of live skill dirs whose git-log author in
+    the agent-layer repo is the agent's own commit (scope (6) auto-commit) —
+    baseline 0;
+  - `authoring_events`: rpc_calls rows for /skills-reload — an agent calling
+    reload IS the self-authoring signal — baseline 0;
+  - `skill_usage_share`: tool_uses Bash rows whose detail matches a skill
+    scripts/ path ÷ all Bash rows (now with duration percentiles);
+  - `learning_capture_rate`: /memory + /heartbeat-log rpc_calls per day —
+    proxy for whether reflection produces durable output at all.
+  All four become OwnerEval v2 dimensions under the skills pillar; H14's
+  validation = these move off zero, not "the code shipped."
 - **measure-by:** an agent-authored draft reaches live activation through the
-  workshop gate; H27/H29 exist as agent-authored skills by ~8/1.
+  workshop gate; H27/H29 exist as agent-authored skills by ~8/1;
+  agent_authored_skills and authoring_events move off their 7/13 zero
+  baseline within one week of scope (2)+(8) deploying.
 
 ### V2-H15 — [H] Real agent-to-agent conversation channel + loop guard (owner ask 7/10)
 - **status:** SHIPPED cycle-adjacent 7/10 (via shared-store a2a.message events + per-daemon poll; depth cap 3, human-reset, [noop]-terminal, 1/min pace). Needs restart of BOTH daemons. measure-by: watch group for a real pika↔umbreon exchange after a human triggers one; confirm it caps at ~3 hops and yields to humans.
