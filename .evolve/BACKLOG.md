@@ -433,7 +433,21 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟡 Proposed (awaiting owner approval or more evidence)
 
-### V2-H42 — [H/A] Identity constitution: persistent core, evolvable edges — PROPOSED 7/13
+### V2-H42 — [H/A] Identity constitution: persistent core, evolvable edges — IN PROGRESS 7/13
+- **7/13 late: ghost primitives SHIPPED (ghost PR #37) + shell curation DONE.**
+  Ghost delivered general primitives (pinned lifecycle-immunity completed,
+  `locked` blessed tag w/ --unlock CLI gate, no-TTL on pinned/locked) instead
+  of layer semantics — boundary rule: ghost=substrate, shell=mind. Shell-side
+  A (curation) executed: 9 charter keys locked across both agents, 27 layer
+  tags applied (layer:charter/personality/lore). DoD verified: plain puts to
+  locked keys FAIL on both agents. Two ghost bugs found during verify and
+  handed back (stale-CLI bypass hazard; FTS trigger bug breaking all chunk
+  GC — see ~/.shell/evolve-reviews/ghost-protected-memory-contract-20260714.md).
+  REMAINING shell scope: (B) pinned-fetch grouped render by layer tags +
+  per-layer hash → identity_stability eval dim + lore token budget w/
+  consolidate-on-overflow; (C) owner charter-edit path (--unlock wrapper) +
+  personality-change rate limit; promotion-proposal consumption from ghost
+  clusters.
 - **status:** proposed (owner design question 7/13: "how do we design so that
   identity is persistent yet evolve-able?"). Sequenced AFTER H14 — reuses its
   notify-and-revoke plumbing.
