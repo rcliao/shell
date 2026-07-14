@@ -1037,9 +1037,20 @@ func (d *Daemon) replayUnfinishedTurns(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		resp, herr := d.bridge.HandleMessageStreaming(context.WithoutCancel(ctx),
-			t.ChatID, t.ThreadID, t.Text, t.SenderName, nil, nil,
-			func(chunk string) {})
+		var resp bridge.AgentResponse
+		var herr error
+		for attempt := 0; attempt < 4; attempt++ {
+			resp, herr = d.bridge.HandleMessageStreaming(context.WithoutCancel(ctx),
+				t.ChatID, t.ThreadID, t.Text, t.SenderName, nil, nil,
+				func(chunk string) {})
+			// Post-boot prewarms hold the session lock for ~10-30s; a busy
+			// session means try again, not give up until the next restart.
+			if herr == nil || !strings.Contains(herr.Error(), "busy") {
+				break
+			}
+			slog.Info("replay: session busy, retrying", "chat_id", t.ChatID, "attempt", attempt+1)
+			time.Sleep(30 * time.Second)
+		}
 		if herr != nil {
 			slog.Warn("replay: turn failed", "chat_id", t.ChatID, "telegram_msg_id", t.TelegramMsgID, "error", herr)
 			continue

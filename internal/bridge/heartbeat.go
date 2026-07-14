@@ -90,7 +90,11 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 				if t.FromAgent != t.ToAgent {
 					src = t.FromAgent
 				}
-				sb.WriteString(fmt.Sprintf("- Task %s (%s): %s\n", t.ID[:12], src, t.Description))
+				id := t.ID
+				if len(id) > 12 {
+					id = id[:12]
+				}
+				sb.WriteString(fmt.Sprintf("- Task %s (%s): %s\n", id, src, t.Description))
 			}
 			sb.WriteString("[End delegated tasks]\n\n")
 		}
