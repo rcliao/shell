@@ -335,9 +335,9 @@ func FormatPendingTasksForAgent(tasks []Task) string {
 		} else {
 			line += " (self-task)"
 		}
-		line += fmt.Sprintf(": %s", t.Description)
+		line += fmt.Sprintf(": %s", truncate(t.Description, 200))
 		if t.Context != "" {
-			line += fmt.Sprintf("\n  Context: %s", t.Context)
+			line += fmt.Sprintf("\n  Context: %s", truncate(t.Context, 150))
 		}
 		if t.GoalID != "" {
 			line += fmt.Sprintf("\n  Goal: %s", t.GoalID)
@@ -364,12 +364,11 @@ func FormatTaskActivity(tasks []Task, selfUsername string) string {
 		}
 		switch t.Status {
 		case TaskCompleted:
-			result := truncate(t.Result, 150)
-			b = append(b, fmt.Sprintf("- ✅ %s (%s): %s → %s\n", t.ID, arrow, t.Description, result)...)
+			b = append(b, fmt.Sprintf("- ✅ %s (%s): %s → %s\n", t.ID, arrow, truncate(t.Description, 150), truncate(t.Result, 150))...)
 		case TaskFailed:
-			b = append(b, fmt.Sprintf("- ❌ %s (%s): %s → %s\n", t.ID, arrow, t.Description, t.Result)...)
+			b = append(b, fmt.Sprintf("- ❌ %s (%s): %s → %s\n", t.ID, arrow, truncate(t.Description, 150), truncate(t.Result, 150))...)
 		case TaskPending, TaskWorking:
-			b = append(b, fmt.Sprintf("- ⏳ %s (%s) %s: %s\n", t.ID, arrow, t.Status, t.Description)...)
+			b = append(b, fmt.Sprintf("- ⏳ %s (%s) %s: %s\n", t.ID, arrow, t.Status, truncate(t.Description, 200))...)
 		}
 	}
 	b = append(b, "[End task activity]\n"...)

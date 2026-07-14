@@ -826,15 +826,25 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	var ghostAug, transcriptBlock, tasksBlock, activityBlock, channelBPrefix string
 	{
 		var wg sync.WaitGroup
-		run := func(f func()) {
+		// Named members: the fanout's slowest member gates prework, and the
+		// aggregate timer can't say which one (12s spikes on 7/14 with ghost
+		// inject at only 3s). Log any member slower than 2s.
+		run := func(name string, f func()) {
 			wg.Add(1)
-			go func() { defer wg.Done(); f() }()
+			go func() {
+				defer wg.Done()
+				t0 := time.Now()
+				f()
+				if d := time.Since(t0); d > 2*time.Second {
+					slog.Info("fanout member slow", "member", name, "chat_id", chatID, "ms", d.Milliseconds())
+				}
+			}()
 		}
 		if b.memory != nil {
-			run(func() { ghostAug = b.memory.InjectContext(ctx, chatID, userMsg) })
+			run("ghost_inject", func() { ghostAug = b.memory.InjectContext(ctx, chatID, userMsg) })
 		}
 		if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
-			run(func() {
+			run("transcript", func() {
 				if entries, err := b.transcript.RecentByTokenBudget(chatID, b.transcriptBudget); err != nil {
 					slog.Warn("failed to fetch transcript", "error", err)
 				} else {
@@ -843,7 +853,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 			})
 		}
 		if b.taskStore != nil && !isSystemSender(senderName) {
-			run(func() {
+			run("tasks", func() {
 				if pending, err := b.taskStore.PendingTasksFor(b.agentBotUsername); err != nil {
 					slog.Warn("failed to fetch pending tasks", "error", err)
 				} else {
@@ -856,7 +866,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 				}
 			})
 		}
-		run(func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, userMsg) })
+		run("channel_b", func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, userMsg) })
 		wg.Wait()
 	}
 	step("context_fanout")
