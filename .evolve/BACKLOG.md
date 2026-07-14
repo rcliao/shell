@@ -66,6 +66,13 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   Verified live 08:07 ("drain: idle, safe to restart"). Fixes deploy-
   collision lost replies (7/13 16:09, 7/14 07:42 — 2nd incident, owner-A
   noticed). Un-fetched updates redeliver via long-poll offset.
+- **FOLLOW-UP (7/14 10:02): post-restart write burst still drops memory writes.**
+  busy_timeout=5000 covers normal operation (zero BUSY all day) but the
+  restart burst (4 prewarms + reflect + exchange logs in one minute) exceeds
+  5s of writer queue → 4 failures incl. one dropped distilled fact. Fix
+  options: retry-with-backoff on BUSY for ghost writes in shell's memory
+  wrapper (preferred — writes are all fire-and-forget goroutines), stagger
+  prewarms, or serialize ghost writes on one conn. Queue for next cycle.
 - **ghost busy_timeout(5000) (ghost b0e319b):** daemon+CLI concurrent
   writes got instant SQLITE_BUSY (consolidate/summarize failures).
 - **system_budget 3000/4000 → 8000 both agents:** zero pin drops (pika 31,
