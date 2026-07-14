@@ -39,6 +39,34 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### 7/14 morning batch — SHIPPED (owner-approved live): prompt hygiene + drain
+- **Pinned-only system prompt (9b8ee16 + ghost b4e1db6 PinnedOnly):** Context(query="")
+  was backfilling the prompt with unpinned dormant episodic exchanges (raw
+  chat fragments rendered as operating rules). Now: pinned only; identity
+  layers force-included; operating packs newest-first with WARN on drops.
+- **Pin data hygiene (both agents):** pika relay + group-chat-id rewritten
+  (taught the stripped [relay] directive — root cause of the recurring relay
+  failure), skill-inventory unpinned (stale, redundant, v133 auto-updater),
+  1+1 dup merged, charter file-era text cleaned via --unlock. umbreon:
+  scheduler pin taught WRONG TOOL (shell_pm as scheduler → shell-schedule),
+  two pre-A2A isolation pins contradicted the group protocol → rewritten,
+  skill-inventory unpinned. Orange-cat tension kept deliberately (owner:
+  watch personality develop).
+- **Graceful drain on SIGHUP (2cb4511):** poller stops, in-flight turns
+  finish (turn ctx detached via WithoutCancel), 120s bound, then exec.
+  Verified live 08:07 ("drain: idle, safe to restart"). Fixes deploy-
+  collision lost replies (7/13 16:09, 7/14 07:42 — 2nd incident, owner-A
+  noticed). Un-fetched updates redeliver via long-poll offset.
+- **ghost busy_timeout(5000) (ghost b0e319b):** daemon+CLI concurrent
+  writes got instant SQLITE_BUSY (consolidate/summarize failures).
+- **system_budget 3000/4000 → 8000 both agents:** zero pin drops (pika 31,
+  umbreon 34 operating pins all render). QUEUED: pin consolidation to claw
+  back ~3-4k tokens (several pins merge naturally: message-length x2,
+  notion rules x2, fortune rules x4); then lower budget again. Also queued:
+  drop dead ghost_context step from the memory-retrieval instruction and
+  fold browser-URL rule into H43 per-turn hint when it ships.
+
+
 ### V2-H43 — [H] Deterministic tool-routing hints in Channel B — PROPOSED 7/13 (transcript review)
 - **status:** proposed (7/13 late transcript review + fresh eval).
 - **why (evidence):** owner-A scolded BOTH agents twice tonight (19:27, 19:29)
