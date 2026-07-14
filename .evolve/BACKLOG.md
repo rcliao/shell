@@ -39,6 +39,17 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### 7/14 reliability audit (owner-requested, 10:50): placeholder-429 = silent drop
+- Full day reconciliation: umbreon 10/10 human turns answered; pika 4 unmatched,
+  ALL in pre-fix windows (09:46 drain-v1 kill x1 owner-A DM; 09:42-44 backlog
+  catch-up x3 where Telegram 429 failed the placeholder send and the handler
+  RETURNS without answering — mostly redelivered dups whose sibling copy was
+  answered). Since 10:27 ledger + 10:40 deny: 1/1, ledger done=1. NEW GAP
+  (small): placeholder-send failure drops the turn until the next restart
+  replays it. FIX: on placeholder error, retry once with backoff, else proceed
+  without a placeholder (send the final reply as a fresh message). Narrow,
+  next cycle.
+
 ### 7/14 morning batch — SHIPPED (owner-approved live): prompt hygiene + drain
 - **Pinned-only system prompt (9b8ee16 + ghost b4e1db6 PinnedOnly):** Context(query="")
   was backfilling the prompt with unpinned dormant episodic exchanges (raw
