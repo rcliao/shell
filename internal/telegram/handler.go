@@ -1953,15 +1953,22 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	})
 	defer longRunning.Stop()
 
-	// Send an initial placeholder message that we'll edit with streaming updates.
-	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:          msg.Chat.ID,
-		MessageThreadID: int(threadID),
-		Text:            escapeMarkdownV2Text("Thinking..."),
-		ParseMode:       models.ParseModeMarkdown,
+	// Send an initial placeholder message that we'll edit with streaming
+	// updates. Flood-retried: a 429 here used to abandon the whole turn
+	// (7/14 audit — 3 turns silently dropped during a backlog burst).
+	var placeholder *models.Message
+	err := withFloodRetry(ctx, func() error {
+		var serr error
+		placeholder, serr = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          msg.Chat.ID,
+			MessageThreadID: int(threadID),
+			Text:            escapeMarkdownV2Text("Thinking..."),
+			ParseMode:       models.ParseModeMarkdown,
+		})
+		return serr
 	})
 	if err != nil {
-		slog.Error("failed to send placeholder", "error", err, "chat_id", msg.Chat.ID, "thread_id", threadID)
+		slog.Error("failed to send placeholder — turn stays pending for replay", "error", err, "chat_id", msg.Chat.ID, "thread_id", threadID)
 		return
 	}
 	msgID := placeholder.ID
