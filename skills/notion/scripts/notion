@@ -6,7 +6,11 @@ Usage:
   notion get-page <page_id>                       # properties as plain text
   notion query-db <db_id> [--date <prop>=<val>]   # rows; filter adapts to prop type (title/text/date)
   notion patch-prop <page_id> <prop_name> <value> # set a property, then READ BACK as receipt
-  notion append <page_id> <text>                  # append a paragraph block
+  notion append <page_id> <text>                  # append a paragraph block at page end
+  notion append <page_id> --after <block_id> <text> # insert paragraph AFTER a specific block
+  notion list-blocks <page_id>                    # block ids + text (find where to insert/edit)
+  notion update-block <block_id> <text>           # replace an existing block's text
+  notion delete-block <block_id>                  # archive (soft-delete) a block
 
 patch-prop auto-detects the property type (title/rich_text/select/number/date)
 from the page schema. Always verify the printed read-back matches your intent
@@ -113,11 +117,55 @@ def main():
         print(f"  {prop_name}: {prop_text(after['properties'][prop_name])}")
 
     elif cmd == "append":
-        page_id, text = sys.argv[2], " ".join(sys.argv[3:])
-        req("PATCH", f"/blocks/{page_id}/children",
-            {"children": [{"object": "block", "type": "paragraph",
-                           "paragraph": {"rich_text": [{"text": {"content": text}}]}}]})
-        print(f"APPENDED paragraph to {page_id}")
+        page_id = sys.argv[2]
+        args = sys.argv[3:]
+        after = None
+        if args and args[0] == "--after":
+            after = args[1]
+            args = args[2:]
+        text = " ".join(args)
+        body = {"children": [{"object": "block", "type": "paragraph",
+                              "paragraph": {"rich_text": [{"text": {"content": text}}]}}]}
+        if after:
+            body["after"] = after
+        req("PATCH", f"/blocks/{page_id}/children", body)
+        where = f"after block {after}" if after else "at page end"
+        print(f"APPENDED paragraph to {page_id} {where}")
+
+    elif cmd == "list-blocks":
+        page_id = sys.argv[2]
+        cursor = None
+        while True:
+            path = f"/blocks/{page_id}/children?page_size=100"
+            if cursor:
+                path += f"&start_cursor={cursor}"
+            r = req("GET", path)
+            for b in r.get("results", []):
+                t = b["type"]
+                rt = b.get(t, {}).get("rich_text", [])
+                txt = "".join(x.get("plain_text", "") for x in rt)[:80]
+                print(f"{b['id']}  {t}  {txt}")
+            if not r.get("has_more"):
+                break
+            cursor = r["next_cursor"]
+
+    elif cmd == "update-block":
+        block_id, text = sys.argv[2], " ".join(sys.argv[3:])
+        blk = req("GET", f"/blocks/{block_id}")
+        t = blk["type"]
+        if "rich_text" not in blk.get(t, {}):
+            die(f"block type {t!r} has no editable text", 3)
+        req("PATCH", f"/blocks/{block_id}",
+            {t: {"rich_text": [{"text": {"content": text}}]}})
+        after = req("GET", f"/blocks/{block_id}")
+        rt = after.get(t, {}).get("rich_text", [])
+        print("UPDATED block — read-back:")
+        print("  " + "".join(x.get("plain_text", "") for x in rt)[:120])
+
+    elif cmd == "delete-block":
+        block_id = sys.argv[2]
+        r = req("PATCH", f"/blocks/{block_id}", {"archived": True})
+        print(f"ARCHIVED block {block_id} (archived={r.get('archived')})")
 
     else:
         die(__doc__)
