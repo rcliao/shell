@@ -7,7 +7,7 @@ require (
 	github.com/go-telegram/bot v1.19.0
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.4.1
-	github.com/rcliao/ghost v0.0.0
+	github.com/rcliao/ghost v0.0.0-20260714035238-62e4a9688470
 	github.com/rcliao/shell-browser v0.0.0
 	github.com/rcliao/shell-imagen v0.0.0
 	github.com/rcliao/shell-pm v0.0.0
