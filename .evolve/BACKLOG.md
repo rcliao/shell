@@ -39,6 +39,15 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### 7/14 midday: fanout >10s spikes — slow member is NOT ghost inject
+- Two 11-12s context_fanout spikes (12:16 pika, 12:18 umbreon) while memory
+  inject was only ~3.2s — the fanout's slowest member gates prework and it's
+  one of: shared tasks.db read, transcript read, or Channel B assembly.
+  ACTION: add per-member timing to the fanout (same step() pattern) so the
+  next spike names its consumer. ALSO: tasks_chars=11,340 injected EVERY turn
+  — shared task store needs pruning/curation (probably old completed tasks
+  rendering forever); that's both tokens and possibly the latency.
+
 ### 7/14 reliability audit (owner-requested, 10:50): placeholder-429 = silent drop
 - Full day reconciliation: umbreon 10/10 human turns answered; pika 4 unmatched,
   ALL in pre-fix windows (09:46 drain-v1 kill x1 owner-A DM; 09:42-44 backlog
