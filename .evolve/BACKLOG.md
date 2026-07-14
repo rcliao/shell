@@ -18,6 +18,16 @@ quality/reliability. Feature work queues BEHIND measurement work.
    H23 backups, H28 inspect, H26 remainder.
 Grading rule: every ship names its eval dimension(s); validation = dimension
 movement vs baseline. Pillar maturity ladder is the progress scoreboard.
+**Owner value ordering (7/13): QUALITY > latency.** Standing rule: no change
+may trade answer quality for speed unless the quality side is measurable and
+gated. Concrete application 7/13: umbreon's conversation_effort=low canary
+was staged after two >60s turns, then REVERTED pre-deploy (agent-layer
+b5348e2→17118bb) — umbreon's role is the careful/fact-checking one; dulling
+effort risks the thing he's valued for, and we lack the v2 quality dims to
+grade such a canary yet. His latency gets structural fixes instead (H39
+compose cache, H40 queue fairness, lock-wait visibility), not model dulling.
+Revisit only after OwnerEval v2 ships dims that can catch quality regression
+within days.
 
 
 **Status flow** (per README): `proposed` → (`approved` for high-risk, owner
