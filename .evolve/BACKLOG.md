@@ -11,7 +11,10 @@ quality/reliability. Feature work queues BEHIND measurement work.
 3. **V2-H24** — send-gate (quality invariant)
 4. **V2-H30** — self-healing reliability
 5. **V2-H33 remainder** — rotation growth-based trigger code fix + TTFT split
-6. Then: H20 flush, H12 recall relevance, H14 autonomous skills (H27/H29),
+6. **V2-H40** — shell as concurrent tool infra (owner 7/13: "shell becomes a
+   tool infra for Claude to execute better"; instrumentation v1 shipped same
+   day, concurrency program below)
+7. Then: H20 flush, H12 recall relevance, H14 autonomous skills (H27/H29),
    H23 backups, H28 inspect, H26 remainder.
 Grading rule: every ship names its eval dimension(s); validation = dimension
 movement vs baseline. Pillar maturity ladder is the progress scoreboard.
@@ -25,6 +28,45 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ---
 
 ## 🟢 Approved (ready for the loop to ship)
+
+### V2-H40 — [H] Shell as concurrent tool infra: measure + harden execution — APPROVED 7/13
+- **status:** approved (owner 7/13: expand monitoring beyond telegram→Claude
+  to tool use + shell ecosystem usage; "go for concurrency and build stable
+  infra for Claude to execute concurrently better"). INSTRUMENTATION v1
+  SHIPPED same day.
+- **why:** the conversation path is fully instrumented (e2e, prework, TTFT)
+  but the EXECUTION path was blind: tool_uses had no durations (the 95s
+  Notion-connector call was only findable by grepping logs), skill-script
+  RPC hits were entirely unrecorded, and nothing measures how the infra
+  behaves when calls overlap. If shell is to be Claude's execution substrate,
+  execution must be as measurable as conversation.
+- **shipped 7/13 (v1):** (1) tool_uses.duration_ms — tool_use→tool_result
+  wall clock paired in the stream parser, "tool slow" log line >10s;
+  (2) rpc_calls ledger — every bridge.sock endpoint hit timed with status,
+  "rpc slow/error" log >1s or ≥400; (3) PRAGMA busy_timeout=5000 on every
+  store open (pulled forward from H30 #3) so concurrent writers queue
+  instead of SQLITE_BUSY; (4) `shell tool-usage` now reports P50/P95/MAX
+  per tool + a skill-script RPC section.
+- **remaining scope (the concurrency program):**
+  (a) MCP server timing — shell_pm/shell_tunnel/shell_relay handlers get the
+      same ledger treatment (they bypass the RPC socket);
+  (b) concurrency overlap metric — from (created_at, duration_ms) compute
+      max concurrent in-flight tool calls + turns per hour; eval dimension;
+  (c) testbed concurrent-stress scenario (H36 tie-in) — N simultaneous
+      `claude -p` sends exercising pm/tunnel/relay/schedule/memory RPC at
+      once; grade zero errors, no lock-wait blowup, ledger complete;
+  (d) per-chat queue fairness — one chat's long tool turn must not starve
+      another chat's turn (today: per-chat locks are independent, but the
+      embedder mutex and sqlite writer are shared — measure before fixing);
+  (e) subprocess concurrency ceiling — today 1 persistent proc per chat,
+      max_sessions=4; decide if parallel tool-heavy turns need a bounded
+      worker pool or if per-chat serialization is the right model.
+- **eval tie-in (OwnerEval v2):** tool_success_rate, tool_latency_p95 per
+  tool class, rpc_error_rate, skill-vs-connector routing compliance (the
+  7/13 Notion case), overlap stability (errors under concurrency = 0).
+- **measure-by:** `shell tool-usage --since 168h` shows durations on all new
+  rows; rpc_calls populates; zero SQLITE_BUSY in logs over a week; the 95s
+  Notion-class outlier is visible in P95 within a day of occurring.
 
 ### V2-H1 — [H] Cut over topic classification to sticky-pointer, retire per-turn Haiku
 - **status:** SHIPPED-VALIDATED (cycle 156, 72h grade: 0 LLM rows, is_new 0/69, 2 new threads, max 19ms, no owner complaints)

@@ -46,6 +46,45 @@ func TestParseBidirectionalEvents_BasicFlow(t *testing.T) {
 	if len(deltas) != 1 || deltas[0] != "Done!" {
 		t.Errorf("unexpected deltas: %v", deltas)
 	}
+	// Duration pairing: the tool_result must have back-filled a wall-clock
+	// duration onto the matching tool_use (0 would mean the pairing broke).
+	if tc.StartedAt.IsZero() {
+		t.Error("expected tool call StartedAt to be set on tool_use")
+	}
+	if tc.DurationMs < 0 {
+		t.Errorf("expected non-negative DurationMs, got %d", tc.DurationMs)
+	}
+}
+
+func TestParseBidirectionalEvents_ToolDurationAndFailure(t *testing.T) {
+	// A failing tool call must get BOTH Failed=true and a duration; a call
+	// with no tool_result (interrupted turn) keeps DurationMs=0.
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_a","name":"Bash","input":{}}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_b","name":"Read","input":{}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_a","content":"boom","is_error":true}]}}`,
+		`{"type":"result","result":"done","session_id":"s"}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, nil)
+	if len(result.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(result.ToolCalls))
+	}
+	a, b := result.ToolCalls[0], result.ToolCalls[1]
+	if !a.Failed {
+		t.Error("expected tu_a Failed=true from is_error tool_result")
+	}
+	if a.StartedAt.IsZero() {
+		t.Error("expected tu_a StartedAt set")
+	}
+	if b.Failed {
+		t.Error("tu_b never errored; Failed should be false")
+	}
+	if b.DurationMs != 0 {
+		t.Errorf("tu_b has no tool_result; DurationMs should stay 0, got %d", b.DurationMs)
+	}
 }
 
 func TestParseBidirectionalEvents_StreamDeltas(t *testing.T) {
@@ -192,7 +231,7 @@ func TestParseBidirectionalEvents_StreamedTextThenToolCallEmptyResult(t *testing
 func TestParseBidirectionalEvents_TextThenToolThenText(t *testing.T) {
 	// Claude emits text, calls tools, then emits more text. The "result" event
 	// only contains the final text block — the earlier text must not be dropped.
-	// Regression for https://… (mami noticed only "Memory saved" arriving in TG).
+	// Regression: owner reported only "Memory saved" arriving in TG.
 	input := strings.Join([]string{
 		`{"type":"system","subtype":"init","session_id":"sess-bug"}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Long reply with content."},{"type":"tool_use","id":"tu_1","name":"Write","input":{"path":"/tmp/x"}},{"type":"tool_use","id":"tu_2","name":"Edit","input":{"path":"/tmp/y"}}]}}`,

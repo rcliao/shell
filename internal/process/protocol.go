@@ -19,6 +19,12 @@ type ToolCall struct {
 	// is_error=true for this ToolUseID. Lets the bridge distinguish a write
 	// that actually landed from one that errored (silent-failure detection).
 	Failed bool `json:"failed,omitempty"`
+	// StartedAt is when the tool_use block was observed; DurationMs is the
+	// gap to the matching tool_result (0 if no result was ever echoed —
+	// interrupted turn). This is the tool's execution wall clock as the
+	// conversation experienced it.
+	StartedAt  time.Time `json:"-"`
+	DurationMs int64     `json:"duration_ms,omitempty"`
 }
 
 // ToolResult represents a tool execution result.
@@ -292,9 +298,10 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 						}
 					case "tool_use":
 						result.ToolCalls = append(result.ToolCalls, ToolCall{
-							ID:    block.ID,
-							Name:  block.Name,
-							Input: block.Input,
+							ID:        block.ID,
+							Name:      block.Name,
+							Input:     block.Input,
+							StartedAt: time.Now(),
 						})
 						pendingSeparator = true
 						slog.Info("tool use", "name", block.Name, "id", block.ID)
@@ -315,14 +322,23 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 				for _, block := range event.Message.Content.Blocks {
 					if block.Type == "tool_result" {
 						slog.Debug("bidirectional: tool_result", "tool_use_id", block.ToolUseID, "is_error", block.IsError)
-						// Back-fill the matching tool_use's Failed flag so the
-						// bridge can tell a landed write from a failed one.
-						if block.IsError {
-							for i := range result.ToolCalls {
-								if result.ToolCalls[i].ID == block.ToolUseID {
+						// Back-fill the matching tool_use: Failed flag (landed
+						// vs errored write) and execution duration (tool_use →
+						// tool_result gap, the tool-infra latency signal).
+						for i := range result.ToolCalls {
+							if result.ToolCalls[i].ID == block.ToolUseID {
+								if block.IsError {
 									result.ToolCalls[i].Failed = true
-									break
 								}
+								if !result.ToolCalls[i].StartedAt.IsZero() {
+									dur := time.Since(result.ToolCalls[i].StartedAt)
+									result.ToolCalls[i].DurationMs = dur.Milliseconds()
+									if dur > 10*time.Second {
+										slog.Info("tool slow", "name", result.ToolCalls[i].Name,
+											"secs", int(dur.Seconds()), "failed", block.IsError)
+									}
+								}
+								break
 							}
 						}
 					}

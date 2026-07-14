@@ -442,15 +442,34 @@ func main() {
 				fmt.Println("  no tool calls recorded (ledger started with this build)")
 				return nil
 			}
-			fmt.Printf("  %-40s %8s %8s  %s\n", "TOOL", "CALLS", "FAILED", "LAST USED")
+			fmt.Printf("  %-40s %7s %7s %8s %8s %8s  %s\n", "TOOL", "CALLS", "FAILED", "P50", "P95", "MAX", "LAST USED")
 			var calls, failed int64
 			for _, r := range rows {
-				fmt.Printf("  %-40s %8d %8d  %s\n", r.Name, r.Calls, r.Failed, r.LastUsed)
+				dur := func(ms int64) string {
+					if r.Timed == 0 {
+						return "-"
+					}
+					return fmtMs(ms)
+				}
+				fmt.Printf("  %-40s %7d %7d %8s %8s %8s  %s\n", r.Name, r.Calls, r.Failed,
+					dur(r.P50Ms), dur(r.P95Ms), dur(r.MaxMs), r.LastUsed)
 				calls += r.Calls
 				failed += r.Failed
 			}
 			fmt.Printf("\n  Total: %d calls, %d failed (%.1f%%)\n", calls, failed,
 				100*float64(failed)/float64(max(calls, 1)))
+
+			// Skill-script RPC ledger — the other half of the tool-infra
+			// surface (Bash skill scripts hitting bridge.sock).
+			rpcRows, err := st.GetRPCUsageSummary(since)
+			if err == nil && len(rpcRows) > 0 {
+				fmt.Printf("\nSkill-script RPC ledger (%s):\n\n", window)
+				fmt.Printf("  %-40s %7s %7s %8s %8s %8s  %s\n", "ENDPOINT", "CALLS", "ERRORS", "P50", "P95", "MAX", "LAST USED")
+				for _, r := range rpcRows {
+					fmt.Printf("  %-40s %7d %7d %8s %8s %8s  %s\n", r.Endpoint, r.Calls, r.Errors,
+						fmtMs(r.P50Ms), fmtMs(r.P95Ms), fmtMs(r.MaxMs), r.LastUsed)
+				}
+			}
 			return nil
 		},
 	}
@@ -1361,4 +1380,16 @@ func loadConfigFrom(path string) config.Config {
 		cfg = config.Default()
 	}
 	return cfg
+}
+
+// fmtMs renders a millisecond duration compactly: "850ms", "2.4s", "95s".
+func fmtMs(ms int64) string {
+	switch {
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	case ms < 10000:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	default:
+		return fmt.Sprintf("%ds", ms/1000)
+	}
 }

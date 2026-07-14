@@ -135,6 +135,38 @@ func (s *Server) SocketPath() string {
 	return s.sockPath
 }
 
+// timed wraps the mux with per-call instrumentation: every skill-script hit
+// is recorded in the rpc_calls ledger (endpoint, duration, status), and slow
+// calls surface in the log. This is the measurement layer for shell-as-tool-
+// infra — skill executions were previously invisible.
+func (s *Server) timed(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		dur := time.Since(start)
+		if s.store != nil {
+			if err := s.store.LogRPCCall(r.URL.Path, dur.Milliseconds(), sw.status); err != nil {
+				slog.Debug("rpc: ledger write failed", "error", err)
+			}
+		}
+		if dur > time.Second || sw.status >= 400 {
+			slog.Info("rpc slow/error", "endpoint", r.URL.Path, "ms", dur.Milliseconds(), "status", sw.status)
+		}
+	})
+}
+
+// statusWriter captures the response status code for the RPC ledger.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
 // Start begins listening on the Unix socket. Call in a goroutine.
 func (s *Server) Start() error {
 	// Remove stale socket file
@@ -163,7 +195,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /heartbeat-log", s.handleHeartbeatLog)
 	mux.HandleFunc("GET /context", s.handleContext)
 
-	s.server = &http.Server{Handler: mux}
+	s.server = &http.Server{Handler: s.timed(mux)}
 	slog.Info("rpc server starting", "socket", s.sockPath)
 	if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err

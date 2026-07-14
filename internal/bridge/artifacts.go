@@ -120,7 +120,7 @@ func toolUseRows(calls []process.ToolCall) []store.ToolUse {
 				break
 			}
 		}
-		rows = append(rows, store.ToolUse{Name: tc.Name, Detail: detail, Failed: tc.Failed})
+		rows = append(rows, store.ToolUse{Name: tc.Name, Detail: detail, Failed: tc.Failed, DurationMs: tc.DurationMs})
 	}
 	return rows
 }

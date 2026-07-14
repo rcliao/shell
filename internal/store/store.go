@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,6 +107,13 @@ func Open(dbPath string) (*Store, error) {
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
+	}
+	// Wait for locks instead of failing fast with SQLITE_BUSY — with tool
+	// calls, prewarm ticks, and scheduler writes running concurrently, an
+	// unlucky overlap must queue, not error (V2-H30 #3).
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
 	}
 
 	s := &Store{db: db}
@@ -265,6 +273,26 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_tool_uses_name ON tool_uses(tool_name, created_at);
 	`
 	if _, err := s.db.Exec(toolUseSchema); err != nil {
+		return err
+	}
+	// Tool execution wall clock (tool-infra observability): tool_use →
+	// tool_result gap. 0 = no result observed (interrupted turn or pre-fix row).
+	s.db.Exec("ALTER TABLE tool_uses ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
+
+	// RPC call ledger: every skill-script hit on bridge.sock, timed. This is
+	// the other half of the tool-infra surface — MCP-native tools land in
+	// tool_uses; skill scripts land here.
+	rpcCallSchema := `
+	CREATE TABLE IF NOT EXISTS rpc_calls (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		endpoint TEXT NOT NULL,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		status INTEGER NOT NULL DEFAULT 200,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_rpc_calls_created ON rpc_calls(endpoint, created_at);
+	`
+	if _, err := s.db.Exec(rpcCallSchema); err != nil {
 		return err
 	}
 
@@ -1413,9 +1441,10 @@ func (s *Store) LogUsage(chatID, sessionID int64, inputTokens, outputTokens, cac
 
 // ToolUse is one observed tool call within an exchange.
 type ToolUse struct {
-	Name   string
-	Detail string // short non-sensitive hint (command head, file path, action)
-	Failed bool
+	Name       string
+	Detail     string // short non-sensitive hint (command head, file path, action)
+	Failed     bool
+	DurationMs int64 // tool_use → tool_result wall clock; 0 = no result observed
 }
 
 // LogToolUses records the tool calls of one exchange in a single transaction.
@@ -1433,8 +1462,8 @@ func (s *Store) LogToolUses(chatID, sessionID int64, source string, calls []Tool
 	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`
-		INSERT INTO tool_uses (chat_id, session_id, source, tool_name, detail, failed)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO tool_uses (chat_id, session_id, source, tool_name, detail, failed, duration_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -1445,19 +1474,25 @@ func (s *Store) LogToolUses(chatID, sessionID int64, source string, calls []Tool
 		if c.Failed {
 			failed = 1
 		}
-		if _, err := stmt.Exec(chatID, sessionID, source, c.Name, c.Detail, failed); err != nil {
+		if _, err := stmt.Exec(chatID, sessionID, source, c.Name, c.Detail, failed, c.DurationMs); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// ToolUsageRow is one tool's aggregate in the tool-use ledger.
+// ToolUsageRow is one tool's aggregate in the tool-use ledger. Duration
+// percentiles cover only rows with an observed tool_result (duration_ms > 0);
+// Timed says how many rows that is.
 type ToolUsageRow struct {
 	Name     string
 	Calls    int64
 	Failed   int64
 	LastUsed string
+	Timed    int64
+	P50Ms    int64
+	P95Ms    int64
+	MaxMs    int64
 }
 
 // GetToolUsageSummary aggregates the tool-use ledger per tool, most-used
@@ -1488,7 +1523,128 @@ func (s *Store) GetToolUsageSummary(chatID int64, since time.Time) ([]ToolUsageR
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Second pass: pull timed durations per tool and compute percentiles in
+	// Go (SQLite has no percentile aggregate). Ledger volume is small.
+	durQ := `SELECT tool_name, duration_ms FROM tool_uses WHERE duration_ms > 0`
+	durArgs := []any{}
+	if chatID != 0 {
+		durQ += " AND chat_id = ?"
+		durArgs = append(durArgs, chatID)
+	}
+	if !since.IsZero() {
+		durQ += " AND created_at >= ?"
+		durArgs = append(durArgs, since.UTC().Format("2006-01-02 15:04:05"))
+	}
+	drows, err := s.db.Query(durQ, durArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer drows.Close()
+	durs := map[string][]int64{}
+	for drows.Next() {
+		var name string
+		var ms int64
+		if err := drows.Scan(&name, &ms); err != nil {
+			return nil, err
+		}
+		durs[name] = append(durs[name], ms)
+	}
+	if err := drows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		d := durs[out[i].Name]
+		if len(d) == 0 {
+			continue
+		}
+		sort.Slice(d, func(a, b int) bool { return d[a] < d[b] })
+		out[i].Timed = int64(len(d))
+		out[i].P50Ms = d[len(d)/2]
+		out[i].P95Ms = d[(len(d)*95)/100]
+		out[i].MaxMs = d[len(d)-1]
+	}
+	return out, nil
+}
+
+// LogRPCCall records one timed skill-script RPC hit. Best-effort.
+func (s *Store) LogRPCCall(endpoint string, durationMs int64, status int) error {
+	_, err := s.db.Exec(`
+		INSERT INTO rpc_calls (endpoint, duration_ms, status) VALUES (?, ?, ?)
+	`, endpoint, durationMs, status)
+	return err
+}
+
+// RPCUsageRow is one endpoint's aggregate in the RPC call ledger.
+type RPCUsageRow struct {
+	Endpoint string
+	Calls    int64
+	Errors   int64 // status >= 400
+	P50Ms    int64
+	P95Ms    int64
+	MaxMs    int64
+	LastUsed string
+}
+
+// GetRPCUsageSummary aggregates the RPC ledger per endpoint, most-used first.
+func (s *Store) GetRPCUsageSummary(since time.Time) ([]RPCUsageRow, error) {
+	q := `SELECT endpoint, duration_ms, status, created_at FROM rpc_calls`
+	var args []any
+	if !since.IsZero() {
+		q += " WHERE created_at >= ?"
+		args = append(args, since.UTC().Format("2006-01-02 15:04:05"))
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type agg struct {
+		durs   []int64
+		errors int64
+		last   string
+	}
+	byEP := map[string]*agg{}
+	for rows.Next() {
+		var ep, created string
+		var ms int64
+		var status int
+		if err := rows.Scan(&ep, &ms, &status, &created); err != nil {
+			return nil, err
+		}
+		a := byEP[ep]
+		if a == nil {
+			a = &agg{}
+			byEP[ep] = a
+		}
+		a.durs = append(a.durs, ms)
+		if status >= 400 {
+			a.errors++
+		}
+		if created > a.last {
+			a.last = created
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []RPCUsageRow
+	for ep, a := range byEP {
+		sort.Slice(a.durs, func(i, j int) bool { return a.durs[i] < a.durs[j] })
+		out = append(out, RPCUsageRow{
+			Endpoint: ep,
+			Calls:    int64(len(a.durs)),
+			Errors:   a.errors,
+			P50Ms:    a.durs[len(a.durs)/2],
+			P95Ms:    a.durs[(len(a.durs)*95)/100],
+			MaxMs:    a.durs[len(a.durs)-1],
+			LastUsed: a.last,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Calls > out[j].Calls })
+	return out, nil
 }
 
 // TierDecision is one shadow-router observation: the predicted model tier
