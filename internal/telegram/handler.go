@@ -1904,6 +1904,17 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		senderName = msg.From.Username
 	}
 
+	// Replay ledger (V2-H30): record the message before processing so a
+	// deploy restart can't silently eat it, and skip Telegram redeliveries
+	// of messages we already answered. Media turns are excluded (their temp
+	// files don't survive a restart).
+	if len(images) == 0 && len(pdfs) == 0 {
+		if alreadyDone, perr := h.bridge.BeginPendingTurn(msg.Chat.ID, threadID, msg.ID, senderName, text); perr == nil && alreadyDone {
+			slog.Info("skipping redelivered already-answered message", "chat_id", msg.Chat.ID, "telegram_msg_id", msg.ID)
+			return
+		}
+	}
+
 	// E2E clock (V2-H33): everything below is measured from handler entry so
 	// the message_map row records what the OWNER experienced, not just the
 	// model process.
@@ -2228,6 +2239,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		if err := h.bridge.SaveMessageMap(msg.Chat.ID, threadID, msg.ID, botID, text, response); err != nil {
 			slog.Warn("failed to save message map", "error", err, "chat_id", msg.Chat.ID, "thread_id", threadID)
 		}
+	}
+	if err := h.bridge.CompletePendingTurn(msg.Chat.ID, msg.ID); err != nil {
+		slog.Warn("failed to complete pending turn", "error", err, "chat_id", msg.Chat.ID)
 	}
 
 	// E2E stamp (V2-H33): what the owner experienced, handler-relative.

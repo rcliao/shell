@@ -1005,6 +1005,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		"memory_enabled", d.cfg.Memory.Enabled,
 	)
 
+	// Replay turns a previous deploy killed mid-processing (V2-H30): rows
+	// still done=0 in the ledger are user messages whose "Thinking..."
+	// placeholder is stranded. Answer them now; replies arrive as fresh
+	// messages. Runs after the bot begins polling.
+	go d.replayUnfinishedTurns(ctx)
+
 	// Start bot (blocks until ctx is cancelled). The poller gets its own
 	// cancellable context so Drain can stop new updates independently of
 	// process shutdown; un-fetched updates redeliver after restart.
@@ -1012,6 +1018,40 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.pollCancel = pollCancel
 	d.bot.Start(pollCtx)
 	return nil
+}
+
+// replayUnfinishedTurns re-runs user messages a restart killed before they
+// were answered (max 30 min old). Serialized: one at a time, oldest first.
+func (d *Daemon) replayUnfinishedTurns(ctx context.Context) {
+	time.Sleep(5 * time.Second) // let the poller and prewarms settle
+	turns, err := d.store.ListUnfinishedTurns(30 * time.Minute)
+	if err != nil {
+		slog.Warn("replay: list unfinished turns failed", "error", err)
+		return
+	}
+	if len(turns) == 0 {
+		return
+	}
+	slog.Info("replay: answering turns lost to the last restart", "count", len(turns))
+	for _, t := range turns {
+		if ctx.Err() != nil {
+			return
+		}
+		resp, herr := d.bridge.HandleMessageStreaming(context.WithoutCancel(ctx),
+			t.ChatID, t.ThreadID, t.Text, t.SenderName, nil, nil,
+			func(chunk string) {})
+		if herr != nil {
+			slog.Warn("replay: turn failed", "chat_id", t.ChatID, "telegram_msg_id", t.TelegramMsgID, "error", herr)
+			continue
+		}
+		if resp.Text != "" {
+			d.bot.SendText(t.ChatID, t.ThreadID, resp.Text)
+		}
+		if cerr := d.store.CompletePendingTurn(t.ChatID, t.TelegramMsgID); cerr != nil {
+			slog.Warn("replay: complete failed", "chat_id", t.ChatID, "error", cerr)
+		}
+		slog.Info("replay: turn answered", "chat_id", t.ChatID, "telegram_msg_id", t.TelegramMsgID)
+	}
 }
 
 // Drain prepares for a graceful restart: stop fetching new Telegram updates,
