@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pm "github.com/rcliao/shell-pm"
@@ -38,6 +39,13 @@ type PDFInfo struct {
 }
 
 type Bridge struct {
+	// In-flight turn tracking for graceful drain: a SIGHUP deploy that
+	// exec's mid-turn kills the Claude subprocess and loses the user's
+	// message (observed 7/13 16:09 and 7/14 07:43). turnWG counts active
+	// HandleMessageStreaming calls so restart can wait for them.
+	turnWG     sync.WaitGroup
+	turnCount  atomic.Int32
+
 	proc      process.Agent
 	pool      AgentPool // optional: multi-agent routing
 	store     *store.Store
@@ -738,6 +746,9 @@ func (b *Bridge) runCompaction(ctx context.Context, chatID, threadID int64, tota
 // pdfs optionally contains downloaded PDF metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram documents).
 func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (AgentResponse, error) {
+	b.turnWG.Add(1)
+	b.turnCount.Add(1)
+	defer func() { b.turnCount.Add(-1); b.turnWG.Done() }()
 	preworkStart := time.Now()
 	// step() logs any prework phase slower than 500ms so the 18-40s prework
 	// mystery decomposes into named consumers (V2-H33 instrumentation).

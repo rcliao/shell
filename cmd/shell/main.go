@@ -110,6 +110,10 @@ func main() {
 			go func() {
 				<-sighup
 				slog.Info("received SIGHUP, restarting")
+				// Graceful drain: never exec over an in-flight turn — a
+				// mid-turn restart kills the Claude subprocess and the
+				// user's message is lost (7/13 16:09, 7/14 07:43).
+				d.Drain(120 * time.Second)
 				d.Shutdown()
 				binary, err := os.Executable()
 				if err != nil {

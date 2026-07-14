@@ -2077,7 +2077,11 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 	}
 
-	resp, err := h.bridge.HandleMessageStreaming(ctx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onUpdate)
+	// Detach the turn from the poller context: during a drain-restart the
+	// poller ctx is cancelled to stop new updates, but in-flight turns must
+	// run to completion (the whole point of draining).
+	turnCtx := context.WithoutCancel(ctx)
+	resp, err := h.bridge.HandleMessageStreaming(turnCtx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onUpdate)
 
 	// Stop the streaming edit goroutine and wait for it to finish.
 	// Send one final signal so the goroutine flushes any remaining text
@@ -2490,7 +2494,8 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		}
 	}
 
-	resp, err := h.bridge.HandleMessageStreaming(ctx, first.Chat.ID, threadID, text, senderName, images, nil, onUpdate)
+	turnCtx := context.WithoutCancel(ctx) // survive poller-ctx cancel during drain-restart
+	resp, err := h.bridge.HandleMessageStreaming(turnCtx, first.Chat.ID, threadID, text, senderName, images, nil, onUpdate)
 	if err != nil {
 		slog.Error("bridge handle message failed (album)", "error", err, "chat_id", first.Chat.ID, "thread_id", threadID)
 		setReaction(ctx, b, first.Chat.ID, first.ID, "❌")

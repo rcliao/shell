@@ -43,6 +43,11 @@ type Daemon struct {
 	tunnelMgr *tunnel.Manager      // nil if disabled
 	pmMgr     *pm.Manager          // nil if disabled
 	rpcServer *rpc.Server          // nil if no RPC endpoints
+
+	// pollCancel stops the Telegram long-poller without cancelling in-flight
+	// turns (their contexts are detached via context.WithoutCancel). Set by
+	// Run, used by Drain for graceful SIGHUP restarts.
+	pollCancel context.CancelFunc
 }
 
 // busyRetryDelays paces synthetic-turn retries when the target session is
@@ -990,9 +995,29 @@ func (d *Daemon) Run(ctx context.Context) error {
 		"memory_enabled", d.cfg.Memory.Enabled,
 	)
 
-	// Start bot (blocks until ctx is cancelled)
-	d.bot.Start(ctx)
+	// Start bot (blocks until ctx is cancelled). The poller gets its own
+	// cancellable context so Drain can stop new updates independently of
+	// process shutdown; un-fetched updates redeliver after restart.
+	pollCtx, pollCancel := context.WithCancel(ctx)
+	d.pollCancel = pollCancel
+	d.bot.Start(pollCtx)
 	return nil
+}
+
+// Drain prepares for a graceful restart: stop fetching new Telegram updates,
+// then wait (bounded) for in-flight turns to finish so a deploy never kills a
+// reply mid-generation. Messages not yet fetched from Telegram are redelivered
+// by the long-poll offset after the new daemon starts.
+func (d *Daemon) Drain(timeout time.Duration) {
+	active := d.bridge.ActiveTurns()
+	slog.Info("drain: stopping poller before restart", "active_turns", active, "timeout", timeout)
+	if d.pollCancel != nil {
+		d.pollCancel()
+	}
+	start := time.Now()
+	if d.bridge.WaitIdle(timeout) {
+		slog.Info("drain: idle, safe to restart", "waited_ms", time.Since(start).Milliseconds())
+	}
 }
 
 // Shutdown gracefully stops all components.
