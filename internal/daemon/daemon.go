@@ -1369,5 +1369,14 @@ func generateAgentSettings(agentNS, dbPath string, ghostEnv map[string]string) m
 
 	return map[string]any{
 		"hooks": agentHooks,
+		// Structural tool enforcement: the claude.ai Notion CONNECTOR tools
+		// are banned for agents — the local skills/notion scripts do the same
+		// job in seconds vs 95-100s of connector round-trips. The pinned
+		// behavioral rule kept losing to habit (agents ToolSearch-loaded the
+		// connector 25+ times on 7/14, incl. a 100s lunch-memo turn); a
+		// permissions deny makes the rule physical instead of aspirational.
+		"permissions": map[string]any{
+			"deny": []string{"mcp__claude_ai_Notion__*"},
+		},
 	}
 }
