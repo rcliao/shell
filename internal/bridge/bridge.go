@@ -39,6 +39,11 @@ type PDFInfo struct {
 }
 
 type Bridge struct {
+	// Cross-turn write-verify carryover: last successful persistence write
+	// per chat (see write_verify.go recentWriteOK).
+	lastWriteMu sync.Mutex
+	lastWriteOK map[int64]time.Time
+
 	// In-flight turn tracking for graceful drain: a SIGHUP deploy that
 	// exec's mid-turn kills the Claude subprocess and loses the user's
 	// message (observed 7/13 16:09 and 7/14 07:43). turnWG counts active
@@ -809,6 +814,10 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 			sess = fresh
 		}
 	}
+	// Rotation (generation close + tail summarization) costs ~8-12s and was
+	// landing in the context_fanout step window, reading as a fanout
+	// regression on every post-deploy turn (7/14 investigation).
+	step("rotate_and_log")
 
 	// Log user message
 	if err := b.store.LogMessage(sess.ID, "user", userMsg); err != nil {
@@ -1209,6 +1218,13 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// ("this is for the other agent, staying quiet [noop]") leak that narration
 	// to the group. Blank it so the autonomous-noop suppression fires.
 	if noopMarkerRe.MatchString(response) {
+		response = ""
+	}
+	// Paraphrased noop: the model sometimes writes a natural-language decline
+	// instead of the exact token ("No response requested." leaked to the
+	// family group 7/14). Normalize a tiny closed set to noop.
+	switch strings.ToLower(strings.TrimRight(strings.TrimSpace(response), ".!")) {
+	case "no response requested", "no response needed", "no response necessary", "no reply needed":
 		response = ""
 	}
 

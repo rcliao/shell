@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/store"
@@ -219,6 +220,18 @@ const writeCorrectionPrompt = `[system: write-verification] You just told the us
 // possibly-augmented response. Best-effort: never fails the user-facing turn.
 func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, chatID, threadID, sessID int64, userMsg string, resp AgentResponse, result process.SendResult, source string) AgentResponse {
 	v := classifyWrite(userMsg, resp.Text, result.ToolCalls)
+	// Cross-turn carryover: a claim that references the PREVIOUS turn's
+	// successful write is honest, not confabulated ("晚餐已經寫進Notion囉"
+	// explaining why the last turn was slow — flagged 7/14 15:52 and burned
+	// a correction turn). If this chat completed a successful persistence
+	// write within the last 3 minutes, downgrade verbal_save to verified.
+	if v.classification == "verbal_save" && b.recentWriteOK(chatID, 3*time.Minute) {
+		v.classification = "verified"
+		v.toolNames = "carryover"
+	}
+	if v.writeOK {
+		b.markWriteOK(chatID)
+	}
 	if !v.shouldLog() {
 		return resp
 	}
@@ -274,4 +287,22 @@ func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, ch
 		slog.Warn("failed to log write verification", "error", err)
 	}
 	return resp
+}
+
+// recentWriteOK reports whether this chat completed a successful persistence
+// write within the window (cross-turn carryover for write-verify).
+func (b *Bridge) recentWriteOK(chatID int64, window time.Duration) bool {
+	b.lastWriteMu.Lock()
+	defer b.lastWriteMu.Unlock()
+	t, ok := b.lastWriteOK[chatID]
+	return ok && time.Since(t) < window
+}
+
+func (b *Bridge) markWriteOK(chatID int64) {
+	b.lastWriteMu.Lock()
+	defer b.lastWriteMu.Unlock()
+	if b.lastWriteOK == nil {
+		b.lastWriteOK = make(map[int64]time.Time)
+	}
+	b.lastWriteOK[chatID] = time.Now()
 }
