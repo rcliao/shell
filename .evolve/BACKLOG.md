@@ -39,6 +39,42 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 
 ## 🟢 Approved (ready for the loop to ship)
 
+### V2-H43 — [H] Deterministic tool-routing hints in Channel B — PROPOSED 7/13 (transcript review)
+- **status:** proposed (7/13 late transcript review + fresh eval).
+- **why (evidence):** owner-A scolded BOTH agents twice tonight (19:27, 19:29)
+  for WebFetch-ing a shared URL instead of using the browser tool — the rule
+  is PINNED in both contexts (`rule-url-use-browser-tool-first` /
+  `behavioral-use-browser-tool-for-urls`) and still lost to tool habit; the
+  same turn produced the 60s hung WebFetch. Same failure class as the 95s
+  Notion-connector misroute (fixed via pin — but pins demonstrably decay
+  under a 24-item operating-knowledge section).
+- **thesis:** rules that map INPUT PATTERN → TOOL should be enforced
+  per-turn and deterministically, not ambiently. The media-note instruction
+  already proves the pattern: shell detects the condition (photo attached)
+  and appends a one-line per-turn instruction that works ~100%
+  (photo_described = 100%).
+- **scope:** small matcher in the bridge prework: message contains URL →
+  append one-line "use the browser skill (absolute path) for this URL, not
+  WebFetch"; notion keywords → point at skills/notion; extensible table in
+  config. Per-turn Channel B text, no prompt-fingerprint churn.
+- **measure-by:** URL turns show browser-skill usage in tool_uses;
+  zero repeat owner complaints; hung-WebFetch class disappears from
+  tool slow ledger.
+
+### Fresh eval evidence (7/6–7/13 window, recorded 7/13 late) — priority check
+- **write_confabulation 19.5% / 18.2% vs 5% goal — WORST dimension both
+  agents** → H24 send-gate is correctly next in the quality queue.
+- recall_grounded 76.5% / 65.4% vs 90% — rerank experiment (verdict ~7/16)
+  + H12 remain the levers; umbreon +2pts since baseline.
+- verbose_to_casual 12.2% / 15.2% vs 8% — pinned brevity rules helping but
+  insufficient; candidate for the H43 per-turn pattern (casual message →
+  one-line brevity reminder) rather than more pins.
+- latency_p95 87s/82s vs 60 — window includes the pre-fix rotation-thrash
+  era; expect a large drop as the window rolls past 7/13. turns>60s 10%/8%.
+- photo_described 100% both — the media-note per-turn instruction pattern
+  is the existence proof for H43.
+
+
 ### V2-H41 — [H] Context-behavior audit: fix the affordance gaps — SHIPPED 7/13
 - **status:** shipped 7/13 evening (owner: "run through agentic evaluation
   around context set for the agent … see if this is a context issue leading
