@@ -61,9 +61,59 @@ var writeClaimRe_CJK = regexp.MustCompile(
 // writeClaimRe catches English persistence claims and explicit Notion/doc cues.
 var writeClaimRe = regexp.MustCompile(`(?i)\b(logged|saved (it|this|that)|added (it|this|that)? ?to (notion|the (doc|log|database))|recorded (it|this)|noted (it|this) down|wrote (it|this) (to|into))\b`)
 
+// A CJK persistence verb alone is NOT a claim: the same vocabulary appears in
+// offers ("要不要我加進去嗎"), promises ("澆完我再補進 Notion"), refusals
+// ("還沒吃就不用先記錄"), advice ("記下當天吃了什麼"), past references
+// ("那時就寫好了"), and plain non-persistence usage ("加到咖啡裡",
+// "熱量來源補上"). A week of production ledger data showed 14/15 verbal_save
+// rows were these, not confabulations — each one burning a correction turn.
+// So a clause only counts as a claim when it (a) matches the verb pattern,
+// (b) carries a completion marker (已/了/好/✅ — every genuine claim sampled
+// had one), and (c) has no modal/future/offer/negation/past-reference token.
+// This trades a few false negatives (e.g. 了+會 in one clause) for killing
+// the dominant false-positive classes; FPs are costlier here.
+var cjkCompletionRe = regexp.MustCompile(`已|了|好|✅`)
+
+var cjkClaimGuards = []string{
+	// negation / refusal
+	"不", "沒", "別",
+	// modal / future / offer / advice
+	"可以", "能", "會", "再", "等", "嗎", "要不要", "要我", "想", "應該", "記得",
+	// embedded question words — advice to the user ("記下曬了多久、吃了
+	// 什麼"), never present in a genuine completed-write claim
+	"什麼", "多久", "怎麼", "哪",
+	// past reference (an earlier turn's write, not this one)
+	"那時", "當時", "之前", "上次",
+}
+
+// cjkClauseSplit breaks a response into clauses so guard tokens in one clause
+// don't veto a genuine claim in another ("已補進 Notion 了，之後不會漏").
+var cjkClauseSplit = regexp.MustCompile(`[。！？!?\n，,；;]`)
+
 // claimsWrite reports whether the agent's prose asserts a persistence happened.
 func claimsWrite(response string) bool {
-	return writeClaimRe.MatchString(response) || writeClaimRe_CJK.MatchString(response)
+	if writeClaimRe.MatchString(response) {
+		return true
+	}
+	for _, clause := range cjkClauseSplit.Split(response, -1) {
+		if !writeClaimRe_CJK.MatchString(clause) {
+			continue
+		}
+		if !cjkCompletionRe.MatchString(clause) {
+			continue
+		}
+		guarded := false
+		for _, g := range cjkClaimGuards {
+			if strings.Contains(clause, g) {
+				guarded = true
+				break
+			}
+		}
+		if !guarded {
+			return true
+		}
+	}
+	return false
 }
 
 // isPersistenceTool reports whether a tool call is a durable write (memory,
