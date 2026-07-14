@@ -178,23 +178,36 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 		{"layer:lore", "[Lore & shared memories]"},
 		{"", "[Operating knowledge]"},
 	}
-	// ContextMemory carries no tags, so build a key→layer map with one
-	// tag-filtered List per layer (rotation-time only; local sqlite). A
-	// recency-limited unfiltered List misses the point: identity keys are
-	// among the OLDEST rows in a namespace of thousands.
+	// Identity layers are FORCE-INCLUDED from tag-filtered List calls
+	// (rotation-time only; local sqlite), not taken from the Context result:
+	// ghost's Context packs pinned memories by score under SystemBudget and
+	// silently drops overflow — production logs showed 4/5 charter, 2/5
+	// personality, 1/6 lore surviving the pack (B2). The charter is locked
+	// and lifecycle-immune in the store; the prompt must give it the same
+	// guarantee. The budget still governs the unlayered operating tail,
+	// which is where the real bulk lives.
 	layerByKey := map[string]string{}
 	for _, lt := range []string{"layer:charter", "layer:personality", "layer:lore"} {
 		listed, lerr := m.store.List(ctx, agentmemory.ListParams{NS: prof.AgentNS, Tags: []string{lt}, Limit: 100})
 		if lerr != nil {
-			slog.Warn("identity layer list failed — flat render for layer", "layer", lt, "error", lerr)
+			slog.Warn("identity layer list failed — layer omitted this rotation", "layer", lt, "error", lerr)
 			continue
 		}
 		for _, lm := range listed {
+			if !lm.Pinned {
+				continue // layer tags belong on pinned identity only
+			}
 			layerByKey[lm.Key] = lt
+			layers[lt] = append(layers[lt], lm.Content)
 		}
 	}
+	// Operating knowledge: budget-packed pinned memories, minus identity
+	// keys already force-rendered above.
 	for _, mem := range result.Memories {
-		layers[layerByKey[mem.Key]] = append(layers[layerByKey[mem.Key]], mem.Content)
+		if _, isIdentity := layerByKey[mem.Key]; isIdentity {
+			continue
+		}
+		layers[""] = append(layers[""], mem.Content)
 	}
 
 	var sb strings.Builder
