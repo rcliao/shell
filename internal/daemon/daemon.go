@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"sync/atomic"
 	"time"
 
 	pm "github.com/rcliao/shell-pm"
@@ -48,7 +49,16 @@ type Daemon struct {
 	// turns (their contexts are detached via context.WithoutCancel). Set by
 	// Run, used by Drain for graceful SIGHUP restarts.
 	pollCancel context.CancelFunc
+	// restartPending is set by Drain: cancelling the poller makes Run return,
+	// and main must NOT exit on that return — the SIGHUP goroutine is about
+	// to exec. Without this flag the two paths race and the daemon can die
+	// instead of restarting (pika was down 90min on 7/14 from exactly this).
+	restartPending atomic.Bool
 }
+
+// RestartPending reports whether a drain-restart is in progress, meaning a
+// Run() return is expected and the process must wait for the exec.
+func (d *Daemon) RestartPending() bool { return d.restartPending.Load() }
 
 // busyRetryDelays paces synthetic-turn retries when the target session is
 // mid-turn (V2-H16): an a2a hand-off or scheduler prompt that collides with a
@@ -1009,6 +1019,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 // reply mid-generation. Messages not yet fetched from Telegram are redelivered
 // by the long-poll offset after the new daemon starts.
 func (d *Daemon) Drain(timeout time.Duration) {
+	d.restartPending.Store(true)
 	active := d.bridge.ActiveTurns()
 	slog.Info("drain: stopping poller before restart", "active_turns", active, "timeout", timeout)
 	if d.pollCancel != nil {

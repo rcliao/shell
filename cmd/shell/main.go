@@ -130,6 +130,12 @@ func main() {
 			// Shutdown synchronously after Run returns to avoid
 			// racing context cancellation against pm restart loops.
 			err = d.Run(ctx)
+			if d.RestartPending() {
+				// Run returned because Drain stopped the poller; the
+				// SIGHUP goroutine owns shutdown+exec. Exiting here
+				// would race the exec and kill the daemon for good.
+				select {}
+			}
 			d.Shutdown()
 			return err
 		},
