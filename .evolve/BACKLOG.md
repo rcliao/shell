@@ -62,8 +62,22 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   tool slow ledger.
 
 ### Fresh eval evidence (7/6–7/13 window, recorded 7/13 late) — priority check
-- **write_confabulation 19.5% / 18.2% vs 5% goal — WORST dimension both
-  agents** → H24 send-gate is correctly next in the quality queue.
+- **write_confabulation 19.5% / 18.2% — MOSTLY MEASUREMENT ERROR (7/13 late
+  audit).** Hand-classified all 15 verbal_save rows from the week: 14 were
+  classifier false positives (future promises "澆完我再補進", offers
+  "要不要我加進…嗎", refusals "不用先記錄", advice "記下…吃了什麼",
+  past references, and non-persistence vocab — 加到 coffee, 補上 metabolic,
+  記錄 noun). Each false flag also fired a WASTED CORRECTION TURN in prod.
+  Fixed 7/13 (8793d84): clause-level claims need completion marker
+  已/了/好/✅ + guard-token veto; 11 regression tests from sanitized prod
+  samples. **True confabulation ≈ 1/15 sampled** — and that one recycled a
+  real-looking Notion URL as receipt (receipts can be faked!). → H24
+  send-gate DOWNGRADED pending re-measure on clean data (~7/20);
+  historical ledger rows before 7/13 overcount — compare post-fix only.
+  ALSO AUDIT: recall_verify.go is the symmetric classifier — recall_grounded
+  76.5%/65.4% may carry the same false-positive inflation. Standing lesson:
+  **audit the classifier before shipping enforcement on its numbers**
+  (quality-gate rule applies to the gates themselves).
 - recall_grounded 76.5% / 65.4% vs 90% — rerank experiment (verdict ~7/16)
   + H12 remain the levers; umbreon +2pts since baseline.
 - verbose_to_casual 12.2% / 15.2% vs 8% — pinned brevity rules helping but
