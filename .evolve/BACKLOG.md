@@ -443,7 +443,14 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   locked keys FAIL on both agents. Two ghost bugs found during verify and
   handed back (stale-CLI bypass hazard; FTS trigger bug breaking all chunk
   GC — see ~/.shell/evolve-reviews/ghost-protected-memory-contract-20260714.md).
-  REMAINING shell scope: (B) pinned-fetch grouped render by layer tags +
+  7/13 late-2: (B) grouped render SHIPPED (commits 61f288f+b355648, deployed
+  21:13): charter/personality/lore/operating sections + per-layer sha256
+  logged every snapshot ("identity layer" lines) + lore soft budget 1500tok.
+  Layer counts immediately exposed: ghost Context budget packs only 4/5
+  charter, 2/5 personality, 1/6 lore — charter must be FORCE-INCLUDED
+  regardless of budget (shell already has the tag-filtered List results;
+  merge them into the snapshot ahead of Context output). That is (B2).
+  REMAINING shell scope: (B2) charter/personality force-include +
   per-layer hash → identity_stability eval dim + lore token budget w/
   consolidate-on-overflow; (C) owner charter-edit path (--unlock wrapper) +
   personality-change rate limit; promotion-proposal consumption from ghost
