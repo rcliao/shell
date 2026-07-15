@@ -82,6 +82,24 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   — shared task store needs pruning/curation (probably old completed tasks
   rendering forever); that's both tokens and possibly the latency.
 
+### 7/15 16:30 EVAL CHECKPOINT (post-classifier-fix window, 42h, small Ns)
+- **write_confabulation**: ledger says pika 20% (1/5), umb 50% (3/6) — but
+  hand-verification of all 4 flags: 1 TRUE (umb 11:38 存起來), 2 FPs now
+  guarded (cross-turn carryover 15:52; 今早/那筆 14:18), 1 unchecked. True
+  rate ≈ 1 confirmed in 42h and enforcement corrected it. VERDICT: **H24
+  send-gate stays downgraded**; re-measure next week on the fully-guarded
+  classifier before reconsidering.
+- **recall_grounded**: pika **100% (9/9)** — up from 76.5% baseline (rerank
+  + same-day recall paying off). umb 66.7% (4/6) — unchanged vs 65.4%.
+  VERDICT: recall work now targets UMBREON specifically (audit his recall
+  flags for FPs first, then H12 relevance).
+- **verbose_to_casual**: pika **5.4% ✓** (goal 8, was 12.2). umb 15.2% ✗
+  unchanged — his brevity pin isn't landing; next behavioral item: per-turn
+  brevity hint on casual turns (H43 pattern) for umbreon.
+- latency_p95 96/116s — window includes 7/14-15 incident storms; expect
+  drop as window rolls. turns>60s 6.1%/13%.
+- delivery_complaints 3/1 = yesterday's outage noticing (root-caused, fixed).
+
 ### 7/15 13:45: /schedule 400s — shell-schedule ergonomics, live evidence
 - Agent needed 3 attempts (400, 400, 200) to create a schedule via RPC —
   matches the skill's long-standing 0% bench. FIX candidate (small): the
