@@ -24,6 +24,7 @@ GOAL_ID=""
 TASK_ID=""
 RESULT=""
 REASON=""
+TTL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -35,6 +36,7 @@ while [ $# -gt 0 ]; do
     --result)      RESULT="$2"; shift 2 ;;
     --reason)      REASON="$2"; shift 2 ;;
     --chat)        CHAT_ID="$2"; shift 2 ;;
+    --ttl)         TTL="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -42,7 +44,7 @@ done
 if [ -z "$ACTION" ]; then
   echo "usage: shell-task <create|complete|fail|list|status> [options]" >&2
   echo "" >&2
-  echo "  create   --to <agent|self> --description \"...\" [--context \"...\"] [--goal <id>]" >&2
+  echo "  create   --to <agent|self> --description \"...\" [--context \"...\"] [--goal <id>] [--ttl <minutes>]" >&2
   echo "  complete --id <task_id> --result \"...\"" >&2
   echo "  fail     --id <task_id> --reason \"...\"" >&2
   echo "  list" >&2
@@ -68,6 +70,8 @@ if goal: d['goal_id'] = goal
 if tid: d['task_id'] = tid
 if result: d['result'] = result
 if reason: d['reason'] = reason
+ttl = '''$TTL'''
+if ttl: d['ttl_minutes'] = int(ttl)
 print(json.dumps(d))
 ")
 

@@ -5,6 +5,7 @@
 package transcript
 
 import (
+	"strconv"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -259,7 +260,11 @@ func (s *TaskStore) ExpireOverdueTasks() (int, error) {
 	}
 
 	for _, t := range expired {
-		s.FailTask(t.ID, "TTL expired")
+		s.FailTask(t.ID, "TTL expired ("+strconv.Itoa(t.TTLMinutes)+"min) — tasks are for active work; use shell-schedule for real waits")
+		// Make the auto-fail visible to the creator (the old comment claimed
+		// events were published; they were not — expiries were near-silent,
+		// which cost two watcher rounds on 7/15).
+		s.PublishEvent(t.FromAgent, "task_expired", t.ID+": "+t.Description)
 	}
 	return len(expired), nil
 }

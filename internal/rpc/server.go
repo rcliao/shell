@@ -524,6 +524,7 @@ type TaskRequest struct {
 	GoalID      string `json:"goal_id"`     // parent goal ID (create)
 	Result      string `json:"result"`      // result text (complete/fail)
 	Reason      string `json:"reason"`      // failure reason (fail)
+	TTLMinutes  int    `json:"ttl_minutes"` // auto-fail deadline (create; default 60)
 }
 
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
@@ -599,6 +600,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 			ToAgent:     toAgent,
 			Description: req.Description,
 			Context:     req.Context,
+			TTLMinutes:  req.TTLMinutes,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create task: "+err.Error())

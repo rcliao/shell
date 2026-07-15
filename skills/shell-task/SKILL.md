@@ -21,7 +21,7 @@ Create, delegate, and complete tasks. Use for:
 scripts/shell-task create --to self --description "step 1: research medication interactions"
 
 # Delegate to a peer agent
-scripts/shell-task create --to umbreon_mini_bot --description "verify this health advice" --context "I told mami ibuprofen is safe with Flonase"
+scripts/shell-task create --to umbreon_mini_bot --description "verify this health advice" --context "I told the user ibuprofen is safe with Flonase"
 
 # Create with a goal ID (links related tasks)
 scripts/shell-task create --to self --description "step 2: summarize findings" --goal abc123
@@ -58,3 +58,13 @@ Before diving into a complex request, consider:
 3. Can I handle it in one step? → Just do it, no task needed
 
 Don't over-decompose simple requests. Tasks are for multi-step or collaborative work.
+
+## TTL — tasks are for ACTIVE work, not waiting
+
+Every task auto-FAILS when its TTL expires (default **60 minutes**; the sweeper
+runs continuously). Tasks are a hand-off/decomposition mechanism for work being
+done NOW — never a timer. For "check again tomorrow", "in N hours", or any
+real wait, use the shell-schedule skill instead (this failure happened twice
+on 7/15: a 24h re-check self-task silently expired at 60min). If a task
+legitimately needs longer active work, pass a bigger `--ttl <minutes>` at
+creation.
