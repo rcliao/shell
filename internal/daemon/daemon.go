@@ -1037,11 +1037,16 @@ func (d *Daemon) replayUnfinishedTurns(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Truthful outage awareness: agents confabulate explanations for
+		// downtime they cannot perceive ("我沒有真的失聯", invented routing
+		// theories — both on 7/14). Tell the model plainly that this message
+		// is a replay after an outage so its apology/explanation is honest.
+		replayMsg := t.Text + "\n\n[system note: the daemon was briefly offline and this message is being answered late via automatic replay. If your absence comes up, say honestly that you were down for a bit and are catching up — do not invent routing or connection theories.]"
 		var resp bridge.AgentResponse
 		var herr error
 		for attempt := 0; attempt < 4; attempt++ {
 			resp, herr = d.bridge.HandleMessageStreaming(context.WithoutCancel(ctx),
-				t.ChatID, t.ThreadID, t.Text, t.SenderName, nil, nil,
+				t.ChatID, t.ThreadID, replayMsg, t.SenderName, nil, nil,
 				func(chunk string) {})
 			// Post-boot prewarms hold the session lock for ~10-30s; a busy
 			// session means try again, not give up until the next restart.
