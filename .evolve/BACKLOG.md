@@ -82,6 +82,14 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   — shared task store needs pruning/curation (probably old completed tasks
   rendering forever); that's both tokens and possibly the latency.
 
+### 7/15 13:45: /schedule 400s — shell-schedule ergonomics, live evidence
+- Agent needed 3 attempts (400, 400, 200) to create a schedule via RPC —
+  matches the skill's long-standing 0% bench. FIX candidate (small): the
+  /schedule endpoint's 400 responses should say WHAT failed (field + expected
+  format, e.g. RFC3339 vs local datetime) so one retry suffices; also align
+  SKILL.md examples with the accepted formats. RPC ledger (V2-H40) surfaced
+  this — instrumentation paying off.
+
 ### 7/15 morning: queue-depth UX — propose turn coalescing (V2-H44)
 - Owner-A sent 3+ messages during a 117s memo turn; serialization made each
   wait its full predecessor (lock_wait 52s/136s/65s, worst experienced 175s
