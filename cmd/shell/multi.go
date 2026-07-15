@@ -90,6 +90,25 @@ func newMultiStartCmd() *cobra.Command {
 				return fmt.Errorf("cannot resolve executable: %w", err)
 			}
 
+			// Preflight: resolve each agent's telegram token BEFORE spawning.
+			// On 7/15 a locked login keychain made every child die 1s after
+			// spawn — with stderr discarded, "started (pid X)" printed while
+			// nothing survived and both agents were silently down for 1h+.
+			for _, name := range agents {
+				cfg, cerr := config.Load(agentConfigPath(name))
+				if cerr != nil {
+					return fmt.Errorf("%s: load config: %w", name, cerr)
+				}
+				config.OpenSecretStore(cfg.Secrets)
+				if cfg.TelegramToken() == "" {
+					return fmt.Errorf("%s: telegram token unresolvable (secret %q) — NOT starting anything.\n"+
+						"Likely a locked login keychain. Fix:\n"+
+						"  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"+
+						"then re-run 'shell multi start'. (Or export the token env vars and re-run.)",
+						name, cfg.Telegram.TokenEnv)
+				}
+			}
+
 			for _, name := range agents {
 				cfgPath := agentConfigPath(name)
 				pidFile := agentPIDFile(name)
@@ -112,9 +131,17 @@ func newMultiStartCmd() *cobra.Command {
 					fmt.Printf("  %s: FAILED (%v)\n", name, err)
 					continue
 				}
-				fmt.Printf("  %s: started (pid %d)\n", name, proc.Process.Pid)
-				// Detach — don't wait for the child.
+				pid := proc.Process.Pid
 				go proc.Wait()
+				// Verify the child survives init (the old code printed
+				// "started" unconditionally, masking 1-second deaths).
+				time.Sleep(2 * time.Second)
+				if err := syscall.Kill(pid, 0); err != nil {
+					fmt.Printf("  %s: DIED during init (pid %d) — check %s\n", name, pid,
+						filepath.Join(filepath.Dir(agentPIDFile(name)), "daemon.log"))
+					continue
+				}
+				fmt.Printf("  %s: started (pid %d)\n", name, pid)
 			}
 			return nil
 		},
