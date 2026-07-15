@@ -266,6 +266,7 @@ type DaemonConfig struct {
 	// the window is suppressed — deterministic guard against duplicate
 	// reminders. On by default; outbound_dedup_disabled is the kill-switch.
 	OutboundDedupDisabled   bool `json:"outbound_dedup_disabled"`
+	CoalesceDisabled        bool `json:"coalesce_disabled"` // kill switch: V2-H44 queued-message coalescing
 	OutboundDedupWindowMins int  `json:"outbound_dedup_window_mins"` // default 60
 }
 

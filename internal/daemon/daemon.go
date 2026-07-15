@@ -568,6 +568,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		PeerAliases:          peerAliases,
 		GroupMode:            cfg.Agent.GroupMode,
 		GroupDomain:          cfg.Agent.GroupDomain,
+		CoalesceDisabled:     cfg.Daemon.CoalesceDisabled,
 	}
 	bot, err := telegram.NewBot(token, auth, br, agentCfg)
 	if err != nil {

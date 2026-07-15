@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"sort"
 	"regexp"
 	"strings"
 	"sync"
@@ -1096,6 +1097,69 @@ type Handler struct {
 
 	chatLocksMu sync.Mutex
 	chatLocks   map[chatLockKey]*sync.Mutex // per (chat, thread) message serialization
+
+	// V2-H44 queued-message coalescing: text messages that queue behind a
+	// long turn from the SAME sender merge into one turn instead of each
+	// waiting its full predecessors (7/15: three follow-ups waited
+	// 52s/136s/65s behind a 117s memo turn).
+	coalesceDisabled bool
+	coalesceMu       sync.Mutex
+	coalesceQueues   map[chatLockKey][]*queuedMsg
+}
+
+// queuedMsg is one waiter in a coalescing queue.
+type queuedMsg struct {
+	senderID   int64
+	senderName string
+	text       string
+	msgID      int
+	enqueued   time.Time
+	consumed   bool // absorbed into another waiter's coalesced turn
+}
+
+// absorbQueued resolves this goroutine's place in the V2-H44 coalescing
+// queue once it holds the chat lock. Returns consumed=true when a sibling
+// waiter already absorbed self (caller must stand down). Otherwise removes
+// and returns up to 4 OTHER queued messages from the same sender, marking
+// them consumed — the caller answers them in one turn.
+func (h *Handler) absorbQueued(key chatLockKey, self *queuedMsg, senderID int64) (bool, []*queuedMsg) {
+	if self == nil {
+		return false, nil
+	}
+	h.coalesceMu.Lock()
+	defer h.coalesceMu.Unlock()
+	if self.consumed {
+		return true, nil
+	}
+	var absorbed []*queuedMsg
+	q := h.coalesceQueues[key]
+	remaining := q[:0]
+	for _, e := range q {
+		if e == self {
+			continue
+		}
+		if e.senderID == senderID && !e.consumed && len(absorbed) < 4 {
+			e.consumed = true
+			absorbed = append(absorbed, e)
+			continue
+		}
+		remaining = append(remaining, e)
+	}
+	h.coalesceQueues[key] = remaining
+	sort.Slice(absorbed, func(i, j int) bool { return absorbed[i].msgID < absorbed[j].msgID })
+	return false, absorbed
+}
+
+// coalesceText appends absorbed messages to the primary text as a numbered
+// block the model answers in one reply.
+func coalesceText(text string, absorbed []*queuedMsg) string {
+	var sb strings.Builder
+	sb.WriteString(text)
+	sb.WriteString("\n\n[同一位使用者在等待期間又傳了以下訊息，請在同一則回覆中一併回答（可用編號對應）:]")
+	for i, e := range absorbed {
+		fmt.Fprintf(&sb, "\n%d. %s", i+1, e.text)
+	}
+	return sb.String()
 }
 
 // chatLockKey identifies a message serialization lock by (chat_id, message_thread_id).
@@ -1115,6 +1179,7 @@ type AgentConfig struct {
 	PeerAliases          []string // name variants for peer agents (e.g. "umbreon", "小傘")
 	GroupMode            string   // "autonomous" = agent decides, "" = legacy probability
 	GroupDomain          string   // "practical" | "companionship" — role-based routing for general messages (empty = no routing)
+	CoalesceDisabled     bool     // kill switch for V2-H44 queued-message coalescing
 }
 
 func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
@@ -1142,6 +1207,8 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 		groupDomain:          agentCfg.GroupDomain,
 		botExchangeCount:     make(map[int64]int),
 		botLastResponse:      make(map[int64]time.Time),
+		coalesceDisabled:     agentCfg.CoalesceDisabled,
+		coalesceQueues:       make(map[chatLockKey][]*queuedMsg),
 		albums:               make(map[string]*albumEntry),
 		chatLocks:            make(map[chatLockKey]*sync.Mutex),
 	}
@@ -1936,13 +2003,37 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// Serialize messages per (chat, thread) so concurrent sends in different
 	// topics run in parallel and only same-topic messages queue.
 	chatMu := h.getChatLock(msg.Chat.ID, threadID)
+	lockKey := chatLockKey{chatID: msg.Chat.ID, threadID: threadID}
 	e2ePreLock := time.Now()
+	var myEntry *queuedMsg
+	canCoalesce := !h.coalesceDisabled && len(images) == 0 && len(pdfs) == 0
 	if !chatMu.TryLock() {
 		setReaction(ctx, b, msg.Chat.ID, msg.ID, "🕐")
+		// V2-H44: register as a coalescing waiter so a sibling waiter from
+		// the same sender can absorb this message into one turn.
+		if canCoalesce {
+			myEntry = &queuedMsg{senderID: msg.From.ID, senderName: senderName,
+				text: text, msgID: msg.ID, enqueued: time.Now()}
+			h.coalesceMu.Lock()
+			h.coalesceQueues[lockKey] = append(h.coalesceQueues[lockKey], myEntry)
+			h.coalesceMu.Unlock()
+		}
 		chatMu.Lock()
 	}
 	e2eLockWaitMs := time.Since(e2ePreLock).Milliseconds()
 	defer chatMu.Unlock()
+
+	// V2-H44: if a sibling absorbed this message while we waited, our
+	// content is answered by their coalesced turn — stand down quietly.
+	consumed, absorbed := h.absorbQueued(lockKey, myEntry, msg.From.ID)
+	if consumed {
+		return // a sibling's coalesced turn answers this message
+	}
+	if len(absorbed) > 0 {
+		text = coalesceText(text, absorbed)
+		slog.Info("coalesced queued messages into one turn", "chat_id", msg.Chat.ID,
+			"thread_id", threadID, "absorbed", len(absorbed))
+	}
 
 	// React with 👀 to acknowledge receipt.
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, "👀")
@@ -2249,6 +2340,14 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	}
 	if err := h.bridge.CompletePendingTurn(msg.Chat.ID, msg.ID); err != nil {
 		slog.Warn("failed to complete pending turn", "error", err, "chat_id", msg.Chat.ID)
+	}
+	// V2-H44: absorbed messages were answered by this turn — mark them done
+	// in the ledger and acknowledge them so their 🕐 doesn't linger.
+	for _, e := range absorbed {
+		if err := h.bridge.CompletePendingTurn(msg.Chat.ID, e.msgID); err != nil {
+			slog.Warn("failed to complete absorbed turn", "error", err, "chat_id", msg.Chat.ID)
+		}
+		setReaction(ctx, b, msg.Chat.ID, e.msgID, "✅")
 	}
 
 	// E2E stamp (V2-H33): what the owner experienced, handler-relative.
