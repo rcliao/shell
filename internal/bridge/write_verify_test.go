@@ -151,6 +151,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — reference to a write hours ago (今早那筆已經寫進)",
+			userMsg:  "植物看起來怎麼樣",
+			response: "長得很好！今早澆透那筆我已經寫進 Notion 了，繼續維持微濕就好",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "genuine claim with completion marker still caught — 已經幫妳補進…了",
 			userMsg:  "脖子還是癢",
 			response: "已經幫妳補進 7/11 頁面的「反應/備註」欄了 💛",

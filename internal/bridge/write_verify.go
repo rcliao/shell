@@ -84,7 +84,7 @@ var cjkClaimGuards = []string{
 	// 什麼"), never present in a genuine completed-write claim
 	"什麼", "多久", "怎麼", "哪",
 	// past reference (an earlier turn's write, not this one)
-	"那時", "當時", "之前", "上次",
+	"那時", "當時", "之前", "上次", "今早", "早上就", "那筆", "那次",
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause
