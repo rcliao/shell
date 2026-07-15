@@ -82,6 +82,18 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   — shared task store needs pruning/curation (probably old completed tasks
   rendering forever); that's both tokens and possibly the latency.
 
+### 7/15 morning: queue-depth UX — propose turn coalescing (V2-H44)
+- Owner-A sent 3+ messages during a 117s memo turn; serialization made each
+  wait its full predecessor (lock_wait 52s/136s/65s, worst experienced 175s
+  for a short follow-up). Everything delivered; UX rough.
+- PROPOSAL (needs design): when N>1 messages from the same human are queued
+  on one session, coalesce them into ONE turn ("she also added: ...") —
+  answers arrive together, placeholders merge. Alternatives: shorter memo
+  turns (partially done via notion skill), or priority lane for one-liners.
+- Also 08:42: a zero-tool one-line arithmetic answer took 42s first-visible
+  (pure model latency, no retry fired, usage row missing from ledger) —
+  check tonight's ttft distribution for sonnet-5 before treating as a trend.
+
 ### 7/14 reliability audit (owner-requested, 10:50): placeholder-429 = silent drop
 - Full day reconciliation: umbreon 10/10 human turns answered; pika 4 unmatched,
   ALL in pre-fix windows (09:46 drain-v1 kill x1 owner-A DM; 09:42-44 backlog
