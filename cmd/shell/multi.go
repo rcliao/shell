@@ -102,9 +102,21 @@ func newMultiStartCmd() *cobra.Command {
 				config.OpenSecretStore(cfg.Secrets)
 				if cfg.TelegramToken() == "" {
 					return fmt.Errorf("%s: telegram token unresolvable (secret %q) — NOT starting anything.\n"+
-						"Likely a locked login keychain. Fix:\n"+
+						"\n"+
+						"Likely a locked login keychain (happens after every reboot/logout when the\n"+
+						"keychain password differs from the login password). Unlock it:\n"+
 						"  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"+
-						"then re-run 'shell multi start'. (Or export the token env vars and re-run.)",
+						"  (use the KEYCHAIN's password — may be an older account password)\n"+
+						"then re-run 'shell multi start'.\n"+
+						"\n"+
+						"PERMANENT FIX (one time) — resync so reboots auto-unlock and this error\n"+
+						"never recurs:\n"+
+						"  security set-keychain-password ~/Library/Keychains/login.keychain-db\n"+
+						"  Old Password: the keychain's current (older) password\n"+
+						"  New Password: your current macOS login password\n"+
+						"\n"+
+						"Bypass for right now (no keychain): export the tokens and re-run:\n"+
+						"  TELEGRAM_BOT_TOKEN=... UMBREONMINI_BOT_TOKEN=... ./shell multi start",
 						name, cfg.Telegram.TokenEnv)
 				}
 			}
