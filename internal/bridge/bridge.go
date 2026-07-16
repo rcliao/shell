@@ -1316,10 +1316,14 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		}
 	}
 
-	// Log exchange to memory (never for cache warm-ups — they carry no signal).
-	// Async (V2-H37): the write computes an embedding (~1s) and must not hold
-	// the session busy — a rapid follow-up message shouldn't queue behind it.
-	if b.memory != nil && source != "prewarm" {
+	// Log exchange to memory — ONLY for real user turns. Heartbeat, scheduler,
+	// and prewarm turns are internal machinery: letting them through polluted
+	// memory with watcher instructions and heartbeat prompts as "same-day
+	// facts" (chat:0 keys pdt/dm/heartbeat-review, found 7/14-7/15), including
+	// stale ops directives retrievable into real conversations. Async
+	// (V2-H37): the write computes an embedding (~1s) and must not hold the
+	// session busy.
+	if b.memory != nil && source == "interactive" {
 		go b.memory.LogExchange(context.Background(), chatID, userMsg, response)
 	}
 
