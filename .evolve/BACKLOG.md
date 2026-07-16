@@ -1180,3 +1180,18 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   Alternatively: support `cron` + a self-disable condition for watchers so
   the rechain isn't the agent's job at all (structural > behavioral, 5th
   proof pending).
+
+### OBS 7/16 — Recall-ledger FP audit (umbreon focus from 7/15 eval)
+- **sampled:** 3/3 most-recent memory_recall flags were FPs, two classes:
+  (1) read-carryover — follow-up question right after a real store read
+  (FIXED 434ee98, grounding=read_carryover, 3-min window mirroring
+  write-verify); (2) domain-knowledge trigger — past-reference words
+  (之前/上次/目前) in a question whose answer is general knowledge with
+  all context supplied in the user's own message (plant care, supplement
+  evidence). Class 2 needs design: the trigger can't tell "recall MY
+  stored fact" from "past word in a general question". Candidate: require
+  a salient SUBJECT token that appears in the agent's own store index, or
+  a first-person-possessive cue (我的/我上次/幫我記過的).
+- **implication:** umbreon's 21.3% all-time ungrounded rate is heavily
+  FP-inflated; re-measure with `shell recall-hygiene` after a week of
+  carryover-guarded data before spending on recall behavior changes.
