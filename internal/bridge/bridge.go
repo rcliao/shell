@@ -44,6 +44,11 @@ type Bridge struct {
 	lastWriteMu sync.Mutex
 	lastWriteOK map[int64]time.Time
 
+	// Cross-turn recall-verify carryover: last successful read per chat
+	// (see recall_verify.go recentReadOK).
+	lastReadMu sync.Mutex
+	lastReadOK map[int64]time.Time
+
 	// In-flight turn tracking for graceful drain: a SIGHUP deploy that
 	// exec's mid-turn kills the Claude subprocess and loses the user's
 	// message (observed 7/13 16:09 and 7/14 07:43). turnWG counts active

@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"testing"
+	"time"
 
 	"github.com/rcliao/shell/internal/process"
 )
@@ -198,5 +199,22 @@ func TestSalientTokens(t *testing.T) {
 				t.Errorf("salientTokens(%q) = %v, missing %q", c.msg, got, w)
 			}
 		}
+	}
+}
+
+func TestRecentReadOKCarryover(t *testing.T) {
+	b := &Bridge{}
+	if b.recentReadOK(42, time.Minute) {
+		t.Fatal("no read recorded yet")
+	}
+	b.markReadOK(42)
+	if !b.recentReadOK(42, time.Minute) {
+		t.Fatal("read within window should carry over")
+	}
+	if b.recentReadOK(43, time.Minute) {
+		t.Fatal("carryover must be per-chat")
+	}
+	if b.recentReadOK(42, 0) {
+		t.Fatal("expired window must not carry over")
 	}
 }

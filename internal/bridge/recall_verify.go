@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/store"
@@ -215,6 +216,18 @@ func classifyRecall(userMsg, response string, calls []process.ToolCall, injected
 // Best-effort: never fails the user-facing turn.
 func (b *Bridge) verifyRecall(chatID, sessID int64, userMsg, response string, calls []process.ToolCall, injectedText string, source string) {
 	v := classifyRecall(userMsg, response, calls, injectedText)
+	// Cross-turn carryover: a follow-up question about facts the agent read
+	// moments ago ("所以這盆是因為…?" right after a Notion diary read) is
+	// grounded by THAT read — the ledger just can't see it this turn. Same
+	// pattern as write-verify's recentWriteOK (7/16 FP audit: 3/3 sampled
+	// ungrounded flags were this or domain-knowledge triggers).
+	if v.isMiss() && b.recentReadOK(chatID, 3*time.Minute) {
+		v.classification = "grounded_recall"
+		v.grounding = "read_carryover"
+	}
+	if v.readOK {
+		b.markReadOK(chatID)
+	}
 	if !v.shouldLog() {
 		return
 	}
@@ -238,4 +251,22 @@ func (b *Bridge) verifyRecall(chatID, sessID int64, userMsg, response string, ca
 	}); err != nil {
 		slog.Warn("failed to log recall verification", "error", err)
 	}
+}
+
+// recentReadOK reports whether this chat completed a successful read within
+// the window (cross-turn carryover for recall-verify).
+func (b *Bridge) recentReadOK(chatID int64, window time.Duration) bool {
+	b.lastReadMu.Lock()
+	defer b.lastReadMu.Unlock()
+	t, ok := b.lastReadOK[chatID]
+	return ok && time.Since(t) < window
+}
+
+func (b *Bridge) markReadOK(chatID int64) {
+	b.lastReadMu.Lock()
+	defer b.lastReadMu.Unlock()
+	if b.lastReadOK == nil {
+		b.lastReadOK = make(map[int64]time.Time)
+	}
+	b.lastReadOK[chatID] = time.Now()
 }
