@@ -1218,3 +1218,25 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **also observed 14:13:** umbreon chat-0 heartbeat prompt failed once
   (claude subprocess 5m timeout during the rotation churn); scheduler
   self-rescheduled. Watch for recurrence before treating as a bug.
+
+### OBS 7/16 (cont) — Pin budget root cause was CONCURRENT SELF-CURATION; umbreon budget 8000→10000
+- **what actually happened:** the 14:10 over-budget drops weren't only stale
+  accumulation — umbreon's own 14:06-14:11 reflection wrote SIX new large
+  pins (9.4k chars: Notion write recipe, fortune-dedup v2, schedule-verify
+  how-to, skill-inventory standing answer, speed-contract self-audit,
+  ghost tier trap). High-quality, evidence-backed — his fortune-dedup v2
+  documents that v1's ttl'd ghost key was silently reaped by the sensory-
+  tier decay sweep within hours (real dup-fortune risk; fix = tier=ltm +
+  SQLite schedules.last_run_at as the authoritative check).
+- **actions:** my consolidated fortune pin updated to defer to his v2 (I
+  had merged the broken v1 recipe an hour earlier); stale 6/10 "peer
+  invisible to me" pin (1k chars, pre-A2A) unpinned; umbreon
+  memory.system_budget raised 8000→10000 (33.9k chars now fits with
+  headroom) — newest-first packing was about to silently drop the
+  photo-read / day-of-week / From:-header pins to make room. Deployed
+  14:32, clean restart. NEEDS PAPI SIGN-OFF as permanent (reversible).
+- **learning:** pin hygiene and agent self-curation race each other. The
+  oldest-drop policy is the wrong failure mode when old pins are critical
+  behavior guards. Candidate structural fixes: (a) priority-aware packing
+  (drop lowest-priority first, not oldest), (b) reflection should respect
+  a pin budget and consolidate before adding.
