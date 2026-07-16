@@ -82,6 +82,15 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
   — shared task store needs pruning/curation (probably old completed tasks
   rendering forever); that's both tokens and possibly the latency.
 
+### 7/16: morning first-turn latency pattern (3rd consecutive day)
+- Owner-A's first morning message (meal memo) pays 40-50s first-visible /
+  100-175s total every day: tool-first turn shape (Notion read before any
+  text) despite the speed contract's answer-first rule. Sessions ARE warm
+  (prewarm keep-alive works) — this is behavioral, not cache. Candidates:
+  per-turn answer-first reminder on memo-trigger messages (H43 pattern),
+  or accept as cost of verify-before-assert. Data: 7/14 06:57 52s, 7/15
+  08:42 42s, 7/16 07:01 50s first-visible.
+
 ### 7/15 16:30 EVAL CHECKPOINT (post-classifier-fix window, 42h, small Ns)
 - **write_confabulation**: ledger says pika 20% (1/5), umb 50% (3/6) — but
   hand-verification of all 4 flags: 1 TRUE (umb 11:38 存起來), 2 FPs now
