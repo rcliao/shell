@@ -416,7 +416,7 @@ flips) → `validating` → `shipped` | `regressed`. Terminals: `rejected`,
 ### V2-H16 — [H] A2A + scheduler "session busy" → enqueue with retry, not drop — NEW 7/12
 - **status:** SHIPPED cycle 161 (commit 8a16717, DEPLOYED 7/12 09:51) — validating
 - **why:** 7/12 08:28 a2a handoff FAILED with `a2a: turn failed … session for
-  chat -<family-group> thread 0 is busy` — the peer turn was silently dropped.
+  chat <family-group> thread 0 is busy` — the peer turn was silently dropped.
   Same error class hit a scheduler prompt on 7/11. Any caller that hits a
   mid-turn session currently loses its message.
 - **scope:** when a synthetic turn (a2a event, scheduler prompt) hits a busy

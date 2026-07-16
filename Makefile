@@ -28,8 +28,14 @@ clean:
 # don't trip it). To check the full working tree, pass FILES=$$(git ls-files).
 verify-no-pii:
 	@FILES="$${FILES:-$$(git diff --cached --name-only --diff-filter=ACM)}"; \
-	if [ -z "$$FILES" ]; then echo "verify-no-pii: no staged files to check"; exit 0; fi; \
-	HITS=$$(echo "$$FILES" | xargs grep -lE 'mami|papi|Jennifer|rcliao01|皮卡|umbreonmini.*妹|Pikamini.*plush|cashew|過敏|蕁麻疹|dairy.*sensit|歐里安|Cream Pan|抹茶.*明太子' 2>/dev/null || true); \
+	if [ -z "$$FILES" ]; then \
+	  FILES="$$(git diff --name-only --diff-filter=ACM)"; \
+	  if [ -z "$$FILES" ]; then echo "verify-no-pii: nothing staged or modified to check"; exit 0; fi; \
+	  echo "verify-no-pii: nothing staged — checking modified working-tree files instead (stage first for the real gate)"; \
+	fi; \
+	PAT='mami|papi|Jennifer|rcliao01|皮卡|umbreonmini.*妹|Pikamini.*plush|cashew|過敏|蕁麻疹|dairy.*sensit|歐里安|Cream Pan|抹茶.*明太子|-100[0-9]{9,}'; \
+	if [ -f "$$HOME/.shell/pii-patterns.txt" ]; then PAT="$$PAT|$$(paste -sd'|' "$$HOME/.shell/pii-patterns.txt")"; fi; \
+	HITS=$$(echo "$$FILES" | grep -v '^Makefile$$' | xargs grep -lE "$$PAT" 2>/dev/null || true); \
 	if [ -n "$$HITS" ]; then \
 	  echo "FAIL — staged files contain restricted tokens:"; \
 	  echo "$$HITS" | sed 's/^/  /'; \
