@@ -1195,3 +1195,26 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **implication:** umbreon's 21.3% all-time ungrounded rate is heavily
   FP-inflated; re-measure with `shell recall-hygiene` after a week of
   carryover-guarded data before spending on recall behavior changes.
+
+### OBS 7/16 — Umbreon operating pins over budget: hygiene pass (queued "pin consolidation" item, umbreon half DONE)
+- **trigger:** 14:10 rotation dropped 6 oldest operating pins (40 pins,
+  ~34.7k chars vs 32k char budget) — dropped set included the critical
+  photo-read-before-responding and day-of-week pins while keeping 5
+  duplicate daily "Skills I've authored" snapshots.
+- **hygiene (data-only, ghost DB; unpinned stay searchable):** 20 unpins +
+  2 consolidated replacements → 35 pins / 31.7k chars, zero drops.
+  Removed: 6 skills-snapshot dupes (the snapshot class is redundant with
+  the system prompt's own skills catalog), speed-contract v1, two
+  superseded message-length pins, expired star-sign embargo (birthday
+  passed), pre-A2A isolation pin, wrong-tool reminder pin, historical
+  relay fact, 5 fortune pins merged into 1 ops pin, concluded birthday-op
+  pin distilled to its 2 durable rules (surprise-op opsec + no unprompted
+  media).
+- **root cause left open:** something (likely umbreon's own heartbeat
+  reflection) pins a fresh "Skills I've authored" snapshot daily without
+  unpinning yesterday's — a permanent budget leak. Candidate structural
+  fix: key-based upsert (same ghost key → replace) or teach the packer to
+  dedupe identical-prefix pins. Pika's pin set should get the same audit.
+- **also observed 14:13:** umbreon chat-0 heartbeat prompt failed once
+  (claude subprocess 5m timeout during the rotation churn); scheduler
+  self-rescheduled. Watch for recurrence before treating as a bug.
