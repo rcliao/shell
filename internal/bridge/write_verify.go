@@ -92,7 +92,12 @@ var cjkClaimGuards = []string{
 var cjkClauseSplit = regexp.MustCompile(`[。！？!?\n，,；;]`)
 
 // claimsWrite reports whether the agent's prose asserts a persistence happened.
-func claimsWrite(response string) bool {
+// peerNames are the configured peer agents' names/aliases: a clause naming a
+// peer as the actor ("Umbreon 已經幫妳寫進 Notion 了") reports ANOTHER agent's
+// write, which this agent's own tool ledger can never verify — guarded like
+// the other non-self-claim classes (7/16 production FP; the peer had in fact
+// written, with read-back). Self name/aliases must NOT be passed in.
+func claimsWrite(response string, peerNames []string) bool {
 	if writeClaimRe.MatchString(response) {
 		return true
 	}
@@ -108,6 +113,15 @@ func claimsWrite(response string) bool {
 			if strings.Contains(clause, g) {
 				guarded = true
 				break
+			}
+		}
+		if !guarded {
+			lower := strings.ToLower(clause)
+			for _, p := range peerNames {
+				if p != "" && strings.Contains(lower, strings.ToLower(p)) {
+					guarded = true
+					break
+				}
 			}
 		}
 		if !guarded {
@@ -172,10 +186,10 @@ func (v writeVerdict) shouldLog() bool { return v.classification != "" }
 //   - verified:          a claim or trigger AND a successful write tool ran
 //   - unclaimed_trigger: user asked to persist, agent neither claimed nor wrote
 //   - "" (skip):         nothing persistence-related happened
-func classifyWrite(userMsg, response string, calls []process.ToolCall) writeVerdict {
+func classifyWrite(userMsg, response string, calls []process.ToolCall, peerNames []string) writeVerdict {
 	v := writeVerdict{
 		triggered: isWriteTrigger(userMsg),
-		claimed:   claimsWrite(response),
+		claimed:   claimsWrite(response, peerNames),
 	}
 
 	var names []string
@@ -219,7 +233,7 @@ const writeCorrectionPrompt = `[system: write-verification] You just told the us
 // real successful tool call), logs the verdict to the ledger, and returns the
 // possibly-augmented response. Best-effort: never fails the user-facing turn.
 func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, chatID, threadID, sessID int64, userMsg string, resp AgentResponse, result process.SendResult, source string) AgentResponse {
-	v := classifyWrite(userMsg, resp.Text, result.ToolCalls)
+	v := classifyWrite(userMsg, resp.Text, result.ToolCalls, b.peerNameList())
 	// Cross-turn carryover: a claim that references the PREVIOUS turn's
 	// successful write is honest, not confabulated ("晚餐已經寫進Notion囉"
 	// explaining why the last turn was slow — flagged 7/14 15:52 and burned
@@ -266,7 +280,7 @@ func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, ch
 				}
 				// Re-classify against the correction turn's tool calls so the
 				// ledger records the post-correction outcome (ideally verified).
-				v = classifyWrite(userMsg, resp.Text, append(append([]process.ToolCall{}, result.ToolCalls...), corr.ToolCalls...))
+				v = classifyWrite(userMsg, resp.Text, append(append([]process.ToolCall{}, result.ToolCalls...), corr.ToolCalls...), b.peerNameList())
 				slog.Info("write-hygiene corrected", "chat_id", chatID, "post_class", v.classification, "tools", v.toolNames)
 			}
 		}
@@ -305,4 +319,17 @@ func (b *Bridge) markWriteOK(chatID int64) {
 		b.lastWriteOK = make(map[int64]time.Time)
 	}
 	b.lastWriteOK[chatID] = time.Now()
+}
+
+// peerNameList flattens configured peer agents into name+alias guard tokens
+// for claimsWrite. Never includes this agent's own name.
+func (b *Bridge) peerNameList() []string {
+	var out []string
+	for _, p := range b.peerAgents {
+		if p.Name != "" {
+			out = append(out, p.Name)
+		}
+		out = append(out, p.Aliases...)
+	}
+	return out
 }

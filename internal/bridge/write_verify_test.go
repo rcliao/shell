@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — peer attribution (Umbreon 已經幫妳寫進…了)",
+			userMsg:  "接駁車路線有到哪些點",
+			response: "路線整理好給妳看。Umbreon 也已經幫妳寫進 Notion 行程頁了💛",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "genuine claim with completion marker still caught — 已經幫妳補進…了",
 			userMsg:  "脖子還是癢",
 			response: "已經幫妳補進 7/11 頁面的「反應/備註」欄了 💛",
@@ -181,7 +188,7 @@ func TestClassifyWrite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyWrite(tt.userMsg, tt.response, tt.calls)
+			got := classifyWrite(tt.userMsg, tt.response, tt.calls, []string{"umbreon", "umbreonmini", "哥哥", "小傘"})
 			if got.classification != tt.want {
 				t.Errorf("classifyWrite() = %q, want %q (claimed=%v triggered=%v writeOK=%v writeFailed=%v)",
 					got.classification, tt.want, got.claimed, got.triggered, got.writeOK, got.writeFailed)
