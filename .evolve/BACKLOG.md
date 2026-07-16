@@ -1240,3 +1240,24 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   behavior guards. Candidate structural fixes: (a) priority-aware packing
   (drop lowest-priority first, not oldest), (b) reflection should respect
   a pin budget and consolidate before adding.
+
+### INCIDENT 7/16 — SIGHUP-exec'd daemon died silently mid-init (umbreon down 14:32→15:26)
+- **what:** the 14:32 SIGHUP restart's new process logged a normal boot up
+  to "memory embedder warmed" then vanished — never reached "rpc server
+  starting"/"daemon starting". No panic in the log (stderr was discarded),
+  no macOS crash report. Down 55 min until the watch loop noticed log
+  silence + dead PID; manually restarted 15:26 with stderr now captured
+  to a file. Zero user messages arrived during the window (verified: no
+  replay-ledger entries, Telegram long-poll backlog empty).
+- **second deploy-death class** after the 7/14 exit-race (that one was
+  fixed by restartPending). This one is later in boot: between memory
+  init (a background reflect had just been triggered) and RPC start.
+- **mitigations to consider:**
+  1. daemons under a supervisor (launchd or shell-pm) so silent deaths
+     auto-restart — infra change, owner decision (config-level system_budget was a decoy — the PROFILE-level memory.profiles.<agent>.system_budget is the effective one, fixed 15:27);
+  2. daemon stderr should ALWAYS go to a file (daemon.stderr.log), not
+     inherit /dev/null — one-line change, makes every future silent death
+     diagnosable; DO THIS FIRST;
+  3. canary should treat >N min of total log silence while a session is
+     supposed to be live as an alert, plus a PID liveness probe — log
+     tailing alone cannot distinguish "quiet" from "dead".
