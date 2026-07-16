@@ -1158,3 +1158,25 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **caution:** touches fingerprint/rotation semantics — ship fresh with
   tests, NOT at the tail of a marathon session (7/13 lesson: two of today's
   incidents were deploy-fatigue-adjacent). Top of the loop queue with H32.
+
+### OBS 7/16 — Watcher self-rechain dropped (scheduled prompt turn skipped its reschedule step)
+- **incident:** pika's schedule #39 (once, prompt-mode "watcher round 19",
+  self-only) fired 09:02. Conditions unmet → instructions said "create the
+  next round via shell-schedule, then [noop]". The turn ran 5 Bash checks,
+  loaded the shell-schedule Skill, wrote a ghost memory, then ended — the
+  script itself was NEVER executed, so the chain silently died (no round-20
+  row; once-schedules disable themselves after firing). A dead persistent
+  subprocess (broken pipe on first send) was cleaned up and respawned
+  automatically first — that part worked; the miss was behavioral.
+- **repair:** round 20 recreated via bridge RPC as schedule #40 (verified in
+  shell.db). Prompt hardened: reschedule step now ordered FIRST ("before
+  anything else"), with the failure mode named in the prompt.
+- **pattern:** same claim-vs-do family as write-hygiene, but for schedule
+  chains: agent loads the skill then treats it as done. Self-rechaining
+  once-schedules have a single point of failure by design.
+- **candidate fix (small):** scheduler could log a WARN when a prompt-mode
+  once-schedule's turn makes no /schedule RPC call AND its message mentions
+  shell-schedule — a rechain-miss canary, analogous to write-verify.
+  Alternatively: support `cron` + a self-disable condition for watchers so
+  the rechain isn't the agent's job at all (structural > behavioral, 5th
+  proof pending).
