@@ -1261,3 +1261,21 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   3. canary should treat >N min of total log silence while a session is
      supposed to be live as an alert, plus a PID liveness probe — log
      tailing alone cannot distinguish "quiet" from "dead".
+
+### V2-H45 — [M] Defer fingerprint rotations to idle — NEW 7/16
+- **finding (live, 16:20):** mid-conversation turn hit first_visible 55.6s:
+  prework 12.1s of which rotate_and_log 9.1s — a fingerprint-change
+  rotation fired MID-CHAT. Now that the agent actively self-curates pins
+  (six new pins written during today's 14:00 reflection, more during
+  chats), every pin write changes the composed-prompt fingerprint and the
+  eager-rotation path respawns the session on the next user turn. Token
+  rotation was already made lazy (300k + prewarm); fingerprint rotation
+  was not.
+- **scope:** debounce fingerprint-triggered rotation to idle: when the
+  fingerprint changes, mark rotation pending and let the 10-min prewarm
+  tick perform it (it already respawns+prewarms invisibly); only rotate
+  synchronously if the pending flag is older than a max-staleness cap
+  (e.g. 30 min). Same caution class as V2-H39 (rotation semantics —
+  ship fresh with tests, not session-tail).
+- **measure-by:** zero rotate_and_log >2s inside interactive turns over a
+  week; prompt changes still land within ≤10 min.
