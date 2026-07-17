@@ -85,6 +85,10 @@ var cjkClaimGuards = []string{
 	"什麼", "多久", "怎麼", "哪",
 	// past reference (an earlier turn's write, not this one)
 	"那時", "當時", "之前", "上次", "今早", "早上就", "那筆", "那次",
+	// coincidence adverbs — "這張近拍剛好補上一個重點" is discussion, not a
+	// write, and the 好 inside 剛好 falsely satisfies the completion-marker
+	// check (7/16 production FP)
+	"剛好", "正好",
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause

@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — coincidence adverb (剛好補上一個重點 is discussion)",
+			userMsg:  "這是軌道的近拍",
+			response: "這張近拍剛好補上一個重點，軌道溝槽裡卡了不少水垢",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "no false positive — peer attribution (Umbreon 已經幫妳寫進…了)",
 			userMsg:  "接駁車路線有到哪些點",
 			response: "路線整理好給妳看。Umbreon 也已經幫妳寫進 Notion 行程頁了💛",
