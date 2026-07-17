@@ -135,8 +135,14 @@ func newMultiStartCmd() *cobra.Command {
 
 				// Spawn daemon in background.
 				proc := exec.Command(binary, "daemon", "--config", cfgPath)
-				proc.Stdout = nil
-				proc.Stderr = nil
+				// Panics and other raw-stderr output must land somewhere
+				// diagnosable: a daemon that died silently mid-init on 7/16
+				// (55-min outage) left no trace because stderr went to
+				// /dev/null. syscall.Exec restarts inherit this fd, so every
+				// generation keeps writing here.
+				stderrLog := agentStderrLog(name)
+				proc.Stdout = stderrLog
+				proc.Stderr = stderrLog
 				proc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 				if err := proc.Start(); err != nil {
 					slog.Error("failed to start agent", "name", name, "error", err)
@@ -287,8 +293,14 @@ func newMultiRestartCmd() *cobra.Command {
 				}
 				cfgPath := agentConfigPath(name)
 				proc := exec.Command(binary, "daemon", "--config", cfgPath)
-				proc.Stdout = nil
-				proc.Stderr = nil
+				// Panics and other raw-stderr output must land somewhere
+				// diagnosable: a daemon that died silently mid-init on 7/16
+				// (55-min outage) left no trace because stderr went to
+				// /dev/null. syscall.Exec restarts inherit this fd, so every
+				// generation keeps writing here.
+				stderrLog := agentStderrLog(name)
+				proc.Stdout = stderrLog
+				proc.Stderr = stderrLog
 				proc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 				if err := proc.Start(); err != nil {
 					fmt.Printf("  %s: FAILED to start (%v)\n", name, err)
@@ -302,3 +314,13 @@ func newMultiRestartCmd() *cobra.Command {
 	}
 }
 
+// agentStderrLog opens (append) the agent's daemon.stderr.log for spawned
+// children, so panics survive. Returns nil (= /dev/null) if it cannot open.
+func agentStderrLog(name string) *os.File {
+	f, err := os.OpenFile(filepath.Join(filepath.Dir(agentConfigPath(name)), "daemon.stderr.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil
+	}
+	return f
+}

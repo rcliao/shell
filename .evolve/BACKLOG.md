@@ -1288,3 +1288,22 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   tail as the verify-before-assert cost, or add an answer-first
   per-turn hint for lookup-heavy turns. V2-H45 alone should shave the
   rotation-driven part of the tail.
+
+### CORRECTION 7/16 — skills-snapshot "pin leak" was a misdiagnosis; stderr capture shipped
+- **finding on review (owner asked how to fix it):** there is NO prompt
+  duplication. StoreSkillInventory writes key `skill-inventory` and ghost
+  upserts correctly: each new version soft-deletes its predecessor, and
+  the List(PinnedOnly) packer joins on latest non-deleted version — only
+  one copy ever renders. The "5 duplicates" were superseded soft-deleted
+  rows visible to naive SQL (they retain pinned=1 after supersede), so
+  today's snapshot unpins were cosmetic no-ops on dead rows. The real
+  budget pressure was simply many DISTINCT live pins vs the 8k budget.
+- **skills survive rotation correctly** — the inventory digest refresh is
+  working as designed; no agent-side fix needed.
+- **small ghost handoff:** clear `pinned` when a version is superseded
+  (cosmetic — prevents exactly this misdiagnosis; superseded rows should
+  not look pinned to ad-hoc queries).
+- **shipped same commit:** multi.go now routes spawned daemon stdout+stderr
+  to ~/.shell/agents/<name>/daemon.stderr.log (both spawn sites) — panics
+  survive; syscall.Exec generations inherit the fd. The 7/16 silent death
+  would have left a trace.
