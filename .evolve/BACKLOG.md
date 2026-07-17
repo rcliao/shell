@@ -1279,3 +1279,12 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   ship fresh with tests, not session-tail).
 - **measure-by:** zero rotate_and_log >2s inside interactive turns over a
   week; prompt changes still land within ≤10 min.
+
+### DATA 7/16 — first_visible distribution (full day, both agents)
+- agent A: n=18 p50=13.4s p90=37.9s max=71.4s; agent B: n=35 p50=13.2s
+  p90=26.8s max=61.4s. Speed contract (<15s visible) HOLDS at median;
+  the tail (~10% of turns) is verify-first tool runs + mid-chat
+  fingerprint rotations (V2-H45). Owner decision pending: accept the
+  tail as the verify-before-assert cost, or add an answer-first
+  per-turn hint for lookup-heavy turns. V2-H45 alone should shave the
+  rotation-driven part of the tail.
