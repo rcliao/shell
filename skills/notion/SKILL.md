@@ -7,6 +7,12 @@ tier: hot
 
 # Notion (lightweight REST)
 
+**Auth is handled INSIDE the script** — never fetch NOTION_TOKEN yourself,
+never write raw python/curl against api.notion.com. If a write seems to
+need auth you don't have, the answer is always the script at the ABSOLUTE
+path `~/.shell/skills/notion/scripts/notion` (works from any cwd), which
+also prints read-back receipts that verify your write actually landed.
+
 Use `scripts/notion` for ALL Notion operations. There is no Notion MCP server.
 
 ```
