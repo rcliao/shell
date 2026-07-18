@@ -1370,3 +1370,20 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   "persistent process send failed" WARNs while recovery behavior is
   unchanged. Supersedes the 7/17 rotation-churn framing; H45 still
   worthwhile on its own merits.
+
+### OBS 7/18 — write-verify TRUE POSITIVE; enforcement worked; two gaps
+- 07:46 DM: agent claimed a completed Notion write (已寫進...✅) with zero
+  persistence tools in the turn. First confirmed TP since the guard
+  batch (post-fix tally: 1 TP / ~5 FP, every FP now guarded). The
+  enforcement correction turn forced the real write — validates keeping
+  enforcement ON.
+- **Gap 1 (ledger):** the correction wrote via a hand-rolled
+  `python3 /tmp/notion_bullet.py`, invisible to isPersistenceTool → the
+  ledger recorded the post-correction turn as still-verbal_save. Options:
+  recognize a read-back receipt marker instead of only command shapes, or
+  have the correction prompt REQUIRE using the notion skill script.
+- **Gap 2 (behavior):** during correction the agent hunted for
+  NOTION_TOKEN (raw python, secrets grep — both failed) instead of using
+  the notion skill script that wraps auth. The 07:46 SKILL.md canonical-
+  invocation pattern should be extended to the notion skill too: "auth is
+  handled inside the script — never fetch tokens yourself."
