@@ -1356,3 +1356,17 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   measure-by: idle-deferred rotations should collapse the respawn storms
   that produce these; if broken pipes persist post-H45, investigate the
   prewarm spawn path itself (why fresh subprocesses exit).
+
+### OBS 7/18 — broken-pipe root cause refined: idle-timeout reap leaves stale session entry
+- 5th occurrence (07:30, DM) breaks the rotation-wave theory: the session
+  was prewarm-spawned 07:23, keep-alive 07:23:14, pipe broke ~5min later
+  — matching the daemon's session idle timeout (5m0s). Hypothesis: the
+  idle reaper kills the Claude subprocess but leaves the session entry
+  registered; the next send discovers the corpse (WARN broken pipe) and
+  pays cleanup+respawn (~3-10s) inside a real user turn.
+- **Candidate fix (small, verifiable):** when the idle reaper stops a
+  subprocess, clear/mark the session entry so the next send spawns
+  directly (no failed-write path). Verify by predicting: post-fix, zero
+  "persistent process send failed" WARNs while recovery behavior is
+  unchanged. Supersedes the 7/17 rotation-churn framing; H45 still
+  worthwhile on its own merits.
