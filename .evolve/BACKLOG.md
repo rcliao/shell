@@ -1346,3 +1346,13 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   before POSTing.
 - Pending owner decision (not yet approved): V2-H47 lesson-to-action
   heartbeat pass + skill-draft auto-promotion.
+
+### OBS 7/17 — recurring young-subprocess broken pipes after rotation churn (4th in 2 days)
+- Pattern: rotation/restart respawns sessions eagerly → some spawned
+  Claude subprocess dies within ~90s → next send hits broken pipe →
+  cleanup + respawn, self-heals, nothing lost (verified each time).
+  Occurrences: 7/16 09:02, 7/16 17:31, 7/17 11:33, 7/17 20:01 — all
+  within minutes of a rotation wave or self-restart. Fold into V2-H45's
+  measure-by: idle-deferred rotations should collapse the respawn storms
+  that produce these; if broken pipes persist post-H45, investigate the
+  prewarm spawn path itself (why fresh subprocesses exit).
