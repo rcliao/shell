@@ -1524,15 +1524,21 @@ func setReaction(ctx context.Context, b *bot.Bot, chatID any, messageID int, emo
 }
 
 // sendPhoto sends an image to a chat/topic as a Telegram photo message.
+// Flood-retried: rapid image iterations hit Telegram 429s (7/18 14:51 —
+// two revised shopping cards silently dropped), same class as the 7/14
+// placeholder drops.
 func sendPhoto(ctx context.Context, b *bot.Bot, chatID, threadID int64, imageData []byte, caption string) {
-	_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
-		ChatID:          chatID,
-		MessageThreadID: int(threadID),
-		Photo: &models.InputFileUpload{
-			Filename: "image.png",
-			Data:     bytes.NewReader(imageData),
-		},
-		Caption: caption,
+	err := withFloodRetry(ctx, func() error {
+		_, serr := b.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Photo: &models.InputFileUpload{
+				Filename: "image.png",
+				Data:     bytes.NewReader(imageData),
+			},
+			Caption: caption,
+		})
+		return serr
 	})
 	if err != nil {
 		slog.Error("failed to send photo", "error", err, "chat_id", chatID, "thread_id", threadID)
@@ -1541,14 +1547,17 @@ func sendPhoto(ctx context.Context, b *bot.Bot, chatID, threadID int64, imageDat
 
 // sendVideo sends a video to a chat/topic as a Telegram video message.
 func sendVideo(ctx context.Context, b *bot.Bot, chatID, threadID int64, videoData []byte, caption string) {
-	_, err := b.SendVideo(ctx, &bot.SendVideoParams{
-		ChatID:          chatID,
-		MessageThreadID: int(threadID),
-		Video: &models.InputFileUpload{
-			Filename: "video.mp4",
-			Data:     bytes.NewReader(videoData),
-		},
-		Caption: caption,
+	err := withFloodRetry(ctx, func() error {
+		_, serr := b.SendVideo(ctx, &bot.SendVideoParams{
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Video: &models.InputFileUpload{
+				Filename: "video.mp4",
+				Data:     bytes.NewReader(videoData),
+			},
+			Caption: caption,
+		})
+		return serr
 	})
 	if err != nil {
 		slog.Error("failed to send video", "error", err, "chat_id", chatID, "thread_id", threadID)
