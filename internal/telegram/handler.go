@@ -2016,7 +2016,14 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 				text: text, msgID: msg.ID, enqueued: time.Now()}
 			h.coalesceMu.Lock()
 			h.coalesceQueues[lockKey] = append(h.coalesceQueues[lockKey], myEntry)
+			qlen := len(h.coalesceQueues[lockKey])
 			h.coalesceMu.Unlock()
+			slog.Info("coalesce: waiter registered", "chat_id", msg.Chat.ID,
+				"thread_id", threadID, "msg_id", msg.ID, "queue_len", qlen)
+		} else {
+			slog.Info("coalesce: waiter NOT eligible", "chat_id", msg.Chat.ID,
+				"thread_id", threadID, "msg_id", msg.ID,
+				"disabled", h.coalesceDisabled, "images", len(images), "pdfs", len(pdfs))
 		}
 		chatMu.Lock()
 	}
@@ -2033,6 +2040,15 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		text = coalesceText(text, absorbed)
 		slog.Info("coalesced queued messages into one turn", "chat_id", msg.Chat.ID,
 			"thread_id", threadID, "absorbed", len(absorbed))
+	} else if myEntry != nil {
+		// Instrumentation for the 7/18 missed-coalesce burst: a registered
+		// waiter won the lock but absorbed nothing — log what the queue
+		// held so the next natural burst is diagnosable.
+		h.coalesceMu.Lock()
+		qlen := len(h.coalesceQueues[lockKey])
+		h.coalesceMu.Unlock()
+		slog.Info("coalesce: lock winner absorbed nothing", "chat_id", msg.Chat.ID,
+			"thread_id", threadID, "msg_id", msg.ID, "queue_len_after", qlen)
 	}
 
 	// React with 👀 to acknowledge receipt.
