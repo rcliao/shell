@@ -1326,3 +1326,23 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **measure-by:** p95 lock_wait_ms in group/DM bursts; zero mangled
   replies (hand-sample first week).
 - **status:** approved (owner 7/17). V2-H45 also approved same day.
+
+### APPROVED 7/17 — shell db skill + shell-schedule/task reliability (owner)
+- **V2-H48 `shell db` read-only query skill:** agents ran 198 raw sqlite3
+  calls (28 fails) to check schedules / verify sends / read state — the
+  #2 Bash usage class, fragile against schema drift and the Go-timestamp
+  string trap. Ship canned read-only subcommands via RPC or a skill
+  script: `schedules [id]`, `sent-today [chat]`, `last-messages <chat> [n]`,
+  `pending-turns`, `write-ledger [n]`, `recall-ledger [n]`. Read-only
+  enforced (sqlite3 -readonly or RPC layer). Replaces hand-written SQL in
+  agent pins (umbreon's dedup-v2 pin can then reference the skill).
+- **V2-H49 schedule/task invocation reliability:** 16-17% failure rates,
+  dominated by path-guessing (repo vs installed), sourcing, ls/head
+  probing, and flag errors. SHIPPED NOW (docs half): canonical
+  absolute-path invocation + verify-after-create in both SKILL.mds
+  (installed live). Remaining (code half, fresh session): /schedule and
+  /task RPC 400s return actionable bodies (what was wrong + a corrected
+  example), and the schedule script validates --at format client-side
+  before POSTing.
+- Pending owner decision (not yet approved): V2-H47 lesson-to-action
+  heartbeat pass + skill-draft auto-promotion.

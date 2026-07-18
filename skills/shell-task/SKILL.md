@@ -1,11 +1,15 @@
 ---
 name: shell-task
 description: Create, complete, and manage tasks (self-decomposition and agent delegation)
-usage: "scripts/shell-task create --to self --description \"research X\""
+usage: "~/.shell/skills/shell-task/scripts/shell-task create --to self --description \"research X\""
 allowed-tools: Bash
 core: true
 tier: core
 ---
+
+**Canonical invocation:** the script lives at the ABSOLUTE path
+`~/.shell/skills/shell-task/scripts/shell-task` — works from any cwd; never
+guess repo-relative paths or probe with ls/head.
 
 # Task Management
 
@@ -18,25 +22,25 @@ Create, delegate, and complete tasks. Use for:
 
 ```bash
 # Create a self-task (you'll process it yourself)
-scripts/shell-task create --to self --description "step 1: research medication interactions"
+~/.shell/skills/shell-task/scripts/shell-task create --to self --description "step 1: research medication interactions"
 
 # Delegate to a peer agent
-scripts/shell-task create --to umbreon_mini_bot --description "verify this health advice" --context "I told the user ibuprofen is safe with Flonase"
+~/.shell/skills/shell-task/scripts/shell-task create --to umbreon_mini_bot --description "verify this health advice" --context "I told the user ibuprofen is safe with Flonase"
 
 # Create with a goal ID (links related tasks)
-scripts/shell-task create --to self --description "step 2: summarize findings" --goal abc123
+~/.shell/skills/shell-task/scripts/shell-task create --to self --description "step 2: summarize findings" --goal abc123
 
 # Complete a task with result
-scripts/shell-task complete --id abc123def4 --result "ibuprofen is safe with Flonase, no interactions"
+~/.shell/skills/shell-task/scripts/shell-task complete --id abc123def4 --result "ibuprofen is safe with Flonase, no interactions"
 
 # Mark a task as failed
-scripts/shell-task fail --id abc123def4 --reason "could not verify, source unavailable"
+~/.shell/skills/shell-task/scripts/shell-task fail --id abc123def4 --reason "could not verify, source unavailable"
 
 # List your pending tasks
-scripts/shell-task list
+~/.shell/skills/shell-task/scripts/shell-task list
 
 # Check a specific task's status
-scripts/shell-task status --id abc123def4
+~/.shell/skills/shell-task/scripts/shell-task status --id abc123def4
 ```
 
 ## Options
