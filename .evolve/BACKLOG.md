@@ -1387,3 +1387,20 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   the notion skill script that wraps auth. The 07:46 SKILL.md canonical-
   invocation pattern should be extended to the notion skill too: "auth is
   handled inside the script — never fetch tokens yourself."
+
+### OBS 7/18 (cont) — broken-pipe root cause FINAL: no exit-watcher on persistent subprocesses
+- Confirmed via logs: the idle-timeout path DOES delete the map entry
+  (persistent.go AfterFunc) and resets on activity — idle deaths are
+  clean. The broken pipes come from subprocesses that EXIT ON THEIR OWN
+  (09:43 thread-1419 pipe had no idle-timeout log): nothing watches
+  cmd.Wait, so the map entry stays live until a send writes to the dead
+  stdin. Supersedes both earlier framings (rotation churn 7/17, idle-reap
+  7/18 morning).
+- **Ready-to-implement spec (fresh session — subprocess lifecycle needs
+  tests, 7/14 race lesson):** per spawned proc, one exit-watcher
+  goroutine owning the single cmd.Wait; on exit: remove map entry, log
+  exit code + last stderr lines (stderr already captured per-proc).
+  kill() signals cancel and waits on the watcher's done channel instead
+  of calling Wait itself. Measure-by: zero "persistent process send
+  failed" WARNs; new "persistent process exited" INFO shows the actual
+  exit reasons (which may reveal WHY the CLI dies young).
