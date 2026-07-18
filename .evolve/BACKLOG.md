@@ -1404,3 +1404,22 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   of calling Wait itself. Measure-by: zero "persistent process send
   failed" WARNs; new "persistent process exited" INFO shows the actual
   exit reasons (which may reveal WHY the CLI dies young).
+
+### OBS 7/18 batch — behavior data points (batched)
+- **Answer-first violation, clean example:** 11:39 DM turn ran 10+
+  sequential Bash calls for 95s before ANY visible text (no rotation,
+  prework 3.4s — pure verify-first behavior against the pinned speed
+  contract). Cleanest evidence yet for the pending answer-first per-turn
+  hint decision.
+- **Recall ledger first TRUE positive (post-carryover):** 15:16 DM —
+  delayed skin-reaction question answered from general knowledge without
+  checking the day's food log, despite the documented delayed-reaction
+  food-sensitivity protocol. The guarded ledger now carries signal.
+- **Phantom artifact paths:** 14:52 — two [artifact] markers referenced
+  files that never existed (v5/output6 names during rapid card
+  iteration). Agent regenerates under new filenames then cites stale
+  paths. Candidate: bridge could verify artifact paths exist BEFORE the
+  reply is sent and tell the agent inline (structural > behavioral).
+- **Media flood-retry + H44 instrumentation deployed 15:26** (ce8d5fb,
+  30858c7): photo/video sends now survive 429 bursts; next same-sender
+  burst definitively diagnoses the missed-coalesce.
