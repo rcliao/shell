@@ -1307,3 +1307,22 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   to ~/.shell/agents/<name>/daemon.stderr.log (both spawn sites) — panics
   survive; syscall.Exec generations inherit the fd. The 7/16 silent death
   would have left a trace.
+
+### V2-H46 — [M] H44 extension: absorb a single waiter into a long-running turn — APPROVED 7/17
+- **why (monitoring 7/17):** H44 coalescing has never fired naturally
+  because real bursts queue ONE message at a time behind long tool-tail
+  turns (lock waits of 38.5s and 27.3s observed 15:37-15:38, both single
+  waiters — H44 requires 2+). The waiter's answer arrives 30-50s after
+  send with zero of that time spent on its own work.
+- **scope:** when a same-sender message queues and the lock holder's turn
+  has been running > N seconds (start N=20s), inject the queued text into
+  the in-flight turn as an addendum (same numbered-answer format H44
+  uses) instead of waiting for a fresh turn. Reuse absorbQueued/
+  coalesceText; the difference is absorbing into an ACTIVE turn rather
+  than a lock-winner's pre-start queue — needs a safe injection point
+  (between tool batches / before final answer), which is the design work.
+  Different-sender waiters keep waiting (their answer shouldn't be inside
+  another user's reply). Kill switch alongside coalesce_disabled.
+- **measure-by:** p95 lock_wait_ms in group/DM bursts; zero mangled
+  replies (hand-sample first week).
+- **status:** approved (owner 7/17). V2-H45 also approved same day.
