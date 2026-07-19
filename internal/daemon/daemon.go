@@ -72,9 +72,9 @@ var busySleep = time.Sleep
 // syntheticTurn runs a bridge turn for a non-human caller, retrying through
 // busy-session collisions on a short backoff. After the delays are exhausted
 // the last error is returned — the caller is expected to log it loudly.
-func syntheticTurn(br *bridge.Bridge, chatID int64, msg, sender string) (bridge.AgentResponse, error) {
+func syntheticTurn(br *bridge.Bridge, chatID, threadID int64, msg, sender string) (bridge.AgentResponse, error) {
 	return retryBusySend(chatID, sender, func() (bridge.AgentResponse, error) {
-		return br.HandleMessageStreaming(context.Background(), chatID, 0, msg, sender, nil, nil, nil)
+		return br.HandleMessageStreaming(context.Background(), chatID, threadID, msg, sender, nil, nil, nil)
 	})
 }
 
@@ -676,7 +676,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		onPrompt := func(chatID int64, msg string) {
 			// Route through bridge as if user sent it; wait out a busy session
 			// instead of dropping the scheduled prompt (V2-H16).
-			resp, err := syntheticTurn(br, chatID, msg, "scheduler")
+			resp, err := syntheticTurn(br, chatID, 0, msg, "scheduler")
 			if err != nil {
 				slog.Error("scheduler prompt failed", "chat_id", chatID, "error", err)
 				return
@@ -749,7 +749,7 @@ func New(cfg config.Config) (*Daemon, error) {
 								prompt := bridge.A2ADeliveryPrompt(pl.From, pl.Depth, pl.Text)
 								// Busy session (e.g. the group is mid-human-turn) →
 								// retry on a backoff rather than losing the hand-off (V2-H16).
-								resp, err := syntheticTurn(br, pl.ChatID, prompt, pl.From)
+								resp, err := syntheticTurn(br, pl.ChatID, pl.ThreadID, prompt, pl.From)
 								if err != nil {
 									slog.Error("a2a: turn failed", "chat_id", pl.ChatID, "error", err)
 									return
@@ -759,9 +759,9 @@ func New(cfg config.Config) (*Daemon, error) {
 									return
 								}
 								for _, photo := range resp.Photos {
-									bot.SendPhoto(pl.ChatID, 0, photo.Data, photo.Caption)
+									bot.SendPhoto(pl.ChatID, pl.ThreadID, photo.Data, photo.Caption)
 								}
-								bot.SendText(pl.ChatID, 0, resp.Text)
+								bot.SendText(pl.ChatID, pl.ThreadID, resp.Text)
 							}(p)
 						}
 						// task.completed and task.failed are informational —

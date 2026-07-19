@@ -1179,7 +1179,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// them (bounded by depth). incoming depth is 0 for a human turn, N for an
 	// A2A turn — so a human message always renews the exchange budget.
 	if !isHeartbeat {
-		b.maybeEnqueueA2A(chatID, resp.Text, a2aDepth)
+		b.maybeEnqueueA2A(chatID, threadID, resp.Text, a2aDepth)
 	}
 
 	return resp, nil

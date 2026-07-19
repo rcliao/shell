@@ -38,7 +38,11 @@ var a2aMarkerRe = regexp.MustCompile(`^\[A2A from=([^\]]+?) depth=(\d+)\]\s*`)
 
 // A2APayload is the JSON body of an a2a.message event.
 type A2APayload struct {
-	ChatID int64  `json:"chat_id"`
+	ChatID int64 `json:"chat_id"`
+	// ThreadID is the forum-topic thread the exchange lives in (0 = main).
+	// Without it, peer replies to a topic conversation landed in the main
+	// thread (owner report 7/18).
+	ThreadID int64 `json:"thread_id"`
 	From   string `json:"from"`  // human-facing peer name (for attribution)
 	Text   string `json:"text"`  // the message the peer said in the group
 	Depth  int    `json:"depth"` // hop count of THIS message
@@ -69,7 +73,7 @@ func A2ADeliveryPrompt(fromName string, depth int, text string) string {
 // incomingDepth is the depth of the message THIS turn was answering (0 for a
 // human turn). No-op unless the chat is a group, the reply is non-empty, a peer
 // is addressed, and a task store is configured.
-func (b *Bridge) maybeEnqueueA2A(chatID int64, replyText string, incomingDepth int) {
+func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incomingDepth int) {
 	if b.taskStore == nil || strings.TrimSpace(replyText) == "" {
 		return
 	}
@@ -86,17 +90,18 @@ func (b *Bridge) maybeEnqueueA2A(chatID int64, replyText string, incomingDepth i
 		return
 	}
 	payload, _ := json.Marshal(A2APayload{
-		ChatID: chatID,
-		From:   b.selfDisplayName(),
-		Text:   replyText,
-		Depth:  nextDepth,
+		ChatID:   chatID,
+		ThreadID: threadID,
+		From:     b.selfDisplayName(),
+		Text:     replyText,
+		Depth:    nextDepth,
 	})
 	if err := b.taskStore.PublishEvent(peer.BotUsername, A2AEventType, string(payload)); err != nil {
 		slog.Warn("a2a: failed to publish event", "to", peer.BotUsername, "error", err)
 		return
 	}
 	slog.Info("a2a: handed off to peer", "from", b.agentBotUsername, "to", peer.BotUsername,
-		"chat_id", chatID, "depth", nextDepth)
+		"chat_id", chatID, "thread_id", threadID, "depth", nextDepth)
 }
 
 // peerAddressedInReply returns the peer the reply is speaking TO, or nil.
