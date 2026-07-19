@@ -1439,3 +1439,21 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   rotation after N empty-retry events on the same session (the retry
   guard already counts them) — same shape as the token-rotation
   latency guard.
+
+### V2-H50 — [M] Structural notion-auth: token reachable ONLY inside the skill script — NEW 7/19
+- **why:** two days running (7/18, 7/19), write-verify corrections show
+  the agent hand-rolling `python3` + urllib against api.notion.com
+  instead of the notion skill script — despite the "auth is handled
+  inside the script" SKILL.md rule installed 7/18. Behavioral rule not
+  sticking (5th structural>behavioral proof). Raw-python writes are also
+  invisible to isPersistenceTool, so the ledger under-credits them.
+- **scope:** remove NOTION_TOKEN from the agent subprocess env; the
+  skill script fetches it itself (shell-secrets or RPC) at exec time.
+  Raw python then fails fast with a clear error naming the script path,
+  and the script becomes the only viable write path — which
+  isPersistenceTool already recognizes. Verify: correction turns stop
+  containing urllib calls; ledger post-correction classes become
+  verified-with-notion-tools.
+- **tally note:** write-verify enforcement now 4/4 TPs converted to real
+  writes; FP guards holding (no new FP classes since 登記/登錄 particle
+  fix).
