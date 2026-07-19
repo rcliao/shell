@@ -1430,3 +1430,12 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   session, replies landed in the topic, depth cap ended the chain
   cleanly. Owner report → root cause → fix → deploy → live validation
   in ~2h. 登記/登錄 particle fix (3031829) also deployed same evening.
+
+### OBS 7/19 — empty zero-usage duds from a long-lived topic session (new degradation class)
+- umbreon's shopping-topic session returned three empty zero-usage
+  results in 7 min (09:28/09:33/09:35); each recovered via the empty-
+  retry guard (+~40s per turn, worst 124s first-visible). Manually
+  flagged the session for rotation. Candidate structural fix: auto-flag
+  rotation after N empty-retry events on the same session (the retry
+  guard already counts them) — same shape as the token-rotation
+  latency guard.
