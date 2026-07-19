@@ -1423,3 +1423,10 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **Media flood-retry + H44 instrumentation deployed 15:26** (ce8d5fb,
   30858c7): photo/video sends now survive 429 bursts; next same-sender
   burst definitively diagnoses the missed-coalesce.
+
+### VALIDATED 7/18 — A2A topic-thread routing (owner-reported, same-day fix)
+- 22:07-22:10: live multi-hop exchange in the shopping topic — hand-offs
+  both directions carried thread_id=1419, peer turns ran in the topic
+  session, replies landed in the topic, depth cap ended the chain
+  cleanly. Owner report → root cause → fix → deploy → live validation
+  in ~2h. 登記/登錄 particle fix (3031829) also deployed same evening.
