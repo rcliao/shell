@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — descriptive 登記 (vendor has registration)",
+			userMsg:  "這家代購可靠嗎",
+			response: "看起來正規：有登記公司 + 客服可聯絡，評價也不錯",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "no false positive — coincidence adverb (剛好補上一個重點 is discussion)",
 			userMsg:  "這是軌道的近拍",
 			response: "這張近拍剛好補上一個重點，軌道溝槽裡卡了不少水垢",

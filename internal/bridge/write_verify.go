@@ -89,6 +89,9 @@ var cjkClaimGuards = []string{
 	// write, and the 好 inside 剛好 falsely satisfies the completion-marker
 	// check (7/16 production FP)
 	"剛好", "正好",
+	// existential/descriptive 登記 — "有登記公司" describes a vendor's
+	// registration status, not the agent registering anything (7/18 FP)
+	"有登記", "沒登記", "未登記",
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause
