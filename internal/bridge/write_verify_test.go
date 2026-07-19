@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — 登錄 as noun (BSMI 登錄號)",
+			userMsg:  "這個字號是什麼",
+			response: "✅ 商檢字號 R56297 — 這就是我要的 BSMI 登錄號",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "no false positive — descriptive 登記 (vendor has registration)",
 			userMsg:  "這家代購可靠嗎",
 			response: "看起來正規：有登記公司 + 客服可聯絡，評價也不錯",

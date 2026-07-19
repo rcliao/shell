@@ -57,7 +57,7 @@ func isWriteTrigger(userMsg string) bool {
 // false positives that share a character (e.g. 存在 "exist", 記得 "remember"
 // are excluded because 在/得 are not persistence resultatives here).
 var writeClaimRe_CJK = regexp.MustCompile(
-	`記(進|下|好|錄|了)|存(進|到|好|起來)|寫(進|到|好)|補(進|上|好)|更新(好|到|進|了)|加(進|到)|建好|登記|登錄`)
+	`記(進|下|好|錄|了)|存(進|到|好|起來)|寫(進|到|好)|補(進|上|好)|更新(好|到|進|了)|加(進|到)|建好|登記(了|好|完)|登錄(了|好|完)`)
 
 // writeClaimRe catches English persistence claims and explicit Notion/doc cues.
 var writeClaimRe = regexp.MustCompile(`(?i)\b(logged|saved (it|this|that)|added (it|this|that)? ?to (notion|the (doc|log|database))|recorded (it|this)|noted (it|this) down|wrote (it|this) (to|into))\b`)
