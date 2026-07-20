@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — content authored in-reply (把英文信寫好)",
+			userMsg:  "幫我寫封英文信給房東",
+			response: "好的 ② 幫妳把英文信寫好了，妳看看：Dear landlord...",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "no false positive — 登錄 as noun (BSMI 登錄號)",
 			userMsg:  "這個字號是什麼",
 			response: "✅ 商檢字號 R56297 — 這就是我要的 BSMI 登錄號",

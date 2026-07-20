@@ -92,6 +92,10 @@ var cjkClaimGuards = []string{
 	// existential/descriptive 登記 — "有登記公司" describes a vendor's
 	// registration status, not the agent registering anything (7/18 FP)
 	"有登記", "沒登記", "未登記",
+	// content authored IN the reply, not saved to a store — "把英文信寫好",
+	// "草稿寫好了" is composition the user reads inline, not persistence
+	// (7/20 FP). Object nouns for a written artifact delivered in-message.
+	"信寫", "稿寫", "草稿", "回覆寫", "訊息寫",
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause
