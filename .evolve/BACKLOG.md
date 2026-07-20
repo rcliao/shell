@@ -1532,3 +1532,16 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   Regression test pins the backoff ordering and total budget.
 - **measure-by:** zero `bridge handle message failed … session busy`;
   new INFO "user message hit busy session, retrying" is the healthy signal.
+
+### VALIDATION 7/20 — the replay ledger DID own the dropped turn, but only at restart
+- The 11:49 dropped message (telegram_msg_id 9509) was answered by the
+  replay ledger at 12:09 — 20 min later, and ONLY because a deploy restart
+  happened to occur inside the 30-min replay window. Confirms the ledger
+  correctly retained it (BeginPendingTurn ran, CompletePendingTurn did not).
+- **Nuance worth keeping:** replay fires at daemon STARTUP only. It is a
+  restart-recovery net, not a general drop-recovery net — an unanswered
+  turn on a daemon that never restarts stays unanswered indefinitely. The
+  18794bc busy-retry is therefore the real fix; the ledger was luck here.
+- **Follow-up candidate (small):** a periodic replay sweep (e.g. on the
+  10-min prewarm tick) for turns pending > 5 min would close the gap
+  without waiting for a restart.
