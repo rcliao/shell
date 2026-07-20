@@ -1511,3 +1511,24 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   completed turns whose BODY is the error string, so no WARN/ERROR ever
   fires. Candidate follow-up: canary rule matching reply text for
   auth-failure strings (would have caught this in ~1 min, not 22).
+
+### FIXED 7/20 — user message DROPPED when a synthetic turn held the session
+- **observed 11:49:** owner's group message ("沒有轉") failed with
+  `bridge handle message failed … session busy` and was never answered by
+  that agent. Sequence: her prior turn ran 11:48:11 → peer A2A hand-off
+  arrived 11:48:28, hit busy, retried (V2-H16 working) → the A2A retry
+  grabbed the session at 11:49:02 → her NEXT message lost the race at
+  11:49:11 and was dropped. The other agent happened to answer, masking
+  it; in a DM this is total message loss.
+- **root cause:** the per-(chat,thread) lock serializes Telegram messages
+  against EACH OTHER, but synthetic turns (A2A, scheduler, heartbeat)
+  take the Claude session WITHOUT that lock. V2-H16 gave the synthetic
+  side a busy-retry; the user side had none and errored out first —
+  exactly backwards on priority.
+- **fix:** sendWithBusyRetry on the user path (2s/5s/10s/20s, 37s total
+  budget — covers a long synthetic turn; synthetic retries pace at 30s).
+  Non-busy errors return immediately; exhausted retries log
+  "turn stays pending for replay" so the ledger still owns it.
+  Regression test pins the backoff ordering and total budget.
+- **measure-by:** zero `bridge handle message failed … session busy`;
+  new INFO "user message hit busy session, retrying" is the healthy signal.

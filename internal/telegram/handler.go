@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
-	"sort"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +18,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/rcliao/shell/internal/bridge"
+	"github.com/rcliao/shell/internal/process"
 )
 
 const streamEditInterval = time.Second // minimum interval between Telegram message edits
@@ -2117,9 +2118,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// Set up streaming state: accumulate text and throttle edits.
 	var mu sync.Mutex
 	var accumulated strings.Builder
-	markdownFailed := false   // set when MarkdownV2 is rejected during streaming
-	lastSentContent := ""     // raw text of last successful streaming edit
-	lastUsedMarkdown := false // whether last streaming edit used MarkdownV2
+	markdownFailed := false       // set when MarkdownV2 is rejected during streaming
+	lastSentContent := ""         // raw text of last successful streaming edit
+	lastUsedMarkdown := false     // whether last streaming edit used MarkdownV2
 	var e2eFirstVisible time.Time // when the owner first saw real content
 
 	// Streaming edit loop: a separate goroutine periodically flushes
@@ -2215,7 +2216,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// poller ctx is cancelled to stop new updates, but in-flight turns must
 	// run to completion (the whole point of draining).
 	turnCtx := context.WithoutCancel(ctx)
-	resp, err := h.bridge.HandleMessageStreaming(turnCtx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onUpdate)
+	resp, err := h.sendWithBusyRetry(turnCtx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onUpdate)
 
 	// Stop the streaming edit goroutine and wait for it to finish.
 	// Send one final signal so the goroutine flushes any remaining text
@@ -2953,4 +2954,36 @@ func (h *Handler) sendTypingPeriodically(ctx context.Context, b *bot.Bot, chatID
 			})
 		}
 	}
+}
+
+// userBusyRetryDelays paces retries when a USER message finds the Claude
+// session mid-turn. The per-(chat,thread) lock serializes Telegram messages
+// against each other, but synthetic turns (A2A hand-offs, scheduler, heartbeat)
+// take the session WITHOUT that lock — so a real user message can lose the
+// race and, before this, was dropped outright with "session busy" (observed
+// 7/20 11:49: an A2A turn from the peer agent stole the session and the
+// owner's message was never answered). Synthetic senders already retry on
+// busy (V2-H16); the user path is the one that must never give up first.
+var userBusyRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second}
+
+// sendWithBusyRetry runs a user turn, retrying while the session is busy with
+// a synthetic turn. Any other error returns immediately.
+func (h *Handler) sendWithBusyRetry(ctx context.Context, chatID, threadID int64, text, sender string, images []bridge.ImageInfo, pdfs []bridge.PDFInfo, onUpdate process.StreamFunc) (bridge.AgentResponse, error) {
+	resp, err := h.bridge.HandleMessageStreaming(ctx, chatID, threadID, text, sender, images, pdfs, onUpdate)
+	for _, delay := range userBusyRetryDelays {
+		if !errors.Is(err, process.ErrSessionBusy) {
+			return resp, err
+		}
+		slog.Info("user message hit busy session, retrying", "chat_id", chatID, "thread_id", threadID, "delay", delay)
+		select {
+		case <-ctx.Done():
+			return resp, err
+		case <-time.After(delay):
+		}
+		resp, err = h.bridge.HandleMessageStreaming(ctx, chatID, threadID, text, sender, images, pdfs, onUpdate)
+	}
+	if errors.Is(err, process.ErrSessionBusy) {
+		slog.Error("user message still busy after retries — turn stays pending for replay", "chat_id", chatID, "thread_id", threadID)
+	}
+	return resp, err
 }
