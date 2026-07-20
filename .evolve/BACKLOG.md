@@ -1457,3 +1457,23 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **tally note:** write-verify enforcement now 4/4 TPs converted to real
   writes; FP guards holding (no new FP classes since 登記/登錄 particle
   fix).
+
+### FIXED 7/19 — heartbeat follow-ups relayed to the wrong chat (owner-reported via agent)
+- **report:** agent flagged "reply-routing to wrong chat", same class as a
+  prior wrong-chat reminder. Diagnosis says reply didn't return to
+  SHELL_CHAT_ID.
+- **actual root cause (different, and not the reply path):** the original
+  DM answer routed correctly. The misrouted message came ~3h later from
+  the DEEP HEARTBEAT (chat 0), which did follow-up Notion work and
+  relayed a confirmation. enrichHeartbeatPrompt aggregates
+  RecentExchanges from ALL chats into one FLAT, UNLABELED list — so the
+  agent could not know the pomelo question came from the DM. A heartbeat
+  has no current chat, so shell_relay demands an explicit chat_id; with
+  no attribution the agent guessed, and guessed the group.
+- **fix:** every heartbeat exchange line is now tagged `(chat <id>)` and
+  the section header instructs replying back to that same id via
+  shell_relay cross_chat. Structural (data the agent lacked), not another
+  behavioral pin — the existing "check SHELL_CHAT_ID before relay" pin is
+  a no-op in heartbeats where it is 0.
+- **measure-by:** zero wrong-chat heartbeat relays; spot-check that
+  heartbeat follow-ups on DM topics land in the DM.

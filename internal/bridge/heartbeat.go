@@ -30,7 +30,14 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	allChats := b.activeHeartbeatChats()
 	for _, cid := range allChats {
 		if ex := b.memory.RecentExchanges(ctx, cid, 5); len(ex) > 0 {
-			exchanges = append(exchanges, ex...)
+			// Tag each exchange with its SOURCE chat. A heartbeat has no
+			// current chat (chat_id 0), so any follow-up it sends must name
+			// a target explicitly — and without attribution the agent is
+			// guessing. 7/19: work following up a DM question was relayed
+			// to the family group because this list was flat and unlabeled.
+			for _, e := range ex {
+				exchanges = append(exchanges, fmt.Sprintf("(chat %d) %s", cid, e))
+			}
 		}
 		if tasks, err := b.store.PendingTasks(cid); err == nil {
 			pendingTasks = append(pendingTasks, tasks...)
@@ -139,7 +146,8 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 
 	// Priority 3: Recent conversations for reflection
 	if len(exchanges) > 0 {
-		sb.WriteString("[Recent conversation history]\n")
+		sb.WriteString("[Recent conversation history — each line is tagged with the chat it came from]\n")
+		sb.WriteString("When you follow up on any of these, send the reply BACK TO THAT SAME chat id (shell_relay chat_id=<that id>, cross_chat=true). Never default to the group.\n")
 		for _, ex := range exchanges {
 			sb.WriteString("- ")
 			sb.WriteString(ex)
