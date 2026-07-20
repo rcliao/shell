@@ -24,7 +24,6 @@ import (
 	"github.com/rcliao/shell/internal/daemon"
 	shellmcp "github.com/rcliao/shell/internal/mcp"
 	"github.com/rcliao/shell/internal/memory"
-	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/rpc"
 	"github.com/rcliao/shell/internal/search"
 	"github.com/rcliao/shell/internal/skill"
@@ -662,21 +661,44 @@ func main() {
 				return fmt.Errorf("invalid chat ID: %s", args[0])
 			}
 
-			// Create a process manager just to track
-			proc := process.NewManager(process.ManagerConfig{
-				Binary:      cfg.Claude.Binary,
-				MaxSessions: cfg.Claude.MaxSessions,
-			})
-			// Kill the main-thread session. The CLI kill command doesn't
-			// accept thread_id today; pass -1 to DeleteSession to wipe all
-			// topic sessions for the chat at once.
-			proc.Kill(process.SessionKey{ChatID: chatID})
+			// Reap the LIVE subprocesses via the daemon's own process
+			// manager. Building a manager here would create an empty one and
+			// silently no-op — which is exactly what happened on 7/20: the DB
+			// rows were deleted while the real subprocesses kept serving a
+			// dead OAuth token, so the "recovery" changed nothing.
+			sockPath := filepath.Join(filepath.Dir(cfg.Daemon.PIDFile), "bridge.sock")
+			client := &http.Client{Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+				},
+			}}
+			body, _ := json.Marshal(map[string]any{"chat_id": chatID, "thread_id": -1})
+			reaped := -1
+			resp, err := client.Post("http://unix/session-kill", "application/json", bytes.NewReader(body))
+			if err != nil {
+				// No daemon running: nothing holds a subprocess, so clearing
+				// the rows below is the whole job. Say so rather than implying
+				// a process was killed.
+				fmt.Printf("daemon not reachable at %s — clearing stored session rows only\n", sockPath)
+			} else {
+				defer resp.Body.Close()
+				var out struct {
+					Killed int `json:"killed"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&out) == nil {
+					reaped = out.Killed
+				}
+			}
 
 			if err := st.DeleteSession(chatID, -1); err != nil {
 				return err
 			}
 
-			fmt.Printf("Killed session for chat %d\n", chatID)
+			if reaped >= 0 {
+				fmt.Printf("Killed session for chat %d (%d live subprocess(es) reaped)\n", chatID, reaped)
+			} else {
+				fmt.Printf("Killed session for chat %d (rows cleared; no daemon to reap)\n", chatID)
+			}
 			return nil
 		},
 	}

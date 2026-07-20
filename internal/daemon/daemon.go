@@ -630,6 +630,15 @@ func New(cfg config.Config) (*Daemon, error) {
 			parts, full := br.ContextManifest(ctx, chatID)
 			return parts, full
 		},
+		// KillSession reaps live subprocesses inside THIS daemon's manager.
+		// threadID -1 means every thread of the chat.
+		KillSession: func(chatID, threadID int64) int {
+			if threadID >= 0 {
+				proc.Kill(process.SessionKey{ChatID: chatID, ThreadID: threadID})
+				return 1
+			}
+			return proc.KillChat(chatID)
+		},
 		RelayToBridge: func(ctx context.Context, chatID, threadID int64, message string) {
 			// Log the relay message to the target chat's session so Claude
 			// has context when the recipient replies. Don't run a full Claude

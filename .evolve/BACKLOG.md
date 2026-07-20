@@ -1490,3 +1490,24 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   entry exists so the answer-first-hint decision is made against a trend
   rather than single anecdotes. Recommend re-checking after V2-H45 lands,
   since rotation cost is the one component with a shipped fix pending.
+
+### FIXED 7/20 — `shell session kill` never reaped subprocesses (stale-OAuth recovery failed)
+- **incident:** owner ran /login to refresh OAuth; both agents kept replying
+  "Failed to authenticate: OAuth session expired" then "Not logged in ·
+  Please run /login" for ~22 min. `shell session kill` appeared to work
+  ("Killed session for chat …") but changed nothing; recovery only
+  happened after killing the CLI subprocesses by hand with kill -9.
+- **root cause:** the kill command built a BRAND-NEW empty
+  process.NewManager and called Kill on it — an in-memory map the daemon
+  does not share, so the kill was a guaranteed no-op. It then deleted the
+  DB rows, so the next message re-attached to the still-live subprocess
+  holding the dead token. The success message actively misled.
+- **fix:** new POST /session-kill RPC → daemon's OWN manager. Added
+  Manager.KillChat(chatID) reaping every thread's session AND any
+  persistent proc (returns count, idempotent, regression-tested). CLI now
+  calls the daemon and reports the real number reaped; with no daemon
+  running it says rows-cleared-only instead of claiming a kill.
+- **why it hid from monitoring:** auth failures come back as normal
+  completed turns whose BODY is the error string, so no WARN/ERROR ever
+  fires. Candidate follow-up: canary rule matching reply text for
+  auth-failure strings (would have caught this in ~1 min, not 22).

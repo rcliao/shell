@@ -61,7 +61,13 @@ type Server struct {
 	timezone       string
 	botUsername    string // this agent's bot username
 	contextManifest func(ctx context.Context, chatID int64) (any, string)
+	killSession     KillSessionFunc
 }
+
+// KillSessionFunc terminates the live CLI subprocess for a chat (all threads
+// when threadID is -1) inside the DAEMON's own process manager. The CLI cannot
+// do this itself: it would build an empty manager and no-op (7/20 incident).
+type KillSessionFunc func(chatID, threadID int64) int
 
 // Config holds the dependencies for the RPC server.
 type Config struct {
@@ -82,6 +88,8 @@ type Config struct {
 	// ContextManifest returns the live composed system-prompt components
 	// (and full text) for a chat — the `shell context` instrument.
 	ContextManifest func(ctx context.Context, chatID int64) (any, string)
+	// KillSession reaps live subprocesses in the daemon's manager.
+	KillSession KillSessionFunc
 }
 
 // handleContext serves the live system-prompt manifest (GET /context?chat_id=N&full=1).
@@ -127,6 +135,7 @@ func New(cfg Config) *Server {
 		timezone:  cfg.Timezone,
 		botUsername: cfg.BotUsername,
 		contextManifest: cfg.ContextManifest,
+		killSession:     cfg.KillSession,
 	}
 }
 
@@ -194,6 +203,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /skills-load", s.handleSkillsLoad)
 	mux.HandleFunc("POST /heartbeat-log", s.handleHeartbeatLog)
 	mux.HandleFunc("GET /context", s.handleContext)
+	mux.HandleFunc("POST /session-kill", s.handleSessionKill)
 
 	s.server = &http.Server{Handler: s.timed(mux)}
 	slog.Info("rpc server starting", "socket", s.sockPath)
@@ -843,4 +853,26 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// handleSessionKill reaps the live CLI subprocess(es) for a chat inside the
+// daemon's process manager. Without this the `shell session kill` CLI only
+// deleted the DB row while the real subprocess kept serving stale state —
+// which made a stale-OAuth recovery silently fail on 7/20.
+func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
+	if s.killSession == nil {
+		writeError(w, http.StatusServiceUnavailable, "session kill not wired")
+		return
+	}
+	var req struct {
+		ChatID   int64 `json:"chat_id"`
+		ThreadID int64 `json:"thread_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	killed := s.killSession(req.ChatID, req.ThreadID)
+	slog.Info("rpc: session kill", "chat_id", req.ChatID, "thread_id", req.ThreadID, "killed", killed)
+	writeJSON(w, map[string]any{"killed": killed})
 }

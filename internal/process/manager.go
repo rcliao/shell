@@ -537,3 +537,34 @@ func filterEnv(env []string, name string) []string {
 	}
 	return filtered
 }
+
+// KillChat terminates every session (all threads) belonging to a chat and
+// returns how many were reaped. Used by the session-kill RPC so an operator
+// recovering a chat — e.g. after an OAuth refresh leaves subprocesses holding
+// a dead token — actually reaps the processes, not just their DB rows.
+func (m *Manager) KillChat(chatID int64) int {
+	m.mu.Lock()
+	var keys []SessionKey
+	for k := range m.sessions {
+		if k.ChatID == chatID {
+			keys = append(keys, k)
+		}
+	}
+	m.mu.Unlock()
+	for _, k := range keys {
+		m.Kill(k)
+	}
+	// Persistent procs can outlive session bookkeeping; sweep those too.
+	m.mu.Lock()
+	var pkeys []SessionKey
+	for k := range m.persistent {
+		if k.ChatID == chatID {
+			pkeys = append(pkeys, k)
+		}
+	}
+	m.mu.Unlock()
+	for _, k := range pkeys {
+		m.killPersistent(k)
+	}
+	return len(keys) + len(pkeys)
+}
