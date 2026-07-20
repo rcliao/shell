@@ -1477,3 +1477,16 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   a no-op in heartbeats where it is 0.
 - **measure-by:** zero wrong-chat heartbeat relays; spot-check that
   heartbeat follow-ups on DM topics land in the DM.
+
+### DATA 7/20 — first_visible: median stable, TAIL worsening (4-day trend)
+- agent A p50 by day: 11 / 14 / 12 s — max: 43 / 62 / 124 s
+- agent B p50 by day: 13 / 22 / 14 / 18 s — max: 46 / 127 / 215 / 159 s
+- **Reading:** the speed contract holds for typical turns (p50 ~11-22s,
+  unchanged); it is only the TAIL that is degrading, roughly tripling in
+  3 days. Cause is the verify-first shape on lookup-heavy turns (7/20
+  07:01: normal prework 3.3s, then ~10 sequential Bash calls / 159s before
+  any visible text), amplified by mid-chat rotations (V2-H45) and dud
+  retries. Owner has accepted current latency as "user acceptable"; this
+  entry exists so the answer-first-hint decision is made against a trend
+  rather than single anecdotes. Recommend re-checking after V2-H45 lands,
+  since rotation cost is the one component with a shipped fix pending.
