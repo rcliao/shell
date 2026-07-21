@@ -101,6 +101,10 @@ var cjkClaimGuards = []string{
 	// persisting anything (7/21 FP). The demonstrative after the verb is
 	// the tell (advice, like the embedded question-word guards above).
 	"記好這", "記好那", "記下這", "記下那", "記住這", "記住那",
+	// comparative "better" — "放點心欄記錄比較好" is a recommendation about
+	// WHERE to record; the 好 inside 比較好/較好 (="better") falsely trips
+	// the completion marker (7/21 FP). Advice, never a completed write.
+	"比較好", "較好", "會比較", "更好",
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause

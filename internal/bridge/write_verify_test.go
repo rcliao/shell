@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — comparative advice (放點心欄記錄比較好)",
+			userMsg:  "芝麻黑豆漿算正餐還點心",
+			response: "放在點心欄記錄比較好，因為時間點在早餐後午餐前",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "no false positive — imperative to user (記好這個數字)",
 			userMsg:  "基準讀數多少",
 			response: "讀到了，基準值 007532。記好這個數字，等妳灑完水再回拍一張",
