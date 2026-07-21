@@ -9,11 +9,36 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/rcliao/shell/internal/bridge"
 )
+
+// getFileWithRetry wraps bot.GetFile with a short retry. Telegram occasionally
+// sends an HTTP/2 GOAWAY (graceful server shutdown) mid-request; because the
+// request body was already written, the http2 transport cannot retry it and
+// the download fails outright (observed 7/21, the user's photo never reached the
+// agent). A fresh GetFile call builds a new request and succeeds.
+func getFileWithRetry(ctx context.Context, b *bot.Bot, fileID string) (*models.File, error) {
+	var lastErr error
+	for _, delay := range []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond} {
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
+		if err == nil {
+			return file, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
 
 // DownloadPhoto fetches the largest resolution of a Telegram photo to a
 // temporary file and returns the image info including metadata. The caller is
@@ -32,7 +57,7 @@ func DownloadPhoto(ctx context.Context, b *bot.Bot, photos []models.PhotoSize) (
 	}
 
 	// Ask the Telegram API for the file path on their servers.
-	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: best.FileID})
+	file, err := getFileWithRetry(ctx, b, best.FileID)
 	if err != nil {
 		return bridge.ImageInfo{}, fmt.Errorf("get file metadata: %w", err)
 	}
@@ -91,7 +116,7 @@ func DownloadSticker(ctx context.Context, b *bot.Bot, sticker *models.Sticker) (
 		return bridge.ImageInfo{}, fmt.Errorf("no sticker provided")
 	}
 
-	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: sticker.FileID})
+	file, err := getFileWithRetry(ctx, b, sticker.FileID)
 	if err != nil {
 		return bridge.ImageInfo{}, fmt.Errorf("get file metadata: %w", err)
 	}
@@ -211,7 +236,7 @@ func DownloadPDF(ctx context.Context, b *bot.Bot, doc *models.Document) (bridge.
 		return bridge.ImageInfo{}, fmt.Errorf("document MIME type is %q, want application/pdf", doc.MimeType)
 	}
 
-	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: doc.FileID})
+	file, err := getFileWithRetry(ctx, b, doc.FileID)
 	if err != nil {
 		return bridge.ImageInfo{}, fmt.Errorf("get file metadata: %w", err)
 	}
@@ -264,7 +289,7 @@ func DownloadDocument(ctx context.Context, b *bot.Bot, doc *models.Document) (br
 		return bridge.ImageInfo{}, fmt.Errorf("no document provided")
 	}
 
-	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: doc.FileID})
+	file, err := getFileWithRetry(ctx, b, doc.FileID)
 	if err != nil {
 		return bridge.ImageInfo{}, fmt.Errorf("get file metadata: %w", err)
 	}
