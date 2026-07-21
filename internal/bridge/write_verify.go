@@ -96,6 +96,11 @@ var cjkClaimGuards = []string{
 	// "草稿寫好了" is composition the user reads inline, not persistence
 	// (7/20 FP). Object nouns for a written artifact delivered in-message.
 	"信寫", "稿寫", "草稿", "回覆寫", "訊息寫",
+	// imperative TO THE USER pointing at just-given content — "記好這個
+	// 數字", "記下這個" tells the user to note it herself; the agent is not
+	// persisting anything (7/21 FP). The demonstrative after the verb is
+	// the tell (advice, like the embedded question-word guards above).
+	"記好這", "記好那", "記下這", "記下那", "記住這", "記住那",
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause

@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — imperative to user (記好這個數字)",
+			userMsg:  "基準讀數多少",
+			response: "讀到了，基準值 007532。記好這個數字，等妳灑完水再回拍一張",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "no false positive — content authored in-reply (把英文信寫好)",
 			userMsg:  "幫我寫封英文信給房東",
 			response: "好的 ② 幫妳把英文信寫好了，妳看看：Dear landlord...",
