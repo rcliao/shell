@@ -1594,3 +1594,18 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   `2026-07-22 16:00:00 +0000 UTC` so it fires; watching for last_run_at.
 - **also:** teach agents (pin/skill) to NEVER write schedule rows via raw
   sqlite3 — mutations must go through shell-schedule; raw SQL is read-only.
+
+### OBS 7/22 (cont) — ✅-as-bullet-decoration is another 好/✅ marker-noise instance (fold into V2-H50-ish structural fix)
+- 11:14 FP: "▫️ ✅ 紅蘿蔔...加進去的" describes a COOKING step (added
+  carrots to the pot); 加進 matched the write verb and the ✅ — used as a
+  bullet-list checkmark at clause start, NOT a completion marker —
+  satisfied cjkCompletionRe. Enforcement then forced a ghost_put of the
+  cooking detail (unwanted write).
+- DELIBERATELY did NOT add an 8th narrow guard. This is the same root
+  cause as the 7/22 好-marker note: completion markers (好, ✅) are matched
+  ANYWHERE in the clause. The structural fix must also require ✅ to be
+  ADJACENT to the write verb (寫進...✅), not a decorative bullet prefix.
+  Folding this in so the structural fix subsumes it; narrow guards now
+  would just be more to retire.
+- restraint note: 7 narrow guards added this week is the signal that the
+  marker design, not individual phrases, is the thing to fix.
