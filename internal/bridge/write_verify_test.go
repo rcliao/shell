@@ -158,6 +158,13 @@ func TestClassifyWrite(t *testing.T) {
 			want:     "",
 		},
 		{
+			name:     "no false positive — offer minimizer (幫你把日期補進 Notion 就好)",
+			userMsg:  "這個要記嗎",
+			response: "我幫你把日期補進 Notion 就好，不用妳自己記",
+			calls:    nil,
+			want:     "",
+		},
+		{
 			name:     "no false positive — comparative advice (放點心欄記錄比較好)",
 			userMsg:  "芝麻黑豆漿算正餐還點心",
 			response: "放在點心欄記錄比較好，因為時間點在早餐後午餐前",

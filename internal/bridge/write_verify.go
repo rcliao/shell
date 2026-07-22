@@ -105,6 +105,10 @@ var cjkClaimGuards = []string{
 	// WHERE to record; the 好 inside 比較好/較好 (="better") falsely trips
 	// the completion marker (7/21 FP). Advice, never a completed write.
 	"比較好", "較好", "會比較", "更好",
+	// offer/minimizer 就好 — "我幫你把日期補進 Notion 就好" ("I'll just add
+	// the date, that's all it takes") states intent, not completion; the 好
+	// in 就好 falsely trips the marker (7/22 FP). Offer, like 要不要/要我.
+	"就好", "就行", "就可以",
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause
