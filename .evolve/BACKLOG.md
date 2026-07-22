@@ -1565,3 +1565,32 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - tally: post-fix write-verify is 5 TP / ~11 FP, every FP guarded + tested,
   zero unguarded FP classes recurring. Enforcement converts TPs to real
   writes. The metric is trustworthy; this is polish, not a correctness gap.
+
+### V2-H51 — [H] Scheduler silently drops schedules whose next_run_at format drifts — NEW 7/22
+- **incident:** pika's daily watcher (schedule #46) did NOT fire at its
+  09:00 PDT time. Root cause: its next_run_at was stored as
+  `2026-07-22T16:00:00` (bare ISO-8601, T separator, no tz) while every
+  other schedule and the `now` bind param use `... +0000 UTC` (space
+  separator). GetDueSchedules does `WHERE next_run_at <= ?` and SQLite
+  compares DATETIME LEXICALLY: 'T' (0x54) sorts after ' ' (0x20), so the
+  row's string is "greater than" now and never selected until the DATE
+  digit rolls over — firing ~8h late (or never, for same-day schedules).
+  Verified: `SELECT '2026-07-22T16:00:00' <= '2026-07-22 16:08:00 +0000 UTC'`
+  returns 0.
+- **how the bad format got written:** the RPC once-path normalizes via
+  t.UTC() (consistent), so this row came from a NON-RPC write — almost
+  certainly the agent editing its own schedule via raw sqlite3 (its
+  dedup-v2 pin teaches raw SQL for schedule inspection; a stray INSERT/
+  UPDATE storing the client ISO string verbatim). Two bugs compound:
+  (a) a write path can persist an un-normalized timestamp; (b) the read
+  path relies on fragile lexical string comparison so ANY drift is silent.
+- **fix (fresh session, scheduler is load-bearing — needs tests):** make
+  the due-check robust to format. Best: store next_run_at as Unix epoch
+  INTEGER (or normalize-on-write + compare in Go by scanning enabled rows
+  and filtering with .Before(now)). Add a migration to normalize existing
+  rows. Regression test: a schedule with a T-format timestamp must still
+  be returned by GetDueSchedules when due.
+- **immediate mitigation done:** normalized #46's row to
+  `2026-07-22 16:00:00 +0000 UTC` so it fires; watching for last_run_at.
+- **also:** teach agents (pin/skill) to NEVER write schedule rows via raw
+  sqlite3 — mutations must go through shell-schedule; raw SQL is read-only.
