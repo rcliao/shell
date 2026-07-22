@@ -1545,3 +1545,23 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
 - **Follow-up candidate (small):** a periodic replay sweep (e.g. on the
   10-min prewarm tick) for turns pending > 5 min would close the gap
   without waiting for a restart.
+
+### OBS 7/22 — write-verify FP root cause is the 好 completion marker; 7 patch-guards, time for the structural fix
+- Guards added this week for FP classes that all share ONE root cause: the
+  completion marker regex `已|了|好|✅` matches 好 ANYWHERE in the clause,
+  but 好 is a hugely polysemous character — 剛好 (coincidentally), 比較好
+  (better), 就好 (that suffices), 更好 (even better), 記好這個 (remember
+  this, imperative). None mean "write completed." Peer-attribution and
+  content-authorship (信寫好) are separate, but 5 of 7 guards are 好-noise.
+- **structural fix candidate (fresh session):** require 好 to be a
+  RESULTATIVE directly bonded to a write verb — 寫好/記好/存好/補好/建好
+  — rather than free-floating in the clause. i.e. drop bare 好 from
+  cjkCompletionRe and instead extend writeClaimRe_CJK's verb+好 alternations
+  (寫好|記好|存好|補好|建好|加好). 了/已/✅ stay as free markers. This kills
+  the whole 好-noise class at once and lets us retire the 剛好/比較好/就好/
+  更好/記好這 enumerated guards. Validate against the full FP corpus (all
+  regression tests must still pass) + a week of shadow data before
+  retiring guards.
+- tally: post-fix write-verify is 5 TP / ~11 FP, every FP guarded + tested,
+  zero unguarded FP classes recurring. Enforcement converts TPs to real
+  writes. The metric is trustworthy; this is polish, not a correctness gap.
