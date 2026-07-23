@@ -1,0 +1,63 @@
+#!/bin/sh
+# shell-db — read-only queries against the agent's own databases.
+# Enforces -readonly so exploratory queries can never corrupt live data.
+set -e
+
+HOME_DIR="${SHELL_AGENT_HOME:-$HOME/.shell}"
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  shell-db dbs                       # list available databases
+  shell-db tables [db]               # list tables (default db: shell)
+  shell-db schema <table> [db]       # show a table's columns
+  shell-db query "SELECT ..." [db]   # run a read-only query
+
+db is one of: shell (sessions/schedules/ledgers), memory (ghost),
+tasks (shared cross-agent task store).
+Queries are READ-ONLY (sqlite3 -readonly). To mutate schedules or tasks,
+use the shell-schedule / shell-task skills — never raw SQL.
+EOF
+  exit 1
+}
+
+db_path() {
+  case "${1:-shell}" in
+    shell)  echo "$HOME_DIR/shell.db" ;;
+    memory) echo "$HOME_DIR/memory.db" ;;
+    tasks)  echo "$HOME/.shell/shared/tasks.db" ;;
+    *) echo "unknown db '$1' (want: shell|memory|tasks)" >&2; exit 1 ;;
+  esac
+}
+
+CMD="$1"
+[ -n "$CMD" ] || usage
+shift
+
+case "$CMD" in
+  dbs)
+    for d in shell memory tasks; do
+      p=$(db_path "$d")
+      if [ -f "$p" ]; then echo "$d	$p"; else echo "$d	$p (missing)"; fi
+    done
+    ;;
+  tables)
+    P=$(db_path "$1")
+    sqlite3 -readonly "$P" ".tables"
+    ;;
+  schema)
+    TABLE="$1"
+    [ -n "$TABLE" ] || usage
+    P=$(db_path "$2")
+    sqlite3 -readonly "$P" ".schema $TABLE"
+    ;;
+  query)
+    SQL="$1"
+    [ -n "$SQL" ] || usage
+    P=$(db_path "$2")
+    sqlite3 -readonly -header -column "$P" "$SQL"
+    ;;
+  *)
+    usage
+    ;;
+esac
