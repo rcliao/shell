@@ -1169,11 +1169,18 @@ func (s *Store) ListSchedules(chatID int64) ([]Schedule, error) {
 }
 
 // GetDueSchedules returns enabled schedules whose next_run_at is at or before now.
+//
+// The due comparison happens in Go on the parsed time, NOT in SQL: SQLite
+// compares DATETIME values as strings, so a row stored in ISO-T format
+// ("2026-07-22T16:00:00") never matches `<= '2026-07-22 16:08:00 +0000 UTC'`
+// ('T' > ' ' lexically) and the schedule silently never fires. The driver's
+// Scan parses every layout we've seen in the wild, so comparing parsed
+// time.Time values is robust to how the row was written.
 func (s *Store) GetDueSchedules(now time.Time) ([]Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, chat_id, label, message, schedule, timezone, type, mode, next_run_at, last_run_at, enabled, created_at
-		FROM schedules WHERE enabled = 1 AND next_run_at <= ?
-	`, now)
+		FROM schedules WHERE enabled = 1
+	`)
 	if err != nil {
 		return nil, err
 	}
@@ -1190,6 +1197,9 @@ func (s *Store) GetDueSchedules(now time.Time) ([]Schedule, error) {
 		sc.Enabled = enabled != 0
 		if lastRun.Valid {
 			sc.LastRunAt = &lastRun.Time
+		}
+		if sc.NextRunAt.After(now) {
+			continue // not due yet
 		}
 		schedules = append(schedules, sc)
 	}
