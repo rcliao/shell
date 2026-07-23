@@ -1,7 +1,7 @@
 ---
 name: shell-schedule
 description: Create one-shot or recurring scheduled reminders
-usage: ~/.shell/skills/shell-schedule/~/.shell/skills/shell-schedule/scripts/shell-schedule once --at "ISO8601" --message "..." [--tz TZ --mode notify|prompt]
+usage: ~/.shell/skills/shell-schedule/scripts/shell-schedule once --at "ISO8601" --message "..." [--tz TZ --mode notify|prompt]
 allowed-tools: Bash
 core: true
 tier: core
@@ -18,7 +18,7 @@ probe with ls/head). `SHELL_CHAT_ID` is already set in your environment for
 the current chat; only override it to schedule for a DIFFERENT chat.
 
 ```bash
-~/.shell/skills/shell-schedule/~/.shell/skills/shell-schedule/scripts/shell-schedule once --at "2026-07-20T09:00:00" --tz "America/Los_Angeles" --message "..." --mode prompt
+~/.shell/skills/shell-schedule/scripts/shell-schedule once --at "2026-07-20T09:00:00" --tz "America/Los_Angeles" --message "..." --mode prompt
 ```
 
 Verify after creating: the script prints `Schedule #<id> created` — if you
@@ -43,7 +43,7 @@ retry rather than assuming success.
 
 ## Options
 
-- `--at <datetime>` — RFC3339 or local datetime for one-shot schedules
+- `--at <datetime>` — when the one-shot fires. Accepted: RFC3339, `"2026-07-23 21:00"` (local to tz), or bare `"21:00"` = the NEXT occurrence (today if still ahead, else tomorrow). Past date-times are rejected with an error — fix the time and retry, never assume it was created.
 - `--expr <cron>` — cron expression or alias (@daily, @hourly, @weekly, @monthly)
 - `--message <text>` — schedule message/label
 - `--tz <timezone>` — timezone override (default: scheduler timezone)

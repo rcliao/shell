@@ -408,18 +408,14 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	case "once":
 		sched.Type = "once"
 		sched.Schedule = req.At
-		t, err := time.Parse(time.RFC3339, req.At)
+		loc, _ := time.LoadLocation(tz)
+		if loc == nil {
+			loc = time.UTC
+		}
+		t, err := parseOnceAt(req.At, loc, time.Now())
 		if err != nil {
-			// Try local datetime format
-			loc, _ := time.LoadLocation(tz)
-			if loc == nil {
-				loc = time.UTC
-			}
-			t, err = time.ParseInLocation("2006-01-02T15:04:05", req.At, loc)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, "invalid at time: "+req.At)
-				return
-			}
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		sched.NextRunAt = t.UTC()
 
@@ -462,6 +458,53 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		"type":     sched.Type,
 		"next_run": sched.NextRunAt.Format("2006-01-02 15:04 UTC"),
 	})
+}
+
+// parseOnceAt resolves a one-shot schedule's --at value. Accepts the formats
+// agents actually send (observed 400s in the rpc_calls ledger, V2-H49):
+// RFC3339, "2006-01-02T15:04[:05]", "2006-01-02 15:04[:05]", and bare
+// "15:04[:05]" (resolved to the NEXT occurrence in loc — today if still
+// ahead, else tomorrow). Rejects times in the past with an actionable
+// message instead of silently creating a reminder that never fires.
+func parseOnceAt(at string, loc *time.Location, now time.Time) (time.Time, error) {
+	if at == "" {
+		return time.Time{}, fmt.Errorf("at is required for type=once; accepted formats: RFC3339, \"2006-01-02 15:04\", or \"15:04\" for the next occurrence")
+	}
+	var t time.Time
+	var err error
+	if t, err = time.Parse(time.RFC3339, at); err != nil {
+		layouts := []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04:05", "2006-01-02 15:04"}
+		for _, l := range layouts {
+			if t, err = time.ParseInLocation(l, at, loc); err == nil {
+				break
+			}
+		}
+	}
+	if err != nil {
+		// Bare clock time → next occurrence in loc.
+		for _, l := range []string{"15:04:05", "15:04"} {
+			c, cerr := time.Parse(l, at)
+			if cerr != nil {
+				continue
+			}
+			n := now.In(loc)
+			t = time.Date(n.Year(), n.Month(), n.Day(), c.Hour(), c.Minute(), c.Second(), 0, loc)
+			if !t.After(now) {
+				t = t.AddDate(0, 0, 1)
+			}
+			err = nil
+			break
+		}
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid at time %q; accepted formats: RFC3339 (2026-07-23T21:00:00-07:00), \"2006-01-02 15:04\" (local to tz), or bare \"15:04\" for the next occurrence", at)
+	}
+	// A fully-dated time in the past would be saved and never fire — reject
+	// loudly so the agent corrects it instead of the user losing a reminder.
+	if t.Before(now.Add(-time.Minute)) {
+		return time.Time{}, fmt.Errorf("at time %q resolves to the past (%s, now %s): give a future date-time, or bare \"15:04\" to mean the next occurrence", at, t.In(loc).Format("2006-01-02 15:04 MST"), now.In(loc).Format("2006-01-02 15:04 MST"))
+	}
+	return t, nil
 }
 
 // MemoryRequest is the JSON body for POST /memory.
