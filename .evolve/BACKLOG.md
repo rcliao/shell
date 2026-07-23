@@ -1344,7 +1344,7 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   /task RPC 400s return actionable bodies (what was wrong + a corrected
   example), and the schedule script validates --at format client-side
   before POSTing.
-- Pending owner decision (not yet approved): V2-H47 lesson-to-action
+- APPROVED 7/23 (owner): V2-H47 lesson-to-action
   heartbeat pass + skill-draft auto-promotion.
 
 ### OBS 7/17 — recurring young-subprocess broken pipes after rotation churn (4th in 2 days)
@@ -1566,7 +1566,7 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   zero unguarded FP classes recurring. Enforcement converts TPs to real
   writes. The metric is trustworthy; this is polish, not a correctness gap.
 
-### V2-H51 — [H] Scheduler silently drops schedules whose next_run_at format drifts — NEW 7/22
+### V2-H51 — [H] Scheduler silently drops schedules whose next_run_at format drifts — NEW 7/22 — status=done (shipped ee1dec2, 7/23: GetDueSchedules filters in Go on parsed time; regression test w/ raw ISO-T row; no migration needed since Scan parses all layouts)
 - **incident:** pika's daily watcher (schedule #46) did NOT fire at its
   09:00 PDT time. Root cause: its next_run_at was stored as
   `2026-07-22T16:00:00` (bare ISO-8601, T separator, no tz) while every
