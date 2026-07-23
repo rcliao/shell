@@ -1609,3 +1609,13 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   would just be more to retire.
 - restraint note: 7 narrow guards added this week is the signal that the
   marker design, not individual phrases, is the thing to fix.
+
+### OBS 7/22 (cont2) — 保存好 (preserve-well) FP: compound-word boundary case for the structural fix
+- 21:18 FP: "玻璃罐裝好保存好帶" = food-packing advice ("jar it, keeps
+  well, easy to carry"). 存(好) matched INSIDE 保存好 — but 保存 (preserve
+  food) ≠ 存 (store-to-db). Enforcement fired a ghost_put (unwanted write).
+- 8th 好-marker FP this week. Nuance for the structural fix: even "verb+好
+  bonded" isn't enough — 存好 as a legit write claim must require 存 NOT be
+  preceded by 保 (保存 is a different lexeme). The fix needs word-boundary
+  awareness, not just adjacency. Reinforces prioritizing the structural
+  rework over more guards. STILL no 9th patch-guard added.
