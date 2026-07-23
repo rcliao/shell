@@ -103,6 +103,11 @@ type TelegramConfig struct {
 	GroupPolicy       string            `json:"group_policy"`        // "pairing", "allowlist", or "disabled" (default: "disabled")
 	GroupAllowedUsers []int64           `json:"group_allowed_users"` // separate allowlist for group chats
 	ReactionMap       map[string]string `json:"reaction_map"`        // emoji → action (e.g. "👍":"go", "👎":"stop")
+	// UserLabels maps a Telegram user ID (as a string, since JSON object keys
+	// are strings) to a display label used in the [From: ...] tag, e.g.
+	// "1234": "Alex (the developer)". Lets the agent attribute group-chat
+	// messages to the right person instead of guessing from first names.
+	UserLabels map[string]string `json:"user_labels"`
 }
 
 // UnmarshalJSON replaces (rather than merges) the ReactionMap when the user

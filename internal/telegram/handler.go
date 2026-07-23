@@ -1087,6 +1087,7 @@ type Handler struct {
 	peerAliases          []string // name variants for peer agents (lowercased)
 	groupMode            string   // "autonomous" = always deliver, agent decides via [noop]
 	groupDomain          string   // role-based routing domain for this agent ("practical"|"companionship"|"")
+	userLabels           map[int64]string // Telegram user ID → display label for the [From: ...] tag
 
 	// Bot-to-bot exchange tracking (per chat)
 	botExchangeMu    sync.Mutex
@@ -1181,6 +1182,7 @@ type AgentConfig struct {
 	GroupMode            string   // "autonomous" = agent decides, "" = legacy probability
 	GroupDomain          string   // "practical" | "companionship" — role-based routing for general messages (empty = no routing)
 	CoalesceDisabled     bool     // kill switch for V2-H44 queued-message coalescing
+	UserLabels           map[int64]string // Telegram user ID → display label for the [From: ...] tag
 }
 
 func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
@@ -1209,10 +1211,29 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 		botExchangeCount:     make(map[int64]int),
 		botLastResponse:      make(map[int64]time.Time),
 		coalesceDisabled:     agentCfg.CoalesceDisabled,
+		userLabels:           agentCfg.UserLabels,
 		coalesceQueues:       make(map[chatLockKey][]*queuedMsg),
 		albums:               make(map[string]*albumEntry),
 		chatLocks:            make(map[chatLockKey]*sync.Mutex),
 	}
+}
+
+// senderLabel resolves the display name used in the [From: ...] tag for a
+// Telegram user. A configured user_labels entry wins (it carries identity the
+// agent can't infer from a bare first name — critical in group chats where
+// multiple people share one session); otherwise fall back to first name, then
+// username.
+func (h *Handler) senderLabel(from *models.User) string {
+	if from == nil {
+		return ""
+	}
+	if label, ok := h.userLabels[from.ID]; ok && label != "" {
+		return label
+	}
+	if from.FirstName != "" {
+		return from.FirstName
+	}
+	return from.Username
 }
 
 // mentionRegex matches @username mentions in message text.
@@ -1976,10 +1997,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	}
 
 	// Build sender display name for Claude to identify who is speaking.
-	senderName := msg.From.FirstName
-	if senderName == "" {
-		senderName = msg.From.Username
-	}
+	senderName := h.senderLabel(msg.From)
 
 	// Replay ledger (V2-H30): record the message before processing so a
 	// deploy restart can't silently eat it, and skip Telegram redeliveries
@@ -2523,10 +2541,7 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 		return
 	}
 
-	senderName := first.From.FirstName
-	if senderName == "" {
-		senderName = first.From.Username
-	}
+	senderName := h.senderLabel(first.From)
 
 	threadID := msgThreadID(first)
 

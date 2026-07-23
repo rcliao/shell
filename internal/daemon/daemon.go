@@ -569,6 +569,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		GroupMode:            cfg.Agent.GroupMode,
 		GroupDomain:          cfg.Agent.GroupDomain,
 		CoalesceDisabled:     cfg.Daemon.CoalesceDisabled,
+		UserLabels:           parseUserLabels(cfg.Telegram.UserLabels),
 	}
 	bot, err := telegram.NewBot(token, auth, br, agentCfg)
 	if err != nil {
@@ -906,6 +907,25 @@ func New(cfg config.Config) (*Daemon, error) {
 }
 
 // discoverPeerAgents reads peer agent config files to discover their skills.
+// parseUserLabels converts the config's string-keyed user_labels map (JSON
+// object keys are strings) to the int64-keyed map the Telegram handler uses.
+// Malformed keys are skipped with a warning rather than failing startup.
+func parseUserLabels(labels map[string]string) map[int64]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make(map[int64]string, len(labels))
+	for k, v := range labels {
+		id, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			slog.Warn("config: skipping malformed user_labels key", "key", k)
+			continue
+		}
+		out[id] = v
+	}
+	return out
+}
+
 func discoverPeerAgents(peerBots []string) []config.PeerAgent {
 	agentsDir := filepath.Join(config.DefaultConfigDir(), "agents")
 	var peers []config.PeerAgent
