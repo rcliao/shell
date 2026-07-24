@@ -4,8 +4,24 @@ BINARY := shell
 PKG := ./cmd/shell
 SKILLS_DIR := $(HOME)/.shell/skills
 
+# Ghost's cross-encoder reranker has two compiled backends: a plain build
+# gets single-threaded pure-Go inference (~3s per memory inject, measured
+# 2026-07-23), the ORT build gets multi-threaded ONNX Runtime (~200ms).
+# Auto-detect the ORT libs so a routine rebuild never silently reverts the
+# daemons to the slow backend (that happened 21 minutes after the first ORT
+# deploy). Libs: brew install onnxruntime; make -C ../ghost ort-install.
+ORT_TOKENIZERS := $(HOME)/.ghost/libs/libtokenizers.a
+ORT_DYLIB := /opt/homebrew/lib/libonnxruntime.dylib
+
 build:
+ifneq (,$(and $(wildcard $(ORT_TOKENIZERS)),$(wildcard $(ORT_DYLIB))))
+	CGO_LDFLAGS="-L$(HOME)/.ghost/libs -L/opt/homebrew/lib" CGO_ENABLED=1 \
+	  go build -tags=ORT -o $(BINARY) $(PKG)
+	@echo "==> built with ORT reranker backend"
+else
 	go build -o $(BINARY) $(PKG)
+	@echo "==> built with pure-Go reranker backend (ORT libs not found)"
+endif
 
 run: build
 	./$(BINARY) daemon
