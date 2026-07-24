@@ -1906,7 +1906,15 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			text = strings.TrimSpace(msg.Caption)
 		}
 		if text == "" {
-			text = "(sticker)"
+			// Name the sender inline: a bare "(sticker)" carries no words from
+			// the sender, and the model has misattributed sticker turns even
+			// with the [From: ...] tag present (observed 7/24) — redundancy at
+			// the point of attention prevents the guess.
+			if label := h.senderLabel(msg.From); label != "" {
+				text = "(sticker from " + label + ")"
+			} else {
+				text = "(sticker)"
+			}
 		}
 		// Annotate animated/video stickers so Claude knows it's seeing a thumbnail.
 		if msg.Sticker.IsAnimated {
