@@ -1,0 +1,17 @@
+#!/bin/sh
+# google — Google Workspace access (docs, sheets, calendar, drive, tasks)
+# via the gog CLI. Handles account selection so callers never deal with auth:
+# invoke this wrapper, NOT gog directly.
+set -e
+
+if ! command -v gog >/dev/null 2>&1; then
+  echo "gog CLI not installed (brew install gogcli)" >&2
+  exit 1
+fi
+
+# Account can be overridden per-agent via config env; defaults to the
+# household service account.
+: "${GOG_ACCOUNT:=pikamini.golden@gmail.com}"
+export GOG_ACCOUNT
+
+exec gog --no-input "$@"
