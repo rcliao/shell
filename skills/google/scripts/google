@@ -14,4 +14,13 @@ fi
 : "${GOG_ACCOUNT:=pikamini.golden@gmail.com}"
 export GOG_ACCOUNT
 
+# Tokens live in gog's password-protected file keyring (the macOS keychain
+# is not accessible from headless daemon subprocesses). The password file is
+# host-local and untracked.
+if [ -f "$HOME/.shell/gog-keyring-pass" ]; then
+  GOG_KEYRING_BACKEND=file
+  GOG_KEYRING_PASSWORD="$(cat "$HOME/.shell/gog-keyring-pass")"
+  export GOG_KEYRING_BACKEND GOG_KEYRING_PASSWORD
+fi
+
 exec gog --no-input "$@"
