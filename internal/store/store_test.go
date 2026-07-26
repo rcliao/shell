@@ -475,8 +475,56 @@ func TestSession_BumpGeneration(t *testing.T) {
 	if sess.RotateReason != "" {
 		t.Errorf("expected rotate_reason cleared on rotation, got %q", sess.RotateReason)
 	}
+	if !sess.RotateFlaggedAt.IsZero() {
+		t.Errorf("expected rotate_flagged_at cleared on rotation, got %v", sess.RotateFlaggedAt)
+	}
 	if sess.CompactState != "" {
 		t.Error("expected compact_state cleared on rotation")
+	}
+}
+
+// V2-H45: setting the rotate flag must stamp rotate_flagged_at (so deferred
+// fingerprint rotations can enforce the max-staleness cap); clearing must null it.
+func TestSetRotatePending_StampsAndClearsFlaggedAt(t *testing.T) {
+	s := testStore(t)
+	s.SaveSession(100, 0, "sess-1")
+
+	sess, err := s.GetSession(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sess.RotateFlaggedAt.IsZero() {
+		t.Errorf("unflagged session should have zero rotate_flagged_at, got %v", sess.RotateFlaggedAt)
+	}
+
+	if err := s.SetRotatePending(100, 0, "prompt_changed"); err != nil {
+		t.Fatal(err)
+	}
+	sess, _ = s.GetSession(100, 0)
+	if sess.RotateFlaggedAt.IsZero() {
+		t.Error("expected rotate_flagged_at stamped when flag is set")
+	}
+	if age := time.Since(sess.RotateFlaggedAt); age < 0 || age > time.Minute {
+		t.Errorf("rotate_flagged_at not near now: age %v", age)
+	}
+
+	// Clearing (empty reason) must null the timestamp too.
+	if err := s.SetRotatePending(100, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	sess, _ = s.GetSession(100, 0)
+	if sess.RotatePending || sess.RotateReason != "" || !sess.RotateFlaggedAt.IsZero() {
+		t.Errorf("clear failed: pending=%v reason=%q flaggedAt=%v",
+			sess.RotatePending, sess.RotateReason, sess.RotateFlaggedAt)
+	}
+
+	// FlagActiveSessionsForRotation (fingerprint path) stamps it as well.
+	if _, err := s.FlagActiveSessionsForRotation("prompt_changed"); err != nil {
+		t.Fatal(err)
+	}
+	sess, _ = s.GetSession(100, 0)
+	if !sess.RotatePending || sess.RotateFlaggedAt.IsZero() {
+		t.Errorf("bulk flag: pending=%v flaggedAt=%v, want true/non-zero", sess.RotatePending, sess.RotateFlaggedAt)
 	}
 }
 

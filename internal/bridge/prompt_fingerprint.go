@@ -9,6 +9,13 @@ import (
 // promptFingerprintKey is the kv key holding the last-seen static-prompt hash.
 const promptFingerprintKey = "prompt_fingerprint"
 
+// rotateReasonPromptChanged is the rotate_reason recorded when a session is
+// flagged because the composed system-prompt fingerprint changed (deploy, skill
+// reload, pinned-memory self-curation). This reason — and ONLY this reason — is
+// eligible for idle deferral in maybeRotate (V2-H45): the old prompt is still
+// perfectly serviceable for a few more turns, unlike cost/latency triggers.
+const rotateReasonPromptChanged = "prompt_changed"
+
 // staticSystemPrompt returns the process-static portion of the system prompt —
 // everything a fresh (non-onboarding) send appends EXCEPT per-chat pinned memory,
 // which prefix_hash already tracks: identity + time guidance + skills catalog +
@@ -53,7 +60,7 @@ func (b *Bridge) ReconcilePromptFingerprint() {
 		return // unchanged — nothing to do
 	}
 	if ok {
-		n, ferr := b.store.FlagActiveSessionsForRotation("prompt_changed")
+		n, ferr := b.store.FlagActiveSessionsForRotation(rotateReasonPromptChanged)
 		if ferr != nil {
 			slog.Warn("prompt-fingerprint: flag failed", "error", ferr)
 			return

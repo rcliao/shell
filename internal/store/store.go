@@ -32,13 +32,17 @@ type Session struct {
 	// `CompactState` is '' (idle) or 'compacting' (proactive compaction in
 	// flight). `RotatePending` is a boolean flag set by soft triggers;
 	// `RotateReason` records WHICH trigger set it (cost | latency |
-	// pinned_overflow | manual) so logs attribute the cause instead of a generic
-	// "rotate_pending" — see docs/MODEL-SESSION-CONFIG.md (S4).
+	// pinned_overflow | manual | prompt_changed) so logs attribute the cause
+	// instead of a generic "rotate_pending" — see docs/MODEL-SESSION-CONFIG.md
+	// (S4). `RotateFlaggedAt` records WHEN the flag was set (zero on legacy rows
+	// that predate the column) so fingerprint-triggered rotations can be deferred
+	// to the idle prewarm tick with a max-staleness cap (V2-H45).
 	Generation          int64
 	PrefixHash          string
 	GenerationStartedAt time.Time
 	RotatePending       bool
 	RotateReason        string
+	RotateFlaggedAt     time.Time
 	CompactState        string
 }
 
@@ -326,6 +330,12 @@ func (s *Store) migrate() error {
 		"ALTER TABLE sessions ADD COLUMN rotate_pending INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE sessions ADD COLUMN compact_state TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE sessions ADD COLUMN rotate_reason TEXT NOT NULL DEFAULT ''",
+		// V2-H45: when the rotate flag was set — lets fingerprint rotations
+		// defer to idle with a max-staleness cap. Nullable: legacy pending rows
+		// have no timestamp and fall back to synchronous rotation. No index —
+		// only ever read via the per-session lookups (see the CREATE INDEX
+		// ordering caveat: new-column indexes must come after table rebuilds).
+		"ALTER TABLE sessions ADD COLUMN rotate_flagged_at DATETIME",
 		// Persist the heartbeat count so deep-reflection cadence (every Nth
 		// heartbeat) survives daemon restarts — an in-memory counter reset on
 		// every re-exec, starving deep reflection. See docs/MODEL-SESSION-CONFIG.md.
@@ -689,6 +699,7 @@ func (s *Store) BumpGeneration(chatID, threadID int64, newPrefixHash string) (in
 			prefix_hash = ?,
 			rotate_pending = 0,
 			rotate_reason = '',
+			rotate_flagged_at = NULL,
 			compact_state = '',
 			updated_at = CURRENT_TIMESTAMP
 		WHERE chat_id = ? AND message_thread_id = ?
@@ -704,16 +715,23 @@ func (s *Store) BumpGeneration(chatID, threadID int64, newPrefixHash string) (in
 // | manual); the bridge checks the flag before each Send and calls
 // BumpGeneration if set. An empty reason clears the flag. Recording the cause
 // (vs a bare boolean) lets rotation logs attribute WHY — see
-// docs/MODEL-SESSION-CONFIG.md (S4).
+// docs/MODEL-SESSION-CONFIG.md (S4). Setting also stamps rotate_flagged_at so
+// deferred (fingerprint) rotations can enforce a max-staleness cap (V2-H45);
+// clearing nulls it.
 func (s *Store) SetRotatePending(chatID, threadID int64, reason string) error {
-	v := 0
-	if reason != "" {
-		v = 1
+	if reason == "" {
+		_, err := s.db.Exec(`
+			UPDATE sessions SET rotate_pending = 0, rotate_reason = '',
+				rotate_flagged_at = NULL, updated_at = CURRENT_TIMESTAMP
+			WHERE chat_id = ? AND message_thread_id = ?
+		`, chatID, threadID)
+		return err
 	}
 	_, err := s.db.Exec(`
-		UPDATE sessions SET rotate_pending = ?, rotate_reason = ?, updated_at = CURRENT_TIMESTAMP
+		UPDATE sessions SET rotate_pending = 1, rotate_reason = ?,
+			rotate_flagged_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE chat_id = ? AND message_thread_id = ?
-	`, v, reason, chatID, threadID)
+	`, reason, chatID, threadID)
 	return err
 }
 
@@ -779,24 +797,26 @@ func (s *Store) SessionThreadID(sessionID int64) int64 {
 func (s *Store) GetSession(chatID, threadID int64) (*Session, error) {
 	row := s.db.QueryRow(`
 		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
-		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason,
+		       rotate_flagged_at
 		FROM sessions WHERE chat_id = ? AND message_thread_id = ?
 	`, chatID, threadID)
 	return scanSession(row)
 }
 
 // scanSession extracts a Session from a row including lifecycle fields.
-// Accepts anything with a Scan method matching the 13-column SELECT used by
+// Accepts anything with a Scan method matching the 14-column SELECT used by
 // GetSession and ListActiveSessions.
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	var rotatePending int
 	var genStarted sql.NullTime
+	var rotateFlagged sql.NullTime
 	err := row.Scan(
 		&sess.ID, &sess.ChatID, &sess.MessageThreadID, &sess.ProviderSessionID,
 		&sess.Status, &sess.CreatedAt, &sess.UpdatedAt,
 		&sess.Generation, &sess.PrefixHash, &genStarted, &rotatePending, &sess.CompactState,
-		&sess.RotateReason,
+		&sess.RotateReason, &rotateFlagged,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -810,6 +830,9 @@ func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 		sess.GenerationStartedAt = sess.CreatedAt
 	}
 	sess.RotatePending = rotatePending != 0
+	if rotateFlagged.Valid {
+		sess.RotateFlaggedAt = rotateFlagged.Time
+	} // else zero: legacy row flagged before the column existed → caller rotates synchronously
 	return &sess, nil
 }
 
@@ -1055,7 +1078,8 @@ func (s *Store) UpdateSessionStatus(chatID, threadID int64, status string) error
 func (s *Store) ListPrewarmableSessions() ([]Session, error) {
 	rows, err := s.db.Query(`
 		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
-		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason,
+		       rotate_flagged_at
 		FROM sessions WHERE status IN ('active','stale') ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -1078,7 +1102,8 @@ func (s *Store) ListPrewarmableSessions() ([]Session, error) {
 func (s *Store) ListActiveSessions() ([]Session, error) {
 	rows, err := s.db.Query(`
 		SELECT id, chat_id, message_thread_id, claude_session_id, status, created_at, updated_at,
-		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason
+		       generation, prefix_hash, generation_started_at, rotate_pending, compact_state, rotate_reason,
+		       rotate_flagged_at
 		FROM sessions WHERE status = 'active' ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -1251,7 +1276,8 @@ func (s *Store) SetKV(key, value string) error {
 // unrelated rotation. Returns the number of sessions flagged.
 func (s *Store) FlagActiveSessionsForRotation(reason string) (int, error) {
 	res, err := s.db.Exec(
-		`UPDATE sessions SET rotate_pending = 1, rotate_reason = ?, updated_at = CURRENT_TIMESTAMP
+		`UPDATE sessions SET rotate_pending = 1, rotate_reason = ?,
+			rotate_flagged_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		 WHERE claude_session_id != '' AND rotate_pending = 0`,
 		reason,
 	)

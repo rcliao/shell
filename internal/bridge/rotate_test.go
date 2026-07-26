@@ -48,6 +48,35 @@ func TestCalendarDayChanged_TZAffectsBoundary(t *testing.T) {
 	}
 }
 
+// V2-H45: only fingerprint-triggered pending rotations defer to idle, and only
+// while the pending flag is younger than the max-staleness cap.
+func TestShouldDeferFingerprintRotation(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name      string
+		reason    string
+		flaggedAt time.Time
+		want      bool
+	}{
+		{"fingerprint fresh flag defers", rotateReasonPromptChanged, now.Add(-5 * time.Minute), true},
+		{"fingerprint just under cap defers", rotateReasonPromptChanged, now.Add(-fingerprintDeferMax + time.Second), true},
+		{"fingerprint at cap rotates sync", rotateReasonPromptChanged, now.Add(-fingerprintDeferMax), false},
+		{"fingerprint stale flag rotates sync", rotateReasonPromptChanged, now.Add(-40 * time.Minute), false},
+		{"fingerprint legacy row (zero flagged-at) rotates sync", rotateReasonPromptChanged, time.Time{}, false},
+		{"token/cost trigger rotates sync", "cost", now.Add(-5 * time.Minute), false},
+		{"latency trigger rotates sync", "latency", now.Add(-5 * time.Minute), false},
+		{"pinned_overflow trigger rotates sync", "pinned_overflow", now.Add(-5 * time.Minute), false},
+		{"manual trigger rotates sync", "manual", now.Add(-5 * time.Minute), false},
+		{"empty reason rotates sync", "", now.Add(-5 * time.Minute), false},
+	}
+	for _, tc := range cases {
+		if got := shouldDeferFingerprintRotation(tc.reason, tc.flaggedAt, now); got != tc.want {
+			t.Errorf("%s: shouldDeferFingerprintRotation(%q, age=%s) = %v, want %v",
+				tc.name, tc.reason, now.Sub(tc.flaggedAt), got, tc.want)
+		}
+	}
+}
+
 func TestCalendarDayChanged_FallsBackToUTCWhenTZUnset(t *testing.T) {
 	b := &Bridge{schedulerTZ: ""}
 	yesterdayUTC := time.Now().UTC().AddDate(0, 0, -1)

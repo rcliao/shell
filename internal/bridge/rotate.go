@@ -34,6 +34,13 @@ const rotationSummaryExchanges = 8
 // context but small enough not to bloat every subsequent turn.
 const rotationMemoryPackBudget = 800
 
+// fingerprintDeferMax is the max-staleness cap for fingerprint-triggered
+// rotations deferred to the idle prewarm tick (V2-H45). The tick runs every
+// 10 minutes, so a pending flag older than this means the tick hasn't been
+// able to handle it (session continuously active, or daemon just restarted)
+// — rotate synchronously so prompt changes are never indefinitely deferred.
+const fingerprintDeferMax = 30 * time.Minute
+
 // maybeRotate inspects a session and rotates if any trigger fires:
 //   - rotate_pending flag (set by Channel B delta overflow, manual CLI, or
 //     skill/identity hash change)
@@ -45,6 +52,10 @@ const rotationMemoryPackBudget = 800
 // in sync with "today" — without it, a Friday session running into Saturday
 // keeps Friday's [Current time:] markers in history and the agent often
 // pattern-matches on the older bulk instead of the freshest marker.
+//
+// Exception (V2-H45): a rotate_pending whose sole cause is a prompt-fingerprint
+// change is deferred to the idle prewarm tick while young — see the deferral
+// block below and shouldDeferFingerprintRotation.
 //
 // Returns true when a rotation happened so callers can refresh any cached
 // session state they hold.
@@ -69,6 +80,23 @@ func (b *Bridge) maybeRotate(ctx context.Context, chatID, threadID int64) bool {
 		return false
 	}
 
+	// V2-H45: fingerprint-only rotations defer to the idle prewarm tick.
+	// A prompt-fingerprint change (pin self-curation, deploy, skill reload)
+	// used to rotate synchronously here, costing ~9s inside an interactive
+	// turn. The old prompt is still serviceable, so when the ONLY trigger is
+	// a fresh prompt_changed flag — no age/day-boundary trigger also firing —
+	// keep this turn on the old prompt and let PrewarmDueSessions perform the
+	// rotation+respawn invisibly. The staleness cap forces a synchronous
+	// rotation if the tick hasn't handled it (see shouldDeferFingerprintRotation).
+	// Token/cost/latency/manual rotations keep their synchronous behavior.
+	if sess.RotatePending && age < rotationMaxAge && !dayChanged &&
+		shouldDeferFingerprintRotation(sess.RotateReason, sess.RotateFlaggedAt, time.Now()) {
+		slog.Info("rotation deferred to idle",
+			"chat_id", chatID, "thread_id", threadID,
+			"pending_age", time.Since(sess.RotateFlaggedAt).Round(time.Second))
+		return false
+	}
+
 	reason := "soft_trigger"
 	switch {
 	case sess.RotatePending:
@@ -88,6 +116,30 @@ func (b *Bridge) maybeRotate(ctx context.Context, chatID, threadID int64) bool {
 		return false
 	}
 	return true
+}
+
+// shouldDeferFingerprintRotation decides whether a pending rotation may be
+// deferred to the idle prewarm tick instead of running synchronously in turn
+// prework (V2-H45). Deferral requires ALL of:
+//   - the pending reason is exactly rotateReasonPromptChanged — every other
+//     reason (cost | latency | pinned_overflow | manual, and any future one)
+//     keeps today's synchronous behavior;
+//   - a known flagged-at timestamp — legacy rows flagged before the
+//     rotate_flagged_at column existed have a zero time, and with unknown age
+//     the safe choice is to rotate now;
+//   - the flag is younger than fingerprintDeferMax — past the cap the tick
+//     should already have handled it, so something is off (continuously busy
+//     session, daemon restart) and we rotate synchronously as before.
+//
+// Pure function of its inputs so the decision is unit-testable.
+func shouldDeferFingerprintRotation(reason string, flaggedAt, now time.Time) bool {
+	if reason != rotateReasonPromptChanged {
+		return false
+	}
+	if flaggedAt.IsZero() {
+		return false
+	}
+	return now.Sub(flaggedAt) < fingerprintDeferMax
 }
 
 // calendarDayChanged returns true when the local-timezone calendar day of
