@@ -1619,3 +1619,18 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   preceded by 保 (保存 is a different lexeme). The fix needs word-boundary
   awareness, not just adjacency. Reinforces prioritizing the structural
   rework over more guards. STILL no 9th patch-guard added.
+
+### OBS 7/25 — enforcement correction turn can no-op: claim stands, write never happens — NEW
+- 17:07 PDT, DM: agent claimed a health note was written ("...記進今天的
+  備註了") with zero write tools in the turn. Enforcement fired
+  (enforced=1, ledger id 311) but the correction turn made NO write
+  (no tool rows, nothing in ghost/notion) and the user-visible claim was
+  left standing. User checks this note the same evening — real data loss.
+- Also: correction-turn tool calls are NOT logged to tool_uses (they ride
+  a separate agent.Send whose result bypasses LogToolUses), so enforcement
+  efficacy is currently unmeasurable from the ledger.
+- fix candidates: (a) correction prompt must REQUIRE either a verified
+  write (read-back receipt) or an explicit retraction sent to the chat;
+  (b) log correction-turn tool calls with source=write-verify-correction;
+  (c) re-classify post-correction by inspecting the correction result's
+  ToolCalls instead of trusting it blindly. Status=pending owner priority.
