@@ -20,15 +20,17 @@ import (
 type persistentProc struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
+	stdinW  *syncWriter // all protocol writes go through this (parse loop + V2-H46 injector run concurrently)
 	stdout  io.ReadCloser
 	stderr  bytes.Buffer
 	scanner *bufio.Scanner // persistent scanner across messages — avoids losing buffered bytes
 
-	sessionID string // Claude session ID (from init response)
+	sessionID string // Claude session ID (from init response); guarded by turn.mu (read by the mid-turn injector)
 	key       SessionKey
 	model     string // model used when spawning this process
 
-	mu        sync.Mutex // guards stdin writes and scanner reads
+	mu        sync.Mutex // guards turn dispatch and scanner reads
+	turn      turnState  // live-turn tracking for mid-turn injection (V2-H46)
 	cancel    context.CancelFunc
 	idleTimer *time.Timer
 }
@@ -154,6 +156,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	proc := &persistentProc{
 		cmd:     cmd,
 		stdin:   stdin,
+		stdinW:  &syncWriter{w: stdin},
 		stdout:  stdout,
 		stderr:  stderr,
 		scanner: sc,
@@ -180,18 +183,29 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, onUp
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Track the live turn so a same-sender follow-up can be absorbed into it
+	// mid-flight (V2-H46). begin/end bracket exactly the window where the
+	// injector may act.
+	p.turn.mu.Lock()
+	sessionID := p.sessionID
+	p.turn.mu.Unlock()
+	p.turn.begin()
+	defer p.turn.end()
+
 	// Send user message.
-	if err := writeJSON(p.stdin, newUserMessage(req, p.sessionID)); err != nil {
+	if err := writeJSON(p.stdinW, newUserMessage(req, sessionID)); err != nil {
 		return SendResult{}, fmt.Errorf("send user message: %w", err)
 	}
 
 	// Read events using the persistent scanner (not a new one per message).
 	// This avoids losing buffered bytes between turns.
-	result := parseBidirectionalEventsScanner(p.scanner, p.stdin, onUpdate)
+	result := parseBidirectionalEventsObserved(p.scanner, p.stdinW, onUpdate, &p.turn)
 
-	// Update session ID if we got one.
+	// Update session ID if we got one (turn.mu: the injector reads it).
 	if result.SessionID != "" {
+		p.turn.mu.Lock()
 		p.sessionID = result.SessionID
+		p.turn.mu.Unlock()
 	}
 
 	return result, nil

@@ -272,6 +272,7 @@ type DaemonConfig struct {
 	// reminders. On by default; outbound_dedup_disabled is the kill-switch.
 	OutboundDedupDisabled   bool `json:"outbound_dedup_disabled"`
 	CoalesceDisabled        bool `json:"coalesce_disabled"` // kill switch: V2-H44 queued-message coalescing
+	AbsorbEnabled           bool `json:"absorb_enabled"`    // V2-H46 absorb single waiter into active turn (default off; canary per agent)
 	OutboundDedupWindowMins int  `json:"outbound_dedup_window_mins"` // default 60
 }
 

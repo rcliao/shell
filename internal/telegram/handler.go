@@ -1107,6 +1107,14 @@ type Handler struct {
 	coalesceDisabled bool
 	coalesceMu       sync.Mutex
 	coalesceQueues   map[chatLockKey][]*queuedMsg
+
+	// V2-H46 absorb-into-active-turn: a single same-sender text waiter behind
+	// a >20s turn is injected into that turn's subprocess stdin instead of
+	// waiting out the full turn. activeTurns records who holds each chat lock
+	// and since when, so waiters can make the same-sender/age decision.
+	absorbEnabled bool
+	activeTurnsMu sync.Mutex
+	activeTurns   map[chatLockKey]activeTurnInfo
 }
 
 // queuedMsg is one waiter in a coalescing queue.
@@ -1182,6 +1190,7 @@ type AgentConfig struct {
 	GroupMode            string   // "autonomous" = agent decides, "" = legacy probability
 	GroupDomain          string   // "practical" | "companionship" — role-based routing for general messages (empty = no routing)
 	CoalesceDisabled     bool     // kill switch for V2-H44 queued-message coalescing
+	AbsorbEnabled        bool     // V2-H46 absorb-into-active-turn (default false; canaried per agent)
 	UserLabels           map[int64]string // Telegram user ID → display label for the [From: ...] tag
 }
 
@@ -1211,8 +1220,10 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 		botExchangeCount:     make(map[int64]int),
 		botLastResponse:      make(map[int64]time.Time),
 		coalesceDisabled:     agentCfg.CoalesceDisabled,
+		absorbEnabled:        agentCfg.AbsorbEnabled,
 		userLabels:           agentCfg.UserLabels,
 		coalesceQueues:       make(map[chatLockKey][]*queuedMsg),
+		activeTurns:          make(map[chatLockKey]activeTurnInfo),
 		albums:               make(map[string]*albumEntry),
 		chatLocks:            make(map[chatLockKey]*sync.Mutex),
 	}
@@ -2042,6 +2053,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	lockKey := chatLockKey{chatID: msg.Chat.ID, threadID: threadID}
 	e2ePreLock := time.Now()
 	var myEntry *queuedMsg
+	injectedIntoActive := false
 	canCoalesce := !h.coalesceDisabled && len(images) == 0 && len(pdfs) == 0
 	if !chatMu.TryLock() {
 		setReaction(ctx, b, msg.Chat.ID, msg.ID, "🕐")
@@ -2056,15 +2068,35 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 			h.coalesceMu.Unlock()
 			slog.Info("coalesce: waiter registered", "chat_id", msg.Chat.ID,
 				"thread_id", threadID, "msg_id", msg.ID, "queue_len", qlen)
+			// V2-H46: single same-sender text waiter behind a long-running
+			// turn → inject into that turn instead of waiting it out.
+			injectedIntoActive = h.tryAbsorbIntoActiveTurn(lockKey, myEntry, qlen)
 		} else {
 			slog.Info("coalesce: waiter NOT eligible", "chat_id", msg.Chat.ID,
 				"thread_id", threadID, "msg_id", msg.ID,
 				"disabled", h.coalesceDisabled, "images", len(images), "pdfs", len(pdfs))
+			if h.absorbEnabled && (len(images) > 0 || len(pdfs) > 0) {
+				slog.Info("absorb: skipped", "chat_id", msg.Chat.ID,
+					"thread_id", threadID, "msg_id", msg.ID, "reason", "media")
+			}
 		}
 		chatMu.Lock()
 	}
 	e2eLockWaitMs := time.Since(e2ePreLock).Milliseconds()
 	defer chatMu.Unlock()
+
+	// V2-H46: this message was injected into the previous lock holder's turn;
+	// its reply (delivered when the lock released, just now) covers it. Mark
+	// it answered and stand down — no fresh turn. Ordering matters: complete
+	// only after the lock releases so a mid-turn daemon death leaves the
+	// message pending for replay.
+	if injectedIntoActive {
+		if err := h.bridge.CompletePendingTurn(msg.Chat.ID, msg.ID); err != nil {
+			slog.Warn("failed to complete absorbed (injected) turn", "error", err, "chat_id", msg.Chat.ID)
+		}
+		setReaction(ctx, b, msg.Chat.ID, msg.ID, "✅")
+		return
+	}
 
 	// V2-H44: if a sibling absorbed this message while we waited, our
 	// content is answered by their coalesced turn — stand down quietly.
@@ -2086,6 +2118,12 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		slog.Info("coalesce: lock winner absorbed nothing", "chat_id", msg.Chat.ID,
 			"thread_id", threadID, "msg_id", msg.ID, "queue_len_after", qlen)
 	}
+
+	// V2-H46: publish this turn as the active lock holder so a same-sender
+	// waiter can be injected into it mid-flight. Cleared before the lock
+	// releases (deferred after chatMu.Unlock → runs first).
+	h.setActiveTurn(lockKey, msg.From.ID)
+	defer h.clearActiveTurn(lockKey)
 
 	// React with 👀 to acknowledge receipt.
 	setReaction(ctx, b, msg.Chat.ID, msg.ID, "👀")

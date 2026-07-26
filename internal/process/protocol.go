@@ -209,10 +209,25 @@ func parseBidirectionalEvents(r io.Reader, stdin io.Writer, onUpdate StreamFunc)
 	return parseBidirectionalEventsScanner(scanner, stdin, onUpdate)
 }
 
+// turnObserver receives tool lifecycle callbacks from the parse loop. Used by
+// the persistent process to track whether a tool call is in flight — the
+// window in which a mid-turn user-message injection is protocol-safe (V2-H46).
+type turnObserver interface {
+	toolStarted()
+	toolEnded()
+}
+
 // parseBidirectionalEventsScanner is like parseBidirectionalEvents but takes
 // an existing scanner. Used by persistent processes to avoid losing buffered
 // bytes between turns.
 func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, onUpdate StreamFunc) SendResult {
+	return parseBidirectionalEventsObserved(scanner, stdin, onUpdate, nil)
+}
+
+// parseBidirectionalEventsObserved is the observer-aware core: obs (may be
+// nil) is notified when a tool_use block is seen and when its tool_result
+// comes back, so the caller can tell mid-tool from mid-inference.
+func parseBidirectionalEventsObserved(scanner *bufio.Scanner, stdin io.Writer, onUpdate StreamFunc, obs turnObserver) SendResult {
 	var result SendResult
 	parseStart := time.Now()
 	// Track whether we've received any stream_event text deltas.
@@ -304,6 +319,9 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 							StartedAt: time.Now(),
 						})
 						pendingSeparator = true
+						if obs != nil {
+							obs.toolStarted()
+						}
 						slog.Info("tool use", "name", block.Name, "id", block.ID)
 					}
 				}
@@ -322,6 +340,9 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 				for _, block := range event.Message.Content.Blocks {
 					if block.Type == "tool_result" {
 						slog.Debug("bidirectional: tool_result", "tool_use_id", block.ToolUseID, "is_error", block.IsError)
+						if obs != nil {
+							obs.toolEnded()
+						}
 						// Back-fill the matching tool_use: Failed flag (landed
 						// vs errored write) and execution duration (tool_use →
 						// tool_result gap, the tool-infra latency signal).
