@@ -1633,4 +1633,4 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   write (read-back receipt) or an explicit retraction sent to the chat;
   (b) log correction-turn tool calls with source=write-verify-correction;
   (c) re-classify post-correction by inspecting the correction result's
-  ToolCalls instead of trusting it blindly. Status=pending owner priority.
+  ToolCalls instead of trusting it blindly. Status=APPROVED 7/26 (owner) — in progress.
