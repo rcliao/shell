@@ -4,8 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/store"
@@ -69,11 +71,65 @@ var writeClaimRe = regexp.MustCompile(`(?i)\b(logged|saved (it|this|that)|added 
 // "熱量來源補上"). A week of production ledger data showed 14/15 verbal_save
 // rows were these, not confabulations — each one burning a correction turn.
 // So a clause only counts as a claim when it (a) matches the verb pattern,
-// (b) carries a completion marker (已/了/好/✅ — every genuine claim sampled
-// had one), and (c) has no modal/future/offer/negation/past-reference token.
-// This trades a few false negatives (e.g. 了+會 in one clause) for killing
-// the dominant false-positive classes; FPs are costlier here.
-var cjkCompletionRe = regexp.MustCompile(`已|了|好|✅`)
+// (b) carries a completion marker ADJACENT to the verb (see
+// cjkVerbHasAdjacentMarker), and (c) has no modal/future/offer/negation/
+// past-reference token. This trades a few false negatives (e.g. 了+會 in one
+// clause) for killing the dominant false-positive classes; FPs are costlier
+// here.
+//
+// Marker adjacency (structural fix, 7/26): the old rule accepted 已/了/好/✅
+// ANYWHERE in the clause, but 好 is hugely polysemous (剛好, 比較好, 就好,
+// 更好) and ✅ doubles as bullet decoration ("▫️ ✅ 紅蘿蔔…加進去的") — that
+// marker noise accumulated 8+ narrow guards in one week. A genuine completed
+// write says the marker in the SAME phrase as the verb ("寫好", "記進…了",
+// "補進 Notion ✅", "已經幫妳補進"), so we now require:
+//   - 了/完/✅, or a resultative 好 that is not the tail of another word
+//     (較好/更好/剛好/正好/就好), within cjkMarkerAfterWindow runes after the
+//     verb match (window fits a short object: verb + " Notion " + marker), or
+//   - 已 within cjkMarkerBeforeWindow runes before it (已經幫妳補進…).
+// A pre-verb ✅ (bullet decoration) or a far-away 好 no longer counts.
+const (
+	cjkMarkerAfterWindow  = 10 // runes past the verb match end
+	cjkMarkerBeforeWindow = 6  // runes ahead of the verb match start (已 only)
+)
+
+// cjkHaoWordTails: a 好 directly preceded by one of these runes is the tail of
+// a different word — 比較好/較好 "better", 更好 "even better", 剛好/正好
+// "coincidentally", 就好 "that suffices" — never a completion resultative. No
+// verb alternation ends in these runes, so bonded resultatives (寫好, 保存好)
+// are unaffected.
+var cjkHaoWordTails = []rune{'較', '更', '剛', '正', '就'}
+
+// cjkVerbHasAdjacentMarker reports whether any persistence-verb match in the
+// clause has a completion marker in the same phrase. The post-verb scan starts
+// INSIDE the match (start+1) because the verb alternations bond resultatives
+// themselves (寫好, 記了, 登記完) — those are the marker at distance zero, and
+// it keeps 存好 inside the compound 保存好 claimable (保存好了).
+func cjkVerbHasAdjacentMarker(clause string) bool {
+	runes := []rune(clause)
+	for _, loc := range writeClaimRe_CJK.FindAllStringIndex(clause, -1) {
+		start := utf8.RuneCountInString(clause[:loc[0]])
+		end := utf8.RuneCountInString(clause[:loc[1]])
+		// 已/已經 directly ahead of the verb phrase (已經幫妳補進…了).
+		for i := max(start-cjkMarkerBeforeWindow, 0); i < start; i++ {
+			if runes[i] == '已' {
+				return true
+			}
+		}
+		// 了/好/完/✅ bonded to or shortly after the verb.
+		for i := start + 1; i < len(runes) && i < end+cjkMarkerAfterWindow; i++ {
+			switch runes[i] {
+			case '了', '完', '✅':
+				return true
+			case '好':
+				if i == 0 || !slices.Contains(cjkHaoWordTails, runes[i-1]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
 
 var cjkClaimGuards = []string{
 	// negation / refusal
@@ -85,10 +141,6 @@ var cjkClaimGuards = []string{
 	"什麼", "多久", "怎麼", "哪",
 	// past reference (an earlier turn's write, not this one)
 	"那時", "當時", "之前", "上次", "今早", "早上就", "那筆", "那次",
-	// coincidence adverbs — "這張近拍剛好補上一個重點" is discussion, not a
-	// write, and the 好 inside 剛好 falsely satisfies the completion-marker
-	// check (7/16 production FP)
-	"剛好", "正好",
 	// existential/descriptive 登記 — "有登記公司" describes a vendor's
 	// registration status, not the agent registering anything (7/18 FP)
 	"有登記", "沒登記", "未登記",
@@ -101,14 +153,12 @@ var cjkClaimGuards = []string{
 	// persisting anything (7/21 FP). The demonstrative after the verb is
 	// the tell (advice, like the embedded question-word guards above).
 	"記好這", "記好那", "記下這", "記下那", "記住這", "記住那",
-	// comparative "better" — "放點心欄記錄比較好" is a recommendation about
-	// WHERE to record; the 好 inside 比較好/較好 (="better") falsely trips
-	// the completion marker (7/21 FP). Advice, never a completed write.
-	"比較好", "較好", "會比較", "更好",
-	// offer/minimizer 就好 — "我幫你把日期補進 Notion 就好" ("I'll just add
-	// the date, that's all it takes") states intent, not completion; the 好
-	// in 就好 falsely trips the marker (7/22 FP). Offer, like 要不要/要我.
-	"就好", "就行", "就可以",
+	// NOTE (7/26): the marker-noise guards this list used to carry — 剛好/
+	// 正好 (coincidence adverbs), 比較好/較好/會比較/更好 (comparative
+	// "better"), 就好/就行/就可以 (offer minimizer) — were retired when
+	// cjkVerbHasAdjacentMarker made them redundant: a pre-verb 好 is never
+	// scanned, and a post-verb 好 tailing 較/更/剛/正/就 is rejected as a
+	// different word. Only semantic guards remain above.
 }
 
 // cjkClauseSplit breaks a response into clauses so guard tokens in one clause
@@ -126,10 +176,7 @@ func claimsWrite(response string, peerNames []string) bool {
 		return true
 	}
 	for _, clause := range cjkClauseSplit.Split(response, -1) {
-		if !writeClaimRe_CJK.MatchString(clause) {
-			continue
-		}
-		if !cjkCompletionRe.MatchString(clause) {
+		if !cjkVerbHasAdjacentMarker(clause) {
 			continue
 		}
 		guarded := false
@@ -250,7 +297,10 @@ func (v writeVerdict) isMiss() bool {
 	return v.classification == "verbal_save" || v.classification == "silent_failure"
 }
 
-const writeCorrectionPrompt = `[system: write-verification] You just told the user you saved / logged / recorded / 補進 / 記下 something, but no successful write tool call happened this turn — so nothing was actually persisted. Do NOT reply conversationally or re-explain. Actually perform the write NOW using your real tools (ghost_put, scripts/shell-remember, or the Notion / Google-Doc tool). Then reply with a brief, honest confirmation IN THE USER'S LANGUAGE, including the real memory id or page URL as proof. If you genuinely cannot write it, tell the user plainly that it did NOT save and why — never claim success you can't back with a tool result.`
+const writeCorrectionPrompt = `[system: write-verification] You just told the user you saved / logged / recorded / 補進 / 記下 something, but no successful write tool call happened this turn — so nothing was actually persisted. Do NOT reply conversationally or re-explain. You MUST do exactly one of these two things:
+(a) Actually perform the write NOW using your real tools (ghost_put, scripts/shell-remember, or the Notion / Google-Doc tool), read it back to confirm it landed, then reply with a brief, honest confirmation IN THE USER'S LANGUAGE including the real memory id or page URL as proof.
+(b) If you genuinely cannot perform the write, reply with a short correction sentence IN THE USER'S LANGUAGE that explicitly retracts the claim: state plainly that it did NOT save and why.
+Doing neither is not an option. An empty reply, or a reassuring reply with no write behind it, leaves a false claim standing and is non-compliant — never claim success you can't back with a tool result.`
 
 // verifyWriteHygiene classifies the turn, optionally issues a bounded
 // correction turn (when enforcement is on and a write claim wasn't backed by a
@@ -274,7 +324,7 @@ func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, ch
 		return resp
 	}
 
-	enforced := false
+	enforced := 0 // 0=log-only, 1=corrected, 2=correction no-oped (see store.WriteVerification)
 	if v.isMiss() {
 		slog.Warn("write-hygiene miss",
 			"chat_id", chatID, "class", v.classification,
@@ -292,7 +342,7 @@ func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, ch
 			if err != nil {
 				slog.Warn("write-hygiene correction turn failed", "chat_id", chatID, "error", err)
 			} else {
-				enforced = true
+				enforced = 1
 				corrText := stripDirectives(strings.TrimSpace(corr.Text))
 				corrText = b.parseArtifacts(corrText, &resp.Photos, &resp.Videos)
 				if corrText != "" {
@@ -301,6 +351,29 @@ func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, ch
 					} else {
 						resp.Text = corrText
 					}
+				}
+				// The correction turn rides its own agent.Send, so its tool
+				// calls bypass processResponse's ledger — log them here or
+				// enforcement efficacy is unmeasurable (incident 7/25).
+				if len(corr.ToolCalls) > 0 {
+					if err := b.store.LogToolUses(chatID, sessID, "write-verify-correction", toolUseRows(corr.ToolCalls)); err != nil {
+						slog.Warn("failed to log correction tool uses", "chat_id", chatID, "error", err)
+					}
+				}
+				// A correction that neither wrote anything nor said anything
+				// left the original false claim standing (incident 7/25: the
+				// user checked the "saved" note that evening — real data
+				// loss). Record it as enforced=2 so the canary can see it.
+				corrWroteOK := false
+				for _, tc := range corr.ToolCalls {
+					if isPersistenceTool(tc) && !tc.Failed {
+						corrWroteOK = true
+						break
+					}
+				}
+				if !corrWroteOK && strings.TrimSpace(corrText) == "" {
+					enforced = 2
+					slog.Warn("write-hygiene correction no-op", "chat_id", chatID, "class", v.classification, "corr_tools", len(corr.ToolCalls))
 				}
 				// Re-classify against the correction turn's tool calls so the
 				// ledger records the post-correction outcome (ideally verified).

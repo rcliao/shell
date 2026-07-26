@@ -473,7 +473,10 @@ func (s *Store) migrate() error {
 	// ("verbal save") rate over time and prove the enforcement loop helps.
 	//
 	// classification ∈ {verified, verbal_save, silent_failure, unclaimed_trigger}
-	// enforced=1 once a correction turn was issued for this row (0 in log-only mode).
+	// enforced: 0 = log-only mode, 1 = a correction turn was issued for this
+	// row, 2 = a correction turn was issued but no-oped (no successful
+	// persistence write AND no user-visible text — the false claim stood;
+	// incident 7/25). Same INTEGER column, no migration needed.
 	writeVerifySchema := `
 	CREATE TABLE IF NOT EXISTS write_verifications (
 		id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1691,7 +1694,7 @@ type WriteVerification struct {
 	WriteOK        bool   // at least one successful persistence tool call observed
 	WriteFailed    bool   // a persistence tool call was observed but errored
 	ToolNames      string // comma-joined persistence tool names seen (for debugging)
-	Enforced       bool   // a correction turn was issued for this row
+	Enforced       int    // 0=log-only, 1=correction turn issued, 2=correction no-oped (no write, no text)
 	Source         string // interactive | heartbeat | scheduler
 }
 
@@ -1708,7 +1711,7 @@ func (s *Store) LogWriteVerification(v WriteVerification) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, v.ChatID, v.SessionID, v.Classification,
 		b2i(v.Triggered), b2i(v.Claimed), b2i(v.WriteOK), b2i(v.WriteFailed),
-		v.ToolNames, b2i(v.Enforced), src)
+		v.ToolNames, v.Enforced, src)
 	return err
 }
 

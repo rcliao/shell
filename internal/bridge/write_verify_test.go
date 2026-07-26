@@ -206,6 +206,37 @@ func TestClassifyWrite(t *testing.T) {
 			calls:    nil,
 			want:     "",
 		},
+		// Marker-adjacency structural fix (7/26): completion markers must sit
+		// in the same phrase as the write verb, not float anywhere in the
+		// clause. These pin the classes the retired narrow guards covered.
+		{
+			name:     "no false positive — ✅ as bullet decoration in a different bullet than the verb",
+			userMsg:  "湯裡加了什麼",
+			response: "▫️ 紅蘿蔔跟洋蔥都是後來才加進去的\n▫️ ✅ 湯底有先冰過",
+			calls:    nil,
+			want:     "",
+		},
+		{
+			name:     "no false positive — ✅ as bullet-prefix decoration before the verb (7/22 incident)",
+			userMsg:  "這鍋是怎麼煮的",
+			response: "▫️ ✅ 紅蘿蔔跟洋蔥都是後來才加進去的",
+			calls:    nil,
+			want:     "",
+		},
+		{
+			name:     "genuine claim — 保存好了 with the marker bonded to the verb",
+			userMsg:  "記一下我對乳製品比較敏感",
+			response: "妳的乳製品筆記保存好了 ✅",
+			calls:    nil,
+			want:     "verbal_save",
+		},
+		{
+			name:     "no false positive — 比較好 is 'better', with a write verb in another clause",
+			userMsg:  "黑豆漿算正餐還是點心",
+			response: "記錄在點心欄比較好。熱量的部分我晚點加進 Notion",
+			calls:    nil,
+			want:     "",
+		},
 		{
 			name:     "no false positive — peer attribution (Umbreon 已經幫妳寫進…了)",
 			userMsg:  "接駁車路線有到哪些點",
