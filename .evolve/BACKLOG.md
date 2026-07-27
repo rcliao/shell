@@ -1262,7 +1262,7 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
      supposed to be live as an alert, plus a PID liveness probe — log
      tailing alone cannot distinguish "quiet" from "dead".
 
-### V2-H45 — [M] Defer fingerprint rotations to idle — NEW 7/16
+### V2-H45 — [M] Defer fingerprint rotations to idle — shipped 3ef950a 7/26
 - **finding (live, 16:20):** mid-conversation turn hit first_visible 55.6s:
   prework 12.1s of which rotate_and_log 9.1s — a fingerprint-change
   rotation fired MID-CHAT. Now that the agent actively self-curates pins
@@ -1308,7 +1308,7 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   survive; syscall.Exec generations inherit the fd. The 7/16 silent death
   would have left a trace.
 
-### V2-H46 — [M] H44 extension: absorb a single waiter into a long-running turn — APPROVED 7/17
+### V2-H46 — [M] H44 extension: absorb a single waiter into a long-running turn — shipped a01cbed 7/26, canary umbreonmini
 - **why (monitoring 7/17):** H44 coalescing has never fired naturally
   because real bursts queue ONE message at a time behind long tool-tail
   turns (lock waits of 38.5s and 27.3s observed 15:37-15:38, both single
