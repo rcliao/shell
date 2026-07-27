@@ -332,6 +332,9 @@ type SchedulerConfig struct {
 	HeartbeatInterval     string `json:"heartbeat_interval"`      // active heartbeat interval (default: "1h")
 	HeartbeatIdleInterval string `json:"heartbeat_idle_interval"` // interval after noop heartbeat (default: "2h")
 	DeepReflectInterval   int    `json:"deep_reflect_interval"`   // every Nth heartbeat uses deep model for reflection (default: 6)
+	// Kill switch: V2-H47 lesson-to-action block in deep heartbeats.
+	// Default false = enabled (prompt-only feature, matches *_disabled pattern).
+	LessonToActionDisabled bool `json:"lesson_to_action_disabled"`
 }
 
 type ReloadConfig struct {

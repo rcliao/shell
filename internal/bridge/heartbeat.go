@@ -222,6 +222,17 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("7. **Task hygiene**: scan recent conversations for in-flight multi-step work that has no task row backing it. Open one so it survives session rotation and shows up in heartbeat context next time:\n")
 		sb.WriteString("     scripts/shell-task add --description \"<work>\"\n")
 		sb.WriteString("   Mark complete with `scripts/shell-task complete --id <id>` when done. The task table is currently underused — most multi-step work evaporates because it never got tracked.\n\n")
+		if !b.lessonToActionDisabled {
+			sb.WriteString("8. **Lesson to action** (one per deep beat): review your stored learnings (heartbeat insights and behavioral learnings above, plus your memory context) and pick AT MOST ONE lesson that is applicable RIGHT NOW. Then take ONE concrete action this beat:\n")
+			sb.WriteString("   - write or update a skill draft in your own workspace, OR\n")
+			sb.WriteString("   - adjust a pinned memory so it encodes the corrected behavior, OR\n")
+			sb.WriteString("   - complete a lingering task the lesson points at, OR\n")
+			sb.WriteString("   - send ONE useful proactive message — ONLY if the lesson directly concerns something the family explicitly asked for.\n")
+			sb.WriteString("   Guardrails: never send media; never message the family group unless the lesson is about an explicit family request; one action max per deep beat; structural/behavioral changes only to your OWN workspace and pins — never to shell repo code or another agent's state.\n")
+			sb.WriteString("   Record what you did so there's a ledger trail:\n")
+			sb.WriteString("     scripts/shell-remember --action heartbeat-learning --content \"[lesson-action] <lesson> → <action taken>\"\n")
+			sb.WriteString("   If no stored lesson is actionable right now, say so explicitly in one line — that's a valid outcome, not a failure.\n\n")
+		}
 		sb.WriteString("After reflection, only message a chat if you have something genuinely useful or delightful to share (a due reminder, a finding, a follow-up the user expects). Reflection alone is not a reason to send anything — [noop] is the normal outcome for most heartbeats.\n")
 	}
 

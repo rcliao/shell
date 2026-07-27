@@ -143,6 +143,10 @@ type Bridge struct {
 	// Heartbeat interval for auto-created heartbeats (empty = "1h" default).
 	heartbeatInterval string
 
+	// Kill switch: V2-H47 lesson-to-action block in deep heartbeats.
+	// false (default) = block included.
+	lessonToActionDisabled bool
+
 	// Topic classifier (cycle 66) — populated when claude.model_routing.
 	// topic_classifier is set in config. nil = disabled.
 	classifier *topic.HybridClassifier
@@ -221,6 +225,12 @@ func (b *Bridge) initTopicClassifier() {
 // SetHeartbeatInterval overrides the default heartbeat interval for auto-created heartbeats.
 func (b *Bridge) SetHeartbeatInterval(interval string) {
 	b.heartbeatInterval = interval
+}
+
+// SetLessonToActionDisabled toggles the V2-H47 lesson-to-action block in deep
+// heartbeat prompts (kill switch; default enabled).
+func (b *Bridge) SetLessonToActionDisabled(disabled bool) {
+	b.lessonToActionDisabled = disabled
 }
 
 // stashConsolidationCandidates stores consolidation candidates for the next heartbeat.

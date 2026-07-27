@@ -832,6 +832,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		if cfg.Scheduler.HeartbeatInterval != "" {
 			br.SetHeartbeatInterval(cfg.Scheduler.HeartbeatInterval)
 		}
+		br.SetLessonToActionDisabled(cfg.Scheduler.LessonToActionDisabled)
 		slog.Info("scheduler initialized",
 			"timezone", cfg.Scheduler.Timezone,
 			"quiet_hours", fmt.Sprintf("%d:00-%d:00", cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd),

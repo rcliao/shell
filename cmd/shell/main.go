@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -320,6 +321,66 @@ func main() {
 	recallHygieneCmd.Flags().StringVar(&rhSinceFlag, "since", "", "lookback window (e.g. 168h, 24h); empty = all-time")
 	recallHygieneCmd.Flags().Int64Var(&rhChatFlag, "chat", 0, "filter by chat ID (0 = all chats)")
 	recallHygieneCmd.Flags().StringVar(&rhConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
+
+	// lesson-actions command — read-only view of the V2-H47 lesson-to-action
+	// ledger: "[lesson-action]"-prefixed heartbeat learnings in the memory store.
+	var laChatFlag int64
+	var laConfigFlag string
+	lessonActionsCmd := &cobra.Command{
+		Use:   "lesson-actions [n]",
+		Short: "List recent [lesson-action] ledger entries from deep-heartbeat lesson-to-action passes",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			n := 10
+			if len(args) == 1 {
+				v, perr := strconv.Atoi(args[0])
+				if perr != nil || v <= 0 {
+					return fmt.Errorf("invalid count %q: want a positive integer", args[0])
+				}
+				n = v
+			}
+
+			cfg := loadConfigFrom(laConfigFlag)
+			mem, err := openMemoryFromConfig(cfg)
+			if err != nil {
+				return err
+			}
+			defer mem.Close()
+
+			// Over-fetch: heartbeat learnings mix lesson-actions with regular
+			// insights, so scan a wider window and filter by prefix.
+			learnings, err := mem.ListHeartbeatLearnings(cmd.Context(), laChatFlag, n*10)
+			if err != nil {
+				return err
+			}
+
+			const prefix = "[lesson-action]"
+			count := 0
+			for _, l := range learnings {
+				if !strings.HasPrefix(strings.TrimSpace(l.Content), prefix) {
+					continue
+				}
+				if count == 0 {
+					fmt.Printf("Recent lesson-actions (newest first, max %d):\n\n", n)
+				}
+				text := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l.Content), prefix))
+				if r := []rune(text); len(r) > 100 { // rune-safe: content may be CJK
+					text = string(r[:100]) + "..."
+				}
+				fmt.Printf("  %s  %s\n", l.CreatedAt.Local().Format("2006-01-02 15:04"), text)
+				count++
+				if count >= n {
+					break
+				}
+			}
+			if count == 0 {
+				fmt.Println("No [lesson-action] entries found. Deep heartbeats record one entry per acted-on lesson.")
+			}
+			return nil
+		},
+	}
+	lessonActionsCmd.Flags().Int64Var(&laChatFlag, "chat", 0, "filter by chat ID (0 = agent-wide/system-chat entries)")
+	lessonActionsCmd.Flags().StringVar(&laConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
 
 	// eval command — the owner-fitness scorecard (V2-H31).
 	var evSinceFlag, evConfigFlag string
@@ -1053,7 +1114,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

@@ -1117,6 +1117,33 @@ func (m *Memory) HeartbeatContext(ctx context.Context, chatID int64, budget int)
 	return strings.TrimSpace(sb.String())
 }
 
+// ListHeartbeatLearnings returns recent heartbeat-learning memories for a chat,
+// newest first (read-only; used by the `shell lesson-actions` CLI to surface
+// "[lesson-action]" ledger entries). chatID 0 covers agent-wide (system-chat)
+// learnings, which are stored without a chat tag.
+func (m *Memory) ListHeartbeatLearnings(ctx context.Context, chatID int64, limit int) ([]agentmemory.Memory, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	prof := m.profileFor(chatID)
+	if prof.AgentNS != "" {
+		tags := []string{"heartbeat"}
+		if chatID != 0 {
+			tags = append(tags, chatTag(chatID))
+		}
+		return m.store.List(ctx, agentmemory.ListParams{
+			NS:    prof.AgentNS,
+			Tags:  tags,
+			Limit: limit,
+		})
+	}
+	return m.store.List(ctx, agentmemory.ListParams{
+		NS:    legacyHeartbeatNamespace(chatID),
+		Kind:  "episodic",
+		Limit: limit,
+	})
+}
+
 // maxBehavioralLearnings is the cap on stored behavioral learnings.
 const maxBehavioralLearnings = 30
 

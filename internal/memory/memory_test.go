@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	agentmemory "github.com/rcliao/ghost"
 )
@@ -51,7 +52,7 @@ func TestRememberMediaPhotoSearchable(t *testing.T) {
 	m := newTestMemory(t)
 	ctx := context.Background()
 	m.RememberMedia(ctx, 42,
-		"mami's new Eevee Evolutions backpack from Hot Topic, brown canvas with all nine evolutions embroidered, shared while shopping online",
+		"the user's new Eevee Evolutions backpack from Hot Topic, brown canvas with all nine evolutions embroidered, shared while shopping online",
 		[]string{"/tmp/media/2026-07/testbot-20260714-msg1.jpg"})
 
 	res, err := m.store.Search(ctx, agentmemory.SearchParams{NS: "agent:test", Query: "Eevee backpack photo", Limit: 5})
@@ -111,5 +112,48 @@ func TestLogExchangeChatterNotDistilled(t *testing.T) {
 	}
 	if len(same) != 0 {
 		t.Errorf("chatter should not produce a distilled fact, got %d: %+v", len(same), same)
+	}
+}
+
+// V2-H47: lesson-action ledger entries stored via StoreHeartbeatLearning must
+// round-trip through the read-only ListHeartbeatLearnings used by the
+// `shell lesson-actions` CLI, newest first.
+func TestListHeartbeatLearnings_LessonActionRoundTrip(t *testing.T) {
+	t.Setenv("GHOST_EMBED_PROVIDER", "none")
+	db := filepath.Join(t.TempDir(), "mem.db")
+	profiles := map[string]ProfileConfig{"p": {AgentNS: "agent:test"}}
+	// Map the system chat (0) so agent-wide learnings use the agent namespace.
+	m, err := New(db, 2000, nil, 500, nil, 3000, profiles, map[int64]string{0: "p"})
+	if err != nil {
+		t.Fatalf("new memory: %v", err)
+	}
+	ctx := context.Background()
+
+	if err := m.StoreHeartbeatLearning(ctx, 0, "plain insight about scheduling"); err != nil {
+		t.Fatalf("store plain: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond) // keys are hb-<unixmilli>; avoid same-ms collision
+	if err := m.StoreHeartbeatLearning(ctx, 0, "[lesson-action] verify writes → updated skill draft"); err != nil {
+		t.Fatalf("store lesson-action: %v", err)
+	}
+
+	got, err := m.ListHeartbeatLearnings(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("expected at least 2 learnings, got %d", len(got))
+	}
+	var found bool
+	for _, g := range got {
+		if strings.HasPrefix(g.Content, "[lesson-action]") {
+			found = true
+			if g.CreatedAt.IsZero() {
+				t.Error("lesson-action entry missing CreatedAt timestamp")
+			}
+		}
+	}
+	if !found {
+		t.Error("lesson-action entry not returned by ListHeartbeatLearnings")
 	}
 }
