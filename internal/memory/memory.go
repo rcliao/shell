@@ -216,7 +216,11 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 		layers[""] = append(layers[""], mem.Content)
 	}
 	if dropped > 0 {
-		slog.Warn("operating knowledge over budget — oldest pins dropped this rotation",
+		// Loud on purpose: silent pin-dropping is how a security-relevant pin
+		// vanished unnoticed for 11 days (7/16–7/27). The budget is a curation
+		// ceiling — when this fires, the fix is consolidation (merge/retire
+		// pins), not raising the budget. Diagnose with `shell context`.
+		slog.Warn("PINNED BUDGET EXCEEDED — oldest operating pins dropped this rotation; consolidate pins, do not raise the budget",
 			"dropped", dropped, "kept", len(layers[""]), "budget_tokens", budget)
 	}
 
@@ -1399,33 +1403,6 @@ func (m *Memory) SeedCapability(ctx context.Context, agentNS, key, content strin
 		Kind:       "procedural",
 		Priority:   "high",
 		Importance: 0.9,
-		Tier:       "ltm",
-		Pinned:     true,
-	})
-	return err
-}
-
-// StoreSkillInventory upserts a pinned semantic memory summarizing the
-// agent-authored skills for chatID's profile. Survives session rotation so
-// the agent remembers its own tools across generations.
-//
-// The key is stable (skill-inventory-<agent-ns>) so repeated calls overwrite
-// rather than accumulate. Content is expected to be a compact, human-
-// readable digest produced by the bridge's retro builder.
-func (m *Memory) StoreSkillInventory(ctx context.Context, chatID int64, content string) error {
-	prof := m.profileFor(chatID)
-	ns := prof.AgentNS
-	if ns == "" {
-		return fmt.Errorf("skill inventory requires AgentNS")
-	}
-	_, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:         ns,
-		Key:        "skill-inventory",
-		Content:    content,
-		Kind:       "semantic",
-		Tags:       []string{"skill-inventory", "capabilities"},
-		Priority:   "high",
-		Importance: 0.85,
 		Tier:       "ltm",
 		Pinned:     true,
 	})

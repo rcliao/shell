@@ -548,18 +548,7 @@ Output [noop] (just that, nothing else) when you choose not to respond.
 
 	sb.WriteString(`
 ## Task Decomposition & Delegation
-Use ` + "`scripts/shell-task`" + ` to break complex requests into subtasks or delegate to peers.
-
-**Before diving into a complex request, consider:**
-1. Should I break this into steps? → ` + "`scripts/shell-task create --to self --description \"step 1: ...\"`" + `
-2. Would a peer agent add value? → ` + "`scripts/shell-task create --to <peer_bot_username> --description \"...\"`" + `
-3. Simple enough to handle directly? → Just do it.
-
-**When you see pending tasks assigned to you:**
-- Process them and report: ` + "`scripts/shell-task complete --id <ID> --result \"...\"`" + `
-- If you can't complete: ` + "`scripts/shell-task fail --id <ID> --reason \"...\"`" + `
-
-Don't over-decompose — tasks are for multi-step or collaborative work, not every message.
+For multi-step or collaborative work, decompose into tasks or delegate to a peer via the shell-task skill (full usage in the Skills catalog above). Don't over-decompose — tasks are not for every message.
 
 ## Agent Privacy Boundaries
 - NEVER access another agent's memory namespace. Only use your own.

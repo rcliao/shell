@@ -1,9 +1,7 @@
 package bridge
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -129,7 +127,7 @@ func (b *Bridge) buildSkillRetroBlock() string {
 	sb.WriteString("- Retire: move `skills/<name>/` to `skills/.archive/`. USAGE.jsonl history stays intact.\n")
 	sb.WriteString("- New version: create `skills/<name>/v2/SKILL.md`, leave ACTIVE on v1 until v2 proves out.\n")
 	sb.WriteString("- Base decisions on USAGE.jsonl stats (shown above), NOT on how clever the skill sounds — productivity theater wastes the hot budget.\n")
-	sb.WriteString("- A compact inventory digest is auto-pinned to memory (key `skill-inventory`) after this reflect so your tools survive session rotation. If you make a significant change, also ghost_put a brief rationale memory tagged `skill:<name>` so the **why** is preserved alongside the what.\n")
+	sb.WriteString("- If you make a significant change, ghost_put a brief rationale memory tagged `skill:<name>` so the **why** is preserved alongside the what. (Your skills catalog is part of every session's system prompt — no pin needed for tools to survive rotation.)\n")
 	return sb.String()
 }
 
@@ -290,27 +288,6 @@ func (b *Bridge) buildSkillInventoryDigest() string {
 		writeDigestLine(s, "lazy")
 	}
 	return strings.TrimRight(sb.String(), "\n")
-}
-
-// refreshSkillInventoryMemory writes the current digest to pinned memory.
-// Called from the deep-reflect path so the digest stays current. Safe to
-// call when memory is disabled or the profile has no agent namespace —
-// in those cases it silently no-ops. Errors are logged, not returned;
-// failing to refresh the digest must never break a heartbeat.
-func (b *Bridge) refreshSkillInventoryMemory(ctx context.Context, chatID int64) {
-	if b.memory == nil {
-		return
-	}
-	if b.memory.AgentNS(chatID) == "" {
-		return
-	}
-	digest := b.buildSkillInventoryDigest()
-	if digest == "" {
-		return
-	}
-	if err := b.memory.StoreSkillInventory(ctx, chatID, digest); err != nil {
-		slog.Warn("skill inventory refresh failed", "chat_id", chatID, "error", err)
-	}
 }
 
 // scanPlayground returns short notes on directories under playground/ that

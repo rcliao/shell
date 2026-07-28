@@ -184,9 +184,10 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		if retro := b.buildSkillRetroBlock(); retro != "" {
 			sb.WriteString(retro)
 		}
-		// Refresh the pinned skill-inventory memory so the agent's tools
-		// survive session rotation. Non-blocking; failures are logged.
-		b.refreshSkillInventoryMemory(ctx, chatID)
+		// NOTE: the pinned skill-inventory digest was retired 2026-07-28 — the
+		// skills catalog is composed into every generation's system prompt, so
+		// skills never needed a pin to survive rotation; the pin duplicated
+		// the catalog and its refresh churned a dead row every deep beat.
 
 		sb.WriteString("\n\n---\n**[Deep Reflection]**\n")
 		sb.WriteString("This is your deep-reflection heartbeat — the one turn where you think as hard as you can about getting better. ultrathink: don't settle for the first observation, trace root causes, weigh alternatives, and be honest about your own failures. Everything above is context, not a checklist — judge what most deserves this beat's attention and do that one thing well. Typical moves, any one of which can be the whole beat:\n")
