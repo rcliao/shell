@@ -17,19 +17,14 @@ func (b *Bridge) skillsSystemPrompt() string {
 		return ""
 	}
 	prompt := b.skills.CatalogPrompt()
+	// Bridge-level facts only. Tool- and skill-specific guidance (pm/tunnel
+	// usage, scheduling via shell-schedule, CronCreate volatility) lives in
+	// the tool descriptions and SKILL.md files — single source of truth per
+	// the Claude-5 context guidance; this block used to duplicate all of it.
 	prompt += "\n\n## Bridge Rules\n\n" +
-		"Do NOT emit text directives like `[pm]`, `[tunnel]`, `[schedule]`, `[relay]`, " +
-		"`[remember]`, `[heartbeat-learning]`, `[task-complete]`, or `[browser]` in your response. " +
-		"These are silently stripped and do nothing.\n\n" +
-		"For process management and tunnels, use the `shell_pm` and `shell_tunnel` MCP tools directly.\n" +
-		"For scheduling, memory, relay, and tasks, use the corresponding skill scripts via Bash.\n\n" +
-		"**CRITICAL:** NEVER run long-running processes (servers, watchers) directly via Bash. " +
-		"Always use `shell_pm` so they are tracked, have logs, and can be stopped.\n\n" +
-		"**IMPORTANT — Scheduling:** CronCreate is SESSION-ONLY and dies on every session restart. " +
-		"NEVER use CronCreate for reminders. ALWAYS use the shell-schedule skill script instead — it persists to SQLite. " +
-		"Invoke it by the ABSOLUTE path shown in the Skills catalog above.\n" +
-		"Example: `<shell-schedule scripts dir>/shell-schedule once --at \"21:00\" --message \"Flonase time!\" --mode notify`\n" +
-		"Example: `<shell-schedule scripts dir>/shell-schedule cron --expr \"0 21 * * *\" --message \"Daily Flonase\" --mode notify`\n"
+		"Bracketed text directives (`[pm]`, `[relay]`, `[schedule]`, …) are legacy — the bridge strips them silently; " +
+		"act through MCP tools and skill scripts instead.\n" +
+		"Long-running processes (servers, watchers) go through `shell_pm`, never bare Bash.\n"
 
 	// Playground directory info (if configured).
 	if b.claudeCfg.PlaygroundDir != "" {

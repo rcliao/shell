@@ -3,7 +3,7 @@ name: google
 description: Read/write Google Docs, Sheets, Calendar, Drive, and Tasks via the gog CLI
 usage: ~/.shell/skills/google/scripts/google docs cat <docId>
 allowed-tools: Bash
-tier: core
+tier: hot
 ---
 
 # Google Workspace

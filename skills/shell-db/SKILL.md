@@ -3,8 +3,8 @@ name: shell-db
 description: Read-only queries against your own databases (sessions, schedules, memory, tasks) with correct paths and schema built in
 usage: ~/.shell/skills/shell-db/scripts/shell-db query "SELECT ..." [shell|memory|tasks]
 allowed-tools: Bash
-core: true
-tier: core
+
+tier: hot
 ---
 
 # Database inspection (read-only)
