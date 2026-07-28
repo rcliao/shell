@@ -133,3 +133,47 @@ max effort was never the problem, the model's self-ranking disposition was).
 - Ephemeral one-shots **never** mutate the persistent session's UUID/model (today only fable
   respects this — generalize it).
 - Public-repo hygiene: this doc and any config carry no chat IDs or personal identifiers.
+
+---
+
+## Context Assembly — current state (refreshed 2026-07-28)
+
+The composed system prompt (Channel A, fingerprinted, cached per subprocess) is
+built in `bridge.go` HandleMessageStreaming in this order; live sizes come from
+`shell context --config <agent-config>` (RPC to the running daemon — always
+prefer it over reconstructing):
+
+| # | Component | Source | Typical size (chars) | Change frequency |
+|---|-----------|--------|----------------------|------------------|
+| 1 | config system_prompt | agent config (legacy, empty) | 0 | never |
+| 2 | pinned_memories | ghost pins, 4 layers (core identity / personality / lore / operating knowledge) | 15k (post-consolidation) – 34k (pre) | daily (agent self-curation) |
+| 3 | timestamp | static instruction to trust the per-turn `[Current time: …]` marker | ~0.4k | never |
+| 4 | skills_catalog | three tiers: core = full SKILL.md inline; hot = budget-packed bodies; lazy = name+description | ~16k | on skill install/edit |
+| 5 | environment | DB paths, workspace (+ project-notes habit), capability calibration | ~1.4k | rare |
+| 6 | session_lifecycle | rotation/compaction self-knowledge | ~1k | rare |
+| 7 | group_agent | sender-attribution contract, noop rules, A2A addressing, cross-check, peer catalog, delegation | ~4.7k | rare |
+
+Channel B (per-turn, not fingerprinted): `[From: <label> \| chat: id]` sender tag,
+time/topic/carry-forward prefix, ghost per-turn delta, shared-transcript block,
+pending-tasks block, media contracts.
+
+### 2026-07 context-engineering changes (Claude-5 guidance)
+- Bridge Rules cut to 2 bridge-level facts; tool/skill guidance single-sourced
+  in SKILL.md / tool descriptions.
+- Heartbeat enrichment: Priority-numbered checklist → labeled context + one
+  judgment goal paragraph (−33% scaffolding). Lesson-to-action contract (V2-H47)
+  preserved with kill switch `scheduler.lesson_to_action_disabled`.
+- Pinned operating knowledge consolidated (one agent done: 37 pins/34k → 16
+  pins/14k; merge sources unpinned but searchable; backup kept next to the DB).
+- Fingerprint rotations defer to the idle prewarm tick (V2-H45, 30-min cap).
+- Skills google/shell-db moved core → hot.
+
+### Known remaining opportunities (see evolve backlog)
+- Second agent's pin consolidation (~34k → ~8k).
+- skill-inventory pinned digest duplicates the skills_catalog that is already
+  in every generation's prompt (it predates the catalog); retiring it also
+  retires the recurring refresh job that re-inserts it.
+- Group prompt's "Task Decomposition & Delegation" section duplicates the
+  core-tier shell-task SKILL.md body — single-source candidate.
+- Core-tier audit: 8 skills render full bodies (~16k); several are candidates
+  for hot/lazy demotion.
