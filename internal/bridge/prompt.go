@@ -57,7 +57,8 @@ func (b *Bridge) environmentPrompt() string {
 	if b.workspaceDir != "" {
 		sb.WriteString("- **Workspace:** `" + b.workspaceDir + "` — your persistent scratch space. ")
 		sb.WriteString("Notes, helper scripts, drafts, and experiments belong here; it survives restarts and rotations. ")
-		sb.WriteString("Prefer it over /tmp for anything you may want again.\n")
+		sb.WriteString("Prefer it over /tmp for anything you may want again. ")
+		sb.WriteString("For multi-day projects (trips, watches, plans), keep a notes file here: read it before re-deriving state, update it when things change — it's cheaper and more faithful than reconstructing from conversation memory.\n")
 	}
 	if len(b.skillDirs) > 0 {
 		sb.WriteString("- **Skill roots:** ")
@@ -70,6 +71,10 @@ func (b *Bridge) environmentPrompt() string {
 		sb.WriteString(" — installed skills load from these; invoke their scripts by absolute path.\n")
 	}
 	sb.WriteString("- **Shared task store:** `~/.shell/shared/tasks.db` — use the shell-task skill, not raw SQL, to mutate it.\n")
+	// Calibration: state what the agent does NOT inherently know, so it
+	// reaches for a tool (or says so) instead of confabulating capability
+	// or freshness it doesn't have.
+	sb.WriteString("- **What you don't know without a tool:** anything after your training cutoff (news, prices, availability — use web search/browser), the current state of files/DBs (read them), and your peer agent's private sessions. If you can't verify something the user will act on, say so rather than guessing.\n")
 	return sb.String()
 }
 
