@@ -62,3 +62,18 @@ scripts/browser "https://example.com" 'extract "body"'
 
 - `CHROME_PATH` — custom Chrome binary path (optional)
 - `BROWSER_HEADLESS` — set to `false` to run with visible browser (default: headless)
+
+## Place-status verification recipe
+
+To confirm a business is currently open (the web-search skill's location
+contract requires this before recommending any place):
+
+```bash
+# Yelp or Google Maps listing shows "Permanently closed" + current hours
+scripts/browser text "https://www.google.com/maps/search/<business>+<city>"
+scripts/browser text "https://www.yelp.com/search?find_desc=<business>&find_loc=<city>"
+```
+
+Look for "Permanently closed" / "Temporarily closed" in the extracted text;
+absence of the business in results is itself a red flag. Prefer the
+business's own site for hours when it has one.
