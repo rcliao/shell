@@ -73,13 +73,17 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 
 	var sb strings.Builder
 
-	// Priority 1: Consolidation tasks (memory hygiene)
+	// CONTEXT: labeled facts only. No priority numbering — the goal framing
+	// at the end asks the agent to judge what the beat needs; ordering here
+	// is presentation, not instruction.
+
+	// Consolidation candidates (memory hygiene)
 	if consolidation != "" {
 		sb.WriteString(consolidation)
 		sb.WriteString("\n")
 	}
 
-	// Priority 2: Pending background tasks
+	// Pending background tasks
 	if len(pendingTasks) > 0 {
 		sb.WriteString("[Pending background tasks]\n")
 		for _, t := range pendingTasks {
@@ -88,7 +92,7 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("[End of pending tasks]\n\n")
 	}
 
-	// Priority 2b: Shared task store activity (self-tasks + delegation)
+	// Shared task store activity (self-tasks + delegation)
 	if b.taskStore != nil {
 		if pending, err := b.taskStore.PendingTasksFor(b.agentBotUsername); err == nil && len(pending) > 0 {
 			sb.WriteString("[Pending delegated/self tasks]\n")
@@ -144,7 +148,7 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		}
 	}
 
-	// Priority 3: Recent conversations for reflection
+	// Recent conversations, tagged with source chat id (load-bearing: see below)
 	if len(exchanges) > 0 {
 		sb.WriteString("[Recent conversation history — each line is tagged with the chat it came from]\n")
 		sb.WriteString("When you follow up on any of these, send the reply BACK TO THAT SAME chat id (shell_relay chat_id=<that id>, cross_chat=true). Never default to the group.\n")
@@ -156,14 +160,14 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("[End of recent history]\n\n")
 	}
 
-	// Priority 4: Previous insights
+	// Previous heartbeat insights
 	if insights != "" {
 		sb.WriteString("[Previous heartbeat insights]\n")
 		sb.WriteString(insights)
 		sb.WriteString("\n[End of previous insights]\n\n")
 	}
 
-	// Priority 5 (deep only): Existing behavioral learnings for review
+	// Deep only: existing behavioral learnings for review
 	if isDeep && behavioralContext != "" {
 		sb.WriteString("[Current behavioral learnings]\n")
 		sb.WriteString(behavioralContext)
@@ -172,18 +176,11 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 
 	sb.WriteString(msg)
 
-	sb.WriteString("\n\n---\nHeartbeat priorities (in order):\n")
-	if consolidation != "" {
-		sb.WriteString("1. **CONSOLIDATE** the memory clusters listed above — use ghost_get to read full content, write a concise summary, call ghost_consolidate. This is the highest priority.\n")
-	}
-	if len(pendingTasks) > 0 {
-		sb.WriteString("2. Complete pending background tasks (scripts/shell-task complete --id <id>).\n")
-	}
-	sb.WriteString("3. If recent conversations reveal patterns, corrections, or user preferences worth remembering:\n")
-	sb.WriteString("   scripts/shell-remember --action heartbeat-learning --content \"<specific, actionable insight>\"\n")
-
-	// Deep heartbeats add behavioral self-evaluation + skill inventory retro.
+	// GOAL: judgment framing instead of a numbered checklist. The agent
+	// decides what (if anything) most deserves this beat; the context above
+	// is information, not a to-do list.
 	if isDeep {
+		// Skill inventory retro: ground-truth usage stats + action menu.
 		if retro := b.buildSkillRetroBlock(); retro != "" {
 			sb.WriteString(retro)
 		}
@@ -191,49 +188,19 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		// survive session rotation. Non-blocking; failures are logged.
 		b.refreshSkillInventoryMemory(ctx, chatID)
 
-		sb.WriteString("\n---\n**[Deep Reflection — Behavioral Self-Evaluation]**\n")
-		sb.WriteString("This is your deep-reflection heartbeat — the one turn where you think as hard as you can about getting better. ultrathink. Reason at maximum depth and effort: don't settle for the first observation, trace root causes, weigh alternatives, and be honest about your own failures. In addition to the regular priorities above, perform a thorough self-evaluation:\n\n")
-		sb.WriteString("1. **Response quality audit**: Review the recent conversations above. Were any of your responses:\n")
-		sb.WriteString("   - Corrected by the user? (e.g., wrong info, wrong format, missed context)\n")
-		sb.WriteString("   - Followed up with clarification? (suggests your first answer was unclear)\n")
-		sb.WriteString("   - Ignored or met with a short \"ok\"? (may indicate low value)\n\n")
-		sb.WriteString("2. **Missed expectations**: Did you miss anything the user likely expected?\n")
-		sb.WriteString("   - Reminders that should have fired but didn't\n")
-		sb.WriteString("   - Context from previous conversations you should have recalled\n")
-		sb.WriteString("   - Follow-ups you should have proactively offered\n\n")
-		sb.WriteString("3. **Usage pattern recognition**: What task types does each user ask you for most?\n")
-		sb.WriteString("   - Are you getting better at those tasks? What specific improvements can you make?\n")
-		sb.WriteString("   - Are there recurring tasks you could handle more efficiently?\n\n")
-		sb.WriteString("4. **Store behavioral adjustments** as procedural memories:\n")
-		sb.WriteString("   scripts/shell-remember --action behavioral --content \"<specific behavior change>\" --kind procedural\n")
-		sb.WriteString("   Good examples:\n")
-		sb.WriteString("   - \"When a user asks about food storage, always include safety timeframe not just yes/no\"\n")
-		sb.WriteString("   - \"When a user reports a bug, check the logs first before asking clarifying questions\"\n")
-		sb.WriteString("   - \"Meal memo format: always echo back the date, items as bullet list, and a brief reaction\"\n")
-		sb.WriteString("   Bad examples (too vague):\n")
-		sb.WriteString("   - \"Be more helpful\" / \"Try harder\" / \"Remember things better\"\n\n")
-		sb.WriteString("5. **Review existing behavioral learnings** (shown above if any exist).\n")
-		sb.WriteString("   - Are any outdated or superseded? Update or remove them.\n")
-		sb.WriteString("   - Are any too vague to be actionable? Make them more specific.\n\n")
-		sb.WriteString("6. **Schedule self-authorship**: scan recent conversations + previous insights for actions you took 2+ times manually that are predictable in time (a daily check, a weekly nudge, a recurring report). Author the schedule yourself instead of waiting for it to be set up for you:\n")
-		sb.WriteString("     scripts/shell-schedule cron --expr \"<cron>\" --message \"<msg>\" --mode <prompt|notify>\n")
-		sb.WriteString("     scripts/shell-schedule once --at \"<HH:MM or ISO>\" --message \"<msg>\" --mode notify\n")
-		sb.WriteString("   Bias toward authoring — under-scheduling is the failure mode. If a routine has emerged organically, formalize it. Differentiation comes from each agent's own schedule library, not from shared prompts.\n\n")
-		sb.WriteString("7. **Task hygiene**: scan recent conversations for in-flight multi-step work that has no task row backing it. Open one so it survives session rotation and shows up in heartbeat context next time:\n")
-		sb.WriteString("     scripts/shell-task add --description \"<work>\"\n")
-		sb.WriteString("   Mark complete with `scripts/shell-task complete --id <id>` when done. The task table is currently underused — most multi-step work evaporates because it never got tracked.\n\n")
+		sb.WriteString("\n\n---\n**[Deep Reflection]**\n")
+		sb.WriteString("This is your deep-reflection heartbeat — the one turn where you think as hard as you can about getting better. ultrathink: don't settle for the first observation, trace root causes, weigh alternatives, and be honest about your own failures. Everything above is context, not a checklist — judge what most deserves this beat's attention and do that one thing well. Typical moves, any one of which can be the whole beat:\n")
+		sb.WriteString("- Complete a due task (scripts/shell-task complete --id <id>), or open a task row for in-flight multi-step work that has none (scripts/shell-task add --description \"<work>\") so it survives session rotation.\n")
+		sb.WriteString("- Consolidate any flagged memory clusters above: ghost_get the full content, write a concise summary, ghost_consolidate.\n")
+		sb.WriteString("- Distill what recent conversations actually taught you — a correction, a missed expectation, a recurring pattern — into ONE stored adjustment (scripts/shell-remember --action behavioral --content \"<specific behavior change>\" --kind procedural), or sharpen/retire a vague or superseded learning shown above. Specific and testable beats \"be more helpful\".\n")
+		sb.WriteString("- Formalize a routine you've now done manually 2+ times as a schedule you author yourself (scripts/shell-schedule cron --expr \"<cron>\" --message \"<msg>\" --mode <prompt|notify>, or once --at \"<HH:MM or ISO>\"). Under-scheduling is the common failure mode; each agent's own schedule library is where differentiation comes from.\n")
 		if !b.lessonToActionDisabled {
-			sb.WriteString("8. **Lesson to action** (one per deep beat): review your stored learnings (heartbeat insights and behavioral learnings above, plus your memory context) and pick AT MOST ONE lesson that is applicable RIGHT NOW. Then take ONE concrete action this beat:\n")
-			sb.WriteString("   - write or update a skill draft in your own workspace, OR\n")
-			sb.WriteString("   - adjust a pinned memory so it encodes the corrected behavior, OR\n")
-			sb.WriteString("   - complete a lingering task the lesson points at, OR\n")
-			sb.WriteString("   - send ONE useful proactive message — ONLY if the lesson directly concerns something the family explicitly asked for.\n")
-			sb.WriteString("   Guardrails: never send media; never message the family group unless the lesson is about an explicit family request; one action max per deep beat; structural/behavioral changes only to your OWN workspace and pins — never to shell repo code or another agent's state.\n")
-			sb.WriteString("   Record what you did so there's a ledger trail:\n")
-			sb.WriteString("     scripts/shell-remember --action heartbeat-learning --content \"[lesson-action] <lesson> → <action taken>\"\n")
-			sb.WriteString("   If no stored lesson is actionable right now, say so explicitly in one line — that's a valid outcome, not a failure.\n\n")
+			sb.WriteString("- **Lesson to action** (AT MOST ONE action per deep beat): pick one stored lesson (insights, behavioral learnings, memory context) that is applicable RIGHT NOW and act on it — a skill draft in your own workspace, a pinned-memory adjustment encoding the corrected behavior, a lingering task the lesson points at, or ONE proactive message only if the lesson directly concerns something the family explicitly asked for. Guardrails: never send media; never message the family group otherwise; changes only to your OWN workspace and pins — never to shell repo code or another agent's state. Ledger the action: scripts/shell-remember --action heartbeat-learning --content \"[lesson-action] <lesson> → <action taken>\". If no stored lesson is actionable right now, say so in one line — that's a valid outcome, not a failure.\n")
 		}
-		sb.WriteString("After reflection, only message a chat if you have something genuinely useful or delightful to share (a due reminder, a finding, a follow-up the user expects). Reflection alone is not a reason to send anything — [noop] is the normal outcome for most heartbeats.\n")
+		sb.WriteString("- Send one genuinely useful or delightful message: a due reminder, a finding, a follow-up the user expects.\n")
+		sb.WriteString("Boundaries: never send media unless a user explicitly asked in the current conversation; don't re-send reminders that a notify-mode schedule already owns. Reflection alone is not a reason to send anything — [noop] is the normal outcome for most heartbeats.\n")
+	} else {
+		sb.WriteString("\n\n---\nDecide what, if anything, this beat needs — the context above is information, not a to-do list. Typical moves: complete a due task (scripts/shell-task complete --id <id>), consolidate any flagged memory clusters above (ghost_get → concise summary → ghost_consolidate), or record a genuinely new insight from recent conversations (scripts/shell-remember --action heartbeat-learning --content \"<specific, actionable insight>\"). Never send media unprompted, and don't re-send reminders that a notify-mode schedule already owns — [noop] is the normal outcome for most heartbeats.\n")
 	}
 
 	sb.WriteString("\nIf there is nothing that needs a user-facing message, respond with just: [noop]\n")
