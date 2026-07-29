@@ -1634,3 +1634,53 @@ reframed as V2-H9. v1 B-017 → shipped 2026-07-01.
   (b) log correction-turn tool calls with source=write-verify-correction;
   (c) re-classify post-correction by inspecting the correction result's
   ToolCalls instead of trusting it blindly. Status=APPROVED 7/26 (owner) — in progress.
+
+## V3 — agent-infra roadmap (research pass 7/29)
+
+Full proposal: `~/.shell/evolve-reviews/shell-vnext-agent-infra-20260729.md`
+(6 harnesses/landscapes surveyed, gap analysis, 30 ranked items, 16-item
+do-not-build list). Status of everything below: **pending owner priority**.
+
+### V3-S1 — [SECURITY, verified] browser blast radius
+The chromedp wrapper evaluates arbitrary JS (ActionJS → chromedp.Evaluate,
+internal/browser/browser.go:192) with no domain allowlist, while the same
+agent holds messaging-relay and secret-store access. Peers enforce this in
+code, not prompt. Fix: domain allowlist + JS off by default behind a flag +
+an untrusted-content boundary on fetched page text. Effort M.
+
+### V3-T1 — reliability quintet (all S, retires standing behavioral rules)
+1. `job_runs` table + dead-man's-switch (catches SILENCE — a job that fires
+   but fails to spawn is today indistinguishable from one that never fired).
+2. Heartbeat becomes a system-owned cron row (dissolves the heartbeat-vs-
+   notify duplicate class instead of patching it).
+3. Sentinel-token silence contract + isolated/light-context heartbeats
+   (framework enforces silence; peers report ~100k → ~2-5k tokens/beat —
+   note `SystemPromptWithBudget` is dead code today).
+4. Pre-run gate scripts (`{"wakeAgent": false}`) + no-agent mode — biggest
+   available cost cut; watch jobs currently wake a full subprocess to learn
+   nothing changed. Gate scripts run headless with full tool policy: a trust
+   boundary, not model-authored.
+5. Jitter + idempotent schedule registration + no-backfill + auto-pause +
+   next-3-fires preview (one afternoon for all five).
+6. Edge-triggered conditions with frozen prior state — the structural version
+   of every dedup bug patched behaviorally so far.
+
+### V3-T2 — memory governance arc (M each, sequence matters)
+provenance columns + session-kind gating (cron/heartbeat turns produce no
+durable candidates) → read-only blocks → hard caps that ERROR instead of
+truncate → nightly consolidation on a stronger model → bi-temporal
+supersede-in-place (corrections close a validity window, keeping the audit
+trail and a correction-rate metric).
+
+### V3-T3 — browser as grounded primitive
+a11y-tree snapshots with per-snapshot refs (~2-5KB vs ~100KB screenshots),
+HTTP-fetch-first escalation, observe/action cache for recurring watches,
+per-site profiles. Honest ceiling from the research: live-site agent browsing
+is ~40-61% success; signed-agent status (Web Bot Auth) is structurally closed
+to self-hosters — design for graceful surrender, not stealth.
+
+### Where shell is AHEAD (do not trade away)
+hygiene ledgers (no peer measures its own memory-write honesty), canary +
+drain + replay deploy discipline, PII gate, deliberate two-agent isolation
+and group semantics, approval-gated multi-repo planner with worktree
+isolation, and NOT embedding an autonomous loop inside the browser tool.
