@@ -126,7 +126,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)&_time_format=sqlite")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -136,6 +136,15 @@ func Open(dbPath string) (*Store, error) {
 	// the one conn that ran it — later pool conns failed instantly with
 	// SQLITE_BUSY under write contention (observed 7/14 during turn-end
 	// write bursts).
+	//
+	// _time_format=sqlite makes the driver write time.Time as
+	// "2006-01-02 15:04:05.999999999-07:00" instead of Go's t.String(), whose
+	// " +0000 UTC" tail SQLite's date functions cannot parse. Without it,
+	// every timestamp this process writes is opaque to datetime()/julianday()
+	// — the root cause of the scheduler comparing timestamps as strings, and
+	// a live trap for any future retention sweep, which would match no rows
+	// and silently prune nothing. Reads accept both formats, so mixed DBs are
+	// safe; migrateTimeFormat normalizes the rows that get date-queried.
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
@@ -145,6 +154,10 @@ func Open(dbPath string) (*Store, error) {
 	if err := s.migratePendingTurns(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate pending_turns: %w", err)
+	}
+	if err := s.migrateTimeFormat(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate time format: %w", err)
 	}
 
 	return s, nil
