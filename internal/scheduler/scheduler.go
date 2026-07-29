@@ -305,7 +305,12 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 
 	// A schedule with no target chat can never deliver. Auto-pause with a
 	// machine-readable reason instead of retrying every minute forever.
-	if sc.ChatID == 0 {
+	//
+	// Heartbeats are exempt: chat_id 0 is their NORMAL state — the system
+	// chat — and the bridge decides where (or whether) their output lands.
+	// Treating 0 as missing paused a live heartbeat on the first fire after
+	// this check shipped (7/29).
+	if sc.ChatID == 0 && sc.Type != "heartbeat" {
 		slog.Error("scheduler: schedule has no chat_id, auto-pausing", "id", sc.ID, "label", sc.Label)
 		s.recordRun(sc, OutcomeSpawnFailed, "missing chat_id")
 		s.pause(sc.ID, PauseMissingChat)

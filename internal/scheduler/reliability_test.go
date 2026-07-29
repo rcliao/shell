@@ -187,6 +187,19 @@ func TestAutoPauseMissingChat(t *testing.T) {
 	}
 }
 
+// Heartbeats run on chat 0 by design — the system chat — so the missing-chat
+// guard must not touch them. Shipping without this exemption paused a live
+// heartbeat on its first fire (7/29).
+func TestAutoPauseMissingChat_HeartbeatExempt(t *testing.T) {
+	st := newMockStore(nil)
+	s := New(st, func(int64, string) {}, nil, "UTC")
+	s.execute(ScheduleEntry{ID: 8, ChatID: 0, Message: "beat", Type: "heartbeat", Mode: "prompt"})
+
+	if reason, paused := st.pauseReasons[8]; paused {
+		t.Errorf("heartbeat on chat 0 must not be paused, got reason %q", reason)
+	}
+}
+
 // The dead-man's-switch flags a schedule whose last SUCCESSFUL run is older
 // than interval x 2 — the only signal that catches silence.
 func TestDeadMansSwitchThreshold(t *testing.T) {
