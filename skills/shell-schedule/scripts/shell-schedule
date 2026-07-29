@@ -51,9 +51,13 @@ if echo "$RESP" | grep -q '"error"'; then
   exit 1
 fi
 
-# Print confirmation
+# Print confirmation. Registration is idempotent: an identical payload returns
+# the EXISTING row, and the output says so instead of implying a new schedule.
 python3 -c "
 import sys, json
 r = json.load(sys.stdin)
-print(f\"Schedule #{r['id']} created ({r['type']}), next run: {r['next_run']}\")
+verb = 'created' if r.get('created', True) else 'already existed'
+print(f\"Schedule #{r['id']} {verb} ({r['type']}), next run: {r['next_run']}\")
+for t in r.get('next_runs') or []:
+    print(f'  next fire: {t}')
 " <<< "$RESP" 2>/dev/null || echo "$RESP"

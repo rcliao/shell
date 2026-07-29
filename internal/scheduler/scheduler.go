@@ -11,29 +11,67 @@ import (
 type ScheduleStore interface {
 	GetDueSchedules(now time.Time) ([]ScheduleEntry, error)
 	UpdateScheduleNextRun(id int64, nextRun time.Time, lastRun time.Time) error
+	// SetExpectedNextAt records the EXACT next occurrence, before jitter.
+	SetExpectedNextAt(id int64, expected time.Time) error
 	DisableSchedule(id int64) error
+	// PauseSchedule disables a schedule and records a machine-readable cause.
+	// Used for unrecoverable config errors instead of retrying forever.
+	PauseSchedule(id int64, reason string) error
 	// BumpHeartbeatCount atomically increments and returns a schedule's persisted
 	// heartbeat count, so deep-reflection cadence survives restarts.
 	BumpHeartbeatCount(id int64) (int, error)
+	// RecordJobRun appends a fire attempt to the job_runs ledger.
+	RecordJobRun(run JobRun) error
 }
+
+// JobRun is one recorded fire attempt (mirrors store.JobRun).
+type JobRun struct {
+	ScheduleID     int64
+	TriggerContext string
+	ScheduledAt    time.Time // zero = unknown
+	FiredAt        time.Time
+	Outcome        string
+	ErrorMessage   string
+}
+
+// Job run outcomes and trigger contexts (mirror the store constants).
+const (
+	TriggerSchedule = "schedule"
+
+	OutcomeFiredOK           = "fired_ok"
+	OutcomeSpawnFailed       = "spawn_failed"
+	OutcomeTurnFailed        = "turn_failed"
+	OutcomeSkippedQuietHours = "skipped_quiet_hours"
+)
+
+// Auto-pause reasons (mirror the store constants).
+const (
+	PauseInvalidCron     = "invalid_cron"
+	PauseInvalidInterval = "invalid_interval"
+	PauseNoNextRun       = "no_next_run"
+	PauseMissingChat     = "missing_chat"
+)
 
 // ScheduleEntry mirrors store.Schedule but avoids a circular import.
 type ScheduleEntry struct {
-	ID       int64
-	ChatID   int64
-	Label    string
-	Message  string
-	Schedule string // cron expr or ISO8601
-	Timezone string
-	Type     string // "cron" or "once"
-	Mode     string // "notify" or "prompt"
+	ID        int64
+	ChatID    int64
+	Label     string
+	Message   string
+	Schedule  string // cron expr or ISO8601
+	Timezone  string
+	Type      string // "cron" or "once"
+	Mode      string // "notify" or "prompt"
+	NextRunAt time.Time
 }
 
 // NotifyFunc sends a plain text message to a chat.
 type NotifyFunc func(chatID int64, msg string)
 
-// PromptFunc routes a message through Claude as if the user sent it.
-type PromptFunc func(chatID int64, msg string)
+// PromptFunc routes a message through Claude as if the user sent it. The error
+// is what makes a failed spawn/turn visible in the job_runs ledger instead of
+// vanishing into the daemon's logs.
+type PromptFunc func(chatID int64, msg string) error
 
 // HeartbeatPromptFunc routes a heartbeat through Claude and returns the response.
 // The scheduler uses the response to decide whether to send it (noop suppression).
@@ -71,6 +109,7 @@ type Scheduler struct {
 	heartbeatIdle        map[int64]bool // chat_id → true if last heartbeat was noop
 	idleInterval         time.Duration  // interval after noop heartbeat (0 = use schedule interval)
 	deepReflectInterval  int            // every Nth heartbeat escalates to deep reflection (0 = use default)
+	jitterFrac           JitterFracFunc // firing jitter source; nil disables jitter
 }
 
 // New creates a new Scheduler.
@@ -86,7 +125,15 @@ func New(store ScheduleStore, onNotify NotifyFunc, onPrompt PromptFunc, defaultT
 		quietHours:      QuietHours{Start: 22, End: 7},
 		heartbeatCounts: make(map[int64]int),
 		heartbeatIdle:   make(map[int64]bool),
+		jitterFrac:      NewSeededJitter(time.Now().UnixNano()),
 	}
+}
+
+// SetJitterSource replaces the firing-jitter fraction source. Pass nil to
+// disable jitter entirely (fires land exactly on the occurrence). Tests inject
+// a fixed source so jittered next-run times are reproducible.
+func (s *Scheduler) SetJitterSource(fn JitterFracFunc) {
+	s.jitterFrac = fn
 }
 
 // SetQuietHours configures the quiet hours window for heartbeats.
@@ -231,15 +278,45 @@ func isHeartbeatNoop(response string) bool {
 	return false
 }
 
+// recordRun appends a fire attempt to the job_runs ledger. Every exit path of
+// execute() goes through here — a fire that dies before spawning must leave the
+// same trace as one that succeeded, otherwise failure is indistinguishable from
+// silence.
+func (s *Scheduler) recordRun(sc ScheduleEntry, outcome, errMsg string) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.RecordJobRun(JobRun{
+		ScheduleID:     sc.ID,
+		TriggerContext: TriggerSchedule,
+		ScheduledAt:    sc.NextRunAt,
+		FiredAt:        time.Now().UTC(),
+		Outcome:        outcome,
+		ErrorMessage:   errMsg,
+	}); err != nil {
+		slog.Warn("scheduler: failed to record job run", "id", sc.ID, "outcome", outcome, "error", err)
+	}
+}
+
 func (s *Scheduler) execute(sc ScheduleEntry) {
 	slog.Info("scheduler: firing", "id", sc.ID, "chat_id", sc.ChatID, "type", sc.Type, "mode", sc.Mode, "label", sc.Label)
 
 	msg := sc.Message
 
+	// A schedule with no target chat can never deliver. Auto-pause with a
+	// machine-readable reason instead of retrying every minute forever.
+	if sc.ChatID == 0 {
+		slog.Error("scheduler: schedule has no chat_id, auto-pausing", "id", sc.ID, "label", sc.Label)
+		s.recordRun(sc, OutcomeSpawnFailed, "missing chat_id")
+		s.pause(sc.ID, PauseMissingChat)
+		return
+	}
+
 	if sc.Type == "heartbeat" {
 		// Suppress heartbeats during quiet hours.
 		if s.isQuietHours() {
 			slog.Info("scheduler: skipping heartbeat during quiet hours", "id", sc.ID, "chat_id", sc.ChatID)
+			s.recordRun(sc, OutcomeSkippedQuietHours, "")
 			return
 		}
 
@@ -281,6 +358,7 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 			hbElapsed := time.Since(hbStart)
 			if err != nil {
 				slog.Error("scheduler: heartbeat prompt failed", "chat_id", sc.ChatID, "elapsed", hbElapsed, "error", err)
+				s.recordRun(sc, OutcomeTurnFailed, err.Error())
 				return
 			}
 			noop := isHeartbeatNoop(resp)
@@ -293,14 +371,22 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 				"count", count,
 			)
 			if noop {
+				s.recordRun(sc, OutcomeFiredOK, "")
 				return
 			}
 			if s.onNotify != nil {
 				s.onNotify(sc.ChatID, resp)
 			}
+			s.recordRun(sc, OutcomeFiredOK, "")
 		} else if s.onPrompt != nil {
 			// Fallback to onPrompt if onHeartbeat not set.
-			s.onPrompt(sc.ChatID, msg)
+			if err := s.onPrompt(sc.ChatID, msg); err != nil {
+				s.recordRun(sc, OutcomeTurnFailed, err.Error())
+				return
+			}
+			s.recordRun(sc, OutcomeFiredOK, "")
+		} else {
+			s.recordRun(sc, OutcomeSpawnFailed, "no heartbeat or prompt handler wired")
 		}
 		return
 	}
@@ -311,13 +397,35 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 
 	switch sc.Mode {
 	case "prompt":
-		if s.onPrompt != nil {
-			s.onPrompt(sc.ChatID, msg)
+		if s.onPrompt == nil {
+			slog.Error("scheduler: prompt-mode schedule fired with no prompt handler", "id", sc.ID)
+			s.recordRun(sc, OutcomeSpawnFailed, "no prompt handler wired")
+			return
 		}
+		if err := s.onPrompt(sc.ChatID, msg); err != nil {
+			slog.Error("scheduler: scheduled prompt failed", "id", sc.ID, "chat_id", sc.ChatID, "error", err)
+			s.recordRun(sc, OutcomeTurnFailed, err.Error())
+			return
+		}
+		s.recordRun(sc, OutcomeFiredOK, "")
 	default: // "notify"
-		if s.onNotify != nil {
-			s.onNotify(sc.ChatID, msg)
+		if s.onNotify == nil {
+			slog.Error("scheduler: notify-mode schedule fired with no notify handler", "id", sc.ID)
+			s.recordRun(sc, OutcomeSpawnFailed, "no notify handler wired")
+			return
 		}
+		s.onNotify(sc.ChatID, msg)
+		s.recordRun(sc, OutcomeFiredOK, "")
+	}
+}
+
+// pause auto-disables a schedule after an unrecoverable config error and stores
+// a machine-readable reason. Falls back to a plain disable if the store predates
+// PauseSchedule.
+func (s *Scheduler) pause(id int64, reason string) {
+	if err := s.store.PauseSchedule(id, reason); err != nil {
+		slog.Error("scheduler: failed to auto-pause schedule", "id", id, "reason", reason, "error", err)
+		s.store.DisableSchedule(id)
 	}
 }
 
@@ -336,8 +444,8 @@ func (s *Scheduler) advance(sc ScheduleEntry, now time.Time) {
 		// Heartbeat uses interval-based advancement: schedule field is a Go duration string.
 		interval, err := time.ParseDuration(sc.Schedule)
 		if err != nil {
-			slog.Error("scheduler: invalid heartbeat interval, disabling", "id", sc.ID, "interval", sc.Schedule, "error", err)
-			s.store.DisableSchedule(sc.ID)
+			slog.Error("scheduler: invalid heartbeat interval, auto-pausing", "id", sc.ID, "interval", sc.Schedule, "error", err)
+			s.pause(sc.ID, PauseInvalidInterval)
 			return
 		}
 		// Use idle interval if last heartbeat was noop and idle interval is configured.
@@ -347,20 +455,21 @@ func (s *Scheduler) advance(sc ScheduleEntry, now time.Time) {
 				"normal", interval, "idle", s.idleInterval)
 			interval = s.idleInterval
 		}
-		nextRun := now.Add(interval)
+		exact := now.Add(interval)
 
 		// If next run falls in quiet hours, push it to the end of quiet hours.
 		loc := s.loadLocation(s.defaultTZ)
-		nextLocal := nextRun.In(loc)
+		nextLocal := exact.In(loc)
 		if s.isQuietAt(nextLocal) {
 			nextLocal = s.nextWakeTime(nextLocal)
-			nextRun = nextLocal.UTC()
-			slog.Info("scheduler: pushed heartbeat past quiet hours", "id", sc.ID, "next_run", nextRun)
+			exact = nextLocal.UTC()
+			slog.Info("scheduler: pushed heartbeat past quiet hours", "id", sc.ID, "next_run", exact)
 		}
 
-		if err := s.store.UpdateScheduleNextRun(sc.ID, nextRun, now); err != nil {
-			slog.Error("scheduler: failed to update next_run", "id", sc.ID, "error", err)
-		}
+		// Jitter the firing moment so two agents' heartbeats don't collide.
+		// The following occurrence bounds it, so jitter can never swallow a beat.
+		nextRun := applyJitter(exact, interval, exact.Add(interval), s.jitterFor(sc.ID))
+		s.persistNextRun(sc.ID, nextRun, exact, now)
 		return
 	}
 
@@ -368,20 +477,40 @@ func (s *Scheduler) advance(sc ScheduleEntry, now time.Time) {
 	loc := s.loadLocation(sc.Timezone)
 	cron, err := ParseCron(sc.Schedule)
 	if err != nil {
-		slog.Error("scheduler: invalid cron, disabling", "id", sc.ID, "expr", sc.Schedule, "error", err)
-		s.store.DisableSchedule(sc.ID)
+		slog.Error("scheduler: invalid cron, auto-pausing", "id", sc.ID, "expr", sc.Schedule, "error", err)
+		s.pause(sc.ID, PauseInvalidCron)
 		return
 	}
 
-	nextRun := cron.Next(now.In(loc)).UTC()
-	if nextRun.IsZero() {
-		slog.Warn("scheduler: no next run found, disabling", "id", sc.ID)
-		s.store.DisableSchedule(sc.ID)
+	// The EXACT occurrence stays exact — jitter is applied to the firing moment
+	// only, and the next computation always starts from real time, so drift
+	// cannot accumulate.
+	exactLocal := cron.Next(now.In(loc))
+	if exactLocal.IsZero() {
+		slog.Warn("scheduler: no next run found, auto-pausing", "id", sc.ID)
+		s.pause(sc.ID, PauseNoNextRun)
 		return
 	}
+	exact := exactLocal.UTC()
+	following := cron.Next(exactLocal)
+	interval := time.Duration(0)
+	if !following.IsZero() {
+		interval = following.Sub(exactLocal)
+	}
+	nextRun := applyJitter(exact, interval, following.UTC(), s.jitterFor(sc.ID))
+	s.persistNextRun(sc.ID, nextRun, exact, now)
+}
 
-	if err := s.store.UpdateScheduleNextRun(sc.ID, nextRun, now); err != nil {
-		slog.Error("scheduler: failed to update next_run", "id", sc.ID, "error", err)
+// persistNextRun writes the jittered firing moment (next_run_at) alongside the
+// exact occurrence (expected_next_at). The dead-man's-switch and the preview
+// read the exact column; only the tick loop reads the jittered one.
+func (s *Scheduler) persistNextRun(id int64, nextRun, exact, lastRun time.Time) {
+	if err := s.store.UpdateScheduleNextRun(id, nextRun, lastRun); err != nil {
+		slog.Error("scheduler: failed to update next_run", "id", id, "error", err)
+		return
+	}
+	if err := s.store.SetExpectedNextAt(id, exact); err != nil {
+		slog.Warn("scheduler: failed to record expected_next_at", "id", id, "error", err)
 	}
 }
 

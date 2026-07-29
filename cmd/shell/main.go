@@ -26,6 +26,7 @@ import (
 	shellmcp "github.com/rcliao/shell/internal/mcp"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/rpc"
+	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/search"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
@@ -381,6 +382,128 @@ func main() {
 	}
 	lessonActionsCmd.Flags().Int64Var(&laChatFlag, "chat", 0, "filter by chat ID (0 = agent-wide/system-chat entries)")
 	lessonActionsCmd.Flags().StringVar(&laConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/pikamini/config.json); default ~/.shell/config.json")
+
+	// job-runs command — read-only view of the V3-T1 fire ledger. Every fire
+	// ATTEMPT lands here, including ones that died before spawning, so a
+	// schedule that fires and fails is distinguishable from one that never
+	// fired at all.
+	var jrScheduleFlag int64
+	var jrConfigFlag string
+	jobRunsCmd := &cobra.Command{
+		Use:   "job-runs [n]",
+		Short: "List recent scheduler fire attempts from the job_runs ledger",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			n := 20
+			if len(args) == 1 {
+				v, perr := strconv.Atoi(args[0])
+				if perr != nil || v <= 0 {
+					return fmt.Errorf("invalid count %q: want a positive integer", args[0])
+				}
+				n = v
+			}
+
+			cfg := loadConfigFrom(jrConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			runs, err := st.ListJobRuns(jrScheduleFlag, n)
+			if err != nil {
+				return err
+			}
+			if len(runs) == 0 {
+				fmt.Println("No job runs recorded yet. Every schedule fire attempt appends one row here.")
+				return nil
+			}
+			fmt.Printf("Recent job runs (newest first, max %d):\n\n", n)
+			for _, r := range runs {
+				label := r.Label
+				if label == "" {
+					label = "(no label)"
+				}
+				line := fmt.Sprintf("  %s  #%-4d %-19s %-12s %s",
+					r.FiredAt.Local().Format("2006-01-02 15:04:05"),
+					r.ScheduleID, r.Outcome, r.TriggerContext, label)
+				fmt.Println(line)
+				if r.ErrorMessage != "" {
+					msg := r.ErrorMessage
+					if len(msg) > 160 {
+						msg = msg[:160] + "..."
+					}
+					fmt.Printf("        error: %s\n", msg)
+				}
+			}
+			return nil
+		},
+	}
+	jobRunsCmd.Flags().Int64Var(&jrScheduleFlag, "schedule", 0, "filter by schedule ID (0 = all schedules)")
+	jobRunsCmd.Flags().StringVar(&jrConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json); default ~/.shell/config.json")
+
+	// schedules command — read-only schedule inventory with the next 3 fires.
+	// Automates the standing "verify against the DB after creating" rule.
+	var schConfigFlag string
+	var schAllFlag bool
+	schedulesCmd := &cobra.Command{
+		Use:   "schedules",
+		Short: "List schedules with their next 3 fire times, enabled state, and pause reason",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(schConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			list, err := st.ListAllSchedules(!schAllFlag)
+			if err != nil {
+				return err
+			}
+			if len(list) == 0 {
+				fmt.Println("No schedules.")
+				return nil
+			}
+			now := time.Now().UTC()
+			for _, sc := range list {
+				state := "enabled"
+				if !sc.Enabled {
+					state = "disabled"
+					if sc.PausedReason != "" {
+						state = "paused:" + sc.PausedReason
+					}
+				}
+				label := sc.Label
+				if label == "" {
+					label = "(no label)"
+				}
+				fmt.Printf("#%-4d %-9s %-10s %s\n", sc.ID, sc.Type, state, label)
+				fmt.Printf("      expr: %s  tz: %s  chat: %d\n", sc.Schedule, stringOr(sc.Timezone, "UTC"), sc.ChatID)
+				runs, rerr := scheduler.NextRuns(sc.Type, sc.Schedule, sc.Timezone, sc.NextRunAt, now, 3)
+				if rerr != nil {
+					fmt.Printf("      next: unresolvable (%s)\n", rerr)
+				} else if len(runs) == 0 {
+					fmt.Printf("      next: none\n")
+				} else {
+					parts := make([]string, 0, len(runs))
+					for _, t := range runs {
+						parts = append(parts, t.Format("2006-01-02 15:04 MST"))
+					}
+					fmt.Printf("      next: %s\n", strings.Join(parts, " | "))
+				}
+				if sc.LastSuccessAt != nil {
+					fmt.Printf("      last success: %s\n", sc.LastSuccessAt.Local().Format("2006-01-02 15:04"))
+				} else {
+					fmt.Printf("      last success: never\n")
+				}
+				fmt.Println()
+			}
+			return nil
+		},
+	}
+	schedulesCmd.Flags().StringVar(&schConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json); default ~/.shell/config.json")
+	schedulesCmd.Flags().BoolVar(&schAllFlag, "all", false, "include disabled/paused schedules")
 
 	// eval command — the owner-fitness scorecard (V2-H31).
 	var evSinceFlag, evConfigFlag string
@@ -1114,7 +1237,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

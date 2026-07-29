@@ -447,17 +447,62 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := s.store.SaveSchedule(sched)
+	// Idempotent registration (V3-T1): the same (chat, type, expression,
+	// message) registered twice returns the EXISTING row instead of creating a
+	// duplicate. This is the class that produced a duplicate recurring schedule
+	// that had to be disabled by hand.
+	id, created, err := s.store.UpsertScheduleByKey(sched)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save schedule: "+err.Error())
 		return
 	}
 
-	writeJSON(w, map[string]any{
+	status := "existing"
+	if created {
+		status = "created"
+	}
+
+	loc, _ := time.LoadLocation(tz)
+	if loc == nil {
+		loc = time.UTC
+	}
+	resp := map[string]any{
 		"id":       id,
 		"type":     sched.Type,
+		"created":  created,
+		"status":   status,
 		"next_run": sched.NextRunAt.Format("2006-01-02 15:04 UTC"),
-	})
+		// Preview automates the standing "verify after creating" rule: a wrong
+		// expression is visible right here instead of at the first missed fire.
+		"next_runs": s.previewRuns(sched, loc, 3),
+	}
+	writeJSON(w, resp)
+}
+
+// previewRuns returns the next n fire times for a schedule, formatted in its
+// resolved timezone. Exact occurrences — firing jitter is an implementation
+// detail and is deliberately not shown.
+func (s *Server) previewRuns(sched *store.Schedule, loc *time.Location, n int) []string {
+	if sched.Type == "once" {
+		return []string{sched.NextRunAt.In(loc).Format("2006-01-02 15:04 MST")}
+	}
+	if s.cronParse == nil {
+		return nil
+	}
+	cronExpr, err := s.cronParse(sched.Schedule)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, n)
+	t := time.Now().In(loc)
+	for i := 0; i < n; i++ {
+		t = cronExpr.Next(t)
+		if t.IsZero() {
+			break
+		}
+		out = append(out, t.Format("2006-01-02 15:04 MST"))
+	}
+	return out
 }
 
 // parseOnceAt resolves a one-shot schedule's --at value. Accepts the formats

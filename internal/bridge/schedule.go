@@ -231,8 +231,13 @@ func (b *Bridge) scheduleEnable(chatID int64, args string) (string, error) {
 		return fmt.Sprintf("Schedule #%d not found.", id), nil
 	}
 
-	// Recompute next_run_at for cron types
-	if sc.Type == "cron" {
+	// No backfill on resume (V3-T1): next_run_at is always recomputed from NOW
+	// forward, so a schedule paused for a week fires once when it comes due —
+	// never seven times catching up. Enabling also clears any auto-pause reason.
+	now := time.Now()
+	nextRun := sc.NextRunAt
+	switch sc.Type {
+	case "cron":
 		cronExpr, err := parseScheduleCron(sc.Schedule)
 		if err != nil {
 			return fmt.Sprintf("Failed to parse cron expression: %s", err), nil
@@ -241,23 +246,27 @@ func (b *Bridge) scheduleEnable(chatID int64, args string) (string, error) {
 		if loc == nil {
 			loc = time.UTC
 		}
-		nextRun := cronExpr.Next(time.Now().In(loc)).UTC()
+		nextRun = cronExpr.Next(now.In(loc)).UTC()
 		if nextRun.IsZero() {
 			return "Could not compute next run time.", nil
 		}
-		lastRun := time.Time{}
-		if sc.LastRunAt != nil {
-			lastRun = *sc.LastRunAt
+	case "heartbeat":
+		interval, err := time.ParseDuration(sc.Schedule)
+		if err != nil || interval <= 0 {
+			return fmt.Sprintf("Failed to parse heartbeat interval %q.", sc.Schedule), nil
 		}
-		if err := b.store.UpdateScheduleNextRun(id, nextRun, lastRun); err != nil {
-			return "", fmt.Errorf("update next run: %w", err)
+		nextRun = now.UTC().Add(interval)
+	default: // "once"
+		if !nextRun.After(now) {
+			return fmt.Sprintf("Schedule #%d is a one-shot whose time (%s) has already passed — create a new one instead of resuming it.",
+				id, nextRun.Format("2006-01-02 15:04 UTC")), nil
 		}
-		sc.NextRunAt = nextRun
 	}
 
-	if err := b.store.EnableSchedule(id); err != nil {
+	if err := b.store.EnableScheduleFrom(id, nextRun); err != nil {
 		return "", fmt.Errorf("enable schedule: %w", err)
 	}
+	sc.NextRunAt = nextRun
 	return fmt.Sprintf("Schedule #%d enabled. Next run: %s", id, sc.NextRunAt.Format("2006-01-02 15:04 UTC")), nil
 }
 

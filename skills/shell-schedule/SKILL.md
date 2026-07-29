@@ -21,9 +21,19 @@ the current chat; only override it to schedule for a DIFFERENT chat.
 ~/.shell/skills/shell-schedule/scripts/shell-schedule once --at "2026-07-20T09:00:00" --tz "America/Los_Angeles" --message "..." --mode prompt
 ```
 
-Verify after creating: the script prints `Schedule #<id> created` — if you
-did not see that line, the schedule does NOT exist; re-read the error and
-retry rather than assuming success.
+Verify after creating: the script prints `Schedule #<id> created` followed by
+the next fire times — if you did not see those lines, the schedule does NOT
+exist; re-read the error and retry rather than assuming success.
+
+**Registration is idempotent.** The same (chat, type, expression, message)
+registered twice returns the EXISTING row and prints
+`Schedule #<id> already existed` instead of creating a duplicate. Report that
+honestly — say the reminder was already set, don't claim you made a new one.
+
+**Read the previewed fire times before replying.** They are already resolved
+in the schedule's timezone, so a wrong cron expression or a reminder landing
+tomorrow instead of today is visible right there. If they look wrong, delete
+and re-create rather than telling the user it's set.
 
 ## Usage
 
@@ -50,6 +60,39 @@ retry rather than assuming success.
 - `--mode <notify|prompt>` — notify sends plain text, prompt routes through Claude (default: notify)
 
 The SHELL_CHAT_ID environment variable is used automatically.
+
+## Response fields
+
+`POST /schedule` (what this script calls) returns:
+
+- `id` — the schedule row ID
+- `type` — `once` or `cron`
+- `created` — `true` when a new row was inserted, `false` when an identical
+  registration already existed and was returned instead
+- `status` — `created` | `existing` (string twin of `created`)
+- `next_run` — the stored next run, in UTC
+- `next_runs` — the next 3 exact fire times, resolved in the schedule's
+  timezone. Firing jitter (a few seconds to at most 9 minutes of spread, so
+  both agents' jobs don't all land on `:00`) is not shown — these are the
+  scheduled occurrences.
+
+## Operator commands (Bash, read-only)
+
+- `shell schedules [--all] [--config <path>]` — every schedule with its next 3
+  fire times, enabled state, pause reason, and last successful run. This is
+  the fastest way to verify a schedule really exists and will fire when you
+  think it will.
+- `shell job-runs [n] [--schedule <id>] [--config <path>]` — the fire ledger.
+  One row per fire ATTEMPT with outcome `fired_ok` | `spawn_failed` |
+  `turn_failed` | `skipped_quiet_hours` | `skipped_disabled`. Use it when a
+  reminder "didn't arrive": it distinguishes a schedule that never fired from
+  one that fired and failed.
+
+A schedule that hits an unrecoverable config error (bad cron expression,
+unparseable time, no target chat) is auto-paused with a machine-readable
+`paused_reason` instead of retrying forever — `shell schedules --all` shows it.
+Re-enabling always recomputes the next run from NOW; missed occurrences are
+never replayed.
 
 **WARNING:** Do NOT use `[schedule]` text directives in your response — they are silently stripped and do nothing. Always use this script via Bash.
 

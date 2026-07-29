@@ -82,6 +82,12 @@ type MessageMap struct {
 }
 
 // Schedule represents a scheduled notification or prompt.
+//
+// NOTE: the V3-T1 reliability columns (DedupKey, PausedReason, ExpectedNextAt,
+// LastSuccessAt) are only populated by the queries that explicitly select them
+// — ListAllSchedules and GetScheduleByID. The legacy hot-path queries
+// (GetDueSchedules, ListSchedules, GetSchedule) leave them zero on purpose so
+// the firing path keeps its original column list.
 type Schedule struct {
 	ID        int64
 	ChatID    int64
@@ -95,6 +101,24 @@ type Schedule struct {
 	LastRunAt *time.Time
 	Enabled   bool
 	CreatedAt time.Time
+
+	// DedupKey is the stable idempotency key derived from
+	// (chat_id, type, schedule-expr, message-hash). Empty for rows created
+	// before idempotent registration existed, and for the internal
+	// heartbeat/bridge paths that do not register through /schedule.
+	DedupKey string
+	// PausedReason is machine-readable and non-empty only when the scheduler
+	// auto-paused the row after an unrecoverable config error
+	// (invalid_cron | invalid_interval | no_next_run | missing_chat).
+	PausedReason string
+	// ExpectedNextAt is the EXACT next occurrence, before firing jitter.
+	// next_run_at carries the jittered moment; this column carries the truth
+	// the dead-man's-switch measures against.
+	ExpectedNextAt *time.Time
+	// LastSuccessAt is the last fire that actually reached the agent/chat
+	// (job_runs.outcome = 'fired_ok'). Distinct from last_run_at, which
+	// advances even when the fire failed.
+	LastSuccessAt *time.Time
 }
 
 func Open(dbPath string) (*Store, error) {
@@ -571,6 +595,58 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(mediaSchema); err != nil {
 		return err
 	}
+
+	// job_runs is the fire ledger (V3-T1): one row per fire ATTEMPT, including
+	// attempts that die before or during spawn. Without it, a schedule that
+	// fired and failed to spawn a subprocess is indistinguishable in the logs
+	// from one that never fired at all — the failure mode the dead-man's-switch
+	// exists to catch. See internal/store/jobruns.go for semantics.
+	jobRunsSchema := `
+	CREATE TABLE IF NOT EXISTS job_runs (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		schedule_id     INTEGER NOT NULL,
+		trigger_context TEXT NOT NULL DEFAULT 'schedule',
+		scheduled_at    DATETIME,
+		fired_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		session_id      INTEGER,
+		outcome         TEXT NOT NULL,
+		error_message   TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_job_runs_schedule ON job_runs(schedule_id, fired_at);
+	CREATE INDEX IF NOT EXISTS idx_job_runs_fired ON job_runs(fired_at);
+	`
+	if _, err := s.db.Exec(jobRunsSchema); err != nil {
+		return err
+	}
+
+	// V3-T1 reliability columns on schedules. Additive ALTERs — duplicate-column
+	// errors are ignored on already-migrated DBs, exactly like the lifecycle
+	// columns above.
+	for _, col := range []string{
+		// Idempotency key for POST /schedule; '' on every legacy row.
+		"ALTER TABLE schedules ADD COLUMN dedup_key TEXT NOT NULL DEFAULT ''",
+		// Machine-readable auto-pause cause; '' means "not auto-paused".
+		"ALTER TABLE schedules ADD COLUMN paused_reason TEXT NOT NULL DEFAULT ''",
+		// The EXACT next occurrence (next_run_at carries the jittered moment).
+		"ALTER TABLE schedules ADD COLUMN expected_next_at DATETIME",
+		// Last fire that actually reached the chat/agent.
+		"ALTER TABLE schedules ADD COLUMN last_success_at DATETIME",
+	} {
+		s.db.Exec(col)
+	}
+	// Backfill last_success_at from last_run_at once, so the dead-man's-switch
+	// does not scream about every pre-existing schedule on the first tick after
+	// deploy. Idempotent: only touches rows that have never been stamped.
+	s.db.Exec(`UPDATE schedules SET last_success_at = last_run_at WHERE last_success_at IS NULL AND last_run_at IS NOT NULL`)
+	// Index AFTER the ALTERs — a new-column index created in the table-schema
+	// phase fails on legacy DBs (see the sessions rebuild caveat above).
+	// PARTIAL unique over ENABLED keyed rows only: legacy rows all carry
+	// dedup_key = '' and are excluded, so this can never fail on a live DB.
+	// Scoping to enabled = 1 matches the lookup in UpsertScheduleByKey — a
+	// fired-and-disabled one-shot must not block re-creating the same reminder
+	// tomorrow. Best-effort: a pre-existing duplicate would error here, and
+	// that must never block daemon startup.
+	s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_dedup ON schedules(dedup_key) WHERE dedup_key != '' AND enabled = 1`)
 
 	return nil
 }

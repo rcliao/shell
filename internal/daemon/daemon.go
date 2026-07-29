@@ -684,21 +684,24 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			bot.SendText(chatID, 0, msg)
 		}
-		onPrompt := func(chatID int64, msg string) {
+		onPrompt := func(chatID int64, msg string) error {
 			// Route through bridge as if user sent it; wait out a busy session
-			// instead of dropping the scheduled prompt (V2-H16).
+			// instead of dropping the scheduled prompt (V2-H16). The error is
+			// returned (not just logged) so the job_runs ledger can record a
+			// failed spawn/turn — the whole point of the fire ledger.
 			resp, err := syntheticTurn(br, chatID, 0, msg, "scheduler")
 			if err != nil {
 				slog.Error("scheduler prompt failed", "chat_id", chatID, "error", err)
-				return
+				return err
 			}
 			if bridge.IsSystemChat(chatID) {
-				return
+				return nil
 			}
 			for _, photo := range resp.Photos {
 				bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)
 			}
 			bot.SendText(chatID, 0, resp.Text)
+			return nil
 		}
 		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
 		sched.SetQuietHours(cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd)
@@ -1194,6 +1197,16 @@ func (d *Daemon) cleanupLoop(ctx context.Context) {
 		case <-sessionTicker.C:
 			if err := d.bridge.CleanupStaleSessions(1 * time.Hour); err != nil {
 				slog.Warn("stale session cleanup failed", "error", err)
+			}
+			// Dead-man's-switch (V3-T1): WARN when a schedule's last SUCCESSFUL
+			// run is older than interval x 2. Rides the existing maintenance
+			// ticker rather than adding a goroutine.
+			if d.scheduler != nil && d.store != nil {
+				if checks, err := scheduler.NewStoreAdapter(d.store).SilenceChecks(); err != nil {
+					slog.Warn("dead-man's-switch: failed to load schedules", "error", err)
+				} else if n := scheduler.LogSilentSchedules(checks, time.Now().UTC()); n > 0 {
+					slog.Warn("dead-man's-switch: silent schedules detected", "count", n)
+				}
 			}
 		case <-dbTicker.C:
 			// V2-H25: retention is config-driven (default 365d, negative =

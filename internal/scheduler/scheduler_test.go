@@ -9,20 +9,60 @@ import (
 )
 
 type mockStore struct {
-	mu         sync.Mutex
-	schedules  []ScheduleEntry
-	disabled   map[int64]bool
-	nextRuns   map[int64]time.Time
-	hbCounts   map[int64]int // schedule id → persisted heartbeat count (survives "restart")
+	mu           sync.Mutex
+	schedules    []ScheduleEntry
+	disabled     map[int64]bool
+	nextRuns     map[int64]time.Time
+	expectedNext map[int64]time.Time
+	pauseReasons map[int64]string
+	hbCounts     map[int64]int // schedule id → persisted heartbeat count (survives "restart")
+	runs         []JobRun
 }
 
 func newMockStore(entries []ScheduleEntry) *mockStore {
 	return &mockStore{
-		schedules: entries,
-		disabled:  make(map[int64]bool),
-		nextRuns:  make(map[int64]time.Time),
-		hbCounts:  make(map[int64]int),
+		schedules:    entries,
+		disabled:     make(map[int64]bool),
+		nextRuns:     make(map[int64]time.Time),
+		expectedNext: make(map[int64]time.Time),
+		pauseReasons: make(map[int64]string),
+		hbCounts:     make(map[int64]int),
 	}
+}
+
+func (m *mockStore) SetExpectedNextAt(id int64, expected time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.expectedNext[id] = expected
+	return nil
+}
+
+func (m *mockStore) PauseSchedule(id int64, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.disabled[id] = true
+	m.pauseReasons[id] = reason
+	return nil
+}
+
+func (m *mockStore) RecordJobRun(run JobRun) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runs = append(m.runs, run)
+	return nil
+}
+
+// outcomes returns the recorded job-run outcomes for a schedule.
+func (m *mockStore) outcomes(id int64) []JobRun {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []JobRun
+	for _, r := range m.runs {
+		if r.ScheduleID == id {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (m *mockStore) GetDueSchedules(now time.Time) ([]ScheduleEntry, error) {
@@ -149,8 +189,9 @@ func TestSchedulerPromptMode(t *testing.T) {
 	})
 
 	var prompted []string
-	s := New(store, nil, func(chatID int64, msg string) {
+	s := New(store, nil, func(chatID int64, msg string) error {
 		prompted = append(prompted, msg)
+		return nil
 	}, "UTC")
 
 	s.tick()
