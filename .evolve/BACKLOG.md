@@ -1684,3 +1684,49 @@ hygiene ledgers (no peer measures its own memory-write honesty), canary +
 drain + replay deploy discipline, PII gate, deliberate two-agent isolation
 and group semantics, approval-gated multi-repo planner with worktree
 isolation, and NOT embedding an autonomous loop inside the browser tool.
+
+### V3-T1b — [NEW 7/29] scheduling as a first-class tool, not a Bash script
+
+**Evidence.** 167 shell-schedule invocations across both agents, 26 failed
+(~16%). The ledger shows the failures are not scheduling logic — they are
+interface archaeology: `which shell-schedule`, `head -60 <script>`,
+`cat /Users/.../shell-schedule`, hand-set `SHELL_CHAT_ID=`, repo-relative
+path guesses. The skill is also the long-standing worst performer in the
+bench suite. Its SKILL.md is 5.1k chars of core tier (every session, both
+agents) and carries SIX prohibitions — never guess repo-relative paths,
+never source it, never probe with ls/head, don't use CronCreate, don't emit
+[schedule] directives, verify before claiming. Every one of those rules
+exists to compensate for the interface being "a Bash script at a path".
+
+**Structural fix.** Promote scheduling to a native MCP tool beside
+shell_pm / shell_tunnel / shell_relay (it is conspicuously the one core
+capability that is not). One `shell_schedule` tool with an action enum:
+create | list | preview | pause | resume | delete | runs.
+
+Why this dissolves the failure class rather than patching it:
+- No path to guess and nothing to probe — the tool is in the tool list.
+- chat_id comes from the calling session; the agent stops hand-wrangling
+  SHELL_CHAT_ID (a recurring source of wrong-chat scheduling).
+- Typed params with enums (type: once|cron, mode: notify|prompt) make the
+  interface self-documenting — the Claude-5 "design interfaces, not
+  examples" rule. NOTE: internal/mcp/server.go's `prop()` helper has no
+  enum support today; adding it improves every existing tool too.
+- A native tool sitting next to CronCreate in the same list wins on
+  obviousness; the "NEVER use CronCreate" rule can retire.
+- Guidance moves into the tool description (single source of truth) and
+  ~5k chars leave every session's core tier.
+- `runs` gives the agent the job_runs ledger, so "did my reminder fire?"
+  becomes self-serve instead of a question to the owner.
+
+Effort S–M: the RPC endpoint already does the work (idempotency, preview,
+paused_reason shipped 7/29); this is a thin typed wrapper plus retiring the
+skill in stages (keep the script working, drop it from core tier first).
+
+**Adjacent gaps this exposes (same theme — lifecycle belongs in the data,
+not the prompt):**
+- No `max_runs` / `until` on schedules. A one-day watch self-disables today
+  only because the agent wrote that intent into its own prompt text.
+- No per-job model pin. A price-watch wakes the same Opus session as a
+  conversation (see also the pre-run-gate item, which is the cost lever).
+- No owner/purpose field, so orphaned schedules are only findable by
+  reading their message text.
