@@ -175,6 +175,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	toolReg.Register(tool.Tool{Name: "shell_pm", Description: "Process manager", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_pm"}})
 	toolReg.Register(tool.Tool{Name: "shell_tunnel", Description: "HTTP tunnels", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_tunnel"}})
 	toolReg.Register(tool.Tool{Name: "shell_relay", Description: "Message relay", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_relay"}})
+	toolReg.Register(tool.Tool{Name: "shell_schedule", Description: "Schedules: create, describe, cancel", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_schedule"}})
 
 	// Register skill scripts.
 	if skillRegistry != nil {

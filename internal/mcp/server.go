@@ -152,6 +152,84 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 		return textResult(fmt.Sprintf("%v", result["result"])), nil
 	})
 
+	// shell_schedule — create and manage schedules as a first-class tool.
+	//
+	// Previously reachable only through a Bash skill script, which gave the
+	// agent no way to check whether its own schedule ever ran: a bad
+	// expression or an auto-paused row stayed invisible until a human noticed
+	// the reminder never arrived. describe closes that loop.
+	server.AddTool(&gomcp.Tool{
+		Name: "shell_schedule",
+		Description: "Create, inspect and cancel scheduled reminders and jobs. " +
+			"action=create needs message plus either at (one-shot) or cron. " +
+			"action=list shows live schedules; action=describe id=N shows a schedule's next runs AND its recent run history — use it to confirm a schedule you created actually fires. " +
+			"action=cancel id=N disables one; action=trigger id=N runs it on the next tick. " +
+			"Creating the same schedule twice returns the existing one rather than a duplicate.",
+		InputSchema: schema([]string{}, map[string]map[string]any{
+			"action":  prop("string", "create (default), list, describe, cancel, trigger"),
+			"id":      prop("integer", "Schedule id — required for describe, cancel, trigger"),
+			"message": prop("string", "What to say or do when it fires (required for create)"),
+			"at":      prop("string", "One-shot time, e.g. '2026-08-01 09:00' or '+30m' (create)"),
+			"cron":    prop("string", "Cron expression for a recurring schedule (create)"),
+			"mode":    prop("string", "notify = send the message verbatim; prompt = run it as a turn. Default notify."),
+			"tz":      prop("string", "Timezone override; defaults to the agent's configured zone"),
+			"chat_id": prop("integer", "Target chat; omit for the current chat"),
+			"all":     prop("boolean", "list: include disabled and paused schedules"),
+		}),
+	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		var p struct {
+			Action  string `json:"action"`
+			ID      int64  `json:"id"`
+			Message string `json:"message"`
+			At      string `json:"at"`
+			Cron    string `json:"cron"`
+			Mode    string `json:"mode"`
+			TZ      string `json:"tz"`
+			ChatID  int64  `json:"chat_id"`
+			All     bool   `json:"all"`
+		}
+		if err := unmarshalArgs(req, &p); err != nil {
+			return errResult(err.Error()), nil
+		}
+		if p.Action == "" {
+			p.Action = "create"
+		}
+		if p.ChatID == 0 {
+			p.ChatID = currentChatID()
+		}
+
+		if p.Action == "create" {
+			schedType := "cron"
+			if p.Cron == "" {
+				schedType = "once"
+			}
+			result, err := client.call(ctx, "/schedule", map[string]any{
+				"chat_id": p.ChatID,
+				"type":    schedType,
+				"at":      p.At,
+				"cron":    p.Cron,
+				"message": p.Message,
+				"mode":    p.Mode,
+				"tz":      p.TZ,
+			})
+			if err != nil {
+				return errResult(err.Error()), nil
+			}
+			return textResult(jsonText(result)), nil
+		}
+
+		result, err := client.call(ctx, "/schedules", map[string]any{
+			"action":  p.Action,
+			"id":      p.ID,
+			"chat_id": p.ChatID,
+			"all":     p.All,
+		})
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		return textResult(jsonText(result)), nil
+	})
+
 	// shell_relay — send messages/photos to other Telegram chats/topics
 	server.AddTool(&gomcp.Tool{
 		Name:        "shell_relay",
@@ -244,4 +322,23 @@ func errResult(msg string) *gomcp.CallToolResult {
 		Content: []gomcp.Content{&gomcp.TextContent{Text: "error: " + msg}},
 		IsError: true,
 	}
+}
+
+// currentChatID is the chat this Claude subprocess is serving, exported into
+// its environment by the daemon. Schedules default to it so an agent never has
+// to guess a chat id — guessing is how a reminder ends up in the wrong chat.
+func currentChatID() int64 {
+	id, _ := strconv.ParseInt(os.Getenv("SHELL_CHAT_ID"), 10, 64)
+	return id
+}
+
+// jsonText renders an RPC result as indented JSON. Schedule replies are
+// structured (next runs, run history) and flattening them with %v turns them
+// into an unreadable map dump.
+func jsonText(v any) string {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
 }

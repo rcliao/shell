@@ -197,6 +197,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /tunnel", s.handleTunnel)
 	mux.HandleFunc("POST /relay", s.handleRelay)
 	mux.HandleFunc("POST /schedule", s.handleSchedule)
+	mux.HandleFunc("POST /schedules", s.handleSchedules)
 	mux.HandleFunc("POST /memory", s.handleMemory)
 	mux.HandleFunc("POST /task", s.handleTask)
 	mux.HandleFunc("POST /skills-reload", s.handleSkillsReload)

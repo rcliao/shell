@@ -11,6 +11,31 @@ tier: core
 
 Create one-shot or recurring scheduled messages/prompts.
 
+## Prefer the `shell_schedule` tool
+
+You have a native `shell_schedule` tool. Use it rather than the Bash script —
+it takes structured arguments instead of shell quoting, and it can tell you
+whether a schedule actually ran:
+
+```
+shell_schedule(message="Reminder: take medication", at="21:00")
+shell_schedule(action="list")
+shell_schedule(action="describe", id=14)
+shell_schedule(action="cancel", id=14)
+```
+
+`describe` is the one to reach for when someone says a reminder never arrived.
+It returns the next fire times AND the recent run history — each attempt with
+its outcome, how long it took, and how long it sat queued. That distinguishes
+the three cases that look identical from the outside: never fired, fired and
+failed, fired and was delivered.
+
+The chat is filled in from your environment; pass `chat_id` only to schedule
+for a DIFFERENT chat.
+
+The Bash script below remains available and behaves identically — both write
+the same rows through the same endpoint.
+
 **Canonical invocation — copy this shape exactly.** The script lives at the
 ABSOLUTE path `~/.shell/skills/shell-schedule/scripts/shell-schedule` (works
 from any cwd — never guess repo-relative paths, never `source` it, never
@@ -84,9 +109,19 @@ The SHELL_CHAT_ID environment variable is used automatically.
   think it will.
 - `shell job-runs [n] [--schedule <id>] [--config <path>]` — the fire ledger.
   One row per fire ATTEMPT with outcome `fired_ok` | `spawn_failed` |
-  `turn_failed` | `skipped_quiet_hours` | `skipped_disabled`. Use it when a
-  reminder "didn't arrive": it distinguishes a schedule that never fired from
-  one that fired and failed.
+  `turn_failed` | `skipped_quiet_hours` | `skipped_disabled` |
+  `skipped_overlap` | `interrupted` | `running`. Use it when a reminder
+  "didn't arrive": it distinguishes a schedule that never fired from one that
+  fired and failed. (`shell_schedule(action="describe")` gives you the same
+  history without leaving the tool.)
+
+Outcomes worth recognizing:
+
+- `skipped_overlap` — the previous run was still going, so this fire was
+  dropped (heartbeats) or queued (reminders). Normal under load, not an error.
+- `interrupted` — the daemon restarted mid-run. The work did not finish.
+- a repeated `turn_failed` on attempts 1..N — a transient failure that was
+  retried. Only the last attempt's outcome reflects what the user saw.
 
 A schedule that hits an unrecoverable config error (bad cron expression,
 unparseable time, no target chat) is auto-paused with a machine-readable
