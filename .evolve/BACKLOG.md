@@ -1685,7 +1685,17 @@ drain + replay deploy discipline, PII gate, deliberate two-agent isolation
 and group semantics, approval-gated multi-repo planner with worktree
 isolation, and NOT embedding an autonomous loop inside the browser tool.
 
-### V3-T1b — [NEW 7/29] scheduling as a first-class tool, not a Bash script
+### V3-T1b — [SHIPPED 7/30, afa834b] scheduling as a first-class tool, not a Bash script
+
+**Shipped.** `shell_schedule` MCP tool over a new POST /schedules endpoint:
+create | list | describe | cancel | trigger. `describe` returns next fire
+times plus per-attempt run history (outcome, duration, queue delay), which
+is the "did my reminder fire?" feedback loop called for below. Not shipped:
+the `prop()` enum support noted below, and retiring the SKILL.md
+prohibitions — the skill still documents the Bash path as an equal
+alternative, so the core-tier char saving has NOT been realized yet.
+Follow-up: once the tool has real usage, cut the script section and the six
+prohibitions down to a pointer.
 
 **Evidence.** 167 shell-schedule invocations across both agents, 26 failed
 (~16%). The ledger shows the failures are not scheduling logic — they are
