@@ -72,9 +72,9 @@ var busySleep = time.Sleep
 // syntheticTurn runs a bridge turn for a non-human caller, retrying through
 // busy-session collisions on a short backoff. After the delays are exhausted
 // the last error is returned — the caller is expected to log it loudly.
-func syntheticTurn(br *bridge.Bridge, chatID, threadID int64, msg, sender string) (bridge.AgentResponse, error) {
+func syntheticTurn(ctx context.Context, br *bridge.Bridge, chatID, threadID int64, msg, sender string) (bridge.AgentResponse, error) {
 	return retryBusySend(chatID, sender, func() (bridge.AgentResponse, error) {
-		return br.HandleMessageStreaming(context.Background(), chatID, threadID, msg, sender, nil, nil, nil)
+		return br.HandleMessageStreaming(ctx, chatID, threadID, msg, sender, nil, nil, nil)
 	})
 }
 
@@ -684,12 +684,12 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			bot.SendText(chatID, 0, msg)
 		}
-		onPrompt := func(chatID int64, msg string) error {
+		onPrompt := func(ctx context.Context, chatID int64, msg string) error {
 			// Route through bridge as if user sent it; wait out a busy session
 			// instead of dropping the scheduled prompt (V2-H16). The error is
 			// returned (not just logged) so the job_runs ledger can record a
 			// failed spawn/turn — the whole point of the fire ledger.
-			resp, err := syntheticTurn(br, chatID, 0, msg, "scheduler")
+			resp, err := syntheticTurn(ctx, br, chatID, 0, msg, "scheduler")
 			if err != nil {
 				slog.Error("scheduler prompt failed", "chat_id", chatID, "error", err)
 				return err
@@ -705,8 +705,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
 		sched.SetQuietHours(cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd)
-		sched.SetHeartbeatPrompt(func(chatID int64, msg string) (string, error) {
-			resp, err := br.HandleMessageStreaming(context.Background(), chatID, 0, msg, "heartbeat", nil, nil, nil)
+		sched.SetHeartbeatPrompt(func(ctx context.Context, chatID int64, msg string) (string, error) {
+			resp, err := br.HandleMessageStreaming(ctx, chatID, 0, msg, "heartbeat", nil, nil, nil)
 			if err != nil {
 				return "", err
 			}
@@ -763,7 +763,7 @@ func New(cfg config.Config) (*Daemon, error) {
 								prompt := bridge.A2ADeliveryPrompt(pl.From, pl.Depth, pl.Text)
 								// Busy session (e.g. the group is mid-human-turn) →
 								// retry on a backoff rather than losing the hand-off (V2-H16).
-								resp, err := syntheticTurn(br, pl.ChatID, pl.ThreadID, prompt, pl.From)
+								resp, err := syntheticTurn(context.Background(), br, pl.ChatID, pl.ThreadID, prompt, pl.From)
 								if err != nil {
 									slog.Error("a2a: turn failed", "chat_id", pl.ChatID, "error", err)
 									return
@@ -825,7 +825,7 @@ func New(cfg config.Config) (*Daemon, error) {
 					// Always process tasks in SystemChat (agent's inner monologue) to avoid
 					// preemption by user messages in the originating chat session.
 					slog.Info("scheduler: firing task prompt", "task_id", data.TaskID, "system_chat", bridge.SystemChatID)
-					onPrompt(bridge.SystemChatID, taskPrompt)
+					onPrompt(context.Background(), bridge.SystemChatID, taskPrompt)
 				},
 			)
 			slog.Info("scheduler: task polling enabled", "agent", botUser)
@@ -1006,6 +1006,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Start scheduler if enabled — register as a pm-managed process.
 	if d.scheduler != nil {
+		// Close out runs that were in flight when the previous process died.
+		// A row still marked 'running' cannot be running — its owner is gone —
+		// and left alone it reads as healthy forever.
+		if n, err := d.store.ReapRunningJobRuns(); err != nil {
+			slog.Warn("scheduler: failed to reap interrupted job runs", "error", err)
+		} else if n > 0 {
+			slog.Warn("scheduler: reaped job runs interrupted by restart", "count", n)
+		}
 		if d.pmMgr != nil {
 			sched := d.scheduler
 			d.pmMgr.StartFunc(ctx, "scheduler", func(fctx context.Context) error {

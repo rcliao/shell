@@ -26,11 +26,19 @@ const (
 
 // Job run outcomes.
 const (
+	OutcomeRunning           = "running" // in flight; a terminal outcome replaces it
 	OutcomeFiredOK           = "fired_ok"
 	OutcomeSpawnFailed       = "spawn_failed"
 	OutcomeTurnFailed        = "turn_failed"
 	OutcomeSkippedQuietHours = "skipped_quiet_hours"
 	OutcomeSkippedDisabled   = "skipped_disabled"
+	// OutcomeSkippedOverlap means the previous run of this schedule was still
+	// in flight and the schedule's overlap policy said not to start another.
+	OutcomeSkippedOverlap = "skipped_overlap"
+	// OutcomeInterrupted marks a run that was still 'running' when the process
+	// restarted. Set by ReapRunningJobRuns at startup — without it a crashed
+	// turn stays 'running' forever and reads as healthy.
+	OutcomeInterrupted = "interrupted"
 )
 
 // Auto-pause reasons. Machine-readable so the CLI and the agent can explain a
@@ -48,10 +56,17 @@ type JobRun struct {
 	ScheduleID     int64
 	TriggerContext string
 	ScheduledAt    *time.Time
-	FiredAt        time.Time
-	SessionID      *int64
-	Outcome        string
-	ErrorMessage   string
+	// FiredAt is when the run STARTED. Rows written before the timing split
+	// carry the completion moment here instead; those have FinishedAt nil.
+	FiredAt    time.Time
+	FinishedAt *time.Time
+	DurationMS int64
+	// Attempt is 1 for the first try and increments per retry of the same
+	// occurrence, so a retried job reads as N rows rather than N unrelated runs.
+	Attempt      int
+	SessionID    *int64
+	Outcome      string
+	ErrorMessage string
 	// Label is joined from schedules for display; empty when the schedule row
 	// has since been deleted.
 	Label string
@@ -72,6 +87,10 @@ func (s *Store) RecordJobRun(run JobRun) error {
 		run.FiredAt = time.Now().UTC()
 	}
 
+	if run.Attempt <= 0 {
+		run.Attempt = 1
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -79,9 +98,10 @@ func (s *Store) RecordJobRun(run JobRun) error {
 	defer tx.Rollback()
 
 	if _, err := tx.Exec(`
-		INSERT INTO job_runs (schedule_id, trigger_context, scheduled_at, fired_at, session_id, outcome, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, run.ScheduleID, run.TriggerContext, run.ScheduledAt, run.FiredAt, run.SessionID, run.Outcome, run.ErrorMessage); err != nil {
+		INSERT INTO job_runs (schedule_id, trigger_context, scheduled_at, fired_at, finished_at, duration_ms, attempt, session_id, outcome, error_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ScheduleID, run.TriggerContext, run.ScheduledAt, run.FiredAt, run.FinishedAt, run.DurationMS,
+		run.Attempt, run.SessionID, run.Outcome, run.ErrorMessage); err != nil {
 		return err
 	}
 
@@ -93,6 +113,92 @@ func (s *Store) RecordJobRun(run JobRun) error {
 	return tx.Commit()
 }
 
+// StartJobRun opens a run row at the moment the job actually starts and returns
+// its id for FinishJobRun. Recording the start separately is what makes queue
+// delay measurable: with a single row written at completion, a job that waited
+// four minutes behind another job is indistinguishable from one that took four
+// minutes to run.
+//
+// An open row also makes a crash visible — see ReapRunningJobRuns.
+func (s *Store) StartJobRun(run JobRun) (int64, error) {
+	if run.TriggerContext == "" {
+		run.TriggerContext = TriggerSchedule
+	}
+	if run.FiredAt.IsZero() {
+		run.FiredAt = time.Now().UTC()
+	}
+	if run.Attempt <= 0 {
+		run.Attempt = 1
+	}
+	res, err := s.db.Exec(`
+		INSERT INTO job_runs (schedule_id, trigger_context, scheduled_at, fired_at, attempt, outcome, error_message)
+		VALUES (?, ?, ?, ?, ?, ?, '')
+	`, run.ScheduleID, run.TriggerContext, run.ScheduledAt, run.FiredAt, run.Attempt, OutcomeRunning)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// FinishJobRun closes an open run with its terminal outcome and duration, and
+// stamps schedules.last_success_at on success — in one transaction, so "the
+// ledger says it worked" and "the schedule looks alive" cannot disagree.
+func (s *Store) FinishJobRun(runID int64, outcome, errMsg string) error {
+	if outcome == "" || outcome == OutcomeRunning {
+		return fmt.Errorf("finish requires a terminal outcome, got %q", outcome)
+	}
+	now := time.Now().UTC()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var scheduleID int64
+	var firedAt time.Time
+	if err := tx.QueryRow(`SELECT schedule_id, fired_at FROM job_runs WHERE id = ?`, runID).
+		Scan(&scheduleID, &firedAt); err != nil {
+		return err
+	}
+	durationMS := now.Sub(firedAt).Milliseconds()
+	if durationMS < 0 {
+		durationMS = 0
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE job_runs SET outcome = ?, error_message = ?, finished_at = ?, duration_ms = ?
+		WHERE id = ?
+	`, outcome, errMsg, now, durationMS, runID); err != nil {
+		return err
+	}
+	if outcome == OutcomeFiredOK {
+		if _, err := tx.Exec(`UPDATE schedules SET last_success_at = ? WHERE id = ?`, now, scheduleID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ReapRunningJobRuns closes runs left open by a crash or restart. Called once at
+// startup: a row still marked 'running' cannot be in flight, because the process
+// that owned it is gone. Without this a crashed turn stays 'running' forever and
+// every "is anything stuck?" check reads it as healthy.
+//
+// Returns the number of rows reaped.
+func (s *Store) ReapRunningJobRuns() (int, error) {
+	res, err := s.db.Exec(`
+		UPDATE job_runs
+		SET outcome = ?, error_message = 'daemon restarted while this run was in flight', finished_at = ?
+		WHERE outcome = ?
+	`, OutcomeInterrupted, time.Now().UTC(), OutcomeRunning)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // ListJobRuns returns the most recent fire attempts, newest first.
 // scheduleID = 0 means all schedules.
 func (s *Store) ListJobRuns(scheduleID int64, limit int) ([]JobRun, error) {
@@ -101,6 +207,7 @@ func (s *Store) ListJobRuns(scheduleID int64, limit int) ([]JobRun, error) {
 	}
 	query := `
 		SELECT r.id, r.schedule_id, r.trigger_context, r.scheduled_at, r.fired_at,
+		       r.finished_at, r.duration_ms, r.attempt,
 		       r.session_id, r.outcome, r.error_message, COALESCE(s.label, '')
 		FROM job_runs r
 		LEFT JOIN schedules s ON s.id = r.schedule_id
@@ -122,15 +229,20 @@ func (s *Store) ListJobRuns(scheduleID int64, limit int) ([]JobRun, error) {
 	var runs []JobRun
 	for rows.Next() {
 		var r JobRun
-		var scheduledAt sql.NullTime
+		var scheduledAt, finishedAt sql.NullTime
 		var sessionID sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.TriggerContext, &scheduledAt, &r.FiredAt,
+			&finishedAt, &r.DurationMS, &r.Attempt,
 			&sessionID, &r.Outcome, &r.ErrorMessage, &r.Label); err != nil {
 			return nil, err
 		}
 		if scheduledAt.Valid {
 			t := scheduledAt.Time
 			r.ScheduledAt = &t
+		}
+		if finishedAt.Valid {
+			t := finishedAt.Time
+			r.FinishedAt = &t
 		}
 		if sessionID.Valid {
 			v := sessionID.Int64

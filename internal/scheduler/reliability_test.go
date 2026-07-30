@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -105,7 +106,7 @@ func TestJobRunRecordedOnSpawnFailure(t *testing.T) {
 	})
 	// No prompt handler wired at all → the fire cannot spawn.
 	s := New(st, nil, nil, "UTC")
-	s.tick()
+	tickSync(t, s)
 
 	runs := st.outcomes(21)
 	if len(runs) != 1 {
@@ -116,20 +117,72 @@ func TestJobRunRecordedOnSpawnFailure(t *testing.T) {
 	}
 }
 
-// A turn that starts and then fails is recorded as turn_failed with the error.
+// A turn that starts and then fails for a NON-transient reason is recorded as
+// turn_failed with the error, and is not retried.
 func TestJobRunRecordedOnTurnFailure(t *testing.T) {
 	st := newMockStore([]ScheduleEntry{
 		{ID: 22, ChatID: 100, Message: "go", Schedule: "@hourly", Type: "cron", Mode: "prompt", Timezone: "UTC"},
 	})
-	s := New(st, nil, func(int64, string) error { return errors.New("session busy") }, "UTC")
-	s.tick()
+	s := New(st, nil, func(context.Context, int64, string) error {
+		return errors.New("skill returned malformed output")
+	}, "UTC")
+	tickSync(t, s)
 
 	runs := st.outcomes(22)
 	if len(runs) != 1 || runs[0].Outcome != OutcomeTurnFailed {
-		t.Fatalf("want one turn_failed row, got %+v", runs)
+		t.Fatalf("want one turn_failed row and no retry, got %+v", runs)
 	}
-	if runs[0].ErrorMessage != "session busy" {
+	if runs[0].ErrorMessage != "skill returned malformed output" {
 		t.Errorf("error message not recorded: %q", runs[0].ErrorMessage)
+	}
+}
+
+// A transient failure is retried up to the policy limit, and every attempt
+// lands in the ledger with its own attempt number — a retried job must read as
+// N attempts of one occurrence, not N unrelated runs.
+func TestTransientFailureRetriesAndRecordsEachAttempt(t *testing.T) {
+	st := newMockStore([]ScheduleEntry{
+		{ID: 23, ChatID: 100, Message: "go", Schedule: "@hourly", Type: "cron", Mode: "prompt", Timezone: "UTC"},
+	})
+	var calls int
+	s := New(st, nil, func(context.Context, int64, string) error {
+		calls++
+		if calls < 3 {
+			return errors.New("429 rate limit")
+		}
+		return nil
+	}, "UTC")
+	s.SetRetryPolicy(RetryPolicy{MaxAttempts: 3, InitialInterval: time.Millisecond, BackoffCoeff: 1, MaxInterval: time.Millisecond})
+	tickSync(t, s)
+
+	runs := st.outcomes(23)
+	if len(runs) != 3 {
+		t.Fatalf("want 3 attempt rows, got %d: %+v", len(runs), runs)
+	}
+	for i, r := range runs {
+		if r.Attempt != i+1 {
+			t.Errorf("row %d: attempt = %d, want %d", i, r.Attempt, i+1)
+		}
+	}
+	if runs[0].Outcome != OutcomeTurnFailed || runs[2].Outcome != OutcomeFiredOK {
+		t.Errorf("want fail,fail,ok across attempts; got %s,%s,%s",
+			runs[0].Outcome, runs[1].Outcome, runs[2].Outcome)
+	}
+}
+
+// A permanent error must not burn the retry budget.
+func TestRetryClassification(t *testing.T) {
+	retryable := []string{"401 unauthorized", "429 rate limit", "upstream overloaded", "context deadline exceeded", "session busy"}
+	permanent := []string{"no such skill", "invalid cron expression", "malformed json"}
+	for _, m := range retryable {
+		if !IsRetryable(errors.New(m)) {
+			t.Errorf("%q should be retryable", m)
+		}
+	}
+	for _, m := range permanent {
+		if IsRetryable(errors.New(m)) {
+			t.Errorf("%q should NOT be retryable — retrying a real bug wastes a turn", m)
+		}
 	}
 }
 
@@ -140,7 +193,7 @@ func TestJobRunRecordedOnSuccess(t *testing.T) {
 		{ID: 23, ChatID: 100, Message: "hi", Type: "once", Mode: "notify", Timezone: "UTC"},
 	})
 	s := New(st, func(int64, string) {}, nil, "UTC")
-	s.tick()
+	tickSync(t, s)
 
 	runs := st.outcomes(23)
 	if len(runs) != 1 || runs[0].Outcome != OutcomeFiredOK {
@@ -177,7 +230,9 @@ func TestAutoPauseRecordsReason(t *testing.T) {
 func TestAutoPauseMissingChat(t *testing.T) {
 	st := newMockStore(nil)
 	s := New(st, func(int64, string) {}, nil, "UTC")
-	s.execute(ScheduleEntry{ID: 33, ChatID: 0, Message: "m", Type: "once", Mode: "notify"})
+	// runJob, not execute: the ledger row is written by the retry wrapper, so
+	// asserting on execute alone would miss the record entirely.
+	s.runJob(context.Background(), ScheduleEntry{ID: 33, ChatID: 0, Message: "m", Type: "once", Mode: "notify"})
 
 	if st.pauseReasons[33] != PauseMissingChat {
 		t.Errorf("paused_reason = %q, want %q", st.pauseReasons[33], PauseMissingChat)
@@ -193,7 +248,7 @@ func TestAutoPauseMissingChat(t *testing.T) {
 func TestAutoPauseMissingChat_HeartbeatExempt(t *testing.T) {
 	st := newMockStore(nil)
 	s := New(st, func(int64, string) {}, nil, "UTC")
-	s.execute(ScheduleEntry{ID: 8, ChatID: 0, Message: "beat", Type: "heartbeat", Mode: "prompt"})
+	s.runJob(context.Background(), ScheduleEntry{ID: 8, ChatID: 0, Message: "beat", Type: "heartbeat", Mode: "prompt"})
 
 	if reason, paused := st.pauseReasons[8]; paused {
 		t.Errorf("heartbeat on chat 0 must not be paused, got reason %q", reason)

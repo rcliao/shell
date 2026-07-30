@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,8 +21,13 @@ type ScheduleStore interface {
 	// BumpHeartbeatCount atomically increments and returns a schedule's persisted
 	// heartbeat count, so deep-reflection cadence survives restarts.
 	BumpHeartbeatCount(id int64) (int, error)
-	// RecordJobRun appends a fire attempt to the job_runs ledger.
+	// RecordJobRun appends a complete fire attempt (used for outcomes decided
+	// before any work starts, e.g. an overlap skip).
 	RecordJobRun(run JobRun) error
+	// StartJobRun opens a run row when work begins; FinishJobRun closes it.
+	// The split is what makes queue delay distinguishable from execution time.
+	StartJobRun(run JobRun) (int64, error)
+	FinishJobRun(runID int64, outcome, errMsg string) error
 }
 
 // JobRun is one recorded fire attempt (mirrors store.JobRun).
@@ -30,6 +36,7 @@ type JobRun struct {
 	TriggerContext string
 	ScheduledAt    time.Time // zero = unknown
 	FiredAt        time.Time
+	Attempt        int
 	Outcome        string
 	ErrorMessage   string
 }
@@ -42,6 +49,7 @@ const (
 	OutcomeSpawnFailed       = "spawn_failed"
 	OutcomeTurnFailed        = "turn_failed"
 	OutcomeSkippedQuietHours = "skipped_quiet_hours"
+	OutcomeSkippedOverlap    = "skipped_overlap"
 )
 
 // Auto-pause reasons (mirror the store constants).
@@ -63,6 +71,8 @@ type ScheduleEntry struct {
 	Type      string // "cron" or "once"
 	Mode      string // "notify" or "prompt"
 	NextRunAt time.Time
+	// Overlap is the stored overlap policy; empty means the type default.
+	Overlap string
 }
 
 // NotifyFunc sends a plain text message to a chat.
@@ -70,12 +80,13 @@ type NotifyFunc func(chatID int64, msg string)
 
 // PromptFunc routes a message through Claude as if the user sent it. The error
 // is what makes a failed spawn/turn visible in the job_runs ledger instead of
-// vanishing into the daemon's logs.
-type PromptFunc func(chatID int64, msg string) error
+// vanishing into the daemon's logs. The context carries the per-job timeout and
+// daemon shutdown — an implementation that ignores it cannot be cancelled.
+type PromptFunc func(ctx context.Context, chatID int64, msg string) error
 
 // HeartbeatPromptFunc routes a heartbeat through Claude and returns the response.
 // The scheduler uses the response to decide whether to send it (noop suppression).
-type HeartbeatPromptFunc func(chatID int64, msg string) (string, error)
+type HeartbeatPromptFunc func(ctx context.Context, chatID int64, msg string) (string, error)
 
 // TaskPollFunc polls the shared task store for events targeting this agent.
 // Returns event payloads (JSON strings) for task.created events that need processing.
@@ -95,21 +106,33 @@ type QuietHours struct {
 // defaultDeepReflectInterval is the default number of heartbeats between deep reflection runs.
 const defaultDeepReflectInterval = 6
 
+// defaultJobTimeout bounds a single fire attempt. Observed turns run to ~8.5
+// minutes, so this is generous — its job is to stop a wedged turn from holding
+// a chat's queue forever, not to cut normal work short.
+const defaultJobTimeout = 20 * time.Minute
+
 // Scheduler runs a 1-minute tick loop to fire due schedules.
 type Scheduler struct {
-	store                ScheduleStore
-	onNotify             NotifyFunc
-	onPrompt             PromptFunc
-	onHeartbeat          HeartbeatPromptFunc
-	onTaskPoll           TaskPollFunc    // polls for pending task events
-	onTaskProcess        TaskProcessFunc // processes a task event
-	defaultTZ            string
-	quietHours           QuietHours
-	heartbeatCounts      map[int64]int  // chat_id → number of heartbeats fired (for check-in cadence)
-	heartbeatIdle        map[int64]bool // chat_id → true if last heartbeat was noop
-	idleInterval         time.Duration  // interval after noop heartbeat (0 = use schedule interval)
-	deepReflectInterval  int            // every Nth heartbeat escalates to deep reflection (0 = use default)
-	jitterFrac           JitterFracFunc // firing jitter source; nil disables jitter
+	store         ScheduleStore
+	onNotify      NotifyFunc
+	onPrompt      PromptFunc
+	onHeartbeat   HeartbeatPromptFunc
+	onTaskPoll    TaskPollFunc    // polls for pending task events
+	onTaskProcess TaskProcessFunc // processes a task event
+	defaultTZ     string
+	quietHours    QuietHours
+	// hbMu guards the heartbeat maps. Jobs run on per-chat worker goroutines,
+	// so these are touched concurrently across chats — they were plain maps
+	// while everything ran on the single tick goroutine.
+	hbMu                sync.Mutex
+	heartbeatCounts     map[int64]int  // chat_id → number of heartbeats fired (for check-in cadence)
+	heartbeatIdle       map[int64]bool // chat_id → true if last heartbeat was noop
+	idleInterval        time.Duration  // interval after noop heartbeat (0 = use schedule interval)
+	deepReflectInterval int            // every Nth heartbeat escalates to deep reflection (0 = use default)
+	jitterFrac          JitterFracFunc // firing jitter source; nil disables jitter
+	dispatch            *dispatcher
+	jobTimeout          time.Duration
+	retry               RetryPolicy
 }
 
 // New creates a new Scheduler.
@@ -126,7 +149,26 @@ func New(store ScheduleStore, onNotify NotifyFunc, onPrompt PromptFunc, defaultT
 		heartbeatCounts: make(map[int64]int),
 		heartbeatIdle:   make(map[int64]bool),
 		jitterFrac:      NewSeededJitter(time.Now().UnixNano()),
+		dispatch:        newDispatcher(16),
+		jobTimeout:      defaultJobTimeout,
+		retry:           DefaultRetryPolicy(),
 	}
+}
+
+// SetJobTimeout bounds a single fire attempt. Zero restores the default.
+func (s *Scheduler) SetJobTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultJobTimeout
+	}
+	s.jobTimeout = d
+}
+
+// SetRetryPolicy replaces the retry policy for failed fires.
+func (s *Scheduler) SetRetryPolicy(p RetryPolicy) {
+	if p.MaxAttempts < 1 {
+		p.MaxAttempts = 1
+	}
+	s.retry = p
 }
 
 // SetJitterSource replaces the firing-jitter fraction source. Pass nil to
@@ -173,20 +215,24 @@ func (s *Scheduler) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Run immediately on start, then on each tick
-	s.tick()
+	s.tick(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("scheduler stopped")
+			s.dispatch.wait()
 			return
 		case <-ticker.C:
-			s.tick()
+			s.tick(ctx)
 		}
 	}
 }
 
-func (s *Scheduler) tick() {
+// tick finds due schedules and hands each to its chat's worker. It must never
+// block on the work itself: the tick goroutine is shared by every schedule, and
+// a fire that runs inline makes every other schedule wait behind it.
+func (s *Scheduler) tick(ctx context.Context) {
 	now := time.Now().UTC()
 	schedules, err := s.store.GetDueSchedules(now)
 	if err != nil {
@@ -195,12 +241,68 @@ func (s *Scheduler) tick() {
 	}
 
 	for _, sc := range schedules {
-		s.execute(sc)
+		policy := ParseOverlapPolicy(sc.Overlap, sc.Type)
+		if !s.dispatch.submit(ctx, sc, policy, s.runJob) {
+			slog.Info("scheduler: overlap policy declined fire",
+				"id", sc.ID, "label", sc.Label, "policy", policy)
+			s.recordComplete(sc, OutcomeSkippedOverlap, string(policy))
+		}
+		// Advance BEFORE the job runs, not after. Work now happens off this
+		// goroutine, so a schedule whose next_run_at is still in the past would
+		// be re-selected on every tick while its job is in flight. Advancing
+		// here also fixes the semantics: a crash mid-turn leaves a visible
+		// 'running' row (reaped to 'interrupted') instead of silently re-firing
+		// on restart and delivering the same reminder twice.
 		s.advance(sc, now)
 	}
 
 	// Poll shared task store for pending task events.
 	s.pollTasks()
+}
+
+// runJob executes one fire with its retry policy, recording every attempt as
+// its own ledger row. Runs on a chat's worker goroutine.
+func (s *Scheduler) runJob(ctx context.Context, sc ScheduleEntry) {
+	for attempt := 1; attempt <= s.retry.MaxAttempts; attempt++ {
+		runID, err := s.store.StartJobRun(JobRun{
+			ScheduleID:     sc.ID,
+			TriggerContext: TriggerSchedule,
+			ScheduledAt:    sc.NextRunAt,
+			FiredAt:        time.Now().UTC(),
+			Attempt:        attempt,
+		})
+		if err != nil {
+			slog.Warn("scheduler: failed to open job run", "id", sc.ID, "error", err)
+		}
+
+		jobCtx, cancel := context.WithTimeout(ctx, s.jobTimeout)
+		outcome, errMsg, runErr := s.execute(jobCtx, sc)
+		cancel()
+
+		if runID != 0 {
+			if err := s.store.FinishJobRun(runID, outcome, errMsg); err != nil {
+				slog.Warn("scheduler: failed to close job run", "id", sc.ID, "run_id", runID, "error", err)
+			}
+		}
+
+		if runErr == nil || !IsRetryable(runErr) {
+			return
+		}
+		if attempt == s.retry.MaxAttempts {
+			slog.Error("scheduler: retries exhausted", "id", sc.ID, "label", sc.Label,
+				"attempts", attempt, "error", runErr)
+			return
+		}
+
+		wait := s.retry.Backoff(attempt + 1)
+		slog.Warn("scheduler: transient failure, retrying",
+			"id", sc.ID, "label", sc.Label, "attempt", attempt, "wait", wait, "error", runErr)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
 }
 
 // pollTasks checks for pending task events and processes each in a goroutine.
@@ -278,19 +380,20 @@ func isHeartbeatNoop(response string) bool {
 	return false
 }
 
-// recordRun appends a fire attempt to the job_runs ledger. Every exit path of
-// execute() goes through here — a fire that dies before spawning must leave the
-// same trace as one that succeeded, otherwise failure is indistinguishable from
-// silence.
-func (s *Scheduler) recordRun(sc ScheduleEntry, outcome, errMsg string) {
+// recordComplete writes a single already-finished ledger row. Used for outcomes
+// decided before any work starts (an overlap skip), where there is no interval
+// to measure and StartJobRun/FinishJobRun would be two writes for one instant.
+func (s *Scheduler) recordComplete(sc ScheduleEntry, outcome, errMsg string) {
 	if s.store == nil {
 		return
 	}
+	now := time.Now().UTC()
 	if err := s.store.RecordJobRun(JobRun{
 		ScheduleID:     sc.ID,
 		TriggerContext: TriggerSchedule,
 		ScheduledAt:    sc.NextRunAt,
-		FiredAt:        time.Now().UTC(),
+		FiredAt:        now,
+		Attempt:        1,
 		Outcome:        outcome,
 		ErrorMessage:   errMsg,
 	}); err != nil {
@@ -298,7 +401,31 @@ func (s *Scheduler) recordRun(sc ScheduleEntry, outcome, errMsg string) {
 	}
 }
 
-func (s *Scheduler) execute(sc ScheduleEntry) {
+// heartbeatFallbackCount bumps the in-memory heartbeat counter for a chat.
+// Only used when the persistent bump fails.
+func (s *Scheduler) heartbeatFallbackCount(chatID int64) int {
+	s.hbMu.Lock()
+	defer s.hbMu.Unlock()
+	s.heartbeatCounts[chatID]++
+	return s.heartbeatCounts[chatID]
+}
+
+func (s *Scheduler) setHeartbeatIdle(chatID int64, idle bool) {
+	s.hbMu.Lock()
+	defer s.hbMu.Unlock()
+	s.heartbeatIdle[chatID] = idle
+}
+
+func (s *Scheduler) isHeartbeatIdle(chatID int64) bool {
+	s.hbMu.Lock()
+	defer s.hbMu.Unlock()
+	return s.heartbeatIdle[chatID]
+}
+
+// execute runs one fire attempt and reports its outcome. The returned error is
+// the raw failure, kept separate from the message so the caller can classify it
+// for retry; a nil error with a non-OK outcome means "failed, do not retry".
+func (s *Scheduler) execute(ctx context.Context, sc ScheduleEntry) (outcome, errMsg string, err error) {
 	slog.Info("scheduler: firing", "id", sc.ID, "chat_id", sc.ChatID, "type", sc.Type, "mode", sc.Mode, "label", sc.Label)
 
 	msg := sc.Message
@@ -312,17 +439,15 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 	// this check shipped (7/29).
 	if sc.ChatID == 0 && sc.Type != "heartbeat" {
 		slog.Error("scheduler: schedule has no chat_id, auto-pausing", "id", sc.ID, "label", sc.Label)
-		s.recordRun(sc, OutcomeSpawnFailed, "missing chat_id")
 		s.pause(sc.ID, PauseMissingChat)
-		return
+		return OutcomeSpawnFailed, "missing chat_id", nil
 	}
 
 	if sc.Type == "heartbeat" {
 		// Suppress heartbeats during quiet hours.
 		if s.isQuietHours() {
 			slog.Info("scheduler: skipping heartbeat during quiet hours", "id", sc.ID, "chat_id", sc.ChatID)
-			s.recordRun(sc, OutcomeSkippedQuietHours, "")
-			return
+			return OutcomeSkippedQuietHours, "", nil
 		}
 
 		// Track heartbeat count for check-in + deep-reflection cadence. Persist
@@ -330,11 +455,10 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 		// survives daemon restarts — an in-memory counter reset on every re-exec
 		// and starved deep reflection entirely. Fall back to in-memory if the
 		// persistent bump fails, so heartbeats keep working.
-		count, err := s.store.BumpHeartbeatCount(sc.ID)
-		if err != nil {
-			s.heartbeatCounts[sc.ChatID]++
-			count = s.heartbeatCounts[sc.ChatID]
-			slog.Warn("scheduler: persistent heartbeat count failed, using in-memory", "id", sc.ID, "chat_id", sc.ChatID, "error", err)
+		count, bumpErr := s.store.BumpHeartbeatCount(sc.ID)
+		if bumpErr != nil {
+			count = s.heartbeatFallbackCount(sc.ChatID)
+			slog.Warn("scheduler: persistent heartbeat count failed, using in-memory", "id", sc.ID, "chat_id", sc.ChatID, "error", bumpErr)
 		}
 
 		// Determine deep reflection interval.
@@ -359,15 +483,14 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 
 		if s.onHeartbeat != nil {
 			hbStart := time.Now()
-			resp, err := s.onHeartbeat(sc.ChatID, msg)
+			resp, hbErr := s.onHeartbeat(ctx, sc.ChatID, msg)
 			hbElapsed := time.Since(hbStart)
-			if err != nil {
-				slog.Error("scheduler: heartbeat prompt failed", "chat_id", sc.ChatID, "elapsed", hbElapsed, "error", err)
-				s.recordRun(sc, OutcomeTurnFailed, err.Error())
-				return
+			if hbErr != nil {
+				slog.Error("scheduler: heartbeat prompt failed", "chat_id", sc.ChatID, "elapsed", hbElapsed, "error", hbErr)
+				return OutcomeTurnFailed, hbErr.Error(), hbErr
 			}
 			noop := isHeartbeatNoop(resp)
-			s.heartbeatIdle[sc.ChatID] = noop
+			s.setHeartbeatIdle(sc.ChatID, noop)
 			slog.Info("scheduler: heartbeat completed",
 				"chat_id", sc.ChatID,
 				"noop", noop,
@@ -376,24 +499,21 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 				"count", count,
 			)
 			if noop {
-				s.recordRun(sc, OutcomeFiredOK, "")
-				return
+				return OutcomeFiredOK, "", nil
 			}
 			if s.onNotify != nil {
 				s.onNotify(sc.ChatID, resp)
 			}
-			s.recordRun(sc, OutcomeFiredOK, "")
-		} else if s.onPrompt != nil {
-			// Fallback to onPrompt if onHeartbeat not set.
-			if err := s.onPrompt(sc.ChatID, msg); err != nil {
-				s.recordRun(sc, OutcomeTurnFailed, err.Error())
-				return
-			}
-			s.recordRun(sc, OutcomeFiredOK, "")
-		} else {
-			s.recordRun(sc, OutcomeSpawnFailed, "no heartbeat or prompt handler wired")
+			return OutcomeFiredOK, "", nil
 		}
-		return
+		if s.onPrompt != nil {
+			// Fallback to onPrompt if onHeartbeat not set.
+			if err := s.onPrompt(ctx, sc.ChatID, msg); err != nil {
+				return OutcomeTurnFailed, err.Error(), err
+			}
+			return OutcomeFiredOK, "", nil
+		}
+		return OutcomeSpawnFailed, "no heartbeat or prompt handler wired", nil
 	}
 
 	if sc.Label != "" && sc.Mode == "notify" {
@@ -404,23 +524,20 @@ func (s *Scheduler) execute(sc ScheduleEntry) {
 	case "prompt":
 		if s.onPrompt == nil {
 			slog.Error("scheduler: prompt-mode schedule fired with no prompt handler", "id", sc.ID)
-			s.recordRun(sc, OutcomeSpawnFailed, "no prompt handler wired")
-			return
+			return OutcomeSpawnFailed, "no prompt handler wired", nil
 		}
-		if err := s.onPrompt(sc.ChatID, msg); err != nil {
+		if err := s.onPrompt(ctx, sc.ChatID, msg); err != nil {
 			slog.Error("scheduler: scheduled prompt failed", "id", sc.ID, "chat_id", sc.ChatID, "error", err)
-			s.recordRun(sc, OutcomeTurnFailed, err.Error())
-			return
+			return OutcomeTurnFailed, err.Error(), err
 		}
-		s.recordRun(sc, OutcomeFiredOK, "")
+		return OutcomeFiredOK, "", nil
 	default: // "notify"
 		if s.onNotify == nil {
 			slog.Error("scheduler: notify-mode schedule fired with no notify handler", "id", sc.ID)
-			s.recordRun(sc, OutcomeSpawnFailed, "no notify handler wired")
-			return
+			return OutcomeSpawnFailed, "no notify handler wired", nil
 		}
 		s.onNotify(sc.ChatID, msg)
-		s.recordRun(sc, OutcomeFiredOK, "")
+		return OutcomeFiredOK, "", nil
 	}
 }
 
@@ -454,7 +571,7 @@ func (s *Scheduler) advance(sc ScheduleEntry, now time.Time) {
 			return
 		}
 		// Use idle interval if last heartbeat was noop and idle interval is configured.
-		if s.heartbeatIdle[sc.ChatID] && s.idleInterval > 0 && s.idleInterval > interval {
+		if s.isHeartbeatIdle(sc.ChatID) && s.idleInterval > 0 && s.idleInterval > interval {
 			slog.Info("scheduler: using idle interval for next heartbeat",
 				"id", sc.ID, "chat_id", sc.ChatID,
 				"normal", interval, "idle", s.idleInterval)

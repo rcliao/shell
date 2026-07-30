@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -49,6 +50,29 @@ func (m *mockStore) RecordJobRun(run JobRun) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.runs = append(m.runs, run)
+	return nil
+}
+
+// StartJobRun/FinishJobRun mirror the two-phase ledger: the row is appended
+// open and its outcome patched in place, so tests see exactly one row per
+// attempt with the terminal outcome — same shape as the real store.
+func (m *mockStore) StartJobRun(run JobRun) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run.Outcome = "running"
+	m.runs = append(m.runs, run)
+	return int64(len(m.runs)), nil
+}
+
+func (m *mockStore) FinishJobRun(runID int64, outcome, errMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idx := int(runID) - 1
+	if idx < 0 || idx >= len(m.runs) {
+		return errors.New("no such run")
+	}
+	m.runs[idx].Outcome = outcome
+	m.runs[idx].ErrorMessage = errMsg
 	return nil
 }
 
@@ -116,7 +140,7 @@ func TestDeepReflectionCadenceSurvivesRestart(t *testing.T) {
 		s := New(store, nil, nil, "UTC")
 		s.SetQuietHours(0, 0) // disable quiet-hours suppression for the test
 		s.SetDeepReflectInterval(3)
-		s.SetHeartbeatPrompt(func(chatID int64, msg string) (string, error) {
+		s.SetHeartbeatPrompt(func(_ context.Context, chatID int64, msg string) (string, error) {
 			fired++
 			if strings.HasPrefix(msg, "[Heartbeat:deep] ") {
 				deepAt = append(deepAt, fired)
@@ -127,13 +151,13 @@ func TestDeepReflectionCadenceSurvivesRestart(t *testing.T) {
 	}
 
 	s := newSched()
-	s.execute(hb) // count 1 → light
-	s.execute(hb) // count 2 → light
+	s.execute(context.Background(), hb) // count 1 → light
+	s.execute(context.Background(), hb) // count 2 → light
 
 	// Simulate a daemon restart: brand-new Scheduler (in-memory counter = 0),
 	// same store (persisted count = 2).
 	s = newSched()
-	s.execute(hb) // persisted count 3 → MUST be deep
+	s.execute(context.Background(), hb) // persisted count 3 → MUST be deep
 
 	if len(deepAt) != 1 || deepAt[0] != 3 {
 		t.Fatalf("deep reflection should fire on the 3rd persisted heartbeat across a restart; got deepAt=%v (fired=%d)", deepAt, fired)
@@ -150,7 +174,7 @@ func TestSchedulerOneShotDisables(t *testing.T) {
 		notified = append(notified, msg)
 	}, nil, "UTC")
 
-	s.tick()
+	tickSync(t, s)
 
 	if len(notified) != 1 {
 		t.Fatalf("expected 1 notification, got %d", len(notified))
@@ -170,7 +194,7 @@ func TestSchedulerCronAdvances(t *testing.T) {
 		notified++
 	}, nil, "UTC")
 
-	s.tick()
+	tickSync(t, s)
 
 	if notified != 1 {
 		t.Fatalf("expected 1 notification, got %d", notified)
@@ -189,12 +213,12 @@ func TestSchedulerPromptMode(t *testing.T) {
 	})
 
 	var prompted []string
-	s := New(store, nil, func(chatID int64, msg string) error {
+	s := New(store, nil, func(_ context.Context, chatID int64, msg string) error {
 		prompted = append(prompted, msg)
 		return nil
 	}, "UTC")
 
-	s.tick()
+	tickSync(t, s)
 
 	if len(prompted) != 1 {
 		t.Fatalf("expected 1 prompt, got %d", len(prompted))
@@ -217,5 +241,20 @@ func TestSchedulerRunCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("scheduler did not stop after context cancellation")
+	}
+}
+
+// tickSync runs one tick and waits for every dispatched job to finish. Fires now
+// run on per-chat worker goroutines, so a test that asserts immediately after
+// tick() would race the work it is asserting on.
+func tickSync(t *testing.T, s *Scheduler) {
+	t.Helper()
+	s.tick(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.dispatch.idle() {
+		if time.Now().After(deadline) {
+			t.Fatal("dispatched jobs did not drain within 5s")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

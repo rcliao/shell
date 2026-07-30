@@ -33,6 +33,7 @@ func (a *StoreAdapter) GetDueSchedules(now time.Time) ([]ScheduleEntry, error) {
 			Type:      sc.Type,
 			Mode:      sc.Mode,
 			NextRunAt: sc.NextRunAt,
+			Overlap:   sc.OverlapPolicy,
 		}
 	}
 	return entries, nil
@@ -59,10 +60,23 @@ func (a *StoreAdapter) PauseSchedule(id int64, reason string) error {
 }
 
 func (a *StoreAdapter) RecordJobRun(run JobRun) error {
+	return a.s.RecordJobRun(toStoreRun(run))
+}
+
+func (a *StoreAdapter) StartJobRun(run JobRun) (int64, error) {
+	return a.s.StartJobRun(toStoreRun(run))
+}
+
+func (a *StoreAdapter) FinishJobRun(runID int64, outcome, errMsg string) error {
+	return a.s.FinishJobRun(runID, outcome, errMsg)
+}
+
+func toStoreRun(run JobRun) store.JobRun {
 	rec := store.JobRun{
 		ScheduleID:     run.ScheduleID,
 		TriggerContext: run.TriggerContext,
 		FiredAt:        run.FiredAt,
+		Attempt:        run.Attempt,
 		Outcome:        run.Outcome,
 		ErrorMessage:   run.ErrorMessage,
 	}
@@ -70,7 +84,7 @@ func (a *StoreAdapter) RecordJobRun(run JobRun) error {
 		t := run.ScheduledAt
 		rec.ScheduledAt = &t
 	}
-	return a.s.RecordJobRun(rec)
+	return rec
 }
 
 // SilenceChecks builds the dead-man's-switch input from the enabled schedules.

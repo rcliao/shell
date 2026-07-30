@@ -119,6 +119,9 @@ type Schedule struct {
 	// (job_runs.outcome = 'fired_ok'). Distinct from last_run_at, which
 	// advances even when the fire failed.
 	LastSuccessAt *time.Time
+	// OverlapPolicy is "skip" | "buffer_one" | "allow"; empty means the
+	// scheduler's per-type default.
+	OverlapPolicy string
 }
 
 func Open(dbPath string) (*Store, error) {
@@ -292,6 +295,10 @@ func (s *Store) migrate() error {
 	s.db.Exec("ALTER TABLE message_map ADD COLUMN e2e_total_ms INTEGER NOT NULL DEFAULT 0")
 	s.db.Exec("ALTER TABLE usage ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0")
 	s.db.Exec("ALTER TABLE usage ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
+	// Overlap policy: what to do when a schedule comes due while its previous
+	// run is still in flight. Empty means the type default (skip for
+	// heartbeats, buffer_one otherwise) — see scheduler/policy.go.
+	s.db.Exec("ALTER TABLE schedules ADD COLUMN overlap_policy TEXT NOT NULL DEFAULT ''")
 
 	// Per-exchange tool-call log. One row per tool_use block observed in the
 	// Claude stream — powers usage analysis (which tools/skills actually get
@@ -627,6 +634,7 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_job_runs_schedule ON job_runs(schedule_id, fired_at);
 	CREATE INDEX IF NOT EXISTS idx_job_runs_fired ON job_runs(fired_at);
+	CREATE INDEX IF NOT EXISTS idx_job_runs_running ON job_runs(outcome) WHERE outcome = 'running';
 	`
 	if _, err := s.db.Exec(jobRunsSchema); err != nil {
 		return err
@@ -644,6 +652,16 @@ func (s *Store) migrate() error {
 		"ALTER TABLE schedules ADD COLUMN expected_next_at DATETIME",
 		// Last fire that actually reached the chat/agent.
 		"ALTER TABLE schedules ADD COLUMN last_success_at DATETIME",
+		// job_runs timing split: fired_at used to be stamped when the turn
+		// FINISHED, so queue delay and execution time were indistinguishable —
+		// the one measurement needed to see head-of-line blocking. Rows written
+		// before this migration have finished_at NULL and a fired_at that still
+		// means "completed"; read pre-migration timings as upper bounds.
+		"ALTER TABLE job_runs ADD COLUMN finished_at DATETIME",
+		"ALTER TABLE job_runs ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
+		// Attempt number within one occurrence, so a retried job reads as N
+		// attempts rather than N unrelated runs.
+		"ALTER TABLE job_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1",
 	} {
 		s.db.Exec(col)
 	}
@@ -1295,8 +1313,10 @@ func (s *Store) ListSchedules(chatID int64) ([]Schedule, error) {
 // time.Time values is robust to how the row was written.
 func (s *Store) GetDueSchedules(now time.Time) ([]Schedule, error) {
 	rows, err := s.db.Query(`
-		SELECT id, chat_id, label, message, schedule, timezone, type, mode, next_run_at, last_run_at, enabled, created_at
+		SELECT id, chat_id, label, message, schedule, timezone, type, mode, next_run_at, last_run_at,
+		       enabled, created_at, COALESCE(overlap_policy, '')
 		FROM schedules WHERE enabled = 1
+		ORDER BY next_run_at
 	`)
 	if err != nil {
 		return nil, err
@@ -1308,7 +1328,7 @@ func (s *Store) GetDueSchedules(now time.Time) ([]Schedule, error) {
 		var sc Schedule
 		var enabled int
 		var lastRun sql.NullTime
-		if err := rows.Scan(&sc.ID, &sc.ChatID, &sc.Label, &sc.Message, &sc.Schedule, &sc.Timezone, &sc.Type, &sc.Mode, &sc.NextRunAt, &lastRun, &enabled, &sc.CreatedAt); err != nil {
+		if err := rows.Scan(&sc.ID, &sc.ChatID, &sc.Label, &sc.Message, &sc.Schedule, &sc.Timezone, &sc.Type, &sc.Mode, &sc.NextRunAt, &lastRun, &enabled, &sc.CreatedAt, &sc.OverlapPolicy); err != nil {
 			return nil, err
 		}
 		sc.Enabled = enabled != 0
