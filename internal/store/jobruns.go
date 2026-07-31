@@ -143,11 +143,62 @@ func (s *Store) StartJobRun(run JobRun) (int64, error) {
 // FinishJobRun closes an open run with its terminal outcome and duration, and
 // stamps schedules.last_success_at on success — in one transaction, so "the
 // ledger says it worked" and "the schedule looks alive" cannot disagree.
+//
+// scheduleID and firedAt are passed in rather than read back inside the
+// transaction, and that is load-bearing. The first version opened with a SELECT
+// and then UPDATEd; a deferred SQLite transaction that upgrades from read to
+// write returns SQLITE_BUSY IMMEDIATELY when another connection has written in
+// the meantime — busy_timeout does not apply to the upgrade. This lands exactly
+// at turn end, where the usage row, memory reflection and session compaction
+// all write at once, and it cost a successful heartbeat its terminal row on
+// 7/30: the run stayed 'running', got reaped as 'interrupted' at the next
+// restart, and last_success_at was never stamped. Starting with the UPDATE
+// takes the write lock up front, so busy_timeout governs the wait.
 func (s *Store) FinishJobRun(runID int64, outcome, errMsg string) error {
+	return s.finishJobRun(runID, 0, time.Time{}, outcome, errMsg)
+}
+
+// FinishJobRunAt is FinishJobRun with the run's identity supplied by the
+// caller, avoiding the lookup entirely.
+func (s *Store) FinishJobRunAt(runID, scheduleID int64, firedAt time.Time, outcome, errMsg string) error {
+	return s.finishJobRun(runID, scheduleID, firedAt, outcome, errMsg)
+}
+
+func (s *Store) finishJobRun(runID, scheduleID int64, firedAt time.Time, outcome, errMsg string) error {
 	if outcome == "" || outcome == OutcomeRunning {
 		return fmt.Errorf("finish requires a terminal outcome, got %q", outcome)
 	}
+
+	// Fall back to a lookup only when the caller could not supply the values.
+	// Done OUTSIDE the transaction so the write below never upgrades a read.
+	if scheduleID == 0 || firedAt.IsZero() {
+		if err := s.db.QueryRow(`SELECT schedule_id, fired_at FROM job_runs WHERE id = ?`, runID).
+			Scan(&scheduleID, &firedAt); err != nil {
+			return err
+		}
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+		}
+		if lastErr = s.finishJobRunOnce(runID, scheduleID, firedAt, outcome, errMsg); lastErr == nil {
+			return nil
+		}
+		if !isBusy(lastErr) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+func (s *Store) finishJobRunOnce(runID, scheduleID int64, firedAt time.Time, outcome, errMsg string) error {
 	now := time.Now().UTC()
+	durationMS := now.Sub(firedAt).Milliseconds()
+	if durationMS < 0 {
+		durationMS = 0
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -155,17 +206,8 @@ func (s *Store) FinishJobRun(runID int64, outcome, errMsg string) error {
 	}
 	defer tx.Rollback()
 
-	var scheduleID int64
-	var firedAt time.Time
-	if err := tx.QueryRow(`SELECT schedule_id, fired_at FROM job_runs WHERE id = ?`, runID).
-		Scan(&scheduleID, &firedAt); err != nil {
-		return err
-	}
-	durationMS := now.Sub(firedAt).Milliseconds()
-	if durationMS < 0 {
-		durationMS = 0
-	}
-
+	// Write first: this statement takes the write lock, so a concurrent writer
+	// makes us WAIT (busy_timeout) instead of failing outright.
 	if _, err := tx.Exec(`
 		UPDATE job_runs SET outcome = ?, error_message = ?, finished_at = ?, duration_ms = ?
 		WHERE id = ?
@@ -178,6 +220,16 @@ func (s *Store) FinishJobRun(runID int64, outcome, errMsg string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// isBusy reports whether an error is SQLite's "database is locked" contention
+// signal, which is worth retrying, as opposed to a real failure.
+func isBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy")
 }
 
 // ReapRunningJobRuns closes runs left open by a crash or restart. Called once at

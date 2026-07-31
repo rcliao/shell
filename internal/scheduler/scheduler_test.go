@@ -64,7 +64,7 @@ func (m *mockStore) StartJobRun(run JobRun) (int64, error) {
 	return int64(len(m.runs)), nil
 }
 
-func (m *mockStore) FinishJobRun(runID int64, outcome, errMsg string) error {
+func (m *mockStore) FinishJobRun(runID, scheduleID int64, firedAt time.Time, outcome, errMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	idx := int(runID) - 1

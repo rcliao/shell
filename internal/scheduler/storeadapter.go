@@ -67,8 +67,8 @@ func (a *StoreAdapter) StartJobRun(run JobRun) (int64, error) {
 	return a.s.StartJobRun(toStoreRun(run))
 }
 
-func (a *StoreAdapter) FinishJobRun(runID int64, outcome, errMsg string) error {
-	return a.s.FinishJobRun(runID, outcome, errMsg)
+func (a *StoreAdapter) FinishJobRun(runID, scheduleID int64, firedAt time.Time, outcome, errMsg string) error {
+	return a.s.FinishJobRunAt(runID, scheduleID, firedAt, outcome, errMsg)
 }
 
 func toStoreRun(run JobRun) store.JobRun {

@@ -74,13 +74,7 @@ func TestJobsSerializeWithinAChat(t *testing.T) {
 	}
 	wg.Wait()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for !s.dispatch.idle() {
-		if time.Now().After(deadline) {
-			t.Fatal("jobs did not drain")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "jobs to drain", s.dispatch.idle)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -101,6 +95,9 @@ func TestOverlapSkipDropsSecondFire(t *testing.T) {
 		<-release
 		return nil
 	}, "UTC")
+	// Heartbeats are suppressed during quiet hours, so a test that fires one
+	// must disable them — otherwise it passes by day and hangs by night.
+	s.SetQuietHours(0, 0)
 
 	ctx := context.Background()
 	entry := ScheduleEntry{ID: 9, ChatID: 7, Message: "beat", Type: "heartbeat", Mode: "prompt"}
@@ -108,22 +105,13 @@ func TestOverlapSkipDropsSecondFire(t *testing.T) {
 	if ok := s.dispatch.submit(ctx, entry, OverlapSkip, s.runJob); !ok {
 		t.Fatal("first fire should be accepted")
 	}
-	// Wait for it to actually occupy the worker.
-	for started.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "first fire to occupy the worker", func() bool { return started.Load() > 0 })
 	if ok := s.dispatch.submit(ctx, entry, OverlapSkip, s.runJob); ok {
 		t.Error("second fire should have been skipped while the first is in flight")
 	}
 
 	close(release)
-	deadline := time.Now().Add(2 * time.Second)
-	for !s.dispatch.idle() {
-		if time.Now().After(deadline) {
-			t.Fatal("did not drain")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "dispatch to drain", s.dispatch.idle)
 	if n := started.Load(); n != 1 {
 		t.Errorf("skip policy ran %d jobs, want 1", n)
 	}
@@ -148,9 +136,7 @@ func TestOverlapBufferOneAllowsExactlyOneWaiter(t *testing.T) {
 	if !s.dispatch.submit(ctx, entry, OverlapBufferOne, s.runJob) {
 		t.Fatal("first fire should be accepted")
 	}
-	for started.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "first fire to occupy the worker", func() bool { return started.Load() > 0 })
 	if !s.dispatch.submit(ctx, entry, OverlapBufferOne, s.runJob) {
 		t.Error("second fire should buffer behind the first")
 	}
@@ -159,13 +145,7 @@ func TestOverlapBufferOneAllowsExactlyOneWaiter(t *testing.T) {
 	}
 
 	close(release)
-	deadline := time.Now().Add(2 * time.Second)
-	for !s.dispatch.idle() {
-		if time.Now().After(deadline) {
-			t.Fatal("did not drain")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "dispatch to drain", s.dispatch.idle)
 }
 
 // An overlap-declined fire must leave a ledger row. A silently dropped fire is
@@ -187,19 +167,11 @@ func TestSkippedOverlapIsRecorded(t *testing.T) {
 
 	ctx := context.Background()
 	s.tick(ctx) // first fire occupies the worker
-	for started.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "first fire to occupy the worker", func() bool { return started.Load() > 0 })
 	s.tick(ctx) // second fire is declined by the skip policy
 
 	close(release)
-	deadline := time.Now().Add(2 * time.Second)
-	for !s.dispatch.idle() {
-		if time.Now().After(deadline) {
-			t.Fatal("did not drain")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "dispatch to drain", s.dispatch.idle)
 
 	var skipped int
 	for _, r := range st.outcomes(11) {
@@ -263,5 +235,19 @@ func TestOverlapPolicyDefaults(t *testing.T) {
 	}
 	if got := ParseOverlapPolicy("ALLOW", "heartbeat"); got != OverlapAllow {
 		t.Errorf("policy parsing should be case-insensitive, got %q", got)
+	}
+}
+
+// waitFor blocks until cond holds, failing the test rather than hanging. Every
+// wait in this file is bounded: a condition that never becomes true is a bug to
+// report, not a reason to burn the package timeout.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

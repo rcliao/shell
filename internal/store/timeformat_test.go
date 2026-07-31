@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -127,4 +128,56 @@ func openTempStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// FinishJobRun must survive write contention. The first implementation opened
+// its transaction with a SELECT and upgraded to a write; SQLite answers that
+// upgrade with an immediate SQLITE_BUSY rather than honoring busy_timeout, and
+// a successful heartbeat lost its terminal row to exactly that on 7/30 — it sat
+// 'running' until a restart reaped it as 'interrupted', and last_success_at was
+// never stamped.
+func TestFinishJobRunSurvivesConcurrentWriter(t *testing.T) {
+	s := openTempStore(t)
+
+	fired := time.Now().UTC()
+	runID, err := s.StartJobRun(JobRun{ScheduleID: 1, FiredAt: fired, Attempt: 1})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Hold an open write transaction on another connection, the way a
+	// turn-end usage write or a session compaction does.
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO job_runs (schedule_id, trigger_context, fired_at, outcome, error_message)
+		VALUES (99, 'schedule', ?, 'running', '')`, time.Now().UTC()); err != nil {
+		tx.Rollback()
+		t.Fatalf("blocker write: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		tx.Commit()
+		close(done)
+	}()
+
+	if err := s.FinishJobRunAt(runID, 1, fired, OutcomeFiredOK, ""); err != nil {
+		t.Fatalf("finish under contention: %v", err)
+	}
+	<-done
+
+	var outcome string
+	if err := s.db.QueryRow(`SELECT outcome FROM job_runs WHERE id = ?`, runID).Scan(&outcome); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if outcome != OutcomeFiredOK {
+		t.Fatalf("outcome = %q, want %q — a lost close leaves the run looking crashed", outcome, OutcomeFiredOK)
+	}
+
+	var lastSuccess sql.NullTime
+	if err := s.db.QueryRow(`SELECT last_success_at FROM schedules WHERE id = 1`).Scan(&lastSuccess); err != nil && err != sql.ErrNoRows {
+		t.Fatalf("last_success read: %v", err)
+	}
 }

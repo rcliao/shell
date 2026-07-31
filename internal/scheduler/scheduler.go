@@ -27,7 +27,10 @@ type ScheduleStore interface {
 	// StartJobRun opens a run row when work begins; FinishJobRun closes it.
 	// The split is what makes queue delay distinguishable from execution time.
 	StartJobRun(run JobRun) (int64, error)
-	FinishJobRun(runID int64, outcome, errMsg string) error
+	// FinishJobRun closes it. scheduleID/firedAt are passed back so the store
+	// never has to read the row inside its write transaction — that read-then-
+	// upgrade is what returned SQLITE_BUSY and lost a run's terminal outcome.
+	FinishJobRun(runID, scheduleID int64, firedAt time.Time, outcome, errMsg string) error
 }
 
 // JobRun is one recorded fire attempt (mirrors store.JobRun).
@@ -264,11 +267,12 @@ func (s *Scheduler) tick(ctx context.Context) {
 // its own ledger row. Runs on a chat's worker goroutine.
 func (s *Scheduler) runJob(ctx context.Context, sc ScheduleEntry) {
 	for attempt := 1; attempt <= s.retry.MaxAttempts; attempt++ {
+		firedAt := time.Now().UTC()
 		runID, err := s.store.StartJobRun(JobRun{
 			ScheduleID:     sc.ID,
 			TriggerContext: TriggerSchedule,
 			ScheduledAt:    sc.NextRunAt,
-			FiredAt:        time.Now().UTC(),
+			FiredAt:        firedAt,
 			Attempt:        attempt,
 		})
 		if err != nil {
@@ -280,7 +284,7 @@ func (s *Scheduler) runJob(ctx context.Context, sc ScheduleEntry) {
 		cancel()
 
 		if runID != 0 {
-			if err := s.store.FinishJobRun(runID, outcome, errMsg); err != nil {
+			if err := s.store.FinishJobRun(runID, sc.ID, firedAt, outcome, errMsg); err != nil {
 				slog.Warn("scheduler: failed to close job run", "id", sc.ID, "run_id", runID, "error", err)
 			}
 		}
