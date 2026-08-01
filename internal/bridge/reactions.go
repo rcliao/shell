@@ -337,7 +337,6 @@ func (b *Bridge) Correct(ctx context.Context, chatID int64, args string) (string
 	return fmt.Sprintf("Updated memory #%d (**%s**): %s", idx, entry.Key, newContent), nil
 }
 
-
 // BeginPendingTurn / CompletePendingTurn expose the replay ledger to the
 // telegram handler (V2-H30: replay turns killed by a deploy restart).
 func (b *Bridge) BeginPendingTurn(chatID, threadID int64, telegramMsgID int, senderName, text string) (bool, error) {

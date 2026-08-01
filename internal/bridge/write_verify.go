@@ -87,6 +87,7 @@ var writeClaimRe = regexp.MustCompile(`(?i)\b(logged|saved (it|this|that)|added 
 //     (較好/更好/剛好/正好/就好), within cjkMarkerAfterWindow runes after the
 //     verb match (window fits a short object: verb + " Notion " + marker), or
 //   - 已 within cjkMarkerBeforeWindow runes before it (已經幫妳補進…).
+//
 // A pre-verb ✅ (bullet decoration) or a far-away 好 no longer counts.
 const (
 	cjkMarkerAfterWindow  = 10 // runes past the verb match end

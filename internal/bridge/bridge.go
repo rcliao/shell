@@ -53,8 +53,8 @@ type Bridge struct {
 	// exec's mid-turn kills the Claude subprocess and loses the user's
 	// message (observed 7/13 16:09 and 7/14 07:43). turnWG counts active
 	// HandleMessageStreaming calls so restart can wait for them.
-	turnWG     sync.WaitGroup
-	turnCount  atomic.Int32
+	turnWG    sync.WaitGroup
+	turnCount atomic.Int32
 
 	proc      process.Agent
 	pool      AgentPool // optional: multi-agent routing
@@ -820,8 +820,8 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// concurrently, then assemble in the exact original order (Channel B |
 	// task activity | pending tasks | transcript | ghost | message). SQLite
 	// WAL supports the concurrent readers; the embedder serializes internally.
-	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ") || strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
-	isDeepHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat:deep] ")
+	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ") || strings.HasPrefix(userMsg, deepHeartbeatPrefix)
+	isDeepHeartbeat := strings.HasPrefix(userMsg, deepHeartbeatPrefix)
 
 	var ghostAug, transcriptBlock, tasksBlock, activityBlock, channelBPrefix string
 	{
@@ -1176,6 +1176,20 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 // logs the exchange, and returns a typed AgentResponse with collected photos.
 func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source, turnModel string) AgentResponse {
 	response := strings.TrimSpace(result.Text)
+
+	// Capture the deep-heartbeat journal BEFORE anything else can consume or
+	// discard the text. Deep beats are where the agent audits its own past
+	// behavior, and their output was previously written only to `messages` and
+	// aged out — heartbeats run on the system chat, whose notify path returns
+	// early, so nothing survived the turn unless the agent happened to call a
+	// memory tool mid-turn.
+	//
+	// Best-effort and non-fatal: a journal that can fail a heartbeat is worse
+	// than no journal. Nothing reads these rows yet — capture is deliberately
+	// observation-only so the corpus can be studied before curation is designed.
+	if strings.HasPrefix(userMsg, deepHeartbeatPrefix) && b.store != nil {
+		b.captureReflection(chatID, response, result, turnModel)
+	}
 
 	// Run memory maintenance during heartbeats.
 	if isHeartbeat && b.memory != nil {

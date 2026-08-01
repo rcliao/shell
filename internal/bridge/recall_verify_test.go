@@ -55,9 +55,9 @@ func TestIsReadTool(t *testing.T) {
 	}
 
 	notRead := []process.ToolCall{
-		{Name: "mcp__ghost__ghost_put"},                        // a write, not a read
-		{Name: "mcp__claude_ai_Notion__notion-update-page"},    // a write
-		{Name: "mcp__claude_ai_Notion__notion-create-pages"},   // a write
+		{Name: "mcp__ghost__ghost_put"},                                        // a write, not a read
+		{Name: "mcp__claude_ai_Notion__notion-update-page"},                    // a write
+		{Name: "mcp__claude_ai_Notion__notion-create-pages"},                   // a write
 		{Name: "Bash", Input: map[string]any{"command": "shell-remember 'x'"}}, // a write
 		{Name: "Bash", Input: map[string]any{"command": "ls -la"}},
 	}

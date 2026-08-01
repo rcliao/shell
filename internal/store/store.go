@@ -636,6 +636,29 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_job_runs_fired ON job_runs(fired_at);
 	CREATE INDEX IF NOT EXISTS idx_job_runs_running ON job_runs(outcome) WHERE outcome = 'running';
 	`
+	// reflections is the deep-heartbeat journal — see internal/store/reflections.go.
+	// Write-only by design at this stage: captured automatically so the corpus is
+	// complete, read by nothing, so observing it changes no behavior.
+	reflectionsSchema := `
+	CREATE TABLE IF NOT EXISTS reflections (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_run_id  INTEGER NOT NULL DEFAULT 0,
+		chat_id     INTEGER NOT NULL DEFAULT 0,
+		beat_count  INTEGER NOT NULL DEFAULT 0,
+		model       TEXT NOT NULL DEFAULT '',
+		text        TEXT NOT NULL DEFAULT '',
+		tool_calls  INTEGER NOT NULL DEFAULT 0,
+		noop        INTEGER NOT NULL DEFAULT 0,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at);
+	CREATE INDEX IF NOT EXISTS idx_reflections_job_run ON reflections(job_run_id);
+	`
+	if _, err := s.db.Exec(reflectionsSchema); err != nil {
+		return err
+	}
+
 	if _, err := s.db.Exec(jobRunsSchema); err != nil {
 		return err
 	}

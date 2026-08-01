@@ -61,9 +61,9 @@ func TestPeerAddressedInReply(t *testing.T) {
 		{"Hey Umbreon — quick one, so I'll ask straight", "umbreon_mini_bot"},
 		{"And Pika — I did catch your message", ""}, // addresses pika, but self IS pika here → no self-match; peer is umbreon, not addressed
 		{"哥哥— 你看這個", "umbreon_mini_bot"},
-		{"好的，我來處理這個", ""},                     // addresses a human, not the peer
-		{"這個問題我覺得...", ""},                     // no address
-		{"the umbreon evolution line is cool", ""},    // substring, not addressed
+		{"好的，我來處理這個", ""},                               // addresses a human, not the peer
+		{"這個問題我覺得...", ""},                              // no address
+		{"the umbreon evolution line is cool", ""},      // substring, not addressed
 		{"Umbreon usually handles the plant stuff", ""}, // passing mention, no vocative punctuation
 	}
 	for _, c := range cases {

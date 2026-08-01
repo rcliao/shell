@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/store"
 )
 
@@ -277,4 +278,34 @@ func (b *Bridge) ensureDefaultHeartbeat(chatID int64) {
 		return
 	}
 	slog.Info("default heartbeat created", "chat_id", chatID, "id", id, "interval", hbInterval)
+}
+
+// deepHeartbeatPrefix marks a deep-reflection beat. The scheduler prepends it
+// in execute(); the bridge keys journal capture off it.
+const deepHeartbeatPrefix = "[Heartbeat:deep] "
+
+// captureReflection journals one deep-heartbeat turn.
+//
+// job_run_id and beat_count are left zero: both live in the scheduler, which
+// does not pass them through the heartbeat callback, and threading them here
+// would mean changing that signature for a write-only table. Correlate by time
+// instead — reflections land within seconds of their job_runs row, and the
+// heartbeat overlap policy is `skip`, so beats never interleave. If the link
+// later needs to be exact, the callback is where to add it.
+func (b *Bridge) captureReflection(chatID int64, response string, result process.SendResult, turnModel string) {
+	id, err := b.store.RecordReflection(store.Reflection{
+		ChatID:     chatID,
+		Model:      turnModel,
+		Text:       response,
+		ToolCalls:  len(result.ToolCalls),
+		Noop:       response == "",
+		DurationMS: result.Timings.TotalMs,
+	})
+	if err != nil {
+		slog.Warn("reflection capture failed", "chat_id", chatID, "error", err)
+		return
+	}
+	slog.Info("reflection captured",
+		"id", id, "chat_id", chatID, "chars", len(response),
+		"tool_calls", len(result.ToolCalls), "noop", response == "")
 }

@@ -5,7 +5,7 @@ import "testing"
 // fakeResolver maps task_type → model, mirroring config.ClaudeConfig.ResolveModel.
 type fakeResolver map[string]string
 
-func (f fakeResolver) ResolveModel(taskType string) string { return f[taskType] }
+func (f fakeResolver) ResolveModel(taskType string) string  { return f[taskType] }
 func (f fakeResolver) ResolveEffort(taskType string) string { return f[taskType+"_effort"] }
 
 func TestResolveExecutionProfile(t *testing.T) {

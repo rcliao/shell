@@ -43,10 +43,10 @@ type A2APayload struct {
 	// ThreadID is the forum-topic thread the exchange lives in (0 = main).
 	// Without it, peer replies to a topic conversation landed in the main
 	// thread (owner report 7/18).
-	ThreadID int64 `json:"thread_id"`
-	From   string `json:"from"`  // human-facing peer name (for attribution)
-	Text   string `json:"text"`  // the message the peer said in the group
-	Depth  int    `json:"depth"` // hop count of THIS message
+	ThreadID int64  `json:"thread_id"`
+	From     string `json:"from"`  // human-facing peer name (for attribution)
+	Text     string `json:"text"`  // the message the peer said in the group
+	Depth    int    `json:"depth"` // hop count of THIS message
 }
 
 // parseA2AMarker extracts the incoming depth and peer name from a synthetic A2A

@@ -439,6 +439,63 @@ func main() {
 			return nil
 		},
 	}
+	// reflections command — read-only view of the deep-heartbeat journal.
+	// Capture is automatic and nothing reads these rows back into a prompt, so
+	// this command is the ONLY way to see what deep reflection actually
+	// produces. That is its purpose: observe the corpus before designing
+	// curation against it.
+	var refConfigFlag string
+	var refFullFlag bool
+	reflectionsCmd := &cobra.Command{
+		Use:   "reflections [n]",
+		Short: "List captured deep-heartbeat reflections (read-only journal)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			n := 20
+			if len(args) == 1 {
+				v, perr := strconv.Atoi(args[0])
+				if perr != nil || v <= 0 {
+					return fmt.Errorf("invalid count %q: want a positive integer", args[0])
+				}
+				n = v
+			}
+			cfg := loadConfigFrom(refConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			refs, err := st.ListReflections(n)
+			if err != nil {
+				return err
+			}
+			if len(refs) == 0 {
+				fmt.Println("No reflections captured yet. Deep heartbeats fire every 6th beat; the journal fills from there.")
+				return nil
+			}
+			fmt.Printf("Deep-heartbeat reflections (newest first, max %d):\n\n", n)
+			for _, r := range refs {
+				fmt.Printf("  #%-4d %s  %-18s tools=%-3d %s\n",
+					r.ID, r.CreatedAt.Local().Format("2006-01-02 15:04:05"),
+					r.Model, r.ToolCalls, noopLabel(r.Noop))
+				text := r.Text
+				if !refFullFlag && len(text) > 240 {
+					text = text[:240] + "..."
+				}
+				for _, line := range strings.Split(text, "\n") {
+					if strings.TrimSpace(line) != "" {
+						fmt.Printf("        %s\n", line)
+					}
+				}
+				fmt.Println()
+			}
+			return nil
+		},
+	}
+	reflectionsCmd.Flags().StringVar(&refConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
+	reflectionsCmd.Flags().BoolVar(&refFullFlag, "full", false, "print the full reflection text instead of a preview")
+
 	jobRunsCmd.Flags().Int64Var(&jrScheduleFlag, "schedule", 0, "filter by schedule ID (0 = all schedules)")
 	jobRunsCmd.Flags().StringVar(&jrConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json); default ~/.shell/config.json")
 
@@ -1237,7 +1294,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -1608,4 +1665,12 @@ func fmtMs(ms int64) string {
 	default:
 		return fmt.Sprintf("%ds", ms/1000)
 	}
+}
+
+// noopLabel renders whether a reflection produced output.
+func noopLabel(noop bool) string {
+	if noop {
+		return "(noop)"
+	}
+	return ""
 }
