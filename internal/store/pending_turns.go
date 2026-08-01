@@ -84,3 +84,17 @@ func (s *Store) ListUnfinishedTurns(maxAge time.Duration) ([]PendingTurn, error)
 	}
 	return out, rows.Err()
 }
+
+// UndeliveredSince counts turns received within maxAge that have not been
+// marked done — i.e. the human has not got their answer yet.
+//
+// The drain path uses this as its second barrier. The age bound matters: rows
+// left undone by a much earlier failure must not block a restart forever, and
+// such rows do exist in practice.
+func (s *Store) UndeliveredSince(maxAge time.Duration) (int, error) {
+	cutoff := time.Now().UTC().Add(-maxAge)
+	var n int
+	err := s.db.QueryRow(
+		`SELECT count(*) FROM pending_turns WHERE done = 0 AND created_at >= ?`, cutoff).Scan(&n)
+	return n, err
+}
