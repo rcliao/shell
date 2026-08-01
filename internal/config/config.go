@@ -56,6 +56,13 @@ type AgentIdentity struct {
 	TranscriptPath       string   `json:"transcript_path"`       // path to shared transcript DB (default: ~/.shell/shared/transcript.db)
 	TranscriptBudget     int      `json:"transcript_budget"`     // token budget for shared transcript injection (default: 2000)
 	Skills               []string `json:"skills"`                // declared capabilities for task delegation (e.g. "code-review", "research")
+	// A2AMaxDepth caps consecutive agent→agent hops in one chain before both
+	// must yield to a human. 0 = default (a2aDefaultMaxDepth). Raise it for
+	// conversations the agents are meant to carry alone — a multi-item sync
+	// agenda needs more hops than an incidental group exchange — but it is the
+	// only thing bounding a bot-to-bot loop, so keep it as low as the use case
+	// allows. Every human message resets the chain to depth 0 regardless.
+	A2AMaxDepth int `json:"a2a_max_depth"`
 }
 
 // PeerAgent describes a peer agent for multi-agent discovery.
