@@ -106,7 +106,8 @@ agent-authored   ─┘       │                 └─ handler: ...
 
 Three fields carry the design:
 
-- **`kind`** — what work this is. Selects the handler. `chat_turn`,
+- **`kind`** — what work this is. Selects the handler, which is either ordinary
+  Go code or a delegation to an agent turn (see "Handlers" below). `chat_turn`,
   `agent_prompt`, `a2a_delivery`, and whatever comes later. Adding a kind is
   registering a handler, not changing the schema.
 - **`payload`** — JSON, handler-defined. A `chat_turn` payload carries chat id,
@@ -179,6 +180,67 @@ old delegation system did, minus its defect.
 
 Timestamps are written UTC in SQLite-parseable form — the DSN already sets
 `_time_format=sqlite`, and the reason is documented in `internal/store/timeformat.go`.
+
+### Handlers: deterministic and agent-delegated
+
+A handler is a Go function:
+
+```go
+type Handler func(ctx context.Context, t Task) (result string, err error)
+```
+
+Kinds map to handlers in a registry. Most are ordinary code — deliver a message,
+run a maintenance sweep, call an API. But **one handler delegates to an agent**,
+and that is the point of building this inside an agent harness rather than a
+job runner:
+
+```go
+// agentHandler runs the task's payload as an agent turn. Non-deterministic by
+// construction: the agent decides HOW, the queue guarantees THAT and ONCE.
+func agentHandler(ctx context.Context, t Task) (string, error)
+```
+
+This split already exists and works. The scheduler's `mode` field is exactly it:
+`notify` sends fixed text (deterministic), `prompt` runs a Claude turn
+(`scheduler.go:536`). The queue generalizes that from schedules to all work.
+
+The division of labor is worth stating explicitly, because it is what makes the
+non-determinism affordable: **the queue owns delivery guarantees, the agent owns
+judgment.** Leases, retries, idempotency, ordering and completion are the
+queue's; deciding what to actually do is the agent's. An agent handler that
+crashes, hangs or wanders is still bounded by lease expiry and `max_attempts`.
+
+Agent handlers need three constraints that deterministic ones do not.
+
+**Completion must be evidence, not assertion.** A Go handler returning `nil`
+means it worked. An agent saying "done!" means nothing — this codebase already
+learned that the expensive way, which is why `internal/bridge/write_verify.go`
+exists: agents report saving things that were never saved, "pure confabulation,
+because the agent often lacks, or fails to call, the write tool." So an agent
+handler is complete only when the agent calls `task_complete(id, result)` — a
+real tool call, observable in `tool_uses`. A turn that ends without one is
+`failed`, not `done`, regardless of how confidently it narrates success. The
+write-verify enforcement path is the working precedent: it already issues a
+bounded correction turn when a claim lacks a corresponding write.
+
+**Retries are not replays.** Re-running a deterministic handler reproduces the
+same work. Re-running an agent handler produces *similar* work — possibly a
+differently-worded message, possibly a second Notion row. The send ledger's text
+hash will not catch a paraphrase, which is precisely why the idempotency key has
+to reach the side effect rather than stopping at the queue. Kinds whose agent
+turn performs non-idempotent effects should set `max_attempts = 1` and surface
+the failure to a human instead of gambling.
+
+**Authority is per-kind, not per-agent.** A task that can invoke any tool is a
+task that can do anything wrong at 3am with nobody watching. Each kind declares
+the tools its handler may use, and the agent turn is spawned with that set —
+using the `disallowed_tools` plumbing already in `internal/process/args.go`. A
+maintenance task has no business sending Telegram messages, and the enforcement
+should be structural rather than a line in a prompt.
+
+The honest trade: agent handlers cost a full turn (observed up to ~8.5 minutes
+and real money) where a Go handler costs microseconds. Use one when the work
+genuinely requires judgment. "Send this text at 9am" does not.
 
 ### Processing once
 
