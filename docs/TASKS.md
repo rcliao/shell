@@ -242,6 +242,89 @@ The honest trade: agent handlers cost a full turn (observed up to ~8.5 minutes
 and real money) where a Go handler costs microseconds. Use one when the work
 genuinely requires judgment. "Send this text at 9am" does not.
 
+### Worker extensibility: three tiers, one of them agent-authored
+
+The constraint that matters most for an agent harness: **an agent should be able
+to add a worker without a Go change and a redeploy.** A queue whose capabilities
+are fixed at compile time makes the agent a caller of infrastructure rather than
+an extender of it.
+
+**What the ecosystem does.** Surveyed while designing this:
+
+- **Restate** assigns each *virtual object* a key and serializes all handler
+  calls on that key, journalling each step so a crashed handler is re-invoked
+  with completed steps skipped. That is the same idea as `partition_key`,
+  arrived at independently — useful corroboration that keyed serialization is
+  the right primitive rather than a workaround.
+- **Temporal** separates workflow (deterministic, replayed) from activity
+  (effectful, retried). Our deterministic-vs-agent handler split is the same
+  seam, minus the replay machinery we have no reason to build.
+- **Inngest / Trigger.dev / Restate** converge on event-in, step-function-out
+  with flow control and observability in the platform rather than the handler.
+- **AnythingLLM** is the most directly stealable: a `plugin.json` declares the
+  entrypoint and its parameters, and `handler.js` exports a `runtime.handler`
+  taking exactly those parameters. Metadata file plus executable, discovered
+  from disk.
+- **Formal Skill / FairyClaw** and **SkillOps** (both 2026 papers) generalize
+  that: a skill is a capability plugin with JSON metadata and an action schema,
+  resolved by the runtime before each model decision; SkillOps adds a typed
+  *Skill Contract* so skills can be maintained as a library rather than
+  accumulating as scripts.
+
+**What shell already has.** The substrate for the agent-authored tier exists and
+is in daily use: `SKILL.md` frontmatter (name, description, `allowed-tools`) plus
+a `scripts/` directory, loaded from `~/.shell/skills/` and the per-agent skills
+dir, hot-reloadable through the existing `SkillsReload` RPC — no restart. Agents
+already have a scoped authoring perimeter (`daemon.go:191`: Write access limited
+to the playground and their own skills dir, invocation through the run-skill
+wrapper with usage logging).
+
+So the registry resolves a `kind` through three tiers:
+
+| Tier | Handler | Author | Determinism | Use when |
+|---|---|---|---|---|
+| 1 | Go function | us | deterministic | hot paths, privileged effects, delivery |
+| 2 | skill subprocess | **agent or human** | deterministic-ish | new capability, no Go change |
+| 3 | agent turn | — | non-deterministic | the work needs judgment |
+
+**Tier 2 is the answer to the question.** A skill declares which task kinds it
+handles in its frontmatter:
+
+```yaml
+name: plant-care
+description: Check plant watering schedule and report what needs attention
+task-kinds: [plant_check]
+timeout: 60s
+```
+
+The worker invokes `scripts/<skill>` as a subprocess with the task JSON on
+stdin, reads a JSON result from stdout, and treats exit status as the outcome.
+That contract — typed in, typed out, exit code decides — is what buys back
+determinism from a handler whose author was non-deterministic. It is
+AnythingLLM's `plugin.json`/`handler.js` shape expressed in the file format this
+repo already uses.
+
+Three constraints on tier 2, learned from what is already known here:
+
+- **Promotion is a gate, not friction.** Skill drafts under
+  `.evolve/skill-drafts/` are inert until installed — a fact previously logged
+  as a papercut. For agent-authored *workers* it is the safety property: a
+  handler that will run unattended at 3am with nobody watching should be read by
+  a human once before it can be leased. Authoring is free; promotion is
+  reviewed.
+- **Tool scope comes from the skill, enforced by the runtime.** `allowed-tools`
+  already exists in frontmatter; a skill-backed handler spawns with that set and
+  nothing more, via the `disallowed_tools` plumbing in `internal/process/args.go`.
+- **Timeouts are declared, not assumed.** A subprocess handler that hangs holds
+  its partition. `timeout` in frontmatter, bounded by the lease.
+
+**What we are not taking.** Journalled step-level replay (Restate/Temporal's
+core) is the expensive part of durable execution and buys little here: our tasks
+are one agent turn or one subprocess, not twelve-step pipelines where losing step
+nine is costly. Task-level retry with idempotency at the side effect is the right
+granularity for this scale. If tasks ever grow internal steps worth resuming,
+that is the moment to revisit — not before.
+
 ### Processing once
 
 "Exactly once" is not achievable and claiming it would be the most dangerous
@@ -430,3 +513,16 @@ retried.
 **Scope.** The honest failure mode of this document is building all of it at
 once. Step 0 is a few lines. If only Step 0 ever ships, the incident that
 prompted this is still fixed.
+
+## Sources
+
+Surveyed 2026-08-01 for the worker-interface design:
+
+- [Temporal — durable execution](https://temporal.io/) — workflow/activity seam, event-history replay
+- [Inngest — durable execution for AI agents](https://www.inngest.com/blog/durable-execution-key-to-harnessing-ai-agents) — event-in/step-out, flow control in the platform
+- [Inngest vs Trigger.dev v3 vs Restate (2026)](https://www.pkgpulse.com/guides/inngest-vs-trigger-dev-v3-vs-restate-2026) — Restate's virtual-object keyed serialization and journalled handlers
+- [Temporal vs Inngest (2026)](https://wetheflywheel.com/en/comparisons/temporal-vs-inngest/) — selection trade-offs
+- [AnythingLLM — handler.js reference](https://docs.anythingllm.com/agent/custom/handler-js) and [plugin.json reference](https://docs.anythingllm.com/agent/custom/plugin-json) — the metadata-plus-entrypoint contract tier 2 copies
+- [Formal Skill: Programmable Runtime Skills for LLM Agents](https://arxiv.org/html/2605.19604v1) — skills as capability plugins resolved by the runtime
+- [SkillOps: Managing LLM Agent Skill Libraries](https://arxiv.org/html/2605.13716v1) — typed skill contracts, skill libraries as maintained ecosystems
+- [SoK: Agentic Skills — Beyond Tool Use](https://arxiv.org/html/2602.20867v1) — survey framing
