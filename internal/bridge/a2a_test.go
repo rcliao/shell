@@ -1,10 +1,12 @@
 package bridge
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/transcript"
 )
 
 func TestA2AMarkerRoundTrip(t *testing.T) {
@@ -73,5 +75,63 @@ func TestPeerAddressedInReply(t *testing.T) {
 		if gotUser != c.want {
 			t.Errorf("peerAddressedInReply(%q) = %q, want %q", c.reply, gotUser, c.want)
 		}
+	}
+}
+
+// The hop cap is the only thing bounding a bot-to-bot loop, so it must hold at
+// whatever value is configured — and an unconfigured Bridge must still be
+// bounded rather than looping forever. Exercises the real enqueue path, not
+// just the accessor: at the cap no event is published, one hop below it is.
+func TestA2ADepthCapConfigurable(t *testing.T) {
+	const chatID = int64(-100123)
+	cases := []struct {
+		name     string
+		configed int
+		want     int
+	}{
+		{"unset falls back to default", 0, a2aDefaultMaxDepth},
+		{"negative falls back to default", -5, a2aDefaultMaxDepth},
+		{"raised for a long sync agenda", 12, 12},
+		{"lowered to a single hop", 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, err := transcript.OpenTaskStore(filepath.Join(t.TempDir(), "task.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			b := &Bridge{
+				taskStore:        ts,
+				agentBotUsername: "Pikamini_bot",
+				peerAgents:       []config.PeerAgent{{Name: "Umbreon", BotUsername: "umbreon_mini_bot"}},
+			}
+			b.SetA2AMaxDepth(tc.configed)
+			if got := b.a2aMaxDepth(); got != tc.want {
+				t.Fatalf("a2aMaxDepth() = %d, want %d", got, tc.want)
+			}
+
+			reply := "Umbreon, what did you get wrong this week?"
+
+			// One hop below the cap: the chain must continue.
+			b.maybeEnqueueA2A(chatID, 0, reply, tc.want-2)
+			evs, err := ts.ConsumeEvents("umbreon_mini_bot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want >= 2 && len(evs) != 1 {
+				t.Fatalf("below cap: got %d events, want 1", len(evs))
+			}
+
+			// At the cap: the chain must stop and yield to a human.
+			b.maybeEnqueueA2A(chatID, 0, reply, tc.want)
+			evs, err = ts.ConsumeEvents("umbreon_mini_bot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(evs) != 0 {
+				t.Errorf("at cap %d: got %d events, want 0 (should yield to human)", tc.want, len(evs))
+			}
+		})
 	}
 }

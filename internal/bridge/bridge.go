@@ -107,6 +107,7 @@ type Bridge struct {
 	agentIdentity     string
 	agentBotUsername  string // this agent's bot username (for transcript filtering)
 	agentIdentityName string // this agent's human-facing name (for A2A peer attribution)
+	a2aMaxDepthCfg    int    // agent→agent hop cap; 0 = a2aDefaultMaxDepth
 
 	// Shared transcript for multi-agent awareness.
 	transcript       *transcript.Store

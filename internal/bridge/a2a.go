@@ -24,9 +24,10 @@ import (
 // Reset is automatic: a human-triggered reply starts a fresh chain at depth 0,
 // so every human message renews the budget.
 
-// a2aMaxDepth caps consecutive agent→agent hops per chain before both must
-// yield back to a human. Depth 1 = the first agent-to-peer message.
-const a2aMaxDepth = 3
+// a2aDefaultMaxDepth caps consecutive agent→agent hops per chain before both
+// must yield back to a human. Depth 1 = the first agent-to-peer message.
+// Override per agent with agent.a2a_max_depth; see Bridge.SetA2AMaxDepth.
+const a2aDefaultMaxDepth = 3
 
 // A2AEventType is the shared-store event type for agent-to-agent group turns.
 const A2AEventType = "a2a.message"
@@ -81,8 +82,8 @@ func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incom
 		return
 	}
 	nextDepth := incomingDepth + 1
-	if nextDepth > a2aMaxDepth {
-		slog.Info("a2a: depth cap reached, yielding to human", "chat_id", chatID, "depth", incomingDepth)
+	if maxDepth := b.a2aMaxDepth(); nextDepth > maxDepth {
+		slog.Info("a2a: depth cap reached, yielding to human", "chat_id", chatID, "depth", incomingDepth, "max_depth", maxDepth)
 		return
 	}
 	peer := b.peerAddressedInReply(replyText)
@@ -179,4 +180,20 @@ var a2aLeadRe = regexp.MustCompile(`^[\s\p{P}\p{S}]+`)
 
 func addressLeadStrip(s string) string {
 	return a2aLeadRe.ReplaceAllString(s, "")
+}
+
+// a2aMaxDepth returns the configured hop cap, falling back to the default when
+// unset. Read through a method rather than the field directly so an
+// unconfigured Bridge (tests, legacy single-agent setups) still gets a bound.
+func (b *Bridge) a2aMaxDepth() int {
+	if b.a2aMaxDepthCfg > 0 {
+		return b.a2aMaxDepthCfg
+	}
+	return a2aDefaultMaxDepth
+}
+
+// SetA2AMaxDepth overrides the agent→agent hop cap for this agent. Values <= 0
+// keep the default.
+func (b *Bridge) SetA2AMaxDepth(n int) {
+	b.a2aMaxDepthCfg = n
 }

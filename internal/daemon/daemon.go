@@ -521,6 +521,10 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 
 		br.SetAgentName(cfg.Agent.Name)
+		if cfg.Agent.A2AMaxDepth > 0 {
+			br.SetA2AMaxDepth(cfg.Agent.A2AMaxDepth)
+			slog.Info("a2a depth cap overridden", "max_depth", cfg.Agent.A2AMaxDepth)
+		}
 		if len(peers) > 0 {
 			br.SetPeerAgents(peers)
 			for _, p := range peers {
