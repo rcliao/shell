@@ -2158,3 +2158,60 @@ func sanitizeKey(content string) string {
 	}
 	return key
 }
+
+// PinnedEntry is one pinned memory as the retrieval path sees it.
+type PinnedEntry struct {
+	Key        string
+	Importance float64
+	Tokens     int
+	Locked     bool // blessed `locked` tag: read-only, curate refuses to touch it
+}
+
+// PinAudit reports the agent's pinned set in the exact order ghost's context
+// assembly admits it, together with the token budget that decides where the
+// cut falls.
+//
+// This exists because "pinned" means two different things depending on who
+// assembles the context. The system prompt lists pinned memories UNBOUNDED
+// (see pinnedMemories), so the agent always carries all of them. But ghost's
+// Context() gives pinned only a sub-budget — Budget/2 — and admits them by
+// importance descending, silently dropping the tail. So when the agent
+// queries its OWN memory, it sees a truncated pin set.
+//
+// That is fine until importance stops tracking consequence. Measured
+// 2026-08-01, both agents had every health and allergy fact sitting at the
+// bottom importance band while persona and running jokes sat at the top: a
+// budget-constrained retrieval kept the plush math and dropped the allergies.
+// Surfacing the ranked cut during deep reflection lets the agent notice that
+// drift itself rather than waiting for a wrong answer to expose it.
+func (m *Memory) PinAudit(ctx context.Context, chatID int64) (entries []PinnedEntry, pinBudget int, err error) {
+	prof := m.profileFor(chatID)
+	if prof.AgentNS == "" || m.store == nil {
+		return nil, 0, nil
+	}
+	pins, err := m.store.List(ctx, agentmemory.ListParams{NS: prof.AgentNS, PinnedOnly: true, Limit: 500})
+	if err != nil {
+		return nil, 0, err
+	}
+	budget := prof.Budget
+	if budget <= 0 {
+		budget = 4000
+	}
+	for _, p := range pins {
+		tok := p.EstTokens
+		if tok <= 0 {
+			tok = (len(p.Content) / 4) + 20
+		}
+		locked := false
+		for _, t := range p.Tags {
+			if t == "locked" {
+				locked = true
+			}
+		}
+		entries = append(entries, PinnedEntry{Key: p.Key, Importance: p.Importance, Tokens: tok, Locked: locked})
+	}
+	// Mirror context assembly's admission order exactly, or the reported cut
+	// is not the cut the agent will actually experience.
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Importance > entries[j].Importance })
+	return entries, budget / 2, nil
+}

@@ -186,6 +186,12 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		if retro := b.buildSkillRetroBlock(); retro != "" {
 			sb.WriteString(retro)
 		}
+		// Pin hygiene: importance decides what a budget-constrained retrieval
+		// keeps, but nothing maintains it, so it drifts out of line with
+		// consequence. Surface the cut and let the agent re-rank its own pins.
+		if audit := b.buildPinAuditBlock(ctx, chatID); audit != "" {
+			sb.WriteString(audit)
+		}
 		// NOTE: the pinned skill-inventory digest was retired 2026-07-28 — the
 		// skills catalog is composed into every generation's system prompt, so
 		// skills never needed a pin to survive rotation; the pin duplicated
