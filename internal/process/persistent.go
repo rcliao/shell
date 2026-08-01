@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -90,6 +91,13 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	args, model := buildClaudeArgs(req, m.claudeArgOpts())
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
+	// Terminate politely on cancellation. exec.CommandContext defaults to
+	// Process.Kill() — SIGKILL — which gives the CLI no chance to flush its
+	// session state or finish writing a reply. WaitDelay escalates to SIGKILL
+	// anyway if SIGTERM is ignored, so this can only improve the outcome.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = sigtermGrace
+
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	for k := range m.env {
 		env = filterEnv(env, k)
@@ -211,15 +219,48 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, onUp
 	return result, nil
 }
 
-// kill terminates the persistent process.
+// stdinCloseGrace is how long the CLI gets to exit on its own after stdin is
+// closed. Closing stdin is the protocol's own end-of-input signal, so a healthy
+// process finishes its turn and exits by itself — the graceful path.
+const stdinCloseGrace = 5 * time.Second
+
+// sigtermGrace is how long SIGTERM gets before Go escalates to SIGKILL.
+const sigtermGrace = 10 * time.Second
+
+// kill terminates the persistent process, escalating only as far as needed.
+//
+// The previous version closed stdin and then cancelled the context on the very
+// next line — and exec.CommandContext cancels with SIGKILL, so the polite
+// signal never had time to work. Every shutdown was a hard kill; a deep
+// reflection beat interrupted by a deploy on 2026-08-01 died with
+// "signal: killed" after 340s of work.
+//
+// Now: close stdin, give the process a moment to leave on its own, then SIGTERM
+// (via cmd.Cancel), with SIGKILL behind it via WaitDelay. Bounded at every step
+// so shutdown can never hang.
 func (p *persistentProc) kill() {
 	if p.idleTimer != nil {
 		p.idleTimer.Stop()
 	}
 	p.stdin.Close()
+
+	exited := make(chan error, 1)
+	go func() { exited <- p.cmd.Wait() }()
+
+	select {
+	case <-exited:
+		slog.Info("persistent process exited cleanly on stdin close",
+			"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
+		return
+	case <-time.After(stdinCloseGrace):
+	}
+
+	// Still running: escalate. cancel() sends SIGTERM; WaitDelay turns it into
+	// SIGKILL if that is ignored.
 	p.cancel()
-	p.cmd.Wait()
-	slog.Info("persistent process killed", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
+	<-exited
+	slog.Info("persistent process terminated after grace period",
+		"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID, "grace", stdinCloseGrace)
 }
 
 // sendPersistent tries to use a persistent process for the request.

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -294,6 +295,12 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	slog.Info("claude send", "resume", claudeSessionID != "", "multimodal", hasAttachments)
 
 	cmd := exec.CommandContext(procCtx, m.binary, args...)
+	// Same politeness as the persistent path: SIGTERM first, SIGKILL only if
+	// it is ignored. Ephemeral turns include deep reflection beats, which are
+	// the longest-running work in the system and the most expensive to lose.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = sigtermGrace
+
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	for k := range m.env {
 		env = filterEnv(env, k)
