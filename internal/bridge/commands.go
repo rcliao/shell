@@ -49,8 +49,6 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID, threadID int64, cmd,
 		return b.Schedule(ctx, chatID, args)
 	case "heartbeat":
 		return b.Heartbeat(ctx, chatID, args)
-	case "task":
-		return b.Task(ctx, chatID, args)
 	case "pm":
 		return b.PM(ctx, chatID, args)
 	case "tunnel":

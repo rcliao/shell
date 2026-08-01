@@ -28,7 +28,6 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	// This pulls recent exchanges and pending tasks from every chat, not just
 	// the heartbeat's own chat, so a single heartbeat covers all conversations.
 	var exchanges []string
-	var pendingTasks []store.Task
 	allChats := b.activeHeartbeatChats()
 	for _, cid := range allChats {
 		if ex := b.memory.RecentExchanges(ctx, cid, 5); len(ex) > 0 {
@@ -40,9 +39,6 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 			for _, e := range ex {
 				exchanges = append(exchanges, fmt.Sprintf("(chat %d) %s", cid, e))
 			}
-		}
-		if tasks, err := b.store.PendingTasks(cid); err == nil {
-			pendingTasks = append(pendingTasks, tasks...)
 		}
 	}
 	insights := b.memory.HeartbeatContext(ctx, chatID, 500)
@@ -56,13 +52,12 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 
 	hasConsolidation := consolidation != ""
 	hasTaskStore := b.taskStore != nil
-	hasContent := len(exchanges) > 0 || insights != "" || len(pendingTasks) > 0 || hasConsolidation || isDeep || hasTaskStore
+	hasContent := len(exchanges) > 0 || insights != "" || hasConsolidation || isDeep || hasTaskStore
 
 	slog.Info("heartbeat: enrichment",
 		"chat_id", chatID,
 		"chats_scanned", len(allChats),
 		"exchanges", len(exchanges),
-		"pending_tasks", len(pendingTasks),
 		"has_insights", insights != "",
 		"has_consolidation", hasConsolidation,
 		"has_content", hasContent,
@@ -83,15 +78,6 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	if consolidation != "" {
 		sb.WriteString(consolidation)
 		sb.WriteString("\n")
-	}
-
-	// Pending background tasks
-	if len(pendingTasks) > 0 {
-		sb.WriteString("[Pending background tasks]\n")
-		for _, t := range pendingTasks {
-			sb.WriteString(fmt.Sprintf("- Task #%d: %s (queued %s)\n", t.ID, t.Description, t.CreatedAt.Format("Jan 2 15:04")))
-		}
-		sb.WriteString("[End of pending tasks]\n\n")
 	}
 
 	// Shared task store activity (self-tasks + delegation)

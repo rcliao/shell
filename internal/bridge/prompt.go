@@ -281,22 +281,6 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID int64,
 		}
 	}
 
-	// Block 4: active background tasks (for non-system chats).
-	if b.store != nil && chatID != 0 {
-		tasks, err := b.store.PendingTasks(chatID)
-		if err == nil && len(tasks) > 0 {
-			var sb strings.Builder
-			sb.WriteString("[Active tasks:\n")
-			for _, t := range tasks {
-				sb.WriteString("- ")
-				sb.WriteString(t.Description)
-				sb.WriteString("\n")
-			}
-			sb.WriteString("]")
-			blocks = append(blocks, sb.String())
-		}
-	}
-
 	if len(blocks) == 0 {
 		return ""
 	}

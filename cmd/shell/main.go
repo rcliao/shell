@@ -1414,23 +1414,6 @@ func renderFullPrompt(cfg config.Config, st *store.Store, sess *store.Session, c
 		}
 	}
 
-	// Active tasks.
-	if chatID != 0 {
-		if tasks, err := st.PendingTasks(chatID); err == nil && len(tasks) > 0 {
-			var sb strings.Builder
-			sb.WriteString("[Active tasks:\n")
-			for _, t := range tasks {
-				sb.WriteString("- ")
-				sb.WriteString(t.Description)
-				sb.WriteString("\n")
-			}
-			sb.WriteString("]")
-			parts = append(parts, sb.String())
-		} else {
-			parts = append(parts, "[Active tasks: (none)]")
-		}
-	}
-
 	if len(parts) == 0 {
 		fmt.Println("  (no Channel B blocks would be prepended)")
 	}

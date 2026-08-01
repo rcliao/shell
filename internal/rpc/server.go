@@ -44,22 +44,22 @@ type SkillsLoadFunc func(name string) (string, error)
 
 // Server is the bridge RPC server listening on a Unix socket.
 type Server struct {
-	listener  net.Listener
-	server    *http.Server
-	sockPath  string
-	pmMgr     *pm.Manager
-	tunnelMgr *tunnel.Manager
-	store     *store.Store
-	memory    *memory.Memory
-	taskStore *transcript.TaskStore // shared task store for delegation
-	notify         NotifyFunc
-	sendPhoto      SendPhotoFunc
-	relayToBridge  RelayToBridgeFunc
-	cronParse      CronParser
-	skillsReload   SkillsReloadFunc
-	skillsLoad     SkillsLoadFunc
-	timezone       string
-	botUsername    string // this agent's bot username
+	listener        net.Listener
+	server          *http.Server
+	sockPath        string
+	pmMgr           *pm.Manager
+	tunnelMgr       *tunnel.Manager
+	store           *store.Store
+	memory          *memory.Memory
+	taskStore       *transcript.TaskStore // shared task store for delegation
+	notify          NotifyFunc
+	sendPhoto       SendPhotoFunc
+	relayToBridge   RelayToBridgeFunc
+	cronParse       CronParser
+	skillsReload    SkillsReloadFunc
+	skillsLoad      SkillsLoadFunc
+	timezone        string
+	botUsername     string // this agent's bot username
 	contextManifest func(ctx context.Context, chatID int64) (any, string)
 	killSession     KillSessionFunc
 }
@@ -120,20 +120,20 @@ func New(cfg Config) *Server {
 		cfg.SocketPath = DefaultSocketPath()
 	}
 	return &Server{
-		sockPath:  cfg.SocketPath,
-		pmMgr:     cfg.PMMgr,
-		tunnelMgr: cfg.TunnelMgr,
-		store:     cfg.Store,
-		memory:    cfg.Memory,
-		taskStore: cfg.TaskStore,
-		notify:        cfg.Notify,
-		sendPhoto:     cfg.SendPhoto,
-		relayToBridge: cfg.RelayToBridge,
-		cronParse:     cfg.CronParse,
-		skillsReload:  cfg.SkillsReload,
-		skillsLoad:    cfg.SkillsLoad,
-		timezone:  cfg.Timezone,
-		botUsername: cfg.BotUsername,
+		sockPath:        cfg.SocketPath,
+		pmMgr:           cfg.PMMgr,
+		tunnelMgr:       cfg.TunnelMgr,
+		store:           cfg.Store,
+		memory:          cfg.Memory,
+		taskStore:       cfg.TaskStore,
+		notify:          cfg.Notify,
+		sendPhoto:       cfg.SendPhoto,
+		relayToBridge:   cfg.RelayToBridge,
+		cronParse:       cfg.CronParse,
+		skillsReload:    cfg.SkillsReload,
+		skillsLoad:      cfg.SkillsLoad,
+		timezone:        cfg.Timezone,
+		botUsername:     cfg.BotUsername,
 		contextManifest: cfg.ContextManifest,
 		killSession:     cfg.KillSession,
 	}
@@ -358,7 +358,6 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"ok": true, "type": "text"})
 }
-
 
 // ScheduleRequest is the JSON body for POST /schedule.
 type ScheduleRequest struct {
@@ -634,23 +633,9 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch req.Action {
-	// --- Legacy background task completion (backward compat) ---
 	case "complete":
-		// If numeric ID is set, this is the old background task system.
-		if req.ID > 0 {
-			if s.store == nil {
-				writeError(w, http.StatusServiceUnavailable, "store not available")
-				return
-			}
-			if err := s.store.CompleteTask(req.ID); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to complete task: "+err.Error())
-				return
-			}
-			slog.Info("rpc: completed background task", "task_id", req.ID)
-			writeJSON(w, map[string]any{"ok": true})
-			return
-		}
-		// String task_id means new delegated task system.
+		// The numeric-ID branch here served the /task backlog, retired with
+		// its table. Delegation uses string task ids.
 		if req.TaskID == "" {
 			writeError(w, http.StatusBadRequest, "task_id is required")
 			return

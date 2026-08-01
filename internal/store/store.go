@@ -412,15 +412,6 @@ func (s *Store) migrate() error {
 
 	// Background task queue for heartbeat to pick up.
 	taskSchema := `
-	CREATE TABLE IF NOT EXISTS tasks (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		chat_id     INTEGER NOT NULL,
-		description TEXT NOT NULL,
-		status      TEXT NOT NULL DEFAULT 'pending',
-		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		completed_at DATETIME
-	);
-	CREATE INDEX IF NOT EXISTS idx_tasks_chat_status ON tasks(chat_id, status);
 	CREATE TABLE IF NOT EXISTS kv (
 		key        TEXT PRIMARY KEY,
 		value      TEXT NOT NULL,
@@ -636,6 +627,45 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_job_runs_fired ON job_runs(fired_at);
 	CREATE INDEX IF NOT EXISTS idx_job_runs_running ON job_runs(outcome) WHERE outcome = 'running';
 	`
+	// Retire the dead /task backlog table so the queue can take the name.
+	// Provably unused: 0 rows and NO sqlite_sequence entry on both live agents,
+	// and AUTOINCREMENT records a high-water mark there — so no row was ever
+	// inserted, on either agent, ever. Guarded anyway: the drop only fires for
+	// a table carrying the old shape AND holding no rows, so a DB that somehow
+	// used it keeps its data and surfaces as a failed migration instead of
+	// silent loss. Without this, CREATE TABLE IF NOT EXISTS below would no-op
+	// against the old table and every queue query would fail on a live DB.
+	s.retireLegacyTaskTable()
+
+	// tasks is the durable work queue — see internal/store/tasks.go and
+	// docs/TASKS.md. Storage layer only at this stage; nothing enqueues yet.
+	tasksSchema := `
+	CREATE TABLE IF NOT EXISTS tasks (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		kind            TEXT NOT NULL,
+		source          TEXT NOT NULL DEFAULT 'agent',
+		idempotency_key TEXT NOT NULL,
+		partition_key   TEXT NOT NULL DEFAULT '',
+		payload         TEXT NOT NULL DEFAULT '{}',
+		state           TEXT NOT NULL DEFAULT 'queued',
+		attempts        INTEGER NOT NULL DEFAULT 0,
+		max_attempts    INTEGER NOT NULL DEFAULT 3,
+		not_before      DATETIME,
+		lease_owner     TEXT NOT NULL DEFAULT '',
+		leased_until    DATETIME,
+		enqueued_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		started_at      DATETIME,
+		done_at         DATETIME,
+		result          TEXT NOT NULL DEFAULT '',
+		last_error      TEXT NOT NULL DEFAULT ''
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idem ON tasks(idempotency_key);
+	CREATE INDEX IF NOT EXISTS idx_tasks_ready ON tasks(state, partition_key, not_before, id);
+	`
+	if _, err := s.db.Exec(tasksSchema); err != nil {
+		return err
+	}
+
 	// reflections is the deep-heartbeat journal — see internal/store/reflections.go.
 	// Write-only by design at this stage: captured automatically so the corpus is
 	// complete, read by nothing, so observing it changes no behavior.
@@ -1504,65 +1534,6 @@ func (s *Store) DeleteSchedule(chatID, id int64) error {
 		return fmt.Errorf("schedule #%d not found", id)
 	}
 	return nil
-}
-
-// Task represents a background task for heartbeat to pick up.
-type Task struct {
-	ID          int64
-	ChatID      int64
-	Description string
-	Status      string // "pending", "in_progress", "completed"
-	CreatedAt   time.Time
-	CompletedAt *time.Time
-}
-
-// AddTask adds a background task to the queue.
-func (s *Store) AddTask(chatID int64, description string) (int64, error) {
-	result, err := s.db.Exec(
-		`INSERT INTO tasks (chat_id, description) VALUES (?, ?)`,
-		chatID, description,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
-}
-
-// PendingTasks returns all pending tasks for a chat.
-func (s *Store) PendingTasks(chatID int64) ([]Task, error) {
-	rows, err := s.db.Query(
-		`SELECT id, chat_id, description, status, created_at FROM tasks WHERE chat_id = ? AND status = 'pending' ORDER BY created_at ASC`,
-		chatID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tasks []Task
-	for rows.Next() {
-		var t Task
-		if err := rows.Scan(&t.ID, &t.ChatID, &t.Description, &t.Status, &t.CreatedAt); err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, t)
-	}
-	return tasks, nil
-}
-
-// CompleteTask marks a task as completed.
-func (s *Store) CompleteTask(id int64) error {
-	_, err := s.db.Exec(
-		`UPDATE tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		id,
-	)
-	return err
-}
-
-// DeleteTask removes a task by ID scoped to a chat.
-func (s *Store) DeleteTask(chatID, id int64) error {
-	_, err := s.db.Exec(`DELETE FROM tasks WHERE id = ? AND chat_id = ?`, id, chatID)
-	return err
 }
 
 // UsageSummary contains aggregated token usage data.
