@@ -6,24 +6,26 @@ import "strings"
 // (persistent and one-shot) share, so buildClaudeArgs can be a pure, testable
 // function independent of a live Manager.
 type claudeArgOpts struct {
-	defaultModel   string
-	allowedTools   []string
-	settingSources []string
-	settingsPath   string
-	permissionMode string
-	mcpConfigPath  string
-	extraArgs      []string
+	defaultModel    string
+	allowedTools    []string
+	disallowedTools []string
+	settingSources  []string
+	settingsPath    string
+	permissionMode  string
+	mcpConfigPath   string
+	extraArgs       []string
 }
 
 func (m *Manager) claudeArgOpts() claudeArgOpts {
 	return claudeArgOpts{
-		defaultModel:   m.model,
-		allowedTools:   m.allowedTools,
-		settingSources: m.settingSources,
-		settingsPath:   m.settingsPath,
-		permissionMode: m.permissionMode,
-		mcpConfigPath:  m.mcpConfigPath,
-		extraArgs:      m.extraArgs,
+		defaultModel:    m.model,
+		allowedTools:    m.allowedTools,
+		disallowedTools: m.disallowedTools,
+		settingSources:  m.settingSources,
+		settingsPath:    m.settingsPath,
+		permissionMode:  m.permissionMode,
+		mcpConfigPath:   m.mcpConfigPath,
+		extraArgs:       m.extraArgs,
 	}
 }
 
@@ -67,6 +69,14 @@ func buildClaudeArgs(req AgentRequest, opts claudeArgOpts) (args []string, resol
 	}
 	if len(opts.allowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(opts.allowedTools, ","))
+	}
+	// --allowedTools is a PERMISSION allowlist, not an availability gate: under
+	// bypassPermissions it gates nothing, which is why a built-in the agent
+	// should never use stayed reachable. --disallowedTools is the gate. Used to
+	// remove CronCreate, whose in-session schedules die with the subprocess —
+	// the prohibition that used to live in the schedule skill as prose.
+	if len(opts.disallowedTools) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(opts.disallowedTools, ","))
 	}
 	if len(opts.settingSources) > 0 {
 		args = append(args, "--setting-sources", strings.Join(opts.settingSources, ","))

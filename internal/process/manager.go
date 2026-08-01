@@ -43,12 +43,12 @@ type Usage struct {
 
 // SendResult contains the response text, session ID, and any binary artifacts.
 type SendResult struct {
-	Text        string
-	SessionID   string
-	Artifacts   []Artifact
-	ToolCalls   []ToolCall // tool calls observed during execution
-	Usage       *Usage     // token usage from result event (nil if absent)
-	Timings     Timings    // per-turn phase timings (V2-H18 latency attribution)
+	Text         string
+	SessionID    string
+	Artifacts    []Artifact
+	ToolCalls    []ToolCall // tool calls observed during execution
+	Usage        *Usage     // token usage from result event (nil if absent)
+	Timings      Timings    // per-turn phase timings (V2-H18 latency attribution)
 	FirstEventAt time.Time  // wall time of the first stdout event this turn (protocol layer)
 }
 
@@ -68,41 +68,44 @@ type Manager struct {
 	mu         sync.RWMutex
 	readyCond  *sync.Cond // signaled when any session transitions out of busy/compacting
 
-	binary         string
-	model          string
-	timeout        time.Duration
-	maxSessions    int
-	workDir        string
-	allowedTools   []string
-	extraArgs      []string
-	env            map[string]string
-	settingSources []string
-	bridgeSockPath string
-	mcpConfigPath  string
-	settingsPath   string
-	agentNS        string
-	ghostDB        string
-	botUsername    string
-	permissionMode string
+	binary          string
+	model           string
+	timeout         time.Duration
+	maxSessions     int
+	workDir         string
+	allowedTools    []string
+	disallowedTools []string
+	extraArgs       []string
+	env             map[string]string
+	settingSources  []string
+	bridgeSockPath  string
+	mcpConfigPath   string
+	settingsPath    string
+	agentNS         string
+	ghostDB         string
+	botUsername     string
+	permissionMode  string
 }
 
 type ManagerConfig struct {
-	Binary         string
-	Model          string
-	Timeout        time.Duration
-	MaxSessions    int
-	WorkDir        string
-	AllowedTools   []string
-	ExtraArgs      []string
-	Env            map[string]string // extra environment variables for Claude CLI subprocess
-	SettingSources []string
-	BridgeSockPath string
-	MCPConfigPath  string
-	SettingsPath   string // path to per-agent settings.json for --settings flag
-	AgentNS        string // ghost namespace for this agent (e.g. "agent:pikamini")
-	GhostDB        string // ghost database path for this agent
-	BotUsername    string // Telegram bot username (available as SHELL_BOT_USERNAME to skill scripts)
-	PermissionMode string // --permission-mode value (default "bypassPermissions")
+	Binary       string
+	Model        string
+	Timeout      time.Duration
+	MaxSessions  int
+	WorkDir      string
+	AllowedTools []string
+	// DisallowedTools makes tools unreachable for the session. See args.go.
+	DisallowedTools []string
+	ExtraArgs       []string
+	Env             map[string]string // extra environment variables for Claude CLI subprocess
+	SettingSources  []string
+	BridgeSockPath  string
+	MCPConfigPath   string
+	SettingsPath    string // path to per-agent settings.json for --settings flag
+	AgentNS         string // ghost namespace for this agent (e.g. "agent:pikamini")
+	GhostDB         string // ghost database path for this agent
+	BotUsername     string // Telegram bot username (available as SHELL_BOT_USERNAME to skill scripts)
+	PermissionMode  string // --permission-mode value (default "bypassPermissions")
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -119,24 +122,25 @@ func NewManager(cfg ManagerConfig) *Manager {
 		cfg.PermissionMode = "bypassPermissions"
 	}
 	mgr := &Manager{
-		sessions:       make(map[SessionKey]*Session),
-		persistent:     make(map[SessionKey]*persistentProc),
-		binary:         cfg.Binary,
-		model:          cfg.Model,
-		timeout:        cfg.Timeout,
-		maxSessions:    cfg.MaxSessions,
-		workDir:        cfg.WorkDir,
-		allowedTools:   cfg.AllowedTools,
-		extraArgs:      cfg.ExtraArgs,
-		env:            cfg.Env,
-		settingSources: cfg.SettingSources,
-		bridgeSockPath: cfg.BridgeSockPath,
-		mcpConfigPath:  cfg.MCPConfigPath,
-		settingsPath:   cfg.SettingsPath,
-		agentNS:        cfg.AgentNS,
-		ghostDB:        cfg.GhostDB,
-		botUsername:    cfg.BotUsername,
-		permissionMode: cfg.PermissionMode,
+		sessions:        make(map[SessionKey]*Session),
+		persistent:      make(map[SessionKey]*persistentProc),
+		binary:          cfg.Binary,
+		model:           cfg.Model,
+		timeout:         cfg.Timeout,
+		maxSessions:     cfg.MaxSessions,
+		workDir:         cfg.WorkDir,
+		allowedTools:    cfg.AllowedTools,
+		disallowedTools: cfg.DisallowedTools,
+		extraArgs:       cfg.ExtraArgs,
+		env:             cfg.Env,
+		settingSources:  cfg.SettingSources,
+		bridgeSockPath:  cfg.BridgeSockPath,
+		mcpConfigPath:   cfg.MCPConfigPath,
+		settingsPath:    cfg.SettingsPath,
+		agentNS:         cfg.AgentNS,
+		ghostDB:         cfg.GhostDB,
+		botUsername:     cfg.BotUsername,
+		permissionMode:  cfg.PermissionMode,
 	}
 	mgr.readyCond = sync.NewCond(&mgr.mu)
 	return mgr

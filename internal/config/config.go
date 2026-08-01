@@ -158,24 +158,28 @@ type ModelRouting struct {
 }
 
 type ClaudeConfig struct {
-	Binary             string            `json:"binary"`
-	Model              string            `json:"model"`
-	ModelRouting       *ModelRouting     `json:"model_routing"` // per-task model overrides (nil = use default)
-	Timeout            time.Duration     `json:"timeout"`
-	MaxSessions        int               `json:"max_sessions"`
-	WorkDir            string            `json:"work_dir"`
-	AllowedTools       []string          `json:"allowed_tools"`
-	ExtraArgs          []string          `json:"extra_args"`
-	Env                map[string]string `json:"env"`                  // extra environment variables for Claude CLI subprocess
-	PlaygroundDir      string            `json:"playground_dir"`       // writable sandbox dir, auto-approved for Write/Edit/Bash
-	SettingSources     []string          `json:"setting_sources"`      // e.g. ["user", "project"] for --setting-sources
-	MaxSessionTokens   int               `json:"max_session_tokens"`   // in-place /compact when total input tokens exceed this (0 = disabled)
-	RotateMaxTokens    int               `json:"rotate_max_tokens"`    // full session ROTATION (fresh system prompt: skills+identity+pinned reloaded) once total input tokens exceed this (0 = disabled). Lower = fresher/less drift, at higher cache cost.
-	RotateMaxContextTokens int           `json:"rotate_max_context_tokens"` // rotate when TOTAL resumed context (input+cache-creation+cache-read) exceeds this — latency guard so long sessions don't bloat to ~1M tokens and crawl (0 = disabled)
-	WriteVerifyEnforce bool              `json:"write_verify_enforce"` // when true, a caught write-claim confabulation triggers a bounded correction turn before delivery
-	MediaGateEnforce   bool              `json:"media_gate_enforce"`   // when true, image/video artifacts are dropped on user turns that didn't ask for media (heartbeat turns always drop media regardless)
-	TopicKeywordOnly   bool              `json:"topic_keyword_only"`   // when true, topic classification runs cache→keyword→sticky only, no per-turn LLM call (cycle 148: the LLM tier regressed every focus metric while adding ~8.5s latency)
-	PermissionMode     string            `json:"permission_mode"`      // --permission-mode for the Claude CLI subprocess (default "bypassPermissions"). "auto" adds a safety classifier but may fall back to prompting (which hangs a headless turn).
+	Binary       string        `json:"binary"`
+	Model        string        `json:"model"`
+	ModelRouting *ModelRouting `json:"model_routing"` // per-task model overrides (nil = use default)
+	Timeout      time.Duration `json:"timeout"`
+	MaxSessions  int           `json:"max_sessions"`
+	WorkDir      string        `json:"work_dir"`
+	AllowedTools []string      `json:"allowed_tools"`
+	// DisallowedTools removes tools from the session entirely. Unlike
+	// allowed_tools (a permission allowlist that bypassPermissions makes moot),
+	// this is the only lever that makes a built-in unreachable.
+	DisallowedTools        []string          `json:"disallowed_tools"`
+	ExtraArgs              []string          `json:"extra_args"`
+	Env                    map[string]string `json:"env"`                       // extra environment variables for Claude CLI subprocess
+	PlaygroundDir          string            `json:"playground_dir"`            // writable sandbox dir, auto-approved for Write/Edit/Bash
+	SettingSources         []string          `json:"setting_sources"`           // e.g. ["user", "project"] for --setting-sources
+	MaxSessionTokens       int               `json:"max_session_tokens"`        // in-place /compact when total input tokens exceed this (0 = disabled)
+	RotateMaxTokens        int               `json:"rotate_max_tokens"`         // full session ROTATION (fresh system prompt: skills+identity+pinned reloaded) once total input tokens exceed this (0 = disabled). Lower = fresher/less drift, at higher cache cost.
+	RotateMaxContextTokens int               `json:"rotate_max_context_tokens"` // rotate when TOTAL resumed context (input+cache-creation+cache-read) exceeds this — latency guard so long sessions don't bloat to ~1M tokens and crawl (0 = disabled)
+	WriteVerifyEnforce     bool              `json:"write_verify_enforce"`      // when true, a caught write-claim confabulation triggers a bounded correction turn before delivery
+	MediaGateEnforce       bool              `json:"media_gate_enforce"`        // when true, image/video artifacts are dropped on user turns that didn't ask for media (heartbeat turns always drop media regardless)
+	TopicKeywordOnly       bool              `json:"topic_keyword_only"`        // when true, topic classification runs cache→keyword→sticky only, no per-turn LLM call (cycle 148: the LLM tier regressed every focus metric while adding ~8.5s latency)
+	PermissionMode         string            `json:"permission_mode"`           // --permission-mode for the Claude CLI subprocess (default "bypassPermissions"). "auto" adds a safety classifier but may fall back to prompting (which hangs a headless turn).
 }
 
 // ResolveEffort returns the reasoning effort for a task type ("" = CLI default).
@@ -271,8 +275,8 @@ type DaemonConfig struct {
 	// the window is suppressed — deterministic guard against duplicate
 	// reminders. On by default; outbound_dedup_disabled is the kill-switch.
 	OutboundDedupDisabled   bool `json:"outbound_dedup_disabled"`
-	CoalesceDisabled        bool `json:"coalesce_disabled"` // kill switch: V2-H44 queued-message coalescing
-	AbsorbEnabled           bool `json:"absorb_enabled"`    // V2-H46 absorb single waiter into active turn (default off; canary per agent)
+	CoalesceDisabled        bool `json:"coalesce_disabled"`          // kill switch: V2-H44 queued-message coalescing
+	AbsorbEnabled           bool `json:"absorb_enabled"`             // V2-H46 absorb single waiter into active turn (default off; canary per agent)
 	OutboundDedupWindowMins int  `json:"outbound_dedup_window_mins"` // default 60
 }
 

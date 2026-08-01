@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	pm "github.com/rcliao/shell-pm"
@@ -296,22 +296,23 @@ func New(cfg config.Config) (*Daemon, error) {
 
 	// Create process manager
 	proc := process.NewManager(process.ManagerConfig{
-		Binary:         cfg.Claude.Binary,
-		Model:          cfg.Claude.Model,
-		Timeout:        cfg.Claude.Timeout,
-		MaxSessions:    cfg.Claude.MaxSessions,
-		WorkDir:        cfg.Claude.WorkDir,
-		AllowedTools:   allowedTools,
-		ExtraArgs:      cfg.Claude.ExtraArgs,
-		Env:            cfg.Claude.Env,
-		SettingSources: cfg.Claude.SettingSources,
-		BridgeSockPath: bridgeSockPath,
-		MCPConfigPath:  mcpConfigPath,
-		SettingsPath:   agentSettingsPath,
-		AgentNS:        agentNS,
-		GhostDB:        cfg.Memory.DBPath,
-		BotUsername:    cfg.Agent.BotUsername,
-		PermissionMode: cfg.Claude.PermissionMode,
+		Binary:          cfg.Claude.Binary,
+		Model:           cfg.Claude.Model,
+		Timeout:         cfg.Claude.Timeout,
+		MaxSessions:     cfg.Claude.MaxSessions,
+		WorkDir:         cfg.Claude.WorkDir,
+		AllowedTools:    allowedTools,
+		DisallowedTools: cfg.Claude.DisallowedTools,
+		ExtraArgs:       cfg.Claude.ExtraArgs,
+		Env:             cfg.Claude.Env,
+		SettingSources:  cfg.Claude.SettingSources,
+		BridgeSockPath:  bridgeSockPath,
+		MCPConfigPath:   mcpConfigPath,
+		SettingsPath:    agentSettingsPath,
+		AgentNS:         agentNS,
+		GhostDB:         cfg.Memory.DBPath,
+		BotUsername:     cfg.Agent.BotUsername,
+		PermissionMode:  cfg.Claude.PermissionMode,
 	})
 
 	// Legacy: inject shell:capabilities into system namespaces for profiles without AgentNS.

@@ -1,6 +1,9 @@
 package process
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // flagValue returns the argument following the first occurrence of flag, and
 // whether the flag was present.
@@ -92,5 +95,44 @@ func TestBuildClaudeArgs_EmptyModelEmitsNoModelFlag(t *testing.T) {
 	}
 	if hasFlag(args, "--model") {
 		t.Errorf("no --model flag expected when both request and default are empty; got %v", args)
+	}
+}
+
+// CronCreate and friends must be UNREACHABLE, not merely un-allowlisted.
+// --allowedTools is a permission allowlist, and these agents run with
+// bypassPermissions, so it gates nothing — an in-session cron whose schedules
+// die with the subprocess stayed reachable behind a prose prohibition in the
+// schedule skill. --disallowedTools is the actual gate.
+func TestBuildClaudeArgs_DisallowedToolsIsEmittedSeparately(t *testing.T) {
+	req := AgentRequest{}
+	args, _ := buildClaudeArgs(req, claudeArgOpts{
+		permissionMode:  "bypassPermissions",
+		allowedTools:    []string{"Bash", "mcp__shell-bridge__shell_schedule"},
+		disallowedTools: []string{"CronCreate", "CronDelete", "CronList"},
+	})
+
+	allowed, _ := flagValue(args, "--allowedTools")
+	disallowed, ok := flagValue(args, "--disallowedTools")
+	if !ok {
+		t.Fatalf("--disallowedTools missing from %v", args)
+	}
+
+	if disallowed != "CronCreate,CronDelete,CronList" {
+		t.Fatalf("--disallowedTools = %q, want the cron trio", disallowed)
+	}
+	if strings.Contains(allowed, "Cron") {
+		t.Errorf("cron tools must not appear in --allowedTools: %q", allowed)
+	}
+	if !strings.Contains(allowed, "shell_schedule") {
+		t.Errorf("the replacement tool must stay allowed: %q", allowed)
+	}
+}
+
+func TestBuildClaudeArgs_NoDisallowedFlagWhenUnset(t *testing.T) {
+	args, _ := buildClaudeArgs(AgentRequest{}, claudeArgOpts{permissionMode: "default"})
+	for _, a := range args {
+		if a == "--disallowedTools" {
+			t.Fatal("--disallowedTools must be omitted entirely when nothing is disallowed")
+		}
 	}
 }
