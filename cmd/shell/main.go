@@ -34,6 +34,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// drainTimeout bounds how long a restart waits for in-flight work. Sized to
+// the longest legitimate turn (deep reflection beats, 5-8.5 min observed),
+// because a budget shorter than that does not risk killing work — it
+// guarantees it.
+const drainTimeout = 15 * time.Minute
+
 func main() {
 	var verbose bool
 
@@ -114,7 +120,17 @@ func main() {
 				// Graceful drain: never exec over an in-flight turn — a
 				// mid-turn restart kills the Claude subprocess and the
 				// user's message is lost (7/13 16:09, 7/14 07:43).
-				d.Drain(120 * time.Second)
+				//
+				// The budget must cover the LONGEST legitimate turn, not a
+				// typical one. At 120s it did not: on 2026-08-01 a deep
+				// reflection beat was 3.7 minutes in when a deploy arrived,
+				// drain waited its two minutes and then killed it anyway
+				// ("claude process failed: signal: killed", 340s of work
+				// discarded). Deep beats run 5-8.5 minutes by design, so the
+				// old budget guaranteed that outcome rather than risking it.
+				// 15m sits above the scheduler's own 20m job timeout floor
+				// minus a margin; a genuinely wedged turn is still bounded.
+				d.Drain(drainTimeout)
 				d.Shutdown()
 				binary, err := os.Executable()
 				if err != nil {
