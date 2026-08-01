@@ -36,15 +36,15 @@ func (s *Store) LogTopicDecision(d TopicDecision) error {
 
 // TopicStats is aggregate per-source / per-topic data for a time window.
 type TopicStats struct {
-	TotalDecisions int
-	BySource       map[string]int                 // source → count
-	ByTopic        map[string]int                 // topic → count
-	NewTopics      int                            // is_new = true count
-	CommitmentsExtracted int                      // sum
-	HaikuLatencyP50 int64                         // median ms for source=haiku
-	HaikuLatencyP95 int64
-	WindowStart    time.Time
-	WindowEnd      time.Time
+	TotalDecisions       int
+	BySource             map[string]int // source → count
+	ByTopic              map[string]int // topic → count
+	NewTopics            int            // is_new = true count
+	CommitmentsExtracted int            // sum
+	HaikuLatencyP50      int64          // median ms for source=haiku
+	HaikuLatencyP95      int64
+	WindowStart          time.Time
+	WindowEnd            time.Time
 }
 
 // AggregateTopicStats reads decisions for a chat (or all if chatID=0)
@@ -103,12 +103,12 @@ func (s *Store) AggregateTopicStats(chatID int64, since, until time.Time) (*Topi
 
 // ThreadHealth is a per-chat snapshot of thread-state quality.
 type ThreadHealth struct {
-	ChatID            int64
-	ActiveThreads     int
-	StaleThreads      int // last_turn_at > 30d
-	TotalOpenCommits  int
-	OverdueCommits    int
-	AvgSummaryLen     int
+	ChatID               int64
+	ActiveThreads        int
+	StaleThreads         int // last_turn_at > 30d
+	TotalOpenCommits     int
+	OverdueCommits       int
+	AvgSummaryLen        int
 	ThreadsWithNoSummary int
 }
 

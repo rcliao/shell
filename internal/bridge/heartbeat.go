@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rcliao/shell/internal/beat"
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/store"
 )
@@ -286,15 +287,16 @@ const deepHeartbeatPrefix = "[Heartbeat:deep] "
 
 // captureReflection journals one deep-heartbeat turn.
 //
-// job_run_id and beat_count are left zero: both live in the scheduler, which
-// does not pass them through the heartbeat callback, and threading them here
-// would mean changing that signature for a write-only table. Correlate by time
-// instead — reflections land within seconds of their job_runs row, and the
-// heartbeat overlap policy is `skip`, so beats never interleave. If the link
-// later needs to be exact, the callback is where to add it.
-func (b *Bridge) captureReflection(chatID int64, response string, result process.SendResult, turnModel string) {
+// The scheduler attaches the fire's job_runs id and heartbeat counter to the
+// context (internal/beat), so a journal row joins to the ledger exactly rather
+// than by timestamp proximity. Metadata is absent for a manually invoked beat,
+// and the zero Meta is fine — the row is still captured, just unlinked.
+func (b *Bridge) captureReflection(ctx context.Context, chatID int64, response string, result process.SendResult, turnModel string) {
+	meta := beat.From(ctx)
 	id, err := b.store.RecordReflection(store.Reflection{
+		JobRunID:   meta.RunID,
 		ChatID:     chatID,
+		BeatCount:  meta.Count,
 		Model:      turnModel,
 		Text:       response,
 		ToolCalls:  len(result.ToolCalls),
@@ -306,6 +308,6 @@ func (b *Bridge) captureReflection(chatID int64, response string, result process
 		return
 	}
 	slog.Info("reflection captured",
-		"id", id, "chat_id", chatID, "chars", len(response),
-		"tool_calls", len(result.ToolCalls), "noop", response == "")
+		"id", id, "chat_id", chatID, "job_run_id", meta.RunID, "beat", meta.Count,
+		"chars", len(response), "tool_calls", len(result.ToolCalls), "noop", response == "")
 }

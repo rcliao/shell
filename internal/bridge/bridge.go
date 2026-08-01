@@ -1188,7 +1188,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// than no journal. Nothing reads these rows yet — capture is deliberately
 	// observation-only so the corpus can be studied before curation is designed.
 	if strings.HasPrefix(userMsg, deepHeartbeatPrefix) && b.store != nil {
-		b.captureReflection(chatID, response, result, turnModel)
+		b.captureReflection(ctx, chatID, response, result, turnModel)
 	}
 
 	// Run memory maintenance during heartbeats.

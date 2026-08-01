@@ -9,11 +9,11 @@ import (
 
 // CronExpr represents a parsed 5-field cron expression.
 type CronExpr struct {
-	Minutes    []bool // 0-59
-	Hours      []bool // 0-23
+	Minutes     []bool // 0-59
+	Hours       []bool // 0-23
 	DaysOfMonth []bool // 1-31
-	Months     []bool // 1-12
-	DaysOfWeek []bool // 0-6 (0=Sunday)
+	Months      []bool // 1-12
+	DaysOfWeek  []bool // 0-6 (0=Sunday)
 }
 
 // Aliases maps shorthand names to cron expressions.

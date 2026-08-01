@@ -476,9 +476,9 @@ func main() {
 			}
 			fmt.Printf("Deep-heartbeat reflections (newest first, max %d):\n\n", n)
 			for _, r := range refs {
-				fmt.Printf("  #%-4d %s  %-18s tools=%-3d %s\n",
+				fmt.Printf("  #%-4d %s  beat=%-4d run=%-5d %-18s tools=%-3d %s\n",
 					r.ID, r.CreatedAt.Local().Format("2006-01-02 15:04:05"),
-					r.Model, r.ToolCalls, noopLabel(r.Noop))
+					r.BeatCount, r.JobRunID, r.Model, r.ToolCalls, noopLabel(r.Noop))
 				text := r.Text
 				if !refFullFlag && len(text) > 240 {
 					text = text[:240] + "..."

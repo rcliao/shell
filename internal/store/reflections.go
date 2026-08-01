@@ -110,22 +110,29 @@ func scanReflections(rows *sql.Rows) ([]Reflection, error) {
 	return out, rows.Err()
 }
 
-// ReflectionCaptureRate compares captured reflections against deep-beat fires
-// in the ledger. Capture is automatic, so this should be 1.0 — a shortfall
-// means the hook is missing turns, which is the one way this design can fail
-// silently.
-func (s *Store) ReflectionCaptureRate(since time.Time) (captured, deepFires int, err error) {
+// ReflectionCaptureRate compares captured reflections against heartbeat fires
+// in the ledger. Capture is automatic, so `captured` should equal the deep
+// share of `heartbeatFires` — a shortfall means the hook is missing turns,
+// which is the one way this design can fail silently.
+//
+// linked counts reflections that carry a job_runs id. It should equal captured:
+// anything unlinked came from outside the scheduler, and a drift between the
+// two means the metadata plumbing broke while capture kept working.
+func (s *Store) ReflectionCaptureRate(since time.Time) (captured, linked, heartbeatFires int, err error) {
 	if err = s.db.QueryRow(
 		`SELECT count(*) FROM reflections WHERE created_at >= ?`, since).Scan(&captured); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	// Deep fires are not labelled in job_runs, so this counts reflections
-	// against ALL heartbeat fires in the window; the caller divides by the
-	// deep interval. Reported raw rather than guessed at.
+	if err = s.db.QueryRow(
+		`SELECT count(*) FROM reflections WHERE created_at >= ? AND job_run_id != 0`, since).Scan(&linked); err != nil {
+		return 0, 0, 0, err
+	}
+	// Deep fires are not separately labelled in job_runs; the caller divides by
+	// the configured deep interval. Reported raw rather than guessed at.
 	err = s.db.QueryRow(`
 		SELECT count(*) FROM job_runs r
 		JOIN schedules s ON s.id = r.schedule_id
 		WHERE s.type = 'heartbeat' AND r.outcome = 'fired_ok' AND r.fired_at >= ?
-	`, since).Scan(&deepFires)
-	return captured, deepFires, err
+	`, since).Scan(&heartbeatFires)
+	return captured, linked, heartbeatFires, err
 }

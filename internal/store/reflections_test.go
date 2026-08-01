@@ -113,15 +113,59 @@ func TestReflectionCaptureRateCountsBoth(t *testing.T) {
 	if err := s.FinishJobRun(runID, OutcomeFiredOK, ""); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
-	if _, err := s.RecordReflection(Reflection{Text: "captured"}); err != nil {
+	if _, err := s.RecordReflection(Reflection{Text: "captured", JobRunID: runID}); err != nil {
 		t.Fatalf("record: %v", err)
 	}
+	// An unlinked row: captured but not attributable to a scheduler fire.
+	if _, err := s.RecordReflection(Reflection{Text: "manual"}); err != nil {
+		t.Fatalf("record manual: %v", err)
+	}
 
-	captured, fires, err := s.ReflectionCaptureRate(since)
+	captured, linked, fires, err := s.ReflectionCaptureRate(since)
 	if err != nil {
 		t.Fatalf("rate: %v", err)
 	}
-	if captured != 1 || fires != 1 {
-		t.Fatalf("captured=%d fires=%d, want 1 and 1", captured, fires)
+	if captured != 2 || linked != 1 || fires != 1 {
+		t.Fatalf("captured=%d linked=%d fires=%d, want 2/1/1 — linked must exclude the manual row",
+			captured, linked, fires)
+	}
+}
+
+// A reflection must join to its fire in the ledger. Timestamp proximity was the
+// fallback before the scheduler threaded its run id through; this pins the real
+// linkage so a regression in that plumbing fails here rather than showing up as
+// a journal full of zeros nobody notices.
+func TestReflectionJoinsItsJobRun(t *testing.T) {
+	s := openTempStore(t)
+
+	sched := &Schedule{
+		ChatID: 0, Label: "hb", Message: "beat", Schedule: "1h", Timezone: "UTC",
+		Type: "heartbeat", Mode: "prompt", NextRunAt: time.Now().UTC(), Enabled: true,
+	}
+	schedID, _, err := s.UpsertScheduleByKey(sched)
+	if err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+	runID, err := s.StartJobRun(JobRun{ScheduleID: schedID, FiredAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if _, err := s.RecordReflection(Reflection{JobRunID: runID, BeatCount: 12, Text: "self-audit"}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	var beatCount int
+	var outcome string
+	if err := s.db.QueryRow(`
+		SELECT r.beat_count, j.outcome
+		FROM reflections r JOIN job_runs j ON j.id = r.job_run_id
+	`).Scan(&beatCount, &outcome); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if beatCount != 12 {
+		t.Errorf("beat_count = %d, want 12", beatCount)
+	}
+	if outcome != OutcomeRunning {
+		t.Errorf("joined outcome = %q, want the open run", outcome)
 	}
 }

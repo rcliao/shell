@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rcliao/shell/internal/beat"
 )
 
 // ScheduleStore is the interface the scheduler needs from the store.
@@ -280,7 +282,7 @@ func (s *Scheduler) runJob(ctx context.Context, sc ScheduleEntry) {
 		}
 
 		jobCtx, cancel := context.WithTimeout(ctx, s.jobTimeout)
-		outcome, errMsg, runErr := s.execute(jobCtx, sc)
+		outcome, errMsg, runErr := s.execute(jobCtx, sc, runID)
 		cancel()
 
 		if runID != 0 {
@@ -429,7 +431,7 @@ func (s *Scheduler) isHeartbeatIdle(chatID int64) bool {
 // execute runs one fire attempt and reports its outcome. The returned error is
 // the raw failure, kept separate from the message so the caller can classify it
 // for retry; a nil error with a non-OK outcome means "failed, do not retry".
-func (s *Scheduler) execute(ctx context.Context, sc ScheduleEntry) (outcome, errMsg string, err error) {
+func (s *Scheduler) execute(ctx context.Context, sc ScheduleEntry, runID int64) (outcome, errMsg string, err error) {
 	slog.Info("scheduler: firing", "id", sc.ID, "chat_id", sc.ChatID, "type", sc.Type, "mode", sc.Mode, "label", sc.Label)
 
 	msg := sc.Message
@@ -479,6 +481,12 @@ func (s *Scheduler) execute(ctx context.Context, sc ScheduleEntry) (outcome, err
 		} else {
 			msg = "[Heartbeat] " + msg
 		}
+
+		// Attach fire metadata for the reflection journal. Done here rather
+		// than in runJob because the counter is only known after the bump —
+		// and the counter is what places a journal row in the deep-reflection
+		// sequence instead of leaving it to timestamp correlation.
+		ctx = beat.With(ctx, beat.Meta{RunID: runID, Count: count, Deep: isDeep})
 
 		// Every ~4 heartbeats, add a check-in hint.
 		if count%4 == 0 {

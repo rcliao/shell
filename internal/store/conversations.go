@@ -16,13 +16,13 @@ import (
 // matched the classifier's choice? If high (which the inertia hypothesis
 // predicts), the sync classifier can move off the user-response path.
 type Conversation struct {
-	ChatID            int64
-	CurrentThreadID   sql.NullInt64
-	CurrentTopic      string
-	LastDriftCheckAt  *time.Time
-	TurnsSinceCheck   int
-	ColdStart         bool
-	UpdatedAt         time.Time
+	ChatID           int64
+	CurrentThreadID  sql.NullInt64
+	CurrentTopic     string
+	LastDriftCheckAt *time.Time
+	TurnsSinceCheck  int
+	ColdStart        bool
+	UpdatedAt        time.Time
 }
 
 // GetConversation returns the sticky-pointer row for a chat, or nil if no

@@ -30,10 +30,10 @@ type TopicThread struct {
 // Cycle 67 ships the data shape + manual-population path; cycle 68+
 // auto-extracts these from agent responses.
 type Commitment struct {
-	Action  string    `json:"action"`             // free-form description
-	DueAt   time.Time `json:"due_at,omitempty"`   // when to revisit
-	Status  string    `json:"status"`             // open | done | overdue | cancelled
-	Source  string    `json:"source,omitempty"`   // which turn/msg established this
+	Action    string    `json:"action"`           // free-form description
+	DueAt     time.Time `json:"due_at,omitempty"` // when to revisit
+	Status    string    `json:"status"`           // open | done | overdue | cancelled
+	Source    string    `json:"source,omitempty"` // which turn/msg established this
 	CreatedAt time.Time `json:"created_at"`
 }
 

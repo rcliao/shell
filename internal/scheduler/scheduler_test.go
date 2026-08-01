@@ -151,13 +151,13 @@ func TestDeepReflectionCadenceSurvivesRestart(t *testing.T) {
 	}
 
 	s := newSched()
-	s.execute(context.Background(), hb) // count 1 → light
-	s.execute(context.Background(), hb) // count 2 → light
+	s.execute(context.Background(), hb, 0) // count 1 → light
+	s.execute(context.Background(), hb, 0) // count 2 → light
 
 	// Simulate a daemon restart: brand-new Scheduler (in-memory counter = 0),
 	// same store (persisted count = 2).
 	s = newSched()
-	s.execute(context.Background(), hb) // persisted count 3 → MUST be deep
+	s.execute(context.Background(), hb, 0) // persisted count 3 → MUST be deep
 
 	if len(deepAt) != 1 || deepAt[0] != 3 {
 		t.Fatalf("deep reflection should fire on the 3rd persisted heartbeat across a restart; got deepAt=%v (fired=%d)", deepAt, fired)
