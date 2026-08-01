@@ -1,6 +1,9 @@
 package store
 
 import (
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -330,5 +333,116 @@ func TestLegacyTaskTableWithRowsIsNotDropped(t *testing.T) {
 	}
 	if desc != "do not lose me" {
 		t.Fatalf("legacy row altered: %q", desc)
+	}
+}
+
+// Contention regression. The first implementation opened a transaction, read
+// for the idempotency key, then inserted — and leased the same way. A soak
+// against a copy of a live DB failed 107 of 320 concurrent enqueues with
+// SQLITE_BUSY and LOST 3 of 40 distinct tasks: SQLite answers a read-to-write
+// upgrade with an immediate busy error rather than honoring busy_timeout, and
+// that holds however short the transaction is.
+//
+// Both paths are now single write statements (INSERT ... ON CONFLICT, and
+// UPDATE ... WHERE id = (SELECT ...) RETURNING). This test fails loudly if
+// either reverts to read-then-write.
+func TestConcurrentEnqueueAndLeaseLoseNothing(t *testing.T) {
+	s := taskStore(t)
+
+	const producers, distinct, partitions = 24, 60, 4
+	var created, deduped, enqErr, leaseErr atomic.Int64
+
+	var wg sync.WaitGroup
+	for p := 0; p < producers; p++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < distinct; i++ {
+				_, isNew, err := s.EnqueueTask(Task{
+					Kind:           "soak",
+					IdempotencyKey: fmt.Sprintf("soak:%d", i),
+					PartitionKey:   fmt.Sprintf("part:%d", i%partitions),
+				})
+				switch {
+				case err != nil:
+					enqErr.Add(1)
+				case isNew:
+					created.Add(1)
+				default:
+					deduped.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := created.Load(); got != distinct {
+		t.Fatalf("created %d of %d distinct tasks (errors=%d) — concurrent enqueue is losing work",
+			got, distinct, enqErr.Load())
+	}
+	if enqErr.Load() != 0 {
+		t.Errorf("%d enqueue errors under contention, want 0", enqErr.Load())
+	}
+	if want := int64(producers*distinct) - int64(distinct); deduped.Load() != want {
+		t.Errorf("deduped %d, want %d — idempotency is not holding under contention", deduped.Load(), want)
+	}
+
+	// Drain concurrently, asserting the partition contract throughout.
+	var mu sync.Mutex
+	held := map[string]int{}
+	var maxPer, done atomic.Int64
+
+	for w := 0; w < 6; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			owner := fmt.Sprintf("boot-%d", w)
+			idle := 0
+			for {
+				task, err := s.LeaseTask(owner, 30*time.Second)
+				if err != nil {
+					leaseErr.Add(1)
+					return
+				}
+				if task == nil {
+					if idle++; idle > 3 {
+						return
+					}
+					time.Sleep(2 * time.Millisecond)
+					continue
+				}
+				idle = 0
+				mu.Lock()
+				held[task.PartitionKey]++
+				if int64(held[task.PartitionKey]) > maxPer.Load() {
+					maxPer.Store(int64(held[task.PartitionKey]))
+				}
+				mu.Unlock()
+
+				mu.Lock()
+				held[task.PartitionKey]--
+				mu.Unlock()
+
+				if err := s.CompleteTask(task.ID, "ok"); err != nil {
+					leaseErr.Add(1)
+					return
+				}
+				done.Add(1)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	if leaseErr.Load() != 0 {
+		t.Errorf("%d lease/complete errors under contention, want 0", leaseErr.Load())
+	}
+	if got := done.Load(); got != distinct {
+		t.Errorf("completed %d of %d tasks", got, distinct)
+	}
+	if maxPer.Load() > 1 {
+		t.Errorf("%d tasks ran concurrently in one partition — serialization broken", maxPer.Load())
+	}
+	if left, err := s.ListTasks(TaskQueued, 5); err != nil || len(left) != 0 {
+		t.Errorf("%d tasks left queued after drain (err %v)", len(left), err)
 	}
 }

@@ -102,40 +102,57 @@ func (s *Store) EnqueueTask(t Task) (id int64, created bool, err error) {
 		t.Payload = "{}"
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, false, err
+	// WRITE FIRST. An earlier version opened a transaction, SELECTed for the
+	// key, then INSERTed — and a soak test against a copy of a live DB failed
+	// 107 of 320 concurrent enqueues with SQLITE_BUSY, losing 3 of 40 distinct
+	// tasks outright. SQLite answers a read-to-write UPGRADE with an immediate
+	// busy error rather than honoring busy_timeout, and that is true however
+	// short the transaction is: it is a property of the upgrade, not of the
+	// span. FinishJobRun learned the same lesson on 7/30.
+	//
+	// ON CONFLICT DO NOTHING makes the insert itself the dedup, so the first
+	// statement takes the write lock and a competing writer makes us WAIT.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
+		}
+		id, created, err := s.enqueueOnce(t)
+		if err == nil {
+			return id, created, nil
+		}
+		lastErr = err
+		if !isBusy(err) {
+			return 0, false, err
+		}
 	}
-	defer tx.Rollback()
+	return 0, false, lastErr
+}
 
-	// Write-first would be ideal, but enqueue genuinely needs to know whether
-	// the key exists. The read is cheap and this transaction is short; the
-	// SQLITE_BUSY hazard documented on FinishJobRun applies to long
-	// read-then-write spans, not to an immediate insert-or-return.
-	var existing int64
-	switch err := tx.QueryRow(
-		`SELECT id FROM tasks WHERE idempotency_key = ?`, t.IdempotencyKey).Scan(&existing); {
-	case err == nil:
-		return existing, false, tx.Commit()
-	case err == sql.ErrNoRows:
-	default:
-		return 0, false, err
-	}
-
-	res, err := tx.Exec(`
+func (s *Store) enqueueOnce(t Task) (int64, bool, error) {
+	res, err := s.db.Exec(`
 		INSERT INTO tasks (kind, source, idempotency_key, partition_key, payload,
 		                   state, attempts, max_attempts, not_before, enqueued_at)
 		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+		ON CONFLICT(idempotency_key) DO NOTHING
 	`, t.Kind, t.Source, t.IdempotencyKey, t.PartitionKey, t.Payload,
 		TaskQueued, t.MaxAttempts, t.NotBefore, time.Now().UTC())
 	if err != nil {
 		return 0, false, err
 	}
-	newID, err := res.LastInsertId()
-	if err != nil {
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		id, err := res.LastInsertId()
+		return id, true, err
+	}
+
+	// The key already existed. This read is safe: it is not inside a write
+	// transaction, so there is no upgrade to fail.
+	var existing int64
+	if err := s.db.QueryRow(
+		`SELECT id FROM tasks WHERE idempotency_key = ?`, t.IdempotencyKey).Scan(&existing); err != nil {
 		return 0, false, err
 	}
-	return newID, true, tx.Commit()
+	return existing, false, nil
 }
 
 // LeaseTask claims the next ready task and marks it in flight, returning nil
@@ -150,42 +167,54 @@ func (s *Store) LeaseTask(owner string, leaseFor time.Duration) (*Task, error) {
 	if owner == "" {
 		return nil, fmt.Errorf("lease owner is required")
 	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
+		}
+		t, err := s.leaseOnce(owner, leaseFor)
+		if err == nil {
+			return t, nil
+		}
+		lastErr = err
+		if !isBusy(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// leaseOnce claims a task in ONE write statement.
+//
+// The selection is a subquery inside the UPDATE rather than a separate SELECT,
+// for the same reason EnqueueTask inserts with ON CONFLICT: a transaction that
+// reads and then upgrades to a write gets an immediate SQLITE_BUSY instead of
+// waiting. The first soak run against a live-DB copy produced 47 lease errors
+// from exactly that shape. Starting with the UPDATE takes the write lock up
+// front, so a competing writer makes us wait.
+func (s *Store) leaseOnce(owner string, leaseFor time.Duration) (*Task, error) {
 	now := time.Now().UTC()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
 	var id int64
-	err = tx.QueryRow(`
-		SELECT id FROM tasks t
-		WHERE t.state = ?
-		  AND (t.not_before IS NULL OR t.not_before <= ?)
-		  AND (t.partition_key = '' OR NOT EXISTS (
-		        SELECT 1 FROM tasks b
-		        WHERE b.partition_key = t.partition_key
-		          AND b.state = ?
-		      ))
-		ORDER BY t.id LIMIT 1
-	`, TaskQueued, now, TaskLeased).Scan(&id)
-	if err == sql.ErrNoRows {
-		return nil, tx.Commit()
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	until := now.Add(leaseFor)
-	if _, err := tx.Exec(`
+	err := s.db.QueryRow(`
 		UPDATE tasks SET state = ?, lease_owner = ?, leased_until = ?,
 		                 attempts = attempts + 1, started_at = coalesce(started_at, ?)
-		WHERE id = ?
-	`, TaskLeased, owner, until, now, id); err != nil {
-		return nil, err
+		WHERE id = (
+			SELECT t.id FROM tasks t
+			WHERE t.state = ?
+			  AND (t.not_before IS NULL OR t.not_before <= ?)
+			  AND (t.partition_key = '' OR NOT EXISTS (
+			        SELECT 1 FROM tasks b
+			        WHERE b.partition_key = t.partition_key
+			          AND b.state = ?
+			      ))
+			ORDER BY t.id LIMIT 1
+		)
+		RETURNING id
+	`, TaskLeased, owner, now.Add(leaseFor), now, TaskQueued, now, TaskLeased).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, nil // nothing ready
 	}
-	if err := tx.Commit(); err != nil {
+	if err != nil {
 		return nil, err
 	}
 	return s.GetTask(id)
