@@ -153,6 +153,7 @@ CREATE TABLE tasks (
   attempts        INTEGER NOT NULL DEFAULT 0,
   max_attempts    INTEGER NOT NULL DEFAULT 3,
   not_before      DATETIME,                 -- visibility delay; NULL = immediately
+  expires_at      DATETIME,                 -- drop rather than run after this; NULL = never
   lease_owner     TEXT NOT NULL DEFAULT '', -- daemon boot id
   leased_until    DATETIME,
   enqueued_at     DATETIME NOT NULL,
@@ -173,6 +174,12 @@ CREATE INDEX idx_tasks_ready ON tasks(state, partition_key, not_before, id);
 delay is a property of the task, evaluated at dequeue, so "check this tomorrow
 at 09:00" is a queued task nobody leases until then — rather than a live row
 racing a 1-minute expiry sweeper it is guaranteed to lose.
+
+`expires_at` is what keeps replay from becoming a liability. A reclaimed chat
+turn is still worth running because the human is still waiting; a heartbeat
+reclaimed hours after it was due would report on a world that has moved on. Past
+its expiry a task is dropped with a recorded outcome rather than run late —
+recovery that knows when to stop.
 
 `result` closes the assign/report loop: an agent that assigns work reads it back
 when the task reaches `done`. That, plus `not_before`, is the whole of what the
@@ -468,31 +475,55 @@ completion, not just the bridge turn. No new tables. This alone closes the
 observed incident, and it is worth doing whether or not the rest is ever built.
 Measured by: zero replays following a clean restart.
 
-**Step 1 — new `tasks` alongside `pending_turns`, Telegram only, shadow mode.**
-Idempotency keys are populated and their uniqueness exercised from day one;
-shadow mode is the cheapest place to discover a key that collides or is not
-stable across a retry.
-Enqueue and complete in the new table while the existing path stays
-authoritative. Compare the two ledgers for a week. Any divergence is a bug in
-the new path found for free.
+**Step 1 — storage layer, no wiring.** DONE. `tasks` table, enqueue/lease/
+complete/fail/reclaim, tested including a contention soak against a copy of a
+live DB (which found and fixed two SQLITE_BUSY losses before anything depended
+on them).
 
-**Step 2 — cut Telegram over.** The handler dequeues instead of executing on
-arrival. `pending_turns` becomes a view or is dropped. Coalescing and absorb move
-to queue operations here, with their existing tests as the regression gate.
+**Step 2 — enqueue SCHEDULER fires.** Heartbeats, cron jobs and one-shots become
+tasks. The scheduler keeps deciding *when*; the queue owns running it.
 
-**Step 3 — enqueue scheduler fires.** Heartbeats and cron jobs become work items.
-The scheduler keeps deciding *when*; the queue owns *running it*. This is where
-scheduled work finally gets replay, and where the dispatcher's mailboxes are
-replaced by the shared partition workers.
+This step was originally sequenced last, behind Telegram, on the reasoning that
+the earlier steps "earn the right" to attempt it. That reasoning optimized for
+validating the queue rather than for fixing the largest hole, and the ledger
+says the hole is here:
 
-**Step 4 — a2a and delegation.** The last two trigger types. This is where the
-old shared task store is retired: its rows migrate in as tasks with
-`source='a2a'`, `~/.shell/shared/tasks.db` is archived, and
-`internal/transcript/taskstore.go` plus the `shell-task` skill are removed. The
-60-minute TTL defect dies with it.
+- Telegram has replayed **13 turns** across the two agents. That path is
+  protected by `pending_turns` and works.
+- Scheduled work has 3 recorded deaths (`interrupted`, `spawn_failed`,
+  `turn_failed`) and **zero replays**, because no replay path exists. One of
+  them is a deep reflection beat killed by a deploy on 2026-08-01 after 340s of
+  work — the most expensive single unit of work in the system, discarded with no
+  recovery.
 
-Steps 3 and 4 are where the "one infra for scheduling and messaging" property
-actually arrives. Steps 0 through 2 are what earn the right to attempt them.
+Cutting Telegram over first would replace working machinery with new machinery.
+Doing the scheduler first fills a gap that is actually open. Blast radius points
+the same way: a replayed heartbeat is noop-suppressed and dedup'd by the send
+ledger, where a replayed chat turn is a duplicate message to the family.
+
+**Staleness is the design question this step must answer.** A reclaimed chat
+turn is still worth running — the human is still waiting. A heartbeat reclaimed
+three hours after it was due is not; it would report on a world that has moved
+on. So scheduled tasks need an expiry distinct from their lease: past it, the
+task is dropped with a recorded outcome rather than run late. Concretely, that
+is an `expires_at` alongside `not_before`, defaulting to the schedule's own
+interval — a beat is worth replaying within its own period and not after.
+
+Deep beats are the exception worth tuning separately: 340s of work is worth
+re-running even somewhat late, where a routine 8pm check-in is not.
+
+**Step 3 — enqueue Telegram, shadow mode.** The handler enqueues alongside the
+existing path while `pending_turns` stays authoritative. Compare the two ledgers
+for a week; any divergence is a bug found for free.
+
+**Step 4 — cut Telegram over.** The handler dequeues instead of executing on
+arrival. `pending_turns` is retired. Coalescing and absorb move to queue
+operations here, with their existing tests as the regression gate.
+
+**Step 5 — a2a and delegation.** The last trigger type. The old shared task
+store is retired: its rows migrate in as tasks with `source='a2a'`,
+`~/.shell/shared/tasks.db` is archived, and `internal/transcript/taskstore.go`
+plus the `shell-task` skill are removed. The 60-minute TTL defect dies with it.
 
 ## Risks
 
