@@ -325,52 +325,60 @@ func ScheduleDedupKey(chatID int64, schedType, expr, message string) string {
 //
 // Only enabled rows participate: a one-shot that already fired (and was
 // disabled) must not block creating the same reminder again tomorrow.
+//
+// WRITE FIRST, exactly as in the task queue. An earlier version opened a
+// transaction, SELECTed for the dedup key, then INSERTed. SQLite refuses to
+// upgrade a read transaction to a write one under contention — it returns
+// SQLITE_BUSY immediately, ignoring busy_timeout — so a concurrent writer could
+// make this path fail outright. It is the path the user's reminders are created
+// on, and a failure there costs the family a reminder, so the read is gone: the
+// partial unique index (dedup_key, enabled = 1) does the deduplication and the
+// SELECT only runs after a conflict has already told us a row exists.
 func (s *Store) UpsertScheduleByKey(sched *Schedule) (id int64, created bool, err error) {
 	key := ScheduleDedupKey(sched.ChatID, sched.Type, sched.Schedule, sched.Message)
 	sched.DedupKey = key
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, false, err
-	}
-	defer tx.Rollback()
-
-	var existingID int64
-	var existingNext time.Time
-	row := tx.QueryRow(`
-		SELECT id, next_run_at FROM schedules
-		WHERE dedup_key = ? AND enabled = 1 ORDER BY id LIMIT 1
-	`, key)
-	switch err := row.Scan(&existingID, &existingNext); {
-	case err == nil:
-		sched.ID = existingID
-		sched.NextRunAt = existingNext
-		return existingID, false, tx.Commit()
-	case err == sql.ErrNoRows:
-		// fall through to insert
-	default:
-		return 0, false, err
-	}
 
 	enabled := 0
 	if sched.Enabled {
 		enabled = 1
 	}
-	res, err := tx.Exec(`
+	res, err := s.db.Exec(`
 		INSERT INTO schedules (chat_id, label, message, schedule, timezone, type, mode,
 			next_run_at, expected_next_at, enabled, dedup_key)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(dedup_key) WHERE dedup_key != '' AND enabled = 1 DO NOTHING
 	`, sched.ChatID, sched.Label, sched.Message, sched.Schedule, sched.Timezone, sched.Type,
 		sched.Mode, sched.NextRunAt, sched.NextRunAt, enabled, key)
 	if err != nil {
 		return 0, false, err
 	}
-	newID, err := res.LastInsertId()
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		newID, err := res.LastInsertId()
+		if err != nil {
+			return 0, false, err
+		}
+		sched.ID = newID
+		return newID, true, nil
+	}
+
+	// Conflict: an enabled row with this key already exists. Return it untouched.
+	var existingID int64
+	var existingNext time.Time
+	err = s.db.QueryRow(`
+		SELECT id, next_run_at FROM schedules
+		WHERE dedup_key = ? AND enabled = 1 ORDER BY id LIMIT 1
+	`, key).Scan(&existingID, &existingNext)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			// The conflicting row was disabled between the insert and this read.
+			// Rare and self-healing: the caller can register again.
+			return 0, false, fmt.Errorf("schedule %q vanished between insert and lookup", key)
+		}
 		return 0, false, err
 	}
-	sched.ID = newID
-	return newID, true, tx.Commit()
+	sched.ID = existingID
+	sched.NextRunAt = existingNext
+	return existingID, false, nil
 }
 
 // PauseSchedule disables a schedule and records WHY in machine-readable form.

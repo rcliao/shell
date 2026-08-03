@@ -1,9 +1,73 @@
 package store
 
 import (
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// Registering reminders concurrently must not lose any and must not error.
+// UpsertScheduleByKey used to open a transaction, SELECT for the dedup key,
+// then INSERT — the same read-then-write upgrade that cost the task queue 3 of
+// 40 tasks under contention. SQLite answers such an upgrade with an immediate
+// SQLITE_BUSY rather than honoring busy_timeout. This is the path the user's
+// reminders are created on, so a failure here is a lost reminder.
+//
+// The producer count is deliberately high: at 8 producers a fresh temp DB
+// lacks the WAL pressure to reproduce it and the broken shape passes.
+func TestUpsertScheduleByKeyConcurrentLosesNothing(t *testing.T) {
+	s := testStore(t)
+	next := time.Now().UTC().Add(time.Hour)
+
+	const producers, distinct = 24, 40
+	var created, existing, failed atomic.Int64
+
+	var wg sync.WaitGroup
+	for p := 0; p < producers; p++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < distinct; i++ {
+				msg := fmt.Sprintf("soak reminder %d", i)
+				_, isNew, err := s.UpsertScheduleByKey(&Schedule{
+					ChatID: 42, Label: msg, Message: msg,
+					Schedule: "0 9 * * *", Timezone: "UTC", Type: "cron", Mode: "notify",
+					NextRunAt: next, Enabled: true,
+				})
+				switch {
+				case err != nil:
+					failed.Add(1)
+				case isNew:
+					created.Add(1)
+				default:
+					existing.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := created.Load(); got != distinct {
+		t.Fatalf("created %d of %d distinct schedules (errors=%d) — concurrent registration is losing reminders",
+			got, distinct, failed.Load())
+	}
+	if failed.Load() != 0 {
+		t.Errorf("%d registration errors under contention, want 0", failed.Load())
+	}
+	if want := int64(producers*distinct) - int64(distinct); existing.Load() != want {
+		t.Errorf("returned existing %d times, want %d — dedup is not holding under contention", existing.Load(), want)
+	}
+
+	var rows int
+	if err := s.db.QueryRow(`SELECT count(*) FROM schedules WHERE chat_id = 42`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != distinct {
+		t.Errorf("%d schedule rows, want %d — duplicates slipped past the dedup index", rows, distinct)
+	}
+}
 
 // Registering the same reminder twice must produce ONE row. This is the class
 // that previously created a duplicate recurring schedule which had to be
