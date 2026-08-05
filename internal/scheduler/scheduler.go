@@ -145,6 +145,8 @@ type Scheduler struct {
 	queue      TaskQueue
 	queueOwner string
 	queueWG    sync.WaitGroup
+	// taskResults reads back agent-written results; see agenttask.go.
+	taskResults TaskResults
 	// handlers maps task kind to handler. Written during wiring, read by the
 	// workers, so it must be fully populated before Run starts.
 	handlers map[string]Handler

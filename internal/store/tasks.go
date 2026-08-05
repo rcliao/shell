@@ -466,3 +466,33 @@ func (s *Store) retireLegacyTaskTable() {
 func openRawForTest(path string) (*sql.DB, error) {
 	return sql.Open("sqlite", path)
 }
+
+// SetTaskResult records a result on a task WITHOUT changing its state.
+//
+// This is the agent-completion path, and the split matters: the agent supplies
+// the result, the worker owns the lifecycle. An agent that could mark its own
+// task done could also mark a task done it never did — and this codebase
+// already learned that agents report work they did not perform, which is why
+// write verification exists. So "complete" from an agent writes evidence; only
+// the worker that holds the lease moves the state.
+func (s *Store) SetTaskResult(id int64, result string) error {
+	res, err := s.db.Exec(`UPDATE tasks SET result = ? WHERE id = ? AND state = ?`,
+		result, id, TaskLeased)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %d is not currently running (already finished, or never leased)", id)
+	}
+	return nil
+}
+
+// TaskResult reads back a task's recorded result.
+func (s *Store) TaskResult(id int64) (string, error) {
+	var out string
+	err := s.db.QueryRow(`SELECT result FROM tasks WHERE id = ?`, id).Scan(&out)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("task %d not found", id)
+	}
+	return out, err
+}
