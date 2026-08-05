@@ -945,6 +945,18 @@ func (m *Memory) Store() agentmemory.Store {
 
 // StoreDirective stores a memory from an RPC call (equivalent to [remember] directive).
 func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind string) error {
+	return m.StoreDirectiveTagged(ctx, chatID, content, kind, nil)
+}
+
+// StoreDirectiveTagged stores a memory with caller-supplied tags on top of the
+// provenance tags this layer always adds.
+//
+// Exists because the agent sync asks each agent to write what it absorbed from
+// its peer tagged `via:<agent>`, and there was no way to express that: the
+// shell-remember skill had no --tags flag, the RPC body had no field, and this
+// function hard-coded its own tag list. The instruction was unexecutable, which
+// is why two live syncs produced zero tagged memories.
+func (m *Memory) StoreDirectiveTagged(ctx context.Context, chatID int64, content, kind string, extraTags []string) error {
 	prof := m.profileFor(chatID)
 	if !prof.MemoryDirectives {
 		return fmt.Errorf("memory directives disabled for chat %d", chatID)
@@ -958,6 +970,11 @@ func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind
 		// from a private DM must be distinguishable from group knowledge —
 		// public composers (diary/占卜/小思考) filter on this (7/5 kimchi leak).
 		tags = []string{"learning", chatTag(chatID)}
+	}
+	for _, t := range extraTags {
+		if t = strings.TrimSpace(t); t != "" {
+			tags = append(tags, t)
+		}
 	}
 	if ns == "" {
 		return fmt.Errorf("no target namespace configured for chat %d", chatID)

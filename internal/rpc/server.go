@@ -554,10 +554,11 @@ func parseOnceAt(at string, loc *time.Location, now time.Time) (time.Time, error
 
 // MemoryRequest is the JSON body for POST /memory.
 type MemoryRequest struct {
-	ChatID  int64  `json:"chat_id"`
-	Action  string `json:"action"`  // "remember" or "heartbeat-learning"
-	Content string `json:"content"` // memory content
-	Kind    string `json:"kind"`    // "semantic", "episodic", "procedural" (default: semantic)
+	ChatID  int64    `json:"chat_id"`
+	Action  string   `json:"action"`  // "remember" or "heartbeat-learning"
+	Content string   `json:"content"` // memory content
+	Kind    string   `json:"kind"`    // "semantic", "episodic", "procedural" (default: semantic)
+	Tags    []string `json:"tags"`    // extra tags on top of provenance (e.g. "via:umbreonmini")
 }
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
@@ -578,12 +579,12 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "remember":
-		err := s.memory.StoreDirective(r.Context(), req.ChatID, req.Content, req.Kind)
+		err := s.memory.StoreDirectiveTagged(r.Context(), req.ChatID, req.Content, req.Kind, req.Tags)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to store: "+err.Error())
 			return
 		}
-		slog.Info("rpc: stored memory", "chat_id", req.ChatID, "kind", req.Kind, "len", len(req.Content))
+		slog.Info("rpc: stored memory", "chat_id", req.ChatID, "kind", req.Kind, "len", len(req.Content), "tags", req.Tags)
 		writeJSON(w, map[string]any{"ok": true})
 
 	case "heartbeat-learning":

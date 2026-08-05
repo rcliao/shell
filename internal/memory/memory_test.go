@@ -157,3 +157,49 @@ func TestListHeartbeatLearnings_LessonActionRoundTrip(t *testing.T) {
 		t.Error("lesson-action entry not returned by ListHeartbeatLearnings")
 	}
 }
+
+// The agent sync asks each agent to record what it absorbed from its peer as
+// `via:<agent>`. Two live syncs produced zero such memories because the
+// instruction was unexecutable end to end — no --tags flag, no RPC field, and
+// this layer hard-coded its tag list. This pins the path that fixes it.
+func TestStoreDirectiveTaggedAddsCallerTags(t *testing.T) {
+	t.Setenv("GHOST_EMBED_PROVIDER", "none")
+	db := filepath.Join(t.TempDir(), "mem.db")
+	profiles := map[string]ProfileConfig{"p": {AgentNS: "agent:test", MemoryDirectives: true}}
+	m, err := New(db, 2000, nil, 500, nil, 3000, profiles, map[int64]string{-1001: "p"})
+	if err != nil {
+		t.Fatalf("new memory: %v", err)
+	}
+	ctx := context.Background()
+	const chatID = int64(-1001)
+
+	if err := m.StoreDirectiveTagged(ctx, chatID, "Umbreon checks the Notion log before answering watering dates.", "semantic",
+		[]string{"via:umbreonmini", "  ", ""}); err != nil {
+		t.Fatalf("StoreDirectiveTagged: %v", err)
+	}
+	got, err2 := m.Store().List(ctx, agentmemory.ListParams{NS: m.AgentNS(chatID), Limit: 10})
+	err = err2
+	if err != nil || len(got) == 0 {
+		t.Fatalf("list: %v (n=%d)", err, len(got))
+	}
+	var tags []string
+	for _, mem := range got {
+		if strings.Contains(mem.Content, "Notion log") {
+			tags = mem.Tags
+		}
+	}
+	joined := strings.Join(tags, ",")
+	if !strings.Contains(joined, "via:umbreonmini") {
+		t.Errorf("caller tag missing; got %v", tags)
+	}
+	// Provenance tags must survive alongside the caller's.
+	if !strings.Contains(joined, "learning") {
+		t.Errorf("provenance tag dropped; got %v", tags)
+	}
+	// Blank entries must not become empty tags.
+	for _, tg := range tags {
+		if strings.TrimSpace(tg) == "" {
+			t.Errorf("empty tag stored: %v", tags)
+		}
+	}
+}
