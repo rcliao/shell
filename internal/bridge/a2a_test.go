@@ -114,7 +114,7 @@ func TestA2ADepthCapConfigurable(t *testing.T) {
 			reply := "Umbreon, what did you get wrong this week?"
 
 			// One hop below the cap: the chain must continue.
-			b.maybeEnqueueA2A(chatID, 0, reply, tc.want-2)
+			b.maybeEnqueueA2A(chatID, 0, reply, tc.want-2, "")
 			evs, err := ts.ConsumeEvents("umbreon_mini_bot")
 			if err != nil {
 				t.Fatal(err)
@@ -124,7 +124,7 @@ func TestA2ADepthCapConfigurable(t *testing.T) {
 			}
 
 			// At the cap: the chain must stop and yield to a human.
-			b.maybeEnqueueA2A(chatID, 0, reply, tc.want)
+			b.maybeEnqueueA2A(chatID, 0, reply, tc.want, "")
 			evs, err = ts.ConsumeEvents("umbreon_mini_bot")
 			if err != nil {
 				t.Fatal(err)
@@ -133,5 +133,73 @@ func TestA2ADepthCapConfigurable(t *testing.T) {
 				t.Errorf("at cap %d: got %d events, want 0 (should yield to human)", tc.want, len(evs))
 			}
 		})
+	}
+}
+
+// The first scheduled agent sync died at depth 1 of a four-item agenda: one
+// reply omitted the peer's name and the relay dropped it, indistinguishable
+// from "we're done". These pin the continuation rule that fixes it.
+func TestA2AChainContinuation(t *testing.T) {
+	const chatID = int64(-100123)
+	newBridge := func(ts *transcript.TaskStore) *Bridge {
+		return &Bridge{
+			taskStore:        ts,
+			agentBotUsername: "Pikamini_bot",
+			peerAgents:       []config.PeerAgent{{Name: "Umbreon", Aliases: []string{"umbreonmini"}, BotUsername: "umbreon_mini_bot"}},
+		}
+	}
+	cases := []struct {
+		name          string
+		reply         string
+		incomingDepth int
+		fromPeer      string
+		wantHandoff   bool
+	}{
+		// The failure that motivated this: mid-agenda, no name, but asking.
+		{"in-flight question without naming the peer", "I got the plant watering wrong. What did you get wrong?", 1, "Umbreon", true},
+		{"in-flight question, full-width mark", "我這週搞錯了澆水頻率。你呢？", 2, "Umbreon", true},
+		// A statement is how a conversation ends — no marker needed.
+		{"in-flight statement ends the chain", "That's everything from me. Sync finished.", 2, "Umbreon", false},
+		// Starting a NEW exchange still requires addressing the peer, or the
+		// agents would strike up conversations nobody asked for.
+		{"human turn, question but no address", "Should we water the plants today?", 0, "", false},
+		{"human turn, addressed", "Umbreon, can you take the plant part?", 0, "", true},
+		// Unknown sender must not resolve to a peer.
+		{"in-flight but unknown sender", "And you? What changed?", 1, "Nobody", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, err := transcript.OpenTaskStore(filepath.Join(t.TempDir(), "task.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := newBridge(ts)
+			b.SetA2AMaxDepth(10)
+			b.maybeEnqueueA2A(chatID, 0, tc.reply, tc.incomingDepth, tc.fromPeer)
+			evs, err := ts.ConsumeEvents("umbreon_mini_bot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(evs) == 1; got != tc.wantHandoff {
+				t.Errorf("handoff = %v, want %v (%d events)", got, tc.wantHandoff, len(evs))
+			}
+		})
+	}
+}
+
+// Continuation must not outlive the depth cap — it is still the only thing
+// bounding a bot-to-bot loop.
+func TestA2AChainContinuationRespectsCap(t *testing.T) {
+	ts, err := transcript.OpenTaskStore(filepath.Join(t.TempDir(), "task.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Bridge{taskStore: ts, agentBotUsername: "Pikamini_bot",
+		peerAgents: []config.PeerAgent{{Name: "Umbreon", BotUsername: "umbreon_mini_bot"}}}
+	b.SetA2AMaxDepth(4)
+	b.maybeEnqueueA2A(-100123, 0, "And you? What changed?", 4, "Umbreon")
+	evs, _ := ts.ConsumeEvents("umbreon_mini_bot")
+	if len(evs) != 0 {
+		t.Errorf("continuation at the cap should yield to a human; got %d events", len(evs))
 	}
 }

@@ -53,14 +53,40 @@ type A2APayload struct {
 // prompt, returning the message reframed for the model as peer attribution.
 // For an ordinary (non-A2A) message it returns depth 0 and the text unchanged.
 func parseA2AMarker(userMsg string) (depth int, framed string, isA2A bool) {
+	d, framed, _, ok := parseA2AMarkerFrom(userMsg)
+	return d, framed, ok
+}
+
+// parseA2AMarkerFrom additionally reports WHICH peer sent the turn, so an
+// in-flight exchange can be continued back to them (see maybeEnqueueA2A).
+func parseA2AMarkerFrom(userMsg string) (depth int, framed string, from string, isA2A bool) {
 	m := a2aMarkerRe.FindStringSubmatch(userMsg)
 	if m == nil {
-		return 0, userMsg, false
+		return 0, userMsg, "", false
 	}
 	d, _ := strconv.Atoi(m[2])
 	rest := userMsg[len(m[0]):]
 	framed = fmt.Sprintf("[%s (your fellow agent) said this in the group — reply if you have something genuinely useful to add or a part of the task to take; otherwise [noop]]\n%s", m[1], rest)
-	return d, framed, true
+	return d, framed, m[1], true
+}
+
+// peerByName resolves a peer by its human-facing name or any alias.
+func (b *Bridge) peerByName(name string) *peerAddr {
+	want := strings.ToLower(strings.TrimSpace(name))
+	if want == "" {
+		return nil
+	}
+	for _, p := range b.peerAgents {
+		if p.BotUsername == b.agentBotUsername {
+			continue
+		}
+		for _, raw := range append([]string{p.Name}, p.Aliases...) {
+			if strings.EqualFold(strings.TrimSpace(raw), want) {
+				return &peerAddr{Name: p.Name, BotUsername: p.BotUsername, Alias: raw, Reason: "chain-continuation"}
+			}
+		}
+	}
+	return nil
 }
 
 // A2ADeliveryPrompt builds the synthetic prompt used to deliver an A2A turn
@@ -74,7 +100,7 @@ func A2ADeliveryPrompt(fromName string, depth int, text string) string {
 // incomingDepth is the depth of the message THIS turn was answering (0 for a
 // human turn). No-op unless the chat is a group, the reply is non-empty, a peer
 // is addressed, and a task store is configured.
-func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incomingDepth int) {
+func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incomingDepth int, fromPeer string) {
 	if b.taskStore == nil || strings.TrimSpace(replyText) == "" {
 		return
 	}
@@ -88,7 +114,26 @@ func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incom
 	}
 	peer := b.peerAddressedInReply(replyText)
 	if peer == nil {
-		return
+		// Chain continuation. Starting a NEW exchange still requires
+		// explicitly addressing the peer — that is what keeps the agents from
+		// striking up conversations nobody asked for. But once an exchange is
+		// in flight, requiring every single reply to re-address the peer makes
+		// a multi-turn agenda depend on each turn happening to phrase itself
+		// the right way. It does not: the first scheduled agent sync died at
+		// depth 1 of a four-item agenda because one reply omitted the name,
+		// and nothing downstream could tell that from "we are finished".
+		//
+		// So an in-flight exchange continues back to whoever sent it — while
+		// the reply is still ASKING something. A question invites an answer;
+		// a plain statement is how a conversation ends. That terminates
+		// naturally without a marker leaking into the family group, and it
+		// keeps incidental peer chatter short instead of running to the cap.
+		if incomingDepth > 0 && fromPeer != "" && strings.ContainsAny(replyText, "?？") {
+			peer = b.peerByName(fromPeer)
+		}
+		if peer == nil {
+			return
+		}
 	}
 	payload, _ := json.Marshal(A2APayload{
 		ChatID:   chatID,
@@ -102,7 +147,7 @@ func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incom
 		return
 	}
 	slog.Info("a2a: handed off to peer", "from", b.agentBotUsername, "to", peer.BotUsername,
-		"chat_id", chatID, "thread_id", threadID, "depth", nextDepth)
+		"chat_id", chatID, "thread_id", threadID, "depth", nextDepth, "reason", peer.Reason)
 }
 
 // peerAddressedInReply returns the peer the reply is speaking TO, or nil.

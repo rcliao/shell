@@ -772,7 +772,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// A2A: if this turn was delivered by a peer agent (synthetic [A2A ...]
 	// marker), unwrap it to peer attribution and remember the chain depth so
 	// our reply is enqueued at depth+1 (or stops at the cap).
-	a2aDepth, a2aFramed, isA2A := parseA2AMarker(userMsg)
+	a2aDepth, a2aFramed, a2aFrom, isA2A := parseA2AMarkerFrom(userMsg)
 	if isA2A {
 		userMsg = a2aFramed
 	}
@@ -1165,7 +1165,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	// them (bounded by depth). incoming depth is 0 for a human turn, N for an
 	// A2A turn — so a human message always renews the exchange budget.
 	if !isHeartbeat {
-		b.maybeEnqueueA2A(chatID, threadID, resp.Text, a2aDepth)
+		b.maybeEnqueueA2A(chatID, threadID, resp.Text, a2aDepth, a2aFrom)
 	}
 
 	return resp, nil
