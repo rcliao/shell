@@ -128,7 +128,7 @@ func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incom
 		// a plain statement is how a conversation ends. That terminates
 		// naturally without a marker leaking into the family group, and it
 		// keeps incidental peer chatter short instead of running to the cap.
-		if incomingDepth > 0 && fromPeer != "" && strings.ContainsAny(replyText, "?？") {
+		if incomingDepth > 0 && fromPeer != "" && invitesReply(replyText) {
 			peer = b.peerByName(fromPeer)
 		}
 		if peer == nil {
@@ -241,4 +241,29 @@ func (b *Bridge) a2aMaxDepth() int {
 // keep the default.
 func (b *Bridge) SetA2AMaxDepth(n int) {
 	b.a2aMaxDepthCfg = n
+}
+
+// turnPassRe matches handing the baton over WITHOUT asking a question.
+//
+// Added after the 2026-08-05 verification run: the chain died at the safety
+// item because pika ended its turn with "換你念一遍你手上的" — "your turn, read
+// out yours" — an unmistakable invitation that happens to contain no question
+// mark. Requiring "?" was too narrow, and Chinese passes the baton with an
+// imperative far more often than English does. Keep this list short and
+// literal; a fuzzy match here would resurrect the chatter the address
+// requirement exists to prevent.
+var turnPassRe = regexp.MustCompile(`(?i)換你|輪到你|你先(講|說)|你呢|該你|\byour turn\b|\bover to you\b|\bwhat about you\b`)
+
+// syncDoneRe matches an explicit close. Checked FIRST, so "that's everything —
+// your turn next week" ends the exchange instead of extending it.
+var syncDoneRe = regexp.MustCompile(`(?i)同步(結束|完成)|\bsync (is )?(finished|complete|done)\b|\bthat'?s everything\b`)
+
+// invitesReply reports whether an in-flight turn is still handing the exchange
+// back. A question invites an answer; so does explicitly passing the turn. A
+// plain statement, or an explicit close, ends it.
+func invitesReply(reply string) bool {
+	if syncDoneRe.MatchString(reply) {
+		return false
+	}
+	return strings.ContainsAny(reply, "?？") || turnPassRe.MatchString(reply)
 }

@@ -203,3 +203,31 @@ func TestA2AChainContinuationRespectsCap(t *testing.T) {
 		t.Errorf("continuation at the cap should yield to a human; got %d events", len(evs))
 	}
 }
+
+// Regression from the 2026-08-05 verification run: the chain died at the
+// safety item because the turn passed the baton with an imperative instead of
+// a question. Shapes are taken from that run; contents are synthetic.
+func TestA2AInvitesReply(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+		want  bool
+	}{
+		{"question mark", "And what did you get wrong this week?", true},
+		{"full-width question", "你這週搞錯了什麼？", true},
+		// The exact shape that broke it: baton passed, no question mark.
+		{"imperative handoff zh", "換你念一遍你手上的。有跟我打架的當場講出來。", true},
+		{"your turn en", "That's my list. Your turn.", true},
+		{"what about you", "I changed my approach. What about you", true},
+		{"plain statement ends it", "I finished the plant log and filed the note.", false},
+		{"explicit close wins over a question", "Sync finished. Same time next week?", false},
+		{"explicit close zh", "同步結束，下週見。", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := invitesReply(tc.reply); got != tc.want {
+				t.Errorf("invitesReply(%q) = %v, want %v", tc.reply, got, tc.want)
+			}
+		})
+	}
+}
