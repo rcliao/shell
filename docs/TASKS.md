@@ -480,8 +480,29 @@ complete/fail/reclaim, tested including a contention soak against a copy of a
 live DB (which found and fixed two SQLITE_BUSY losses before anything depended
 on them).
 
-**Step 2 — enqueue SCHEDULER fires.** Heartbeats, cron jobs and one-shots become
-tasks. The scheduler keeps deciding *when*; the queue owns running it.
+**Step 2 — enqueue SCHEDULER fires.** DONE. Heartbeats, cron jobs and one-shots
+became tasks. The scheduler keeps deciding *when*; the queue owns running it.
+
+Proven in production on 2026-08-05 rather than only in tests. A fire was
+triggered, leased, and the daemon was killed with SIGKILL mid-turn so the drain
+barrier could not save it. The replacement process reclaimed the orphaned lease
+within milliseconds of booting and re-ran the occurrence:
+
+    job_run 90  interrupted  0ms       <- the killed fire
+    job_run 91  fired_ok     6377ms    <- the replay
+    task 3      done, attempts=2, "lease reclaimed: owner gone or lease expired"
+
+Before this step only row 90 would exist. That is the whole change.
+
+Two details that earned their keep. The lease owner is pid PLUS start timestamp:
+the SIGHUP restart path execs in place and keeps the pid, so pid alone would
+make a restart look like the same process and reclaim nothing. And workers drain
+before their first poll tick rather than after, so the reclaim-to-replay gap is
+milliseconds instead of a poll interval added to work that already lost time.
+
+Overlap moved from the dispatcher's in-memory maps to a query against the table,
+so it now survives a restart too. `durable_queue_disabled` falls back to the
+dispatcher without a code change.
 
 This step was originally sequenced last, behind Telegram, on the reasoning that
 the earlier steps "earn the right" to attempt it. That reasoning optimized for
