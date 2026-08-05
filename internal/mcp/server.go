@@ -17,12 +17,36 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const serverInstructions = `Shell bridge tools for managing background processes and tunnels.
+// serverInstructions is injected into every agent's context, so it must cover
+// EVERY tool this server exposes. It previously described only shell_pm and
+// shell_tunnel — the two developer-facing tools — while omitting shell_schedule
+// and shell_relay entirely, which are the two that do the day-to-day work.
+//
+// The omission showed up in the usage ledger: over 14 days one agent called
+// shell_schedule three times, all writes, and never once list or describe. An
+// agent that is not told a tool can be READ does not read it, so a schedule
+// that silently never fired stayed invisible. Hence the explicit "verify after
+// creating" line — the read half is the part that gets skipped.
+const serverInstructions = `Shell bridge tools. Four tools, each the ONLY correct way to do its job.
 
-Use shell_pm to start, stop, list, and manage background processes (servers, watchers, etc.).
-CRITICAL: NEVER run long-running processes (servers, watchers) directly via Bash — always use shell_pm.
+shell_schedule — every time-based reminder or recurring job. Use it instead of
+any scheduling built into this session: those are tied to a conversation and do
+not survive it, while these are durable and fire even when nobody is chatting.
+After creating one, VERIFY it with action=describe id=N — a bad expression or a
+paused row is otherwise invisible until the reminder never arrives. action=list
+shows what is live; action=queue shows whether fires are running, replayed after
+a restart, or dropped as stale.
 
-Use shell_tunnel to expose local ports to the internet via Cloudflare quick tunnels.
+shell_relay — send a message or photo to a chat. Omit chat_id to reply in the
+current chat, which is the safe default. Sending somewhere else needs both
+chat_id and cross_chat=true, so a message never leaves this conversation by
+accident.
+
+shell_pm — start, stop, list and inspect background processes.
+CRITICAL: NEVER run long-running processes (servers, watchers) directly via
+Bash — they die with the turn. Always use shell_pm.
+
+shell_tunnel — expose a local port to the internet via a Cloudflare quick tunnel.
 
 Typical web app workflow:
 1. Write app files
