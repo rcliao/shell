@@ -275,6 +275,21 @@ func (s *Store) FailTask(id int64, errMsg string) (terminal bool, err error) {
 	return terminal, tx.Commit()
 }
 
+// FailTaskPermanent marks a task failed outright, ignoring remaining attempts.
+//
+// For failures that cannot come out differently on a retry: an unregistered
+// kind, an undecodable payload. Routing those through FailTask would return
+// them to the queue to burn every remaining attempt against the same certain
+// outcome, which turns a loud wiring bug into a quiet retry loop.
+func (s *Store) FailTaskPermanent(id int64, errMsg string) error {
+	_, err := s.db.Exec(`
+		UPDATE tasks SET state = ?, last_error = ?, done_at = ?,
+		                 lease_owner = '', leased_until = NULL
+		WHERE id = ?
+	`, TaskFailed, errMsg, time.Now().UTC(), id)
+	return err
+}
+
 // ReclaimTasks returns leased tasks to the queue when their owner is gone or
 // their lease expired.
 //

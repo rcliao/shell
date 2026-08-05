@@ -54,15 +54,47 @@ type QueuedFire struct {
 	Attempt int
 }
 
+// LeasedTask is any leased unit of work, of any kind. The workers dispatch on
+// Kind through the handler registry; only the schedule.fire handler knows how
+// to read a fire payload.
+type LeasedTask struct {
+	ID      int64
+	Kind    string
+	Payload string
+	Attempt int
+}
+
+// Handler runs one task and reports what it produced.
+//
+// Returning an error fails the attempt: the task returns to queued while
+// attempts remain and becomes terminally failed once they are exhausted. The
+// returned string is the task's result, which is what an assigner reads back.
+type Handler func(ctx context.Context, t LeasedTask) (result string, err error)
+
+// RegisterHandler binds a kind to its handler. A leased task whose kind has no
+// handler fails immediately rather than being silently dropped or retried — an
+// unregistered kind is a wiring bug, and retrying it would just hide it.
+func (s *Scheduler) RegisterHandler(kind string, h Handler) {
+	if s.handlers == nil {
+		s.handlers = map[string]Handler{}
+	}
+	s.handlers[kind] = h
+}
+
 // TaskQueue is the durable side of firing. Implemented by StoreAdapter.
 type TaskQueue interface {
 	// EnqueueFire registers one occurrence. Idempotent on (schedule, occurrence):
 	// enqueuing the same occurrence twice returns created=false.
 	EnqueueFire(entry ScheduleEntry, occurrence time.Time, expiresAt time.Time, maxAttempts int) (created bool, err error)
-	// LeaseFire claims the next ready fire, or nil when none is ready.
-	LeaseFire(owner string, leaseFor time.Duration) (*QueuedFire, error)
+	// LeaseNext claims the next ready task of ANY kind, or nil when none is
+	// ready. Kind-specific decoding belongs to that kind's handler, not here:
+	// the queue is generic infrastructure and scheduled fires are one producer.
+	LeaseNext(owner string, leaseFor time.Duration) (*LeasedTask, error)
 	CompleteFire(taskID int64, result string) error
 	FailFire(taskID int64, errMsg string) (terminal bool, err error)
+	// FailPermanent marks a task failed outright, ignoring remaining attempts,
+	// for failures that cannot come out differently on a retry.
+	FailPermanent(taskID int64, errMsg string) error
 	// ReclaimFires returns leases held by a dead owner or past their expiry.
 	ReclaimFires(currentOwner string) (int, error)
 	// ExpireFires drops queued work that is no longer worth starting.
@@ -124,6 +156,7 @@ func FirePartitionKey(chatID int64) string {
 func (s *Scheduler) SetQueue(q TaskQueue, owner string) {
 	s.queue = q
 	s.queueOwner = owner
+	s.RegisterHandler(TaskKindScheduleFire, s.handleScheduleFire)
 }
 
 // defaultFireTTL derives how long a fire stays worth running from its own
@@ -237,34 +270,67 @@ const queuePollInterval = 5 * time.Second
 // schedules can produce.
 const queueWorkers = 4
 
-// leaseAndRunOne runs at most one fire, reporting whether it found work.
+// leaseAndRunOne runs at most one task of any kind, reporting whether it found
+// work. Dispatch is by kind through the registry; this function knows nothing
+// about what any particular kind means.
 func (s *Scheduler) leaseAndRunOne(ctx context.Context) bool {
-	fire, err := s.queue.LeaseFire(s.queueOwner, s.jobTimeout+fireLeaseGrace)
+	task, err := s.queue.LeaseNext(s.queueOwner, s.jobTimeout+fireLeaseGrace)
 	if err != nil {
-		slog.Warn("scheduler: lease failed", "error", err)
+		slog.Warn("worker: lease failed", "error", err)
 		return false
 	}
-	if fire == nil {
+	if task == nil {
 		return false
 	}
 
-	if fire.Attempt > 1 {
-		slog.Info("scheduler: replaying fire after interruption",
-			"task_id", fire.TaskID, "schedule_id", fire.Entry.ID,
-			"label", fire.Entry.Label, "attempt", fire.Attempt)
+	if task.Attempt > 1 {
+		slog.Info("worker: replaying task after interruption",
+			"task_id", task.ID, "kind", task.Kind, "attempt", task.Attempt)
 	}
 
-	s.runJob(ctx, fire.Entry)
+	handler, ok := s.handlers[task.Kind]
+	if !ok {
+		// An unregistered kind is a wiring bug, not a transient failure.
+		// Retrying would burn attempts and hide it; fail it once, loudly.
+		slog.Error("worker: no handler for kind", "task_id", task.ID, "kind", task.Kind)
+		if ferr := s.queue.FailPermanent(task.ID, "no handler registered for kind "+task.Kind); ferr != nil {
+			slog.Warn("worker: failed to record missing handler", "task_id", task.ID, "error", ferr)
+		}
+		return true
+	}
 
-	// runJob owns the retry ladder and the ledger, and returns only once the
-	// occurrence is settled one way or another. So reaching here means the fire
-	// was handled — the task is done regardless of the turn's own outcome, which
-	// job_runs already records. Failing the task here would replay a fire that
-	// genuinely ran, which is the duplicate-reminder failure mode.
-	if err := s.queue.CompleteFire(fire.TaskID, ""); err != nil {
-		slog.Warn("scheduler: failed to close task", "task_id", fire.TaskID, "error", err)
+	result, herr := handler(ctx, *task)
+	if herr != nil {
+		terminal, ferr := s.queue.FailFire(task.ID, herr.Error())
+		if ferr != nil {
+			slog.Warn("worker: failed to record failure", "task_id", task.ID, "error", ferr)
+		}
+		slog.Warn("worker: task failed", "task_id", task.ID, "kind", task.Kind,
+			"terminal", terminal, "attempt", task.Attempt, "error", herr)
+		return true
+	}
+	if err := s.queue.CompleteFire(task.ID, result); err != nil {
+		slog.Warn("worker: failed to close task", "task_id", task.ID, "error", err)
 	}
 	return true
+}
+
+// handleScheduleFire is the handler for scheduled fires.
+//
+// It never returns an error. runJob owns the retry ladder and the ledger and
+// returns only once the occurrence is settled one way or another, so reaching
+// the end means the fire was HANDLED — whatever the turn's own outcome, which
+// job_runs already records. Failing the task here would replay a fire that
+// genuinely ran, which is the duplicate-reminder failure mode.
+func (s *Scheduler) handleScheduleFire(ctx context.Context, t LeasedTask) (string, error) {
+	entry, err := decodeFirePayload(t.Payload)
+	if err != nil {
+		// Undecodable payload is permanent: the same bytes will not parse on a
+		// retry either. Fail it so it stops consuming workers.
+		return "", fmt.Errorf("undecodable fire payload: %w", err)
+	}
+	s.runJob(ctx, entry)
+	return "", nil
 }
 
 // sweepQueue reclaims dead leases and drops stale work. Called on each tick so

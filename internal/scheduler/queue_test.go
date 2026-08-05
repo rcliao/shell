@@ -20,6 +20,18 @@ func queueAdapter(t *testing.T) (*StoreAdapter, *store.Store) {
 	return NewStoreAdapter(st), st
 }
 
+// mustChat decodes a leased task's fire payload and returns its chat. Leases
+// are generic now — the payload is opaque bytes until a handler reads it — so
+// tests that care about the fire inside must decode it the same way.
+func mustChat(t *testing.T, lt *LeasedTask) int64 {
+	t.Helper()
+	e, err := decodeFirePayload(lt.Payload)
+	if err != nil {
+		t.Fatalf("undecodable fire payload %q: %v", lt.Payload, err)
+	}
+	return e.ChatID
+}
+
 // Occurrences are anchored to the real clock, not a fixed date: expiry is
 // evaluated against now, so a hardcoded 2026 timestamp would be swept as stale
 // the moment the wall clock passed it.
@@ -48,17 +60,17 @@ func TestFireSurvivesProcessDeath(t *testing.T) {
 	}
 
 	// Process A leases it, then dies without completing.
-	got, err := q.LeaseFire("boot-A", time.Hour)
+	got, err := q.LeaseNext("boot-A", time.Hour)
 	if err != nil || got == nil {
 		t.Fatalf("lease returned (%v, %v), want a fire", got, err)
 	}
-	if got.Entry.ID != 7 || got.Entry.Message != "check in" {
-		t.Fatalf("payload did not round-trip: %+v", got.Entry)
+	if func() bool { e, _ := decodeFirePayload(got.Payload); return e.ID != 7 || e.Message != "check in" }() {
+		t.Fatalf("payload did not round-trip: %s", got.Payload)
 	}
 
 	// Process B boots. Nothing is leasable until it reclaims — the lease is
 	// still live from the table's point of view.
-	if again, err := q.LeaseFire("boot-B", time.Hour); err != nil || again != nil {
+	if again, err := q.LeaseNext("boot-B", time.Hour); err != nil || again != nil {
 		t.Fatalf("a live lease must not be handed to a second worker (got %v, %v)", again, err)
 	}
 
@@ -70,12 +82,12 @@ func TestFireSurvivesProcessDeath(t *testing.T) {
 		t.Fatalf("reclaimed %d fires, want 1 — work abandoned by a dead process is lost", n)
 	}
 
-	replay, err := q.LeaseFire("boot-B", time.Hour)
+	replay, err := q.LeaseNext("boot-B", time.Hour)
 	if err != nil || replay == nil {
 		t.Fatalf("reclaimed fire was not re-leasable (got %v, %v)", replay, err)
 	}
-	if replay.Entry.Message != "check in" {
-		t.Errorf("replayed payload lost: %+v", replay.Entry)
+	if func() bool { e, _ := decodeFirePayload(replay.Payload); return e.Message != "check in" }() {
+		t.Errorf("replayed payload lost: %s", replay.Payload)
 	}
 	if replay.Attempt != 2 {
 		t.Errorf("replay attempt = %d, want 2 — attempts must count across processes", replay.Attempt)
@@ -96,7 +108,7 @@ func TestStaleFireIsDroppedNotRun(t *testing.T) {
 
 	// Even before the sweep runs, a lease must not hand out expired work — the
 	// two race, and starting a stale beat is the exact failure expiry prevents.
-	if got, err := q.LeaseFire("boot-A", time.Hour); err != nil || got != nil {
+	if got, err := q.LeaseNext("boot-A", time.Hour); err != nil || got != nil {
 		t.Fatalf("leased an expired fire (%v, %v)", got, err)
 	}
 
@@ -136,7 +148,7 @@ func TestOverlapIsAnsweredByTheQueue(t *testing.T) {
 	if n, err := q.CountActiveFires(11); err != nil || n != 1 {
 		t.Fatalf("active fires = %d (%v), want 1 while queued", n, err)
 	}
-	if _, err := q.LeaseFire("boot-A", time.Hour); err != nil {
+	if _, err := q.LeaseNext("boot-A", time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := q.CountActiveFires(11); err != nil || n != 1 {
@@ -200,21 +212,21 @@ func TestFiresSerializePerChatAndRunAcrossChats(t *testing.T) {
 		}
 	}
 
-	first, err := q.LeaseFire("boot-A", time.Hour)
+	first, err := q.LeaseNext("boot-A", time.Hour)
 	if err != nil || first == nil {
 		t.Fatalf("lease 1 = %v, %v", first, err)
 	}
-	second, err := q.LeaseFire("boot-A", time.Hour)
+	second, err := q.LeaseNext("boot-A", time.Hour)
 	if err != nil || second == nil {
 		t.Fatalf("lease 2 = %v, %v", second, err)
 	}
-	if first.Entry.ChatID == second.Entry.ChatID {
+	if mustChat(t, first) == mustChat(t, second) {
 		t.Fatalf("two fires leased for chat %d at once — one subprocess, two turns",
-			first.Entry.ChatID)
+			mustChat(t, first))
 	}
 
 	// Chat 100's second fire stays queued until the first completes.
-	if third, err := q.LeaseFire("boot-A", time.Hour); err != nil || third != nil {
+	if third, err := q.LeaseNext("boot-A", time.Hour); err != nil || third != nil {
 		t.Fatalf("third lease = %v, %v; want nothing (both partitions busy)", third, err)
 	}
 }
@@ -262,4 +274,54 @@ func TestSchedulerRunsFiresThroughTheQueue(t *testing.T) {
 
 	cancel()
 	s.queueWG.Wait()
+}
+
+// The queue is generic infrastructure; scheduled fires are one producer among
+// several. A task of an unknown kind must reach its registered handler, and a
+// kind with NO handler must fail loudly rather than be silently dropped or
+// retried forever — an unregistered kind is a wiring bug, not a transient one.
+func TestWorkerDispatchesByKind(t *testing.T) {
+	q, st := queueAdapter(t)
+	s := New(newMockStore(nil), nil, nil, "UTC")
+	s.SetQueue(q, "boot-test")
+
+	var got LeasedTask
+	s.RegisterHandler("custom.kind", func(_ context.Context, lt LeasedTask) (string, error) {
+		got = lt
+		return "handled", nil
+	})
+
+	if _, _, err := st.EnqueueTask(store.Task{
+		Kind: "custom.kind", IdempotencyKey: "k1", Payload: `{"hello":"world"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !s.leaseAndRunOne(context.Background()) {
+		t.Fatal("worker found no work")
+	}
+	if got.Kind != "custom.kind" || got.Payload != `{"hello":"world"}` {
+		t.Fatalf("handler got %+v, want the enqueued kind and payload", got)
+	}
+	tasks, err := st.ListTasks(store.TaskDone, 10)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("expected one done task, got %d (%v)", len(tasks), err)
+	}
+	if tasks[0].Result != "handled" {
+		t.Errorf("result = %q, want the handler's return — that is what an assigner reads back", tasks[0].Result)
+	}
+
+	// A kind nobody registered fails immediately.
+	if _, _, err := st.EnqueueTask(store.Task{Kind: "nobody.handles.this", IdempotencyKey: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+	if !s.leaseAndRunOne(context.Background()) {
+		t.Fatal("worker found no work for the unhandled kind")
+	}
+	pending, err := st.ListTasks(store.TaskQueued, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("an unregistered kind was left queued for retry: %+v", pending)
+	}
 }

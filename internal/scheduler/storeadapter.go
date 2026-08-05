@@ -118,27 +118,14 @@ func (a *StoreAdapter) EnqueueFire(entry ScheduleEntry, occurrence, expiresAt ti
 	return created, err
 }
 
-func (a *StoreAdapter) LeaseFire(owner string, leaseFor time.Duration) (*QueuedFire, error) {
+// LeaseNext claims the next ready task of any kind. Decoding is the handler's
+// job — this layer stays generic so a new kind needs no change here.
+func (a *StoreAdapter) LeaseNext(owner string, leaseFor time.Duration) (*LeasedTask, error) {
 	t, err := a.s.LeaseTask(owner, leaseFor)
 	if err != nil || t == nil {
 		return nil, err
 	}
-	if t.Kind != TaskKindScheduleFire {
-		// Another kind reached a scheduler worker. Nothing else enqueues yet, so
-		// this is unreachable today; fail the task rather than silently drop it
-		// so the first non-fire kind shows up loudly instead of stalling.
-		_, ferr := a.s.FailTask(t.ID, "no handler: scheduler workers only run "+TaskKindScheduleFire)
-		return nil, ferr
-	}
-	entry, err := decodeFirePayload(t.Payload)
-	if err != nil {
-		_, ferr := a.s.FailTask(t.ID, "undecodable payload: "+err.Error())
-		if ferr != nil {
-			return nil, ferr
-		}
-		return nil, err
-	}
-	return &QueuedFire{TaskID: t.ID, Entry: entry, Attempt: t.Attempts}, nil
+	return &LeasedTask{ID: t.ID, Kind: t.Kind, Payload: t.Payload, Attempt: t.Attempts}, nil
 }
 
 func (a *StoreAdapter) CompleteFire(taskID int64, result string) error {
@@ -147,6 +134,10 @@ func (a *StoreAdapter) CompleteFire(taskID int64, result string) error {
 
 func (a *StoreAdapter) FailFire(taskID int64, errMsg string) (bool, error) {
 	return a.s.FailTask(taskID, errMsg)
+}
+
+func (a *StoreAdapter) FailPermanent(taskID int64, errMsg string) error {
+	return a.s.FailTaskPermanent(taskID, errMsg)
 }
 
 func (a *StoreAdapter) ReclaimFires(currentOwner string) (int, error) {

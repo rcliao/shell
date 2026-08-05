@@ -145,6 +145,9 @@ type Scheduler struct {
 	queue      TaskQueue
 	queueOwner string
 	queueWG    sync.WaitGroup
+	// handlers maps task kind to handler. Written during wiring, read by the
+	// workers, so it must be fully populated before Run starts.
+	handlers map[string]Handler
 }
 
 // New creates a new Scheduler.
