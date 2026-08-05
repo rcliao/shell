@@ -164,9 +164,10 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"action=create needs message plus either at (one-shot) or cron. " +
 			"action=list shows live schedules; action=describe id=N shows a schedule's next runs AND its recent run history — use it to confirm a schedule you created actually fires. " +
 			"action=cancel id=N disables one; action=trigger id=N runs it on the next tick. " +
+			"action=queue shows the durable execution queue behind all schedules — whether fires are waiting, running, replayed after a restart, or dropped as stale. " +
 			"Creating the same schedule twice returns the existing one rather than a duplicate.",
 		InputSchema: schema([]string{}, map[string]map[string]any{
-			"action":  prop("string", "create (default), list, describe, cancel, trigger"),
+			"action":  prop("string", "create (default), list, describe, cancel, trigger, queue"),
 			"id":      prop("integer", "Schedule id — required for describe, cancel, trigger"),
 			"message": prop("string", "What to say or do when it fires (required for create)"),
 			"at":      prop("string", "One-shot time, e.g. '2026-08-01 09:00' or '+30m' (create)"),

@@ -512,6 +512,62 @@ func main() {
 	reflectionsCmd.Flags().StringVar(&refConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
 	reflectionsCmd.Flags().BoolVar(&refFullFlag, "full", false, "print the full reflection text instead of a preview")
 
+	// tasks command — the queue's status surface. A durable queue nobody can
+	// see is a queue nobody can trust: without this, "did that beat get
+	// replayed or silently dropped?" has no answer short of raw SQL.
+	var tasksConfigFlag, tasksStateFlag string
+	tasksCmd := &cobra.Command{
+		Use:   "tasks [n]",
+		Short: "Show the durable task queue: state counts and recent tasks",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			n := 20
+			if len(args) == 1 {
+				v, perr := strconv.Atoi(args[0])
+				if perr != nil || v <= 0 {
+					return fmt.Errorf("invalid count %q: want a positive integer", args[0])
+				}
+				n = v
+			}
+			cfg := loadConfigFrom(tasksConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			counts, err := st.CountTasksByState()
+			if err != nil {
+				return err
+			}
+			if len(counts) == 0 {
+				fmt.Println("Task queue is empty. Scheduled fires enqueue here; nothing has run yet.")
+				return nil
+			}
+			fmt.Print("Queue: ")
+			for _, state := range []string{store.TaskQueued, store.TaskLeased, store.TaskDone, store.TaskFailed, store.TaskExpired} {
+				fmt.Printf("%s=%d  ", state, counts[state])
+			}
+			fmt.Printf("\n\n")
+
+			tasks, err := st.ListTasks(tasksStateFlag, n)
+			if err != nil {
+				return err
+			}
+			for _, t := range tasks {
+				age := time.Since(t.EnqueuedAt).Round(time.Second)
+				fmt.Printf("  #%-5d %-14s %-9s %-16s try=%d/%d  %s ago\n",
+					t.ID, t.Kind, t.State, t.PartitionKey, t.Attempts, t.MaxAttempts, age)
+				if t.LastError != "" {
+					fmt.Printf("        %s\n", t.LastError)
+				}
+			}
+			return nil
+		},
+	}
+	tasksCmd.Flags().StringVar(&tasksConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
+	tasksCmd.Flags().StringVar(&tasksStateFlag, "state", "", "filter by state: queued, leased, done, failed, expired")
+
 	jobRunsCmd.Flags().Int64Var(&jrScheduleFlag, "schedule", 0, "filter by schedule ID (0 = all schedules)")
 	jobRunsCmd.Flags().StringVar(&jrConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json); default ~/.shell/config.json")
 
@@ -1310,7 +1366,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

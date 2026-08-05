@@ -651,6 +651,7 @@ func (s *Store) migrate() error {
 		attempts        INTEGER NOT NULL DEFAULT 0,
 		max_attempts    INTEGER NOT NULL DEFAULT 3,
 		not_before      DATETIME,
+		expires_at      DATETIME,
 		lease_owner     TEXT NOT NULL DEFAULT '',
 		leased_until    DATETIME,
 		enqueued_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -715,6 +716,11 @@ func (s *Store) migrate() error {
 		// Attempt number within one occurrence, so a retried job reads as N
 		// attempts rather than N unrelated runs.
 		"ALTER TABLE job_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1",
+		// Staleness bound. A reclaimed chat turn is still worth running because
+		// the human is still waiting; a heartbeat reclaimed hours after it was
+		// due would report on a world that has moved on. Past this the task is
+		// dropped with a recorded outcome rather than run late. NULL = never.
+		"ALTER TABLE tasks ADD COLUMN expires_at DATETIME",
 	} {
 		s.db.Exec(col)
 	}

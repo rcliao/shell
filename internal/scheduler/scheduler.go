@@ -138,6 +138,13 @@ type Scheduler struct {
 	dispatch            *dispatcher
 	jobTimeout          time.Duration
 	retry               RetryPolicy
+	// queue, when set, replaces the in-memory dispatcher with durable
+	// execution: fires become rows that survive the process. queueOwner is the
+	// daemon's boot id, which is how a reclaim tells "my lease" from "a lease
+	// held by a process that no longer exists". See queue.go.
+	queue      TaskQueue
+	queueOwner string
+	queueWG    sync.WaitGroup
 }
 
 // New creates a new Scheduler.
@@ -219,6 +226,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
+	if s.queue != nil {
+		slog.Info("scheduler: durable fire queue enabled", "owner", s.queueOwner, "workers", queueWorkers)
+		s.runQueueWorkers(ctx, queueWorkers)
+	}
+
 	// Run immediately on start, then on each tick
 	s.tick(ctx)
 
@@ -227,6 +239,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			slog.Info("scheduler stopped")
 			s.dispatch.wait()
+			s.queueWG.Wait()
 			return
 		case <-ticker.C:
 			s.tick(ctx)
@@ -245,9 +258,22 @@ func (s *Scheduler) tick(ctx context.Context) {
 		return
 	}
 
+	if s.queue != nil {
+		// Reclaim before enqueueing. A fire abandoned by the previous process
+		// must be back in the queue before this tick's overlap check runs, or
+		// the check would not see it and would happily queue a duplicate.
+		s.sweepQueue()
+	}
+
 	for _, sc := range schedules {
 		policy := ParseOverlapPolicy(sc.Overlap, sc.Type)
-		if !s.dispatch.submit(ctx, sc, policy, s.runJob) {
+		submitted := false
+		if s.queue != nil {
+			submitted = s.submitToQueue(sc, policy, sc.NextRunAt)
+		} else {
+			submitted = s.dispatch.submit(ctx, sc, policy, s.runJob)
+		}
+		if !submitted {
 			slog.Info("scheduler: overlap policy declined fire",
 				"id", sc.ID, "label", sc.Label, "policy", policy)
 			s.recordComplete(sc, OutcomeSkippedOverlap, string(policy))

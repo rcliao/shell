@@ -54,9 +54,58 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		s.schedulesCancel(w, req)
 	case "trigger":
 		s.schedulesTrigger(w, req)
+	case "queue":
+		s.schedulesQueue(w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be list, describe, cancel or trigger")
+		writeError(w, http.StatusBadRequest, "action must be list, describe, cancel, trigger or queue")
 	}
+}
+
+// schedulesQueue reports the durable execution queue behind the schedules.
+//
+// Firing is no longer in-memory: a fire is a queued row that survives a
+// restart, gets reclaimed if its process dies, and is dropped if it goes stale.
+// None of that is visible from `list` or `describe`, which read the SCHEDULE.
+// Without this an agent cannot tell a beat that was replayed from one that was
+// silently dropped — and a queue nobody can inspect is a queue nobody can trust.
+func (s *Server) schedulesQueue(w http.ResponseWriter, req SchedulesRequest) {
+	counts, err := s.store.CountTasksByState()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	limit := req.Runs
+	if limit <= 0 {
+		limit = 10
+	}
+	tasks, err := s.store.ListTasks("", limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	recent := make([]map[string]any, 0, len(tasks))
+	for _, t := range tasks {
+		row := map[string]any{
+			"id": t.ID, "kind": t.Kind, "state": t.State, "source": t.Source,
+			"partition": t.PartitionKey, "attempts": t.Attempts,
+			"enqueued_at": t.EnqueuedAt.UTC().Format(time.RFC3339),
+		}
+		if t.LastError != "" {
+			row["last_error"] = t.LastError
+		}
+		recent = append(recent, row)
+	}
+	writeJSON(w, map[string]any{
+		"counts": map[string]int{
+			"queued":  counts[store.TaskQueued],
+			"leased":  counts[store.TaskLeased],
+			"done":    counts[store.TaskDone],
+			"failed":  counts[store.TaskFailed],
+			"expired": counts[store.TaskExpired],
+		},
+		"recent": recent,
+		"note":   "leased = running now; expired = dropped as stale rather than run late; failed = attempts exhausted",
+	})
 }
 
 func (s *Server) schedulesList(w http.ResponseWriter, req SchedulesRequest) {

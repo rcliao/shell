@@ -28,6 +28,10 @@ const (
 	TaskLeased = "leased"
 	TaskDone   = "done"
 	TaskFailed = "failed" // terminal: attempts exhausted or permanently unprocessable
+	// TaskExpired is terminal and distinct from failed on purpose: nothing went
+	// wrong, the work simply stopped being worth doing. Conflating the two would
+	// hide a real failure rate behind ordinary staleness.
+	TaskExpired = "expired"
 )
 
 // Task sources — who enqueued the work.
@@ -57,7 +61,13 @@ type Task struct {
 	// NotBefore delays visibility. This is what the retired delegation system
 	// could not express: it hardcoded a 60-minute TTL swept every minute, so a
 	// "check this tomorrow at 09:00" task always expired before it was due.
-	NotBefore   *time.Time
+	NotBefore *time.Time
+	// ExpiresAt bounds staleness. Replay is only a gift while the work still
+	// matters: a chat turn reclaimed after a crash is worth running because the
+	// human is still waiting, but a heartbeat reclaimed hours after it was due
+	// would report on a world that has moved on. Past this the task is dropped
+	// with a recorded outcome instead of run late. Nil = never expires.
+	ExpiresAt   *time.Time
 	LeaseOwner  string
 	LeasedUntil *time.Time
 	EnqueuedAt  time.Time
@@ -132,11 +142,11 @@ func (s *Store) EnqueueTask(t Task) (id int64, created bool, err error) {
 func (s *Store) enqueueOnce(t Task) (int64, bool, error) {
 	res, err := s.db.Exec(`
 		INSERT INTO tasks (kind, source, idempotency_key, partition_key, payload,
-		                   state, attempts, max_attempts, not_before, enqueued_at)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+		                   state, attempts, max_attempts, not_before, expires_at, enqueued_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
 		ON CONFLICT(idempotency_key) DO NOTHING
 	`, t.Kind, t.Source, t.IdempotencyKey, t.PartitionKey, t.Payload,
-		TaskQueued, t.MaxAttempts, t.NotBefore, time.Now().UTC())
+		TaskQueued, t.MaxAttempts, t.NotBefore, t.ExpiresAt, time.Now().UTC())
 	if err != nil {
 		return 0, false, err
 	}
@@ -202,6 +212,10 @@ func (s *Store) leaseOnce(owner string, leaseFor time.Duration) (*Task, error) {
 			SELECT t.id FROM tasks t
 			WHERE t.state = ?
 			  AND (t.not_before IS NULL OR t.not_before <= ?)
+			  -- Never hand out expired work. The sweep marks these terminal, but
+			  -- a lease can race it, and starting a stale beat is the exact
+			  -- failure expiry exists to prevent.
+			  AND (t.expires_at IS NULL OR t.expires_at > ?)
 			  AND (t.partition_key = '' OR NOT EXISTS (
 			        SELECT 1 FROM tasks b
 			        WHERE b.partition_key = t.partition_key
@@ -210,7 +224,7 @@ func (s *Store) leaseOnce(owner string, leaseFor time.Duration) (*Task, error) {
 			ORDER BY t.id LIMIT 1
 		)
 		RETURNING id
-	`, TaskLeased, owner, now.Add(leaseFor), now, TaskQueued, now, TaskLeased).Scan(&id)
+	`, TaskLeased, owner, now.Add(leaseFor), now, TaskQueued, now, now, TaskLeased).Scan(&id)
 	if err == sql.ErrNoRows {
 		return nil, nil // nothing ready
 	}
@@ -320,7 +334,7 @@ func (s *Store) ListTasks(state string, limit int) ([]Task, error) {
 
 const taskSelect = `
 	SELECT id, kind, source, idempotency_key, partition_key, payload, state,
-	       attempts, max_attempts, not_before, lease_owner, leased_until,
+	       attempts, max_attempts, not_before, expires_at, lease_owner, leased_until,
 	       enqueued_at, started_at, done_at, result, last_error
 	FROM tasks`
 
@@ -328,22 +342,78 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 	var out []Task
 	for rows.Next() {
 		var t Task
-		var notBefore, leasedUntil, startedAt, doneAt sql.NullTime
+		var notBefore, expiresAt, leasedUntil, startedAt, doneAt sql.NullTime
 		if err := rows.Scan(&t.ID, &t.Kind, &t.Source, &t.IdempotencyKey, &t.PartitionKey,
-			&t.Payload, &t.State, &t.Attempts, &t.MaxAttempts, &notBefore, &t.LeaseOwner,
+			&t.Payload, &t.State, &t.Attempts, &t.MaxAttempts, &notBefore, &expiresAt, &t.LeaseOwner,
 			&leasedUntil, &t.EnqueuedAt, &startedAt, &doneAt, &t.Result, &t.LastError); err != nil {
 			return nil, err
 		}
 		for _, p := range []struct {
 			src sql.NullTime
 			dst **time.Time
-		}{{notBefore, &t.NotBefore}, {leasedUntil, &t.LeasedUntil}, {startedAt, &t.StartedAt}, {doneAt, &t.DoneAt}} {
+		}{
+			{notBefore, &t.NotBefore}, {expiresAt, &t.ExpiresAt}, {leasedUntil, &t.LeasedUntil},
+			{startedAt, &t.StartedAt}, {doneAt, &t.DoneAt},
+		} {
 			if p.src.Valid {
 				v := p.src.Time
 				*p.dst = &v
 			}
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ExpireTasks drops queued work that is past its expiry, returning how many.
+//
+// Only QUEUED tasks are swept. A leased task is actively running and killing it
+// mid-turn would be worse than letting it finish late — expiry answers "is this
+// still worth STARTING", not "should this be interrupted".
+func (s *Store) ExpireTasks() (int, error) {
+	res, err := s.db.Exec(`
+		UPDATE tasks SET state = ?, done_at = ?, lease_owner = '', leased_until = NULL,
+		                 last_error = 'expired: past expires_at before it could run'
+		WHERE state = ? AND expires_at IS NOT NULL AND expires_at < ?
+	`, TaskExpired, time.Now().UTC(), TaskQueued, time.Now().UTC())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// CountActiveByPayloadInt counts non-terminal tasks of a kind whose payload
+// carries a given integer at a JSON path — the overlap question, asked of the
+// queue rather than of an in-memory map.
+//
+// The dispatcher used to answer this from `running`/`buffered` maps that died
+// with the process. Asking the table means overlap survives a restart: a beat
+// still queued from before a deploy correctly blocks a duplicate.
+func (s *Store) CountActiveByPayloadInt(kind, path string, value int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+		SELECT count(*) FROM tasks
+		WHERE kind = ? AND state IN (?, ?) AND json_extract(payload, ?) = ?
+	`, kind, TaskQueued, TaskLeased, path, value).Scan(&n)
+	return n, err
+}
+
+// CountTasksByState returns a state histogram, for status surfaces.
+func (s *Store) CountTasksByState() (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT state, count(*) FROM tasks GROUP BY state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var state string
+		var n int
+		if err := rows.Scan(&state, &n); err != nil {
+			return nil, err
+		}
+		out[state] = n
 	}
 	return out, rows.Err()
 }

@@ -346,6 +346,12 @@ type SchedulerConfig struct {
 	// Kill switch: V2-H47 lesson-to-action block in deep heartbeats.
 	// Default false = enabled (prompt-only feature, matches *_disabled pattern).
 	LessonToActionDisabled bool `json:"lesson_to_action_disabled"`
+	// Kill switch: durable fire queue. Default false = enabled, so scheduled
+	// work survives a restart. Set true to fall back to the in-memory
+	// dispatcher, which loses in-flight fires but is the long-running shape.
+	// A config edit plus SIGHUP beats a code revert when something goes wrong
+	// at 9pm.
+	DurableQueueDisabled bool `json:"durable_queue_disabled"`
 }
 
 type ReloadConfig struct {

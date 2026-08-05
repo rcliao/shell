@@ -734,6 +734,18 @@ func New(cfg config.Config) (*Daemon, error) {
 			sched.SetDeepReflectInterval(cfg.Scheduler.DeepReflectInterval)
 		}
 
+		// Durable execution: fires become queued tasks that survive a restart.
+		//
+		// The owner must change on every boot, because that is how a reclaim
+		// distinguishes "my lease" from "a lease held by a process that no
+		// longer exists". PID alone is NOT enough: the SIGHUP restart path
+		// execs in place and keeps the same PID, so a start timestamp is what
+		// actually makes this unique across restarts.
+		if !cfg.Scheduler.DurableQueueDisabled {
+			owner := fmt.Sprintf("boot-%d-%d", os.Getpid(), time.Now().UnixNano())
+			sched.SetQueue(adapter, owner)
+		}
+
 		// Wire task polling if task store is available.
 		if taskStore != nil {
 			botUser := cfg.Agent.BotUsername
