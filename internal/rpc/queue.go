@@ -45,6 +45,17 @@ const AgentTaskKind = "agent.task"
 // MessageTurnKind mirrors scheduler.TaskKindMessageTurn.
 const MessageTurnKind = "message.turn"
 
+// chatTTL bounds how long an unstarted chat turn stays worth running.
+//
+// Staleness is a TIME question, not an attempts question. Long enough to
+// survive a deploy or a crash-restart; short enough that nobody is answered
+// about something they have moved past. Past it the turn is dropped with a
+// recorded outcome rather than delivered late.
+const chatTTL = 10 * time.Minute
+
+// chatMaxAttempts is one normal run plus one crash replay.
+const chatMaxAttempts = 2
+
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store not available")
@@ -153,6 +164,7 @@ func (s *Server) queueChat(w http.ResponseWriter, req QueueRequest) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	expires := time.Now().UTC().Add(chatTTL)
 	id, created, err := s.store.EnqueueTask(store.Task{
 		Kind:   MessageTurnKind,
 		Source: store.TaskSourceAgent,
@@ -161,9 +173,17 @@ func (s *Server) queueChat(w http.ResponseWriter, req QueueRequest) {
 		IdempotencyKey: "cli:" + req.ExternalID,
 		PartitionKey:   fmt.Sprintf("chat:%d:%d", req.ChatID, req.ThreadID),
 		Payload:        string(payload),
-		// One attempt: a chat turn re-run after a crash would answer a question
-		// the person may have already given up on, and they can simply ask again.
-		MaxAttempts: 1,
+		// One normal run plus ONE crash replay.
+		//
+		// This was max_attempts=1 with a comment claiming a re-run would answer
+		// a question the person had moved on from. That reasoning is what
+		// expires_at is for, and using the attempt budget for it made chat
+		// at-most-once — which docs/TASKS.md lists as an explicit non-goal: "a
+		// duplicated reminder is a nuisance and a dropped one is a failure."
+		// The person is still waiting; a crash 20 seconds in should still get
+		// answered.
+		MaxAttempts: chatMaxAttempts,
+		ExpiresAt:   &expires,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

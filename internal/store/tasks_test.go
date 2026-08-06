@@ -566,3 +566,53 @@ func TestBudgetedTaskStillReplaysOnce(t *testing.T) {
 		t.Error("a task replayed once was leased a third time")
 	}
 }
+
+// The staleness/recovery split, which is the whole policy: a chat turn
+// interrupted by a crash IS replayed because the person is still waiting, but
+// only inside its expiry window. Using the attempt budget for staleness
+// instead made chat at-most-once — an explicit non-goal, since "a duplicated
+// reminder is a nuisance and a dropped one is a failure."
+func TestChatTurnReplaysInsideItsWindowAndNotAfter(t *testing.T) {
+	s := taskStore(t)
+
+	mk := func(key string, expiresIn time.Duration) int64 {
+		t.Helper()
+		exp := time.Now().UTC().Add(expiresIn)
+		id, _, err := s.EnqueueTask(Task{
+			Kind: "message.turn", IdempotencyKey: key, MaxAttempts: 2, ExpiresAt: &exp,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	// Crashed 20 seconds into a 10-minute window: still worth answering.
+	fresh := mk("fresh", 10*time.Minute)
+	if got, err := s.LeaseTask("boot-A", time.Hour); err != nil || got == nil || got.ID != fresh {
+		t.Fatalf("first lease = %v, %v", got, err)
+	}
+	if n, err := s.ReclaimTasks("boot-B"); err != nil || n != 1 {
+		t.Fatalf("reclaimed %d (%v), want 1 — the person is still waiting", n, err)
+	}
+	replay, err := s.LeaseTask("boot-B", time.Hour)
+	if err != nil || replay == nil || replay.ID != fresh {
+		t.Fatalf("a crashed chat turn inside its window was not replayed (%v, %v)", replay, err)
+	}
+
+	// Same crash, but the window has passed: dropped rather than answered late.
+	stale := mk("stale", -time.Minute)
+	if _, err := s.db.Exec(`UPDATE tasks SET state = ?, attempts = 1, lease_owner = 'dead' WHERE id = ?`,
+		TaskLeased, stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReclaimTasks("boot-C"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.LeaseTask("boot-C", time.Hour); got != nil && got.ID == stale {
+		t.Error("an expired chat turn was replayed — the person has moved on")
+	}
+	if n, err := s.ExpireTasks(); err != nil || n != 1 {
+		t.Fatalf("expired %d (%v), want the stale turn retired with a recorded outcome", n, err)
+	}
+}
