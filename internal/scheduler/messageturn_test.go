@@ -61,12 +61,13 @@ func TestAnyTransportWorksByRegisteringASink(t *testing.T) {
 	s.RegisterTransport("tui", func(MessageTurn) (Sink, error) { return sink, nil })
 
 	var ran MessageTurn
-	s.EnableMessageTurns(func(_ context.Context, m MessageTurn, k Sink) error {
+	s.EnableMessageTurns(func(_ context.Context, m MessageTurn, k Sink) (string, error) {
 		ran = m
 		if err := k.Update(context.Background(), "thinking"); err != nil {
-			return err
+			return "", err
 		}
-		return k.Finish(context.Background(), "done: "+m.Text)
+		final := "done: " + m.Text
+		return final, k.Finish(context.Background(), final)
 	})
 
 	id := enqueueMessage(t, st, msg("tui", "tui-1", 42, 0, "hello from a terminal"))
@@ -80,8 +81,14 @@ func TestAnyTransportWorksByRegisteringASink(t *testing.T) {
 	if len(sink.updates) != 1 || sink.finished != "done: hello from a terminal" {
 		t.Fatalf("sink saw updates=%v finished=%q — streaming must reach the transport", sink.updates, sink.finished)
 	}
-	if got, _ := st.GetTask(id); got.State != store.TaskDone {
+	got, _ := st.GetTask(id)
+	if got.State != store.TaskDone {
 		t.Errorf("state = %q, want done", got.State)
+	}
+	// The reply lands in the task result, which is how a transport that is not
+	// attached while the turn runs — a CLI, a webhook — reads the answer.
+	if got.Result != "done: hello from a terminal" {
+		t.Errorf("result = %q, want the final reply", got.Result)
 	}
 }
 
@@ -113,7 +120,7 @@ func TestUnknownTransportFailsWithoutRunningTheTurn(t *testing.T) {
 	s.SetQueue(q, "boot-t")
 
 	ran := false
-	s.EnableMessageTurns(func(context.Context, MessageTurn, Sink) error { ran = true; return nil })
+	s.EnableMessageTurns(func(context.Context, MessageTurn, Sink) (string, error) { ran = true; return "", nil })
 
 	id := enqueueMessage(t, st, msg("carrier-pigeon", "p-1", 42, 0, "hi"))
 	if !s.leaseAndRunOne(context.Background()) {
@@ -138,7 +145,7 @@ func TestFailedTurnNotifiesTheSink(t *testing.T) {
 	sink := &recordingSink{}
 	s.RegisterTransport("tui", func(MessageTurn) (Sink, error) { return sink, nil })
 	boom := errors.New("model unreachable")
-	s.EnableMessageTurns(func(context.Context, MessageTurn, Sink) error { return boom })
+	s.EnableMessageTurns(func(context.Context, MessageTurn, Sink) (string, error) { return "", boom })
 
 	enqueueMessage(t, st, msg("tui", "tui-9", 42, 0, "hi"))
 	if !s.leaseAndRunOne(context.Background()) {

@@ -43,6 +43,11 @@ type MessageTurn struct {
 	SenderID   int64  `json:"sender_id"`
 	SenderName string `json:"sender_name"`
 	Text       string `json:"text"`
+
+	// TaskID is filled in by the worker before the sink is built. It is not
+	// part of the stored payload — a task cannot know its own id at enqueue
+	// time — but a detached sink needs it to write the reply back.
+	TaskID int64 `json:"-"`
 }
 
 // Sink renders a reply back to wherever the message came from.
@@ -108,7 +113,10 @@ func (s *Scheduler) EnableMessageTurns(run MessageRunner) {
 // MessageRunner executes one message turn against the agent, streaming through
 // the sink. It is the bridge's HandleMessageStreaming in transport-neutral
 // clothing — the queue must not import the bridge.
-type MessageRunner func(ctx context.Context, m MessageTurn, sink Sink) error
+// It returns the final reply text, which becomes the task's result — so a
+// caller that was not present while the turn ran can still read the answer.
+// That is what makes a CLI or any other non-attached transport work.
+type MessageRunner func(ctx context.Context, m MessageTurn, sink Sink) (string, error)
 
 func (s *Scheduler) handleMessageTurn(ctx context.Context, t LeasedTask) (string, error) {
 	var m MessageTurn
@@ -119,6 +127,7 @@ func (s *Scheduler) handleMessageTurn(ctx context.Context, t LeasedTask) (string
 		return "", fmt.Errorf("message turns enabled with no runner wired")
 	}
 
+	m.TaskID = t.ID
 	sink, err := s.sinkFor(m)
 	if err != nil {
 		// No sink means the reply has nowhere to go. Running the turn anyway
@@ -133,9 +142,10 @@ func (s *Scheduler) handleMessageTurn(ctx context.Context, t LeasedTask) (string
 			"attempt", t.Attempt)
 	}
 
-	if err := s.runMessage(ctx, m, sink); err != nil {
+	final, err := s.runMessage(ctx, m, sink)
+	if err != nil {
 		sink.Fail(ctx, err)
 		return "", err
 	}
-	return "", nil
+	return final, nil
 }

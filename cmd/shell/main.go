@@ -512,6 +512,96 @@ func main() {
 	reflectionsCmd.Flags().StringVar(&refConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
 	reflectionsCmd.Flags().BoolVar(&refFullFlag, "full", false, "print the full reflection text instead of a preview")
 
+	// chat command — talk to the RUNNING agent from a terminal.
+	//
+	// `shell send` spawns a fresh `claude -p` and so reaches nobody: no
+	// session, no memory, no skills. This goes through the queue as a
+	// message.turn, so a CLI conversation lands in the same session a Telegram
+	// one would, and is the first non-Telegram producer — which is what proves
+	// intake is transport-agnostic rather than Telegram-shaped.
+	var chatConfigFlag, chatSenderFlag string
+	var chatChatIDFlag, chatThreadFlag int64
+	var chatTimeoutFlag time.Duration
+	chatCmd := &cobra.Command{
+		Use:   "chat [message]",
+		Short: "Send a message to the running agent and print its reply",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(chatConfigFlag)
+			sockPath := filepath.Join(filepath.Dir(cfg.Daemon.PIDFile), "bridge.sock")
+			client := &http.Client{Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+				},
+			}}
+			post := func(body map[string]any) (map[string]any, error) {
+				b, _ := json.Marshal(body)
+				resp, err := client.Post("http://unix/queue", "application/json", bytes.NewReader(b))
+				if err != nil {
+					return nil, fmt.Errorf("daemon not reachable at %s: %w", sockPath, err)
+				}
+				defer resp.Body.Close()
+				var out map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+					return nil, err
+				}
+				if msg, ok := out["error"].(string); ok {
+					return nil, fmt.Errorf("%s", msg)
+				}
+				return out, nil
+			}
+
+			sender := chatSenderFlag
+			if sender == "" {
+				sender = "cli"
+			}
+			// A unique external id per invocation: re-running the command is a
+			// new question, while a retried POST of the SAME id is not.
+			external := fmt.Sprintf("%s-%d", sender, time.Now().UnixNano())
+			created, err := post(map[string]any{
+				"action": "chat", "prompt": args[0], "external_id": external,
+				"chat_id": chatChatIDFlag, "thread_id": chatThreadFlag, "sender_name": sender,
+			})
+			if err != nil {
+				return err
+			}
+			id := int64(created["id"].(float64))
+			fmt.Fprintf(os.Stderr, "task %d queued; waiting for reply...\n", id)
+
+			// Poll the task result. The reply grows as the turn streams, so
+			// print only what is new — the same experience as watching it
+			// arrive, without holding a connection the daemon would have to
+			// keep alive across its own restarts.
+			deadline := time.Now().Add(chatTimeoutFlag)
+			printed := 0
+			for time.Now().Before(deadline) {
+				got, err := post(map[string]any{"action": "get", "id": id})
+				if err != nil {
+					return err
+				}
+				if r, ok := got["result"].(string); ok && len(r) > printed {
+					fmt.Print(r[printed:])
+					printed = len(r)
+				}
+				switch got["state"] {
+				case "done":
+					fmt.Println()
+					return nil
+				case "failed", "expired":
+					fmt.Println()
+					return fmt.Errorf("turn %s: %v", got["state"], got["last_error"])
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			return fmt.Errorf("timed out after %s waiting for task %d (it may still be running: shell tasks)", chatTimeoutFlag, id)
+		},
+	}
+	chatCmd.Flags().StringVar(&chatConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
+	chatCmd.Flags().StringVar(&chatSenderFlag, "sender", "cli", "sender name the agent sees")
+	chatCmd.Flags().Int64Var(&chatChatIDFlag, "chat", 0, "chat id to converse in (0 = the system chat)")
+	chatCmd.Flags().Int64Var(&chatThreadFlag, "thread", 0, "thread id within the chat")
+	chatCmd.Flags().DurationVar(&chatTimeoutFlag, "timeout", 5*time.Minute, "how long to wait for the reply")
+
 	// tasks command — the queue's status surface. A durable queue nobody can
 	// see is a queue nobody can trust: without this, "did that beat get
 	// replayed or silently dropped?" has no answer short of raw SQL.
@@ -1366,7 +1456,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

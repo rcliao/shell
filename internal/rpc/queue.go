@@ -32,11 +32,18 @@ type QueueRequest struct {
 	Result    string `json:"result"`
 	State     string `json:"state"`
 	Limit     int    `json:"limit"`
+	// chat action
+	ExternalID string `json:"external_id"`
+	ThreadID   int64  `json:"thread_id"`
+	SenderName string `json:"sender_name"`
 }
 
 // AgentTaskKind is the queue kind whose handler runs the payload as an agent
 // turn. Kept in sync with the scheduler's handler registration.
 const AgentTaskKind = "agent.task"
+
+// MessageTurnKind mirrors scheduler.TaskKindMessageTurn.
+const MessageTurnKind = "message.turn"
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
@@ -61,8 +68,10 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		s.queueGet(w, req)
 	case "complete":
 		s.queueComplete(w, req)
+	case "chat":
+		s.queueChat(w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be create, list, get or complete")
+		writeError(w, http.StatusBadRequest, "action must be create, chat, list, get or complete")
 	}
 }
 
@@ -118,6 +127,53 @@ func (s *Server) queueCreate(w http.ResponseWriter, req QueueRequest) {
 		"id": id, "status": status,
 		"note": "runs on a worker, at most once. Poll action=get for state and result.",
 	})
+}
+
+// queueChat enqueues one CLI message as a message.turn.
+//
+// It is the same kind Telegram will produce, on the same queue, with the same
+// durability — which is the point. A CLI conversation reaches the live agent's
+// session rather than spawning a throwaway one, and if the daemon dies
+// mid-answer the turn is replayed like any other.
+func (s *Server) queueChat(w http.ResponseWriter, req QueueRequest) {
+	if req.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	m := map[string]any{
+		"transport":   "cli",
+		"external_id": req.ExternalID,
+		"chat_id":     req.ChatID,
+		"thread_id":   req.ThreadID,
+		"sender_name": req.SenderName,
+		"text":        req.Prompt,
+	}
+	payload, err := json.Marshal(m)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	id, created, err := s.store.EnqueueTask(store.Task{
+		Kind:   MessageTurnKind,
+		Source: store.TaskSourceAgent,
+		// Natural key: the caller supplies an id, so re-running the same
+		// command is a redelivery rather than a second question.
+		IdempotencyKey: "cli:" + req.ExternalID,
+		PartitionKey:   fmt.Sprintf("chat:%d:%d", req.ChatID, req.ThreadID),
+		Payload:        string(payload),
+		// One attempt: a chat turn re-run after a crash would answer a question
+		// the person may have already given up on, and they can simply ask again.
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	status := "queued"
+	if !created {
+		status = "existing"
+	}
+	writeJSON(w, map[string]any{"id": id, "status": status})
 }
 
 func (s *Server) queueList(w http.ResponseWriter, req QueueRequest) {

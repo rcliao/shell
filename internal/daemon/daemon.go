@@ -748,6 +748,10 @@ func New(cfg config.Config) (*Daemon, error) {
 			// Agent-assigned durable work. The queue owns delivery guarantees,
 			// the agent owns judgment — see internal/scheduler/agenttask.go.
 			sched.SetAgentTaskHandler(st)
+			// Message intake. Registers the CLI transport and the runner that
+			// executes a turn against the live agent — see clichat.go. Telegram
+			// becomes a producer of the same kind in a later step.
+			wireMessageTurns(sched, br, st)
 		}
 
 		// Wire task polling if task store is available.
