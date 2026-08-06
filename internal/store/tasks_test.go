@@ -446,3 +446,52 @@ func TestConcurrentEnqueueAndLeaseLoseNothing(t *testing.T) {
 		t.Errorf("%d tasks left queued after drain (err %v)", len(left), err)
 	}
 }
+
+// Retention must sweep finished work and leave pending work alone. The sweep
+// silently did neither for days: it was still written against the retired
+// /task backlog's columns, so it failed with "no such column: status" every
+// six hours and the queue accumulated without bound while looking maintained.
+func TestCleanupRemovesOnlyFinishedTasks(t *testing.T) {
+	s := taskStore(t)
+	old := time.Now().UTC().Add(-72 * time.Hour)
+
+	mk := func(key, state string, done *time.Time) int64 {
+		t.Helper()
+		id, _, err := s.EnqueueTask(Task{Kind: "k", IdempotencyKey: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`UPDATE tasks SET state = ?, done_at = ? WHERE id = ?`, state, done, id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	oldDone := mk("done-old", TaskDone, &old)
+	oldFailed := mk("failed-old", TaskFailed, &old)
+	oldExpired := mk("expired-old", TaskExpired, &old)
+	// A queued task is FUTURE work however old the row: one with not_before set
+	// to next month is waiting, not stale.
+	queued := mk("queued-old", TaskQueued, nil)
+	leased := mk("leased-old", TaskLeased, nil)
+	recent := time.Now().UTC().Add(-time.Minute)
+	fresh := mk("done-fresh", TaskDone, &recent)
+
+	n, err := s.CleanupCompletedTasks(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("cleanup failed: %v — this is the regression, the sweep must run at all", err)
+	}
+	if n != 3 {
+		t.Fatalf("swept %d tasks, want 3 (done, failed, expired)", n)
+	}
+	for _, id := range []int64{oldDone, oldFailed, oldExpired} {
+		if got, _ := s.GetTask(id); got != nil {
+			t.Errorf("task %d survived the sweep", id)
+		}
+	}
+	for _, id := range []int64{queued, leased, fresh} {
+		if got, _ := s.GetTask(id); got == nil {
+			t.Errorf("task %d was swept but should have been kept", id)
+		}
+	}
+}

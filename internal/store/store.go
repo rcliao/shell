@@ -2103,9 +2103,21 @@ func (s *Store) CleanupOldMessages(olderThan time.Duration) (int64, error) {
 }
 
 // CleanupCompletedTasks deletes completed tasks older than the given duration.
+// It sweeps only TERMINAL tasks. Queued work is future work however old the
+// row is — a task with not_before set to next month is not stale, it is
+// waiting — and a leased task is running.
+//
+// This query was written for the retired /task backlog and still named its
+// columns (status, completed_at). When that table was replaced by the durable
+// queue the sweep started failing every six hours with "no such column:
+// status", which meant the queue had no retention at all while appearing to.
+// Caught from a WARN line in the daemon log on 2026-08-05.
 func (s *Store) CleanupCompletedTasks(olderThan time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-olderThan)
-	result, err := s.db.Exec(`DELETE FROM tasks WHERE status = 'completed' AND completed_at < ?`, cutoff)
+	cutoff := time.Now().UTC().Add(-olderThan)
+	result, err := s.db.Exec(`
+		DELETE FROM tasks
+		WHERE state IN (?, ?, ?) AND done_at IS NOT NULL AND done_at < ?
+	`, TaskDone, TaskFailed, TaskExpired, cutoff)
 	if err != nil {
 		return 0, err
 	}
