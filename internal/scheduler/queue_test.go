@@ -447,3 +447,20 @@ func TestEnqueueWakesAWorkerImmediately(t *testing.T) {
 	cancel()
 	s.queueWG.Wait()
 }
+
+// Partitioning follows SESSION identity, which is (chat, thread) — one Claude
+// subprocess per pair. A forum group runs one subprocess per topic, so keying
+// on chat alone would queue independent conversations behind each other.
+func TestPartitionKeyFollowsSessionIdentity(t *testing.T) {
+	const group int64 = -100200300
+	if a, b := PartitionKey(group, 111), PartitionKey(group, 222); a == b {
+		t.Fatalf("two forum topics share partition %q — they own separate subprocesses and must run in parallel", a)
+	}
+	if a, b := PartitionKey(group, 0), PartitionKey(group, 0); a != b {
+		t.Fatalf("the same conversation produced two partitions, %q and %q", a, b)
+	}
+	// Different chats never share a partition even at the same thread id.
+	if a, b := PartitionKey(1, 0), PartitionKey(2, 0); a == b {
+		t.Fatalf("two chats share partition %q", a)
+	}
+}

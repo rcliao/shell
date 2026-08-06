@@ -142,12 +142,20 @@ func decodeFirePayload(s string) (ScheduleEntry, error) {
 	}, nil
 }
 
-// FirePartitionKey serializes fires per chat. This is the queue's replacement
-// for the dispatcher's per-chat mailbox, and it exists for the same reason:
-// each chat is backed by ONE Claude subprocess, so two concurrent turns for one
-// chat contend for it. Different chats still run in parallel.
-func FirePartitionKey(chatID int64) string {
-	return fmt.Sprintf("chat:%d", chatID)
+// PartitionKey names the serialization domain for work in one conversation.
+//
+// It is (chat, thread) because that is how SESSIONS are keyed: there is one
+// Claude subprocess per pair, and the family group alone runs five of them, one
+// per forum topic. The dispatcher's mailboxes and this key both exist for the
+// same reason — two concurrent turns would contend for one subprocess.
+//
+// Keying on chat alone, which is what the dispatcher did and what this function
+// did when first written, over-serializes: five topics that each own a separate
+// subprocess would queue behind each other for no reason. Harmless for
+// heartbeats, which run on the system chat, but wrong for anything per-topic —
+// and message intake is entirely per-topic.
+func PartitionKey(chatID, threadID int64) string {
+	return fmt.Sprintf("chat:%d:%d", chatID, threadID)
 }
 
 // SetQueue enables durable execution. Without it the scheduler keeps using the

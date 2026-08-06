@@ -110,7 +110,9 @@ func (a *StoreAdapter) EnqueueFire(entry ScheduleEntry, occurrence, expiresAt ti
 			strconv.FormatInt(entry.ID, 10),
 			occurrence.UTC().Format(time.RFC3339Nano),
 		),
-		PartitionKey: FirePartitionKey(entry.ChatID),
+		// Schedules have no thread column — a fire always targets the chat's
+		// main thread, and therefore its thread-0 subprocess.
+		PartitionKey: PartitionKey(entry.ChatID, 0),
 		Payload:      payload,
 		MaxAttempts:  maxAttempts,
 		ExpiresAt:    &exp,
