@@ -586,6 +586,24 @@ func New(cfg config.Config) (*Daemon, error) {
 	var bot outbound = headlessOutbound{}
 	if token == "" {
 		slog.Info("no telegram token — running headless (CLI transport only)")
+	} else if other, clash := tokenOwnedByAnotherAgent(cfg, token); clash {
+		// Two daemons polling getUpdates with one token do not share the
+		// stream: Telegram hands each update to whichever poller asks first,
+		// and the loser never sees it. On 2026-08-06 a test agent inherited a
+		// real agent's token by omitting token_env — config.Default() supplies
+		// TELEGRAM_BOT_TOKEN — and silently consumed four of the family's
+		// messages, rejecting them while the real agent waited.
+		//
+		// Refuse to start rather than steal. A misconfigured agent that does
+		// not run is recoverable; one that quietly eats messages is not.
+		st.Close()
+		if mem != nil {
+			mem.Close()
+		}
+		return nil, fmt.Errorf("telegram token env %q is already used by agent %q — "+
+			"two daemons polling one token silently drop each other's messages; "+
+			"set a distinct telegram.token_env (or leave it unset for a headless agent)",
+			cfg.Telegram.TokenEnv, other)
 	} else {
 		tgBot, err := telegram.NewBot(token, auth, br, agentCfg)
 		if err != nil {

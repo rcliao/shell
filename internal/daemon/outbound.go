@@ -3,6 +3,10 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
+
+	"github.com/rcliao/shell/internal/config"
 )
 
 // Outbound delivery, abstracted away from Telegram.
@@ -55,3 +59,35 @@ func (headlessOutbound) SetOutboundDedup(func(chatID, threadID int64, text strin
 // Start blocks until cancelled: there is no inbound poller, but the daemon's
 // run loop expects this call to own the process's lifetime.
 func (headlessOutbound) Start(ctx context.Context) { <-ctx.Done() }
+
+// tokenOwnedByAnotherAgent reports whether another agent's config on this
+// machine already claims the same Telegram token.
+//
+// The check is by TOKEN VALUE, not by env-var name: the failure that motivated
+// it was an agent inheriting the DEFAULT env name and therefore a different
+// agent's token, so comparing names would have missed it entirely.
+func tokenOwnedByAnotherAgent(cfg config.Config, token string) (string, bool) {
+	agentsDir := filepath.Join(config.DefaultConfigDir(), "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return "", false // no agents dir: nothing to clash with
+	}
+	self := filepath.Dir(cfg.Daemon.PIDFile)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(agentsDir, e.Name())
+		if dir == self {
+			continue
+		}
+		other, err := config.Load(filepath.Join(dir, "config.json"))
+		if err != nil {
+			continue // a broken sibling config is not this daemon's problem
+		}
+		if other.TelegramToken() == token {
+			return e.Name(), true
+		}
+	}
+	return "", false
+}
