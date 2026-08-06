@@ -2230,6 +2230,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 							e2eFirstVisible = time.Now()
 						}
 						mu.Unlock()
+						h.markTurnAnswering(lockKey)
 						continue
 					}
 					slog.Debug("streaming markdown edit failed, disabling for remaining edits", "error", editErr)
@@ -2259,6 +2260,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 					e2eFirstVisible = time.Now()
 				}
 				mu.Unlock()
+				h.markTurnAnswering(lockKey)
 			}
 		}
 	}()

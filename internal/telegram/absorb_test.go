@@ -12,26 +12,32 @@ func TestShouldAbsorb(t *testing.T) {
 		enabled    bool
 		sameSender bool
 		hasMedia   bool
+		answering  bool
 		turnAge    time.Duration
 		queueLen   int
 		wantOK     bool
 		wantReason string
 	}{
-		{"happy path", true, true, false, old, 1, true, ""},
-		{"disabled", false, true, false, old, 1, false, "disabled"},
-		{"media", true, true, true, old, 1, false, "media"},
-		{"different sender", true, false, false, old, 1, false, "different_sender"},
-		{"turn too young", true, true, false, 5 * time.Second, 1, false, "turn_too_young"},
-		{"exactly at threshold", true, true, false, absorbMinTurnAge, 1, true, ""},
-		{"just under threshold", true, true, false, absorbMinTurnAge - time.Millisecond, 1, false, "turn_too_young"},
-		{"multiple waiters go to H44", true, true, false, old, 2, false, "queue_not_single"},
-		{"zero queue len", true, true, false, old, 0, false, "queue_not_single"},
+		{"happy path", true, true, false, false, old, 1, true, ""},
+		// The LATE race. Once the turn has started writing its reply, injecting
+		// a question cannot change that reply — the message would be answered a
+		// turn late, leaving every subsequent reply one behind. Production
+		// 2026-08-06: three consecutive replies answered the previous message.
+		{"turn already answering", true, true, false, true, old, 1, false, "already_answering"},
+		{"disabled", false, true, false, false, old, 1, false, "disabled"},
+		{"media", true, true, true, false, old, 1, false, "media"},
+		{"different sender", true, false, false, false, old, 1, false, "different_sender"},
+		{"turn too young", true, true, false, false, 5 * time.Second, 1, false, "turn_too_young"},
+		{"exactly at threshold", true, true, false, false, absorbMinTurnAge, 1, true, ""},
+		{"just under threshold", true, true, false, false, absorbMinTurnAge - time.Millisecond, 1, false, "turn_too_young"},
+		{"multiple waiters go to H44", true, true, false, false, old, 2, false, "queue_not_single"},
+		{"zero queue len", true, true, false, false, old, 0, false, "queue_not_single"},
 		// Precedence: disabled wins over everything else.
-		{"disabled wins", false, false, true, 0, 3, false, "disabled"},
+		{"disabled wins", false, false, true, true, 0, 3, false, "disabled"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, reason := shouldAbsorb(tc.enabled, tc.sameSender, tc.hasMedia, tc.turnAge, tc.queueLen)
+			ok, reason := shouldAbsorb(tc.enabled, tc.sameSender, tc.hasMedia, tc.answering, tc.turnAge, tc.queueLen)
 			if ok != tc.wantOK || reason != tc.wantReason {
 				t.Errorf("shouldAbsorb() = (%v, %q), want (%v, %q)", ok, reason, tc.wantOK, tc.wantReason)
 			}

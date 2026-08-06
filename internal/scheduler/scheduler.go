@@ -145,6 +145,9 @@ type Scheduler struct {
 	queue      TaskQueue
 	queueOwner string
 	queueWG    sync.WaitGroup
+	// queueWake nudges workers when work is enqueued, so a fire does not wait
+	// out a poll interval before starting. See wakeWorkers.
+	queueWake chan struct{}
 	// taskResults reads back agent-written results; see agenttask.go.
 	taskResults TaskResults
 	// handlers maps task kind to handler. Written during wiring, read by the

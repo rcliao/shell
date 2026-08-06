@@ -156,6 +156,10 @@ func FirePartitionKey(chatID int64) string {
 func (s *Scheduler) SetQueue(q TaskQueue, owner string) {
 	s.queue = q
 	s.queueOwner = owner
+	// Buffered by one: a wake is a hint that work exists, not a message that
+	// must be delivered. If a wake is already pending the workers are about to
+	// look anyway, so dropping the duplicate is correct.
+	s.queueWake = make(chan struct{}, 1)
 	s.RegisterHandler(TaskKindScheduleFire, s.handleScheduleFire)
 }
 
@@ -223,6 +227,7 @@ func (s *Scheduler) submitToQueue(sc ScheduleEntry, policy OverlapPolicy, occurr
 		// restart replaying the same due row. Not an error, and not a fire.
 		slog.Info("scheduler: occurrence already queued", "id", sc.ID, "label", sc.Label)
 	}
+	s.wakeWorkers()
 	return true
 }
 
@@ -254,11 +259,30 @@ func (s *Scheduler) runQueueWorkers(ctx context.Context, n int) {
 				select {
 				case <-ctx.Done():
 					return
+				case <-s.queueWake:
+					drain()
 				case <-ticker.C:
 					drain()
 				}
 			}
 		}(i)
+	}
+}
+
+// wakeWorkers nudges a polling worker to look now instead of on its next tick.
+//
+// Without this a fire waits up to queuePollInterval before it starts. The old
+// in-memory dispatcher handed work straight to a mailbox goroutine, so moving
+// to the queue quietly added a latency FLOOR to every scheduled fire — measured
+// at a flat 5.0s on a production fire on 2026-08-06. The poll remains as the
+// safety net that makes reclaimed and not_before work visible.
+func (s *Scheduler) wakeWorkers() {
+	if s.queueWake == nil {
+		return
+	}
+	select {
+	case s.queueWake <- struct{}{}:
+	default: // a wake is already pending; the workers are about to look
 	}
 }
 

@@ -396,3 +396,54 @@ func TestAgentTaskNeedsEvidenceNotNarration(t *testing.T) {
 		t.Errorf("result = %q — this is what an assigner reads back", got2.Result)
 	}
 }
+
+// Enqueueing must wake a worker rather than leaving the fire to be discovered
+// on the next poll. The in-memory dispatcher handed work straight to a mailbox
+// goroutine; moving to the queue quietly added a latency FLOOR of one poll
+// interval to every scheduled fire, measured at a flat 5.0s on a production
+// fire on 2026-08-06.
+func TestEnqueueWakesAWorkerImmediately(t *testing.T) {
+	q, _ := queueAdapter(t)
+	entry := fireEntry(31, 77)
+	entry.Type = "cron"
+	entry.Schedule = "@hourly"
+	entry.NextRunAt = time.Now().UTC().Add(-time.Minute)
+
+	fired := make(chan struct{}, 1)
+	s := New(newMockStore([]ScheduleEntry{entry}), nil, func(context.Context, int64, string) error {
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+		return nil
+	}, "UTC")
+	s.SetQueue(q, "boot-wake")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.runQueueWorkers(ctx, 1)
+
+	// Let the STARTUP drain finish against an empty queue and park the worker on
+	// its select. Without this the initial drain races the tick and picks the
+	// fire up with no wake involved — which made an earlier version of this test
+	// pass even with the wake deliberately disabled.
+	time.Sleep(300 * time.Millisecond)
+
+	start := time.Now()
+	s.tick(ctx)
+
+	// The next poll tick is ~4.7s away, so anything under a second can only be
+	// the wake.
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatalf("fire did not start within 1s of being enqueued — it waited for the %s poll tick",
+			queuePollInterval)
+	}
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Errorf("fire took %s to start; the wake should make it near-immediate", elapsed)
+	}
+
+	cancel()
+	s.queueWG.Wait()
+}

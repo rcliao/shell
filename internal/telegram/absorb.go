@@ -20,12 +20,38 @@ const absorbMinTurnAge = 20 * time.Second
 type activeTurnInfo struct {
 	senderID  int64
 	startedAt time.Time
+	// answering is set once the turn has put visible content in front of the
+	// owner. After that the reply is already being composed and an injected
+	// question CANNOT change it — see markTurnAnswering.
+	answering bool
 }
 
 // setActiveTurn publishes this goroutine's turn as the active lock holder.
 func (h *Handler) setActiveTurn(key chatLockKey, senderID int64) {
 	h.activeTurnsMu.Lock()
 	h.activeTurns[key] = activeTurnInfo{senderID: senderID, startedAt: time.Now()}
+	h.activeTurnsMu.Unlock()
+}
+
+// markTurnAnswering records that the active turn has begun emitting its reply.
+//
+// This closes the LATE race, the mirror of the early one absorbMinTurnAge
+// guards. Injecting a follow-up while the model is still thinking can change
+// the answer; injecting after it has started writing cannot. The message lands
+// in the session anyway, unanswered, and the model picks it up on the NEXT turn
+// — which then answers the previous question while a new one arrives, leaving
+// every reply one behind until a lull resets it.
+//
+// That happened in production on 2026-08-06: a follow-up was absorbed at turn
+// age 35s into a turn whose first visible output was at 25.5s. Three
+// consecutive replies answered the previous message — a question about hotel
+// checkout was answered with a meal count.
+func (h *Handler) markTurnAnswering(key chatLockKey) {
+	h.activeTurnsMu.Lock()
+	if at, ok := h.activeTurns[key]; ok && !at.answering {
+		at.answering = true
+		h.activeTurns[key] = at
+	}
 	h.activeTurnsMu.Unlock()
 }
 
@@ -38,10 +64,16 @@ func (h *Handler) clearActiveTurn(key chatLockKey) {
 
 // shouldAbsorb is the pure eligibility decision for absorbing a queued waiter
 // into the active turn. Returns (ok, skip-reason).
-func shouldAbsorb(enabled, sameSender, hasMedia bool, turnAge time.Duration, queueLen int) (bool, string) {
+func shouldAbsorb(enabled, sameSender, hasMedia, answering bool, turnAge time.Duration, queueLen int) (bool, string) {
 	switch {
 	case !enabled:
 		return false, "disabled"
+	case answering:
+		// The reply is already being written; injecting now cannot change it,
+		// and the message would be answered a turn late — putting every
+		// subsequent reply one behind. Fall through to the normal queue path,
+		// which answers it in order.
+		return false, "already_answering"
 	case hasMedia:
 		return false, "media"
 	case !sameSender:
@@ -80,7 +112,7 @@ func (h *Handler) tryAbsorbIntoActiveTurn(key chatLockKey, entry *queuedMsg, que
 	}
 
 	turnAge := time.Since(at.startedAt)
-	ok, reason := shouldAbsorb(true, entry.senderID == at.senderID, false, turnAge, queueLen)
+	ok, reason := shouldAbsorb(true, entry.senderID == at.senderID, false, at.answering, turnAge, queueLen)
 	if !ok {
 		slog.Info("absorb: skipped", "chat_id", key.chatID, "thread_id", key.threadID,
 			"msg_id", entry.msgID, "reason", reason, "turn_age_s", int(turnAge.Seconds()))
