@@ -34,7 +34,7 @@ import (
 
 type Daemon struct {
 	cfg       config.Config
-	bot       *telegram.Bot
+	bot       outbound
 	bridge    *bridge.Bridge
 	proc      *process.Manager
 	store     *store.Store
@@ -579,13 +579,23 @@ func New(cfg config.Config) (*Daemon, error) {
 		AbsorbEnabled:        cfg.Daemon.AbsorbEnabled,
 		UserLabels:           parseUserLabels(cfg.Telegram.UserLabels),
 	}
-	bot, err := telegram.NewBot(token, auth, br, agentCfg)
-	if err != nil {
-		st.Close()
-		if mem != nil {
-			mem.Close()
+	// No token means no Telegram, which is now a supported way to run rather
+	// than a startup failure: a headless agent reachable only through the CLI
+	// transport. That is what makes a disposable test agent possible without
+	// registering a bot or touching the family's chats.
+	var bot outbound = headlessOutbound{}
+	if token == "" {
+		slog.Info("no telegram token — running headless (CLI transport only)")
+	} else {
+		tgBot, err := telegram.NewBot(token, auth, br, agentCfg)
+		if err != nil {
+			st.Close()
+			if mem != nil {
+				mem.Close()
+			}
+			return nil, err
 		}
-		return nil, err
+		bot = tgBot
 	}
 
 	// Wire transport: plan progress, relay photos → Telegram
@@ -677,6 +687,11 @@ func New(cfg config.Config) (*Daemon, error) {
 	})
 
 	// Initialize scheduler if enabled.
+	//
+	// When it is NOT enabled the agent still needs queue workers: message
+	// intake, agent tasks and everything else on the queue are independent of
+	// scheduling, and without a worker they queue forever. See the headless
+	// branch after this block.
 	var sched *scheduler.Scheduler
 	if cfg.Scheduler.Enabled {
 		adapter := scheduler.NewStoreAdapter(st)
@@ -876,6 +891,20 @@ func New(cfg config.Config) (*Daemon, error) {
 		br.SetTimezone(cfg.Scheduler.Timezone)
 	}
 
+	// Queue workers WITHOUT the schedule tick. The queue is infrastructure that
+	// scheduled fires happen to use, not a scheduler component: message intake
+	// and agent tasks need a worker whether or not anything is scheduled. An
+	// agent with scheduling off previously had a queue nobody drained, so CLI
+	// messages sat queued forever.
+	if !cfg.Scheduler.Enabled && !cfg.Scheduler.DurableQueueDisabled {
+		sched = scheduler.New(scheduler.NewStoreAdapter(st), nil, nil, cfg.Scheduler.Timezone)
+		owner := fmt.Sprintf("boot-%d-%d", os.Getpid(), time.Now().UnixNano())
+		sched.SetQueue(scheduler.NewStoreAdapter(st), owner)
+		sched.SetAgentTaskHandler(st)
+		wireMessageTurns(sched, br, st)
+		slog.Info("queue workers enabled without scheduler", "owner", owner)
+	}
+
 	d := &Daemon{
 		cfg:       cfg,
 		bot:       bot,
@@ -1049,6 +1078,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		} else {
 			go d.scheduler.Run(ctx)
 		}
+	} else if d.scheduler != nil {
+		// Queue-only: workers, no tick.
+		go d.scheduler.RunWorkers(ctx)
 	}
 
 	// Start stale session cleanup ticker — register as pm-managed if available.
@@ -1337,7 +1369,7 @@ func containsStr(ss []string, v string) bool {
 
 // telegramTransport implements bridge.Transport for Telegram.
 type telegramTransport struct {
-	bot *telegram.Bot
+	bot outbound
 }
 
 func (t *telegramTransport) Notify(chatID, threadID int64, msg string) {

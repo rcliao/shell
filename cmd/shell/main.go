@@ -1794,8 +1794,22 @@ func loadConfigFrom(path string) config.Config {
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		slog.Warn("failed to load config, using defaults", "error", err)
-		cfg = config.Default()
+		// A MALFORMED config is fatal. It used to warn and fall back to
+		// defaults, which is far worse than it sounds: the daemon would come up
+		// on the DEFAULT database rather than the agent's, so an agent with
+		// years of history would start empty, with an empty allowlist, writing
+		// its pid and socket over the global ones. Read-only commands would
+		// cheerfully report on the wrong agent.
+		//
+		// Observed on 2026-08-06 while standing up a test agent: one wrong type
+		// in the JSON and the daemon ran entirely on defaults, announcing it in
+		// a single WARN line among hundreds.
+		//
+		// A MISSING config still falls back — config.Load returns defaults with
+		// no error for that, and it is how a first run bootstraps.
+		fmt.Fprintf(os.Stderr, "config %s is invalid: %v\n", path, err)
+		fmt.Fprintln(os.Stderr, "refusing to continue on defaults — fix the config or pass a different --config")
+		os.Exit(1)
 	}
 	return cfg
 }

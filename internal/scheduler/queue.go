@@ -239,6 +239,27 @@ func (s *Scheduler) submitToQueue(sc ScheduleEntry, policy OverlapPolicy, occurr
 	return true
 }
 
+// RunWorkers starts the queue's workers WITHOUT the schedule tick loop.
+//
+// The workers lived inside Run, so an agent with scheduling disabled had a
+// queue nobody drained: message.turn tasks sat queued forever. That coupling
+// contradicts the whole premise — the queue is infrastructure that scheduled
+// fires happen to use, not a scheduler component. A headless agent reachable
+// only by CLI needs the workers and has no use for the tick.
+//
+// Blocks until ctx is cancelled, matching Run's contract.
+func (s *Scheduler) RunWorkers(ctx context.Context) {
+	if s.queue == nil {
+		<-ctx.Done()
+		return
+	}
+	slog.Info("worker: queue workers started without scheduler tick", "owner", s.queueOwner, "workers", queueWorkers)
+	s.sweepQueue()
+	s.runQueueWorkers(ctx, queueWorkers)
+	<-ctx.Done()
+	s.queueWG.Wait()
+}
+
 // runQueueWorkers leases and runs fires until ctx is cancelled.
 //
 // Workers poll rather than subscribe. The queue is SQLite and the work unit is
