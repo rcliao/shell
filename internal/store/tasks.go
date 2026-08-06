@@ -211,6 +211,12 @@ func (s *Store) leaseOnce(owner string, leaseFor time.Duration) (*Task, error) {
 		WHERE id = (
 			SELECT t.id FROM tasks t
 			WHERE t.state = ?
+			  -- Attempts are enforced HERE, not only in FailTask. A crashed
+			  -- task is reclaimed straight back to queued, so a lease that
+			  -- ignored the budget would re-run it forever: reclaim, lease,
+			  -- crash, reclaim. Observed on 2026-08-06 — a chat turn with
+			  -- max_attempts=1 was replayed as attempt 2.
+			  AND t.attempts < t.max_attempts
 			  AND (t.not_before IS NULL OR t.not_before <= ?)
 			  -- Never hand out expired work. The sweep marks these terminal, but
 			  -- a lease can race it, and starting a stale beat is the exact
@@ -298,12 +304,29 @@ func (s *Store) FailTaskPermanent(id int64, errMsg string) error {
 // This replaces the age heuristic used for pending turns, which is
 // simultaneously too short for a slow turn and too long for a crash loop.
 func (s *Store) ReclaimTasks(currentOwner string) (int, error) {
+	now := time.Now().UTC()
+
+	// Retire first: a task whose attempts are spent has no replay left, and
+	// returning it to the queue would either re-run work that already used its
+	// budget or leave a row nobody can ever lease. Work that kills its worker
+	// every time must stop, visibly, rather than loop.
+	if _, err := s.db.Exec(`
+		UPDATE tasks
+		SET state = ?, lease_owner = '', leased_until = NULL, done_at = ?,
+		    last_error = 'abandoned by a dead owner with no attempts remaining'
+		WHERE state = ? AND (lease_owner != ? OR leased_until < ?)
+		  AND attempts >= max_attempts
+	`, TaskFailed, now, TaskLeased, currentOwner, now); err != nil {
+		return 0, err
+	}
+
 	res, err := s.db.Exec(`
 		UPDATE tasks
 		SET state = ?, lease_owner = '', leased_until = NULL,
 		    last_error = 'lease reclaimed: owner gone or lease expired'
 		WHERE state = ? AND (lease_owner != ? OR leased_until < ?)
-	`, TaskQueued, TaskLeased, currentOwner, time.Now().UTC())
+		  AND attempts < max_attempts
+	`, TaskQueued, TaskLeased, currentOwner, now)
 	if err != nil {
 		return 0, err
 	}

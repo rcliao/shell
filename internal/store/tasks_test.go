@@ -495,3 +495,74 @@ func TestCleanupRemovesOnlyFinishedTasks(t *testing.T) {
 		}
 	}
 }
+
+// A task with no attempts left must never be leased again, however it got back
+// to the queue. Attempts were enforced only in FailTask, so a crashed task —
+// which reclaim returns straight to queued — could be re-run past its budget
+// forever: reclaim, lease, crash, reclaim. Caught in production on 2026-08-06
+// when a chat turn with max_attempts=1 was replayed as attempt 2.
+func TestExhaustedTaskIsNeverLeasedAgain(t *testing.T) {
+	s := taskStore(t)
+	id, _, err := s.EnqueueTask(Task{Kind: "chat", IdempotencyKey: "one-shot", MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.LeaseTask("boot-A", time.Hour)
+	if err != nil || got == nil {
+		t.Fatalf("first lease = %v, %v", got, err)
+	}
+	if got.Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", got.Attempts)
+	}
+
+	// Process A dies. B reclaims: the budget is spent, so this is terminal
+	// rather than replayable.
+	n, err := s.ReclaimTasks("boot-B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("reclaimed %d tasks for replay; a task with no attempts left must not be requeued", n)
+	}
+	after, err := s.GetTask(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != TaskFailed {
+		t.Fatalf("state = %q, want failed — exhausted work must retire visibly, not linger", after.State)
+	}
+	if again, _ := s.LeaseTask("boot-B", time.Hour); again != nil {
+		t.Fatalf("leased task %d again at attempt %d, past its budget", again.ID, again.Attempts)
+	}
+}
+
+// The budget must still allow the replay it was sized for: max_attempts=2 is
+// one normal run plus one crash recovery, which is what scheduled fires use.
+func TestBudgetedTaskStillReplaysOnce(t *testing.T) {
+	s := taskStore(t)
+	if _, _, err := s.EnqueueTask(Task{Kind: "fire", IdempotencyKey: "two-shot", MaxAttempts: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.LeaseTask("boot-A", time.Hour); err != nil || got == nil {
+		t.Fatalf("first lease = %v, %v", got, err)
+	}
+	n, err := s.ReclaimTasks("boot-B")
+	if err != nil || n != 1 {
+		t.Fatalf("reclaimed %d (%v), want 1 — a budgeted task must survive a crash", n, err)
+	}
+	replay, err := s.LeaseTask("boot-B", time.Hour)
+	if err != nil || replay == nil {
+		t.Fatalf("replay lease = %v, %v", replay, err)
+	}
+	if replay.Attempts != 2 {
+		t.Errorf("replay attempts = %d, want 2", replay.Attempts)
+	}
+	// Now it is spent.
+	if _, err := s.ReclaimTasks("boot-C"); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := s.LeaseTask("boot-C", time.Hour); again != nil {
+		t.Error("a task replayed once was leased a third time")
+	}
+}
