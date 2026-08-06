@@ -150,6 +150,10 @@ type Scheduler struct {
 	queueWake chan struct{}
 	// taskResults reads back agent-written results; see agenttask.go.
 	taskResults TaskResults
+	// sinks maps transport name to delivery sink; runMessage executes an
+	// inbound message turn. See messageturn.go.
+	sinks      sinkRegistry
+	runMessage MessageRunner
 	// handlers maps task kind to handler. Written during wiring, read by the
 	// workers, so it must be fully populated before Run starts.
 	handlers map[string]Handler
