@@ -1,6 +1,6 @@
 # Durable task system
 
-Status: proposal. Nothing here is built yet.
+Status: steps 0-2 shipped and validated in production; step 3 is the design below.
 
 ## Why
 
@@ -533,13 +533,64 @@ interval — a beat is worth replaying within its own period and not after.
 Deep beats are the exception worth tuning separately: 340s of work is worth
 re-running even somewhat late, where a routine 8pm check-in is not.
 
-**Step 3 — enqueue Telegram, shadow mode.** The handler enqueues alongside the
-existing path while `pending_turns` stays authoritative. Compare the two ledgers
-for a week; any divergence is a bug found for free.
+**Step 3 — transport-agnostic intake.** Telegram stops being the message path
+and becomes one PRODUCER of a generic `message.turn` kind. A TUI, Discord, or a
+web client is then a second producer with no queue changes at all.
 
-**Step 4 — cut Telegram over.** The handler dequeues instead of executing on
-arrival. `pending_turns` is retired. Coalescing and absorb move to queue
-operations here, with their existing tests as the regression gate.
+This is a bigger goal than "give Telegram replay protection", and it is the
+right one: the thing that makes a message a unit of work is (who said it, in
+which conversation, what it says). None of that is Telegram. What IS Telegram
+is how the message arrived and how the reply gets rendered.
+
+```
+payload: {
+  transport:   "telegram" | "tui" | ...,   -- names the delivery adapter
+  external_id: "12366",                    -- the transport's own message id
+  chat_id, thread_id,                      -- conversation address
+  sender_id, sender_name,
+  text,
+  media: [...]                             -- transport-neutral references
+}
+```
+
+Three decisions carry the design.
+
+**The idempotency key is (transport, external_id)** — a NATURAL key, not a
+content hash. Telegram redelivers updates on reconnect, and two identical
+"ok" messages minutes apart are different work while the same message id is
+always the same work. A content hash gets both of those backwards.
+
+**The partition key must be (chat, thread), not chat.** Sessions are keyed by
+both — the family group alone runs five subprocesses, one per topic — so
+partitioning by chat serializes conversations that have no reason to wait for
+each other. `FirePartitionKey` currently gets this wrong for scheduled fires
+too; it is a latency bug there and would be a correctness-shaped bug here.
+
+**Intake is transport-agnostic; DELIVERY is not, and pretending otherwise is
+the trap.** Telegram streams a reply by editing a message in place; a TUI
+writes to a terminal; a webhook posts once at the end. So the queue carries the
+transport name and the worker resolves a delivery sink from it. The sink
+interface is the narrow part worth getting right — roughly "start a reply",
+"update it", "finish it", "attach media" — and Telegram's live-editing streamer
+becomes its first implementation rather than the assumed one.
+
+**Step 4 — cut over behind a kill switch.** Not shadow mode. The original plan
+was to dual-write for a week and compare ledgers, on the theory that the queue
+needed proving. It has since been proven where it counts: a fire was killed
+mid-turn with SIGKILL and replayed by the next process. Dual-writing the
+family's actual messages would mean two sources of truth on the one path where
+a duplicate is a duplicate message to a human, so the safer shape is the one
+already used twice — a config kill switch, with `pending_turns` kept
+write-only for a few days as a cross-check before removal.
+
+Blast radius is genuinely higher here than anywhere else in this document. A
+replayed heartbeat is noop-suppressed and dedup'd. A replayed chat turn is a
+message the family reads twice. The natural idempotency key is what makes that
+impossible rather than unlikely.
+
+Coalescing and absorb move to queue operations, with their existing tests as
+the regression gate — including the late-race guard added after absorb answered
+three consecutive messages a turn behind on 2026-08-06.
 
 **Step 5 — a2a and delegation.** The last trigger type. The old shared task
 store is retired: its rows migrate in as tasks with `source='a2a'`,
