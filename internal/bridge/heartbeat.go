@@ -52,7 +52,12 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 
 	hasConsolidation := consolidation != ""
 	hasTaskStore := b.taskStore != nil
-	hasContent := len(exchanges) > 0 || insights != "" || hasConsolidation || isDeep || hasTaskStore
+	// Computed before the gate below, not after: a failed task on a quiet day
+	// is exactly the case where nothing else would carry the beat, and
+	// enriching only when there is already something to say would hide the
+	// work precisely when it is the only thing worth reporting.
+	queueWork := b.queueDigest()
+	hasContent := len(exchanges) > 0 || insights != "" || hasConsolidation || isDeep || hasTaskStore || queueWork != ""
 
 	slog.Info("heartbeat: enrichment",
 		"chat_id", chatID,
@@ -79,6 +84,21 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString(consolidation)
 		sb.WriteString("\n")
 	}
+
+	// Durable queue: work this agent registered, and work that failed.
+	//
+	// Injected rather than left to a tool call, because the tool call does not
+	// happen. Over seven days the two live agents called shell_task once
+	// between them, and that once was a smoke test — while calling ghost_put a
+	// hundred times. The read half of a tool gets skipped even when the
+	// instructions describe it, which is the same failure shell_schedule had
+	// (three calls in fourteen days, all writes, never a list).
+	//
+	// So the queue's state arrives as part of the situation instead of as an
+	// answer to a question nobody asks. A task that outlives the turn that
+	// created it is only useful if something later notices it, and the
+	// heartbeat is the only moment that reliably looks around.
+	sb.WriteString(queueWork)
 
 	// Shared task store activity (self-tasks + delegation)
 	if b.taskStore != nil {
