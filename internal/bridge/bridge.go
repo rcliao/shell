@@ -68,6 +68,9 @@ type Bridge struct {
 	repoDir     string // main repository working directory
 	worktreeDir string // base directory for worktree checkouts
 
+	// turnLedger records inbound messages for replay. nil = pending_turns.
+	turnLedger TurnLedger
+
 	reactionMap map[string]string // emoji → action (e.g. "👍":"go")
 
 	// Self-restart: when a plan modifies shell's own source

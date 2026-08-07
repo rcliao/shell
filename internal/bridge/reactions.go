@@ -337,12 +337,58 @@ func (b *Bridge) Correct(ctx context.Context, chatID int64, args string) (string
 	return fmt.Sprintf("Updated memory #%d (**%s**): %s", idx, entry.Key, newContent), nil
 }
 
+// TurnLedger records an inbound message from receipt to answered, so a restart
+// mid-turn cannot silently eat it.
+//
+// It is an interface because there are two implementations with identical
+// semantics and very different guarantees: the original pending_turns table,
+// and the durable queue. Putting the seam HERE rather than in the Telegram
+// handler is deliberate — the handler is ~600 lines of streaming, coalescing
+// and locking that has been tuned against real traffic, and the safest way to
+// move Telegram onto the queue is to not touch it at all.
+type TurnLedger interface {
+	// Begin records the message. alreadyDone reports a redelivery of something
+	// already answered, which the caller drops.
+	Begin(chatID, threadID int64, telegramMsgID int, senderName, text string) (alreadyDone bool, err error)
+	// Complete marks it answered.
+	Complete(chatID int64, telegramMsgID int) error
+	// Abandon gives up on answering in this process, leaving the message to be
+	// replayed. Distinct from Complete because the person is still unanswered.
+	Abandon(chatID int64, telegramMsgID int) error
+}
+
+// SetTurnLedger swaps in a different ledger. Unset means pending_turns, which
+// keeps every existing caller and test on the original path.
+func (b *Bridge) SetTurnLedger(l TurnLedger) { b.turnLedger = l }
+
 // BeginPendingTurn / CompletePendingTurn expose the replay ledger to the
 // telegram handler (V2-H30: replay turns killed by a deploy restart).
 func (b *Bridge) BeginPendingTurn(chatID, threadID int64, telegramMsgID int, senderName, text string) (bool, error) {
+	if b.turnLedger != nil {
+		return b.turnLedger.Begin(chatID, threadID, telegramMsgID, senderName, text)
+	}
 	return b.store.BeginPendingTurn(chatID, threadID, telegramMsgID, senderName, text)
 }
 
 func (b *Bridge) CompletePendingTurn(chatID int64, telegramMsgID int) error {
+	if b.turnLedger != nil {
+		return b.turnLedger.Complete(chatID, telegramMsgID)
+	}
 	return b.store.CompletePendingTurn(chatID, telegramMsgID)
+}
+
+// AbandonPendingTurn releases a turn this process cannot finish, so something
+// else can answer it.
+//
+// On pending_turns this is a no-op: an unfinished row is already "pending", and
+// the boot replay will find it. On the queue it matters twice over — the task
+// goes back on the queue for a worker to replay in SECONDS rather than at the
+// next restart, and, just as importantly, it stops holding its partition. A
+// lease abandoned by a live process would otherwise block that conversation's
+// scheduled work until the lease aged out.
+func (b *Bridge) AbandonPendingTurn(chatID int64, telegramMsgID int) error {
+	if b.turnLedger != nil {
+		return b.turnLedger.Abandon(chatID, telegramMsgID)
+	}
+	return nil
 }

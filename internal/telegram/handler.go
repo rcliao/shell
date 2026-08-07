@@ -2150,6 +2150,13 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	})
 	if err != nil {
 		slog.Error("failed to send placeholder — turn stays pending for replay", "error", err, "chat_id", msg.Chat.ID, "thread_id", threadID)
+		// This turn is over before it began, and the sender is unanswered.
+		// Hand it back explicitly rather than just returning: on the queue a
+		// silent return would leave the turn holding its conversation's
+		// partition until the lease aged out.
+		if aerr := h.bridge.AbandonPendingTurn(msg.Chat.ID, msg.ID); aerr != nil {
+			slog.Warn("failed to abandon pending turn", "error", aerr, "chat_id", msg.Chat.ID)
+		}
 		return
 	}
 	msgID := placeholder.ID

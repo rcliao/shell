@@ -352,6 +352,17 @@ type SchedulerConfig struct {
 	// A config edit plus SIGHUP beats a code revert when something goes wrong
 	// at 9pm.
 	DurableQueueDisabled bool `json:"durable_queue_disabled"`
+	// Telegram intake through the durable queue instead of the pending_turns
+	// ledger. Deliberately an ENABLE flag rather than the *_disabled pattern
+	// used above: those guard features already proven on live traffic, and
+	// this one touches the path every family message takes. Default off means
+	// a new agent, and any agent whose config predates this, keeps the ledger
+	// it has been running on.
+	//
+	// The two are mutually exclusive by construction. Both would mean two
+	// replay mechanisms racing over one message, which is how a restart sends
+	// somebody the same answer twice.
+	TelegramQueueIntake bool `json:"telegram_queue_intake"`
 }
 
 type ReloadConfig struct {

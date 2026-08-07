@@ -588,9 +588,30 @@ replayed heartbeat is noop-suppressed and dedup'd. A replayed chat turn is a
 message the family reads twice. The natural idempotency key is what makes that
 impossible rather than unlikely.
 
-Coalescing and absorb move to queue operations, with their existing tests as
-the regression gate — including the late-race guard added after absorb answered
-three consecutive messages a turn behind on 2026-08-06.
+**What shipped is narrower than the paragraph above originally promised, on
+purpose.** This step said coalescing and absorb would "move to queue
+operations". They did not. Execution stays exactly where it was: the handler
+runs the turn inline, holding the per-topic lock, with the coalescing waiters
+and the absorb path untouched. What moved is the LEDGER and the REPLAY.
+
+The reason is that those are the weak parts and the rest is not. `pending_turns`
+was text-only, had no attempt limit, no expiry, and a replay that ran once at
+boot. The 600 lines around it are tuned against real traffic and carry a fix for
+a race found on live messages the day before this shipped. Rewriting the tuned
+half to reach the broken half would have been the expensive way round.
+
+So a Telegram message is now a `message.turn` task created ALREADY LEASED by the
+handler that will run it — durable, invisible to workers while its owner lives,
+and reclaimed by the ordinary path when that owner dies. Boot owners carry a
+start timestamp, so a SIGHUP exec that keeps the PID still counts as a new
+owner. Moving coalescing into the queue stays available as a later step, and the
+queue's partition keys already express it; it is no longer a prerequisite.
+
+One hazard this introduces that the ledger did not have: a leased task holds its
+partition, so a turn abandoned by a LIVE process would block that conversation's
+scheduled work until the lease aged out. Handler paths that give up without
+answering — a placeholder send that fails past its flood retries — therefore
+requeue explicitly rather than returning silently.
 
 **Step 5 — a2a and delegation.** The last trigger type. The old shared task
 store is retired: its rows migrate in as tasks with `source='a2a'`,

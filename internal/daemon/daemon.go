@@ -782,9 +782,22 @@ func New(cfg config.Config) (*Daemon, error) {
 			// the agent owns judgment — see internal/scheduler/agenttask.go.
 			sched.SetAgentTaskHandler(st)
 			// Message intake. Registers the CLI transport and the runner that
-			// executes a turn against the live agent — see clichat.go. Telegram
-			// becomes a producer of the same kind in a later step.
+			// executes a turn against the live agent — see clichat.go.
 			wireMessageTurns(sched, br, st)
+			// Telegram as a second producer of the same kind. Only the ledger
+			// and the replay move; the handler still runs turns inline. See
+			// telegramqueue.go.
+			// Both halves or neither: a ledger with no sink would record turns
+			// it has no way to replay, and only discover that at the moment it
+			// tried. A headless agent has no Telegram to take intake from
+			// anyway.
+			if cfg.Scheduler.TelegramQueueIntake && bot != nil {
+				br.SetTurnLedger(&queueTurnLedger{store: st, owner: owner})
+				wireTelegramQueue(sched, bot.SendText)
+				slog.Info("telegram intake: durable queue", "owner", owner)
+			} else if cfg.Scheduler.TelegramQueueIntake {
+				slog.Info("telegram intake: queue requested but no telegram; keeping ledger")
+			}
 		}
 
 		// Wire task polling if task store is available.
@@ -1128,7 +1141,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// still done=0 in the ledger are user messages whose "Thinking..."
 	// placeholder is stranded. Answer them now; replies arrive as fresh
 	// messages. Runs after the bot begins polling.
-	go d.replayUnfinishedTurns(ctx)
+	//
+	// Skipped entirely when the queue owns intake: those turns are tasks now,
+	// and the reclaim path replays them. Running both would answer one message
+	// twice.
+	if !d.cfg.Scheduler.TelegramQueueIntake {
+		go d.replayUnfinishedTurns(ctx)
+	}
 
 	// Start bot (blocks until ctx is cancelled). The poller gets its own
 	// cancellable context so Drain can stop new updates independently of

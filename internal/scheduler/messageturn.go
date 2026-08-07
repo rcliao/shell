@@ -48,6 +48,11 @@ type MessageTurn struct {
 	// part of the stored payload — a task cannot know its own id at enqueue
 	// time — but a detached sink needs it to write the reply back.
 	TaskID int64 `json:"-"`
+	// Attempt is 1 on the first run and higher on a replay. Also not stored:
+	// it is a property of the run, not of the message. A runner needs it
+	// because a replayed turn is answering late after an outage, and an agent
+	// that cannot perceive the gap invents explanations for it.
+	Attempt int `json:"-"`
 }
 
 // Sink renders a reply back to wherever the message came from.
@@ -128,6 +133,7 @@ func (s *Scheduler) handleMessageTurn(ctx context.Context, t LeasedTask) (string
 	}
 
 	m.TaskID = t.ID
+	m.Attempt = t.Attempt
 	sink, err := s.sinkFor(m)
 	if err != nil {
 		// No sink means the reply has nowhere to go. Running the turn anyway

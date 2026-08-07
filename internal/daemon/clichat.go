@@ -67,7 +67,13 @@ func wireMessageTurns(sched *scheduler.Scheduler, br *bridge.Bridge, st *store.S
 		// CLI turn. Accumulate here, at the one place that knows both shapes.
 		var sb strings.Builder
 		var mu sync.Mutex
-		resp, err := br.HandleMessageStreaming(ctx, m.ChatID, m.ThreadID, m.Text, m.SenderName, nil, nil,
+		// A replay is answering late after an outage. Say so in the prompt —
+		// see replayNote for why silence here produces invented excuses.
+		text := m.Text
+		if m.Attempt > 1 {
+			text += replayNote
+		}
+		resp, err := br.HandleMessageStreaming(ctx, m.ChatID, m.ThreadID, text, m.SenderName, nil, nil,
 			func(delta string) {
 				mu.Lock()
 				sb.WriteString(delta)
