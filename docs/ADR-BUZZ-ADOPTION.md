@@ -80,9 +80,29 @@ compare-and-swap at every layer — `ErrVersionConflict` in the store,
 `ghost_put` and `ghost_patch` MCP tools. Buzz's engram CAS is the same idea,
 keyed on a content hash instead of a monotonic version.
 
+### E. Adopt Buzz's shared docs (notes + canvas)
+
+This is the one capability shell genuinely lacks, and the reason it was
+considered: Telegram has no documents, so docs live in Google/Notion today,
+disconnected from the conversation.
+
+Pros: verified working. An agent updated a shared note from chat and *merged*
+rather than overwrote — prior sections survived. Notes are slug-addressable
+with a stable `naddr`; both agents read each other's. Canvas is a per-channel
+living document. Both sit beside the conversation with nothing to integrate.
+
+Cons, and they decide it: **editing is a raw markdown input**. For the
+non-technical daily user who currently keeps docs in Google/Notion, that is a
+downgrade in the only interaction that matters — hers. Neither notes nor canvas
+has revision history, and neither has a write guard, so a concurrent edit is
+lost silently (only `mem` has compare-and-swap).
+
+Cheaper alternative: extend shell's existing Google/Notion skill to format and
+edit better. That keeps her in an editor she already uses.
+
 ## Decision Outcome
 
-**Adopt none of the four. Revisit only on a demand signal.**
+**Adopt none of the five. Revisit only on a demand signal.**
 
 The decision changed while writing this. The draft recommended importing engram
 CAS into ghost; checking the code showed ghost has had compare-and-swap all
@@ -91,8 +111,19 @@ a present consumer: transport loses on measured usage, the runtime is a peer
 rather than an upgrade, and attested identity is real but has no verifier while
 the household is the only audience.
 
-The runner-up is D's identity half, held rather than rejected — it is the one
-idea here that shell genuinely lacks.
+The runner-up is E. Shared docs are the one capability shell lacks outright,
+and the agent-maintenance half works well — but the editing surface is markdown
+in a textarea, and the person who would use it most is the one it suits least.
+Improving shell's Google/Notion skill is the cheaper path to the same outcome.
+
+Three further tests changed nothing but are worth recording. Session continuity
+is *not* capped at `context_limit=12` — a fact survived 15 intervening messages
+because the ACP session persists, so the hypothesis that Buzz would degrade on
+long-running context was wrong. Proactive delivery works via
+`--heartbeat-interval`, but expresses only a fixed global interval where shell
+has 21 per-chat schedules with timezones and dated one-shots. And Buzz forums
+are votable threaded posts (`kind:45001`/`45003`), not containers — they are
+not equivalents of the five Telegram topics in use.
 
 ## Consequences
 
