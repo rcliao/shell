@@ -55,16 +55,21 @@ steering, which shell reached independently. They are alternative
 implementations of the same role, and convergent design is evidence both are
 reasonable.
 
-### Verified working, with two defects
+### Verified working; one real defect, one retracted
 
-Round trip confirmed: mention → relay → harness → ACP session → reply posted
-under the agent key, with the NIP-AE core engram injected into the system
-prompt automatically.
+Round trip confirmed: mention → relay → harness → ACP session → reply under the
+agent key, engram injected automatically. Two agents then delegated to each
+other unattended.
 
-Two defects found. `--respond-to allowlist` silently dropped a mention with no
-log line at any level — a dropped inbound leaving no trace. And workflow runs
-never materialise: `trigger` returns a `run_id`, `runs` returns `[]`, attested
-or not, and the action schema has no `invoke_agent`.
+Real defect: workflow runs never materialise — `trigger` returns a `run_id`,
+`runs` returns `[]`, and no `invoke_agent` action exists.
+
+**Retracted:** an earlier draft reported `--respond-to allowlist` dropping
+mentions silently. At `RUST_LOG=debug` it admits them normally. The apparent
+drop was `agent_claimed` logging at DEBUG plus `plan` mode blocking the reply.
+
+Log-level filtering caused two false findings here. Claims need DEBUG logs or
+CLI output, never absence of log lines.
 
 ## Code References
 
@@ -75,9 +80,10 @@ or not, and the action schema has no `invoke_agent`.
 
 ## Open Questions
 
-1. Is `--respond-to allowlist` broken, or does it need a different pubkey
-   format? It failed closed and silent, which is the dangerous direction.
-2. Does any launcher-agnostic way exist to surface a hand-launched agent in
+1. Does any launcher-agnostic way exist to surface a hand-launched agent in
    the desktop UI, or is presence the only signal available?
-3. Would scoping the attestation (`kind=30174`) break the harness's owner
+2. Would scoping the attestation (`kind=30174`) break the harness's owner
    resolution, which appears to read the tag regardless of conditions?
+3. Does a steered turn end, or absorb later mentions indefinitely? The
+   7200s deadline extension is logged; turn closure was not observed because
+   `pool::prompt` was filtered out.
