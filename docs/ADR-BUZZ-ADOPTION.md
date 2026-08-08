@@ -28,10 +28,19 @@ household, on phones, with heavy media and scheduled push.
 
 Pros: one identity model, searchable history, agents and humans as peers.
 
+The media path is no longer untested: an owner-posted image round-tripped
+correctly. Blossom storage is content-addressed (the filename is the sha256,
+which verified byte-for-byte on download) and auth-gated (401 unauthenticated)
+— both stronger than shell's flat `~/.shell/media` archive, which has no
+checksum. But the agent only *saw* it by shelling out to `buzz media get` and
+reading the file; the harness never passed it as an ACP image block despite
+advertising `promptCapabilities: {image: true}`. Shell passes typed `ImageInfo`
+into the turn with no incantation.
+
 Cons: the mother would have to move to a new mobile app; buzz's shipping
 client showed no push notification path, and push is the entire delivery
-mechanism for the 21 schedules. 586 photos in five weeks would move to an
-untested media path. Relay-side outage becomes a family outage. No migration
+mechanism for the 21 schedules. 586 photos in five weeks would move to a media
+path that works but needs the agent to know a CLI call. Relay-side outage becomes a family outage. No migration
 path for ~6 GB of existing transcripts, and signing old history with keys that
 did not exist then would forge the audit trail the migration was for.
 
@@ -100,6 +109,10 @@ infrastructure that demonstrably delivers push.
 Also positive, and the real return on this evaluation: it surfaced a live
 drain-barrier regression and confirmed that shell's bridge, coalescing,
 steering and CAS choices independently match what a well-resourced team built.
+
+One primitive is worth stealing without adopting anything: content-addressed
+media. A sha256 column on shell's media ledger would make a truncated or
+substituted photo detectable, which today nothing would notice.
 
 Revisit when: a second household machine, a third agent, or an outside
 collaborator needs to reach these agents — that is when relay-side services and
