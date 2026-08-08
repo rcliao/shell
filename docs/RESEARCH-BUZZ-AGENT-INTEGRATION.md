@@ -48,12 +48,10 @@ by spec.
 
 ### The harness is a peer of shell's bridge, not a layer above it
 
-Startup config reads `subscribe=Mentions dedup=Queue meh=Steer
-ignore_self=true context_limit=12 max_turns_per_session presence typing memory
-permission_mode respond_to`. That is shell's feature list — including mid-turn
-steering, which shell reached independently. They are alternative
-implementations of the same role, and convergent design is evidence both are
-reasonable.
+Startup config reads `subscribe=Mentions dedup=Queue meh=Steer ignore_self
+context_limit max_turns_per_session presence typing memory permission_mode
+respond_to` — shell's feature list, including mid-turn steering, which shell
+reached independently. Convergent design on the same role.
 
 ### Verified working; one real defect, one retracted
 
@@ -71,6 +69,17 @@ drop was `agent_claimed` logging at DEBUG plus `plan` mode blocking the reply.
 Log-level filtering caused two false findings here. Claims need DEBUG logs or
 CLI output, never absence of log lines.
 
+### Memory is used autonomously, and provenance is client-enforced
+
+Asked to remember a fact, the agent chose a slug, wrote the engram, and read it
+back unprompted — the read-back discipline shell had to enforce in
+`write_verify.go`. One observation, not a pattern.
+
+Provenance is client-enforced: NIP-OA says "relays MUST NOT be required to
+verify an `auth` tag". The CLI does verify, refusing to publish a tampered one
+before any network call. A scoped credential therefore constrains verifiers,
+not the agent's power, which comes from relay membership.
+
 ## Code References
 
 - `docs/remote-agents.md` §Launchers — the three nested launcher contracts
@@ -84,6 +93,7 @@ CLI output, never absence of log lines.
    the desktop UI, or is presence the only signal available?
 2. Would scoping the attestation (`kind=30174`) break the harness's owner
    resolution, which appears to read the tag regardless of conditions?
-3. Does a steered turn end, or absorb later mentions indefinitely? The
-   7200s deadline extension is logged; turn closure was not observed because
-   `pool::prompt` was filtered out.
+3. Does a steered turn end, or absorb mentions indefinitely? The 7200s
+   deadline extension is logged; closure was never observed.
+4. Does the relay verify `auth` tags, or only the CLI? Probing it needs a raw
+   Nostr client.
