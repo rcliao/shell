@@ -1,6 +1,6 @@
 # ADR: how much of Buzz to adopt
 
-Status: proposed · Date: 2026-08-08
+Status: **accepted** (owner, 2026-08-08) · Date: 2026-08-08
 
 ## Context and Problem Statement
 
@@ -28,19 +28,14 @@ household, on phones, with heavy media and scheduled push.
 
 Pros: one identity model, searchable history, agents and humans as peers.
 
-The media path is no longer untested: an owner-posted image round-tripped
-correctly. Blossom storage is content-addressed (the filename is the sha256,
-which verified byte-for-byte on download) and auth-gated (401 unauthenticated)
-— both stronger than shell's flat `~/.shell/media` archive, which has no
-checksum. But the agent only *saw* it by shelling out to `buzz media get` and
-reading the file; the harness never passed it as an ACP image block despite
-advertising `promptCapabilities: {image: true}`. Shell passes typed `ImageInfo`
-into the turn with no incantation.
+Media works: an owner-posted image round-tripped, and Blossom storage is
+content-addressed (sha256 verified byte-for-byte) and auth-gated — both
+stronger than shell's flat archive. But the agent only *saw* it by shelling out
+to `buzz media get`; the harness never passed it as an ACP image block.
 
-Cons: the mother would have to move to a new mobile app; buzz's shipping
-client showed no push notification path, and push is the entire delivery
-mechanism for the 21 schedules. 586 photos in five weeks would move to a media
-path that works but needs the agent to know a CLI call. Relay-side outage becomes a family outage. No migration
+Cons: the mother would move to a new mobile app; buzz's shipping client showed
+no push path, and push is the entire delivery mechanism for the 21 schedules.
+586 photos in five weeks would move to a media path needing a CLI call. Relay-side outage becomes a family outage. No migration
 path for ~6 GB of existing transcripts, and signing old history with keys that
 did not exist then would forge the audit trail the migration was for.
 
@@ -86,19 +81,14 @@ This is the one capability shell genuinely lacks, and the reason it was
 considered: Telegram has no documents, so docs live in Google/Notion today,
 disconnected from the conversation.
 
-Pros: verified working. An agent updated a shared note from chat and *merged*
-rather than overwrote — prior sections survived. Notes are slug-addressable
-with a stable `naddr`; both agents read each other's. Canvas is a per-channel
-living document. Both sit beside the conversation with nothing to integrate.
+Pros: verified. An agent updated a shared note from chat and *merged* rather
+than overwrote. Notes are slug-addressable; both agents read each other's.
+Canvas is a per-channel living document.
 
-Cons, and they decide it: **editing is a raw markdown input**. For the
-non-technical daily user who currently keeps docs in Google/Notion, that is a
-downgrade in the only interaction that matters — hers. Neither notes nor canvas
-has revision history, and neither has a write guard, so a concurrent edit is
-lost silently (only `mem` has compare-and-swap).
-
-Cheaper alternative: extend shell's existing Google/Notion skill to format and
-edit better. That keeps her in an editor she already uses.
+Cons, and they decide it: **editing is a raw markdown input** — a downgrade in
+the only interaction that matters, hers. No revision history, and no write
+guard on either (only `mem` has compare-and-swap). Extending shell's
+Google/Notion skill is the cheaper path to the same outcome.
 
 ## Decision Outcome
 
@@ -116,14 +106,14 @@ and the agent-maintenance half works well — but the editing surface is markdow
 in a textarea, and the person who would use it most is the one it suits least.
 Improving shell's Google/Notion skill is the cheaper path to the same outcome.
 
-Three further tests changed nothing but are worth recording. Session continuity
-is *not* capped at `context_limit=12` — a fact survived 15 intervening messages
-because the ACP session persists, so the hypothesis that Buzz would degrade on
-long-running context was wrong. Proactive delivery works via
-`--heartbeat-interval`, but expresses only a fixed global interval where shell
-has 21 per-chat schedules with timezones and dated one-shots. And Buzz forums
-are votable threaded posts (`kind:45001`/`45003`), not containers — they are
-not equivalents of the five Telegram topics in use.
+Three tests changed nothing but corrected me, and are detailed in
+`RESEARCH-BUZZ-AGENT-INTEGRATION.md`: continuity is *not* capped at
+`context_limit=12` (the ACP session persists); proactive works but expresses one
+global interval against shell's 21 scheduled jobs; forums are votable threaded
+posts, not topic containers.
+
+**Owner's framing, accepted:** Buzz is not mature enough to switch to, but it
+is a source of design inspiration for shell.
 
 ## Consequences
 
@@ -141,9 +131,20 @@ Also positive, and the real return on this evaluation: it surfaced a live
 drain-barrier regression and confirmed that shell's bridge, coalescing,
 steering and CAS choices independently match what a well-resourced team built.
 
-One primitive is worth stealing without adopting anything: content-addressed
-media. A sha256 column on shell's media ledger would make a truncated or
-substituted photo detectable, which today nothing would notice.
+Follow-ups this evaluation earned, in priority order:
+
+1. **ACP-shaped process boundary.** `buzz-acp` talks to any agent over a
+   standard stdio protocol, so goose, codex and Claude are interchangeable.
+   Shell's bridge↔process boundary is bespoke. Adopting that shape would make
+   the agent runtime swappable and testable without a live model.
+2. **A2A on stable ids.** Buzz routes by pubkey in a `p` tag — unspoofable, and
+   threads are addressable units. Shell matches names and keeps delegation in a
+   shared store, which is the `[relay]`-directive failure class.
+3. **A canvas per Telegram topic.** The one capability shell lacks outright: a
+   living document bound to a conversation. Buzz's editing surface is unusable
+   for the primary user, so the move is shell's own doc skill, not Buzz's store.
+4. **Content-addressed media.** A sha256 column on the media ledger makes a
+   truncated or substituted photo detectable; today nothing would notice.
 
 Revisit when: a second household machine, a third agent, or an outside
 collaborator needs to reach these agents — that is when relay-side services and
