@@ -54,27 +54,36 @@ minus ExecutionProfile, model/effort routing, rotation, ghost, write-hygiene
 and the Telegram-specific tuning. Trading a tuned implementation for an
 equivalent untuned one.
 
-### D. Adopt the identity and storage *primitives* only
+### D. Adopt the identity *primitive* only
 
 Pros: NIP-OA is ~90 lines of spec over BIP-340; a signer was implemented in an
 afternoon with no dependencies. Gives agents cryptographic identity, revocable
 authority, verifiable provenance, and a spoof-proof id for a2a routing — with
-Telegram as transport and no relay at all. Engram CAS (`hash` → `patch
---base-hash` → conflict) is a direct answer to ghost's last-writer-wins.
+Telegram as transport and no relay at all.
 
 Cons: provenance nobody verifies is inert while the family is the only
-audience. Adds a key-management burden with no present consumer.
+audience. Adds key management with no present consumer.
+
+Storage was originally listed here on the belief that engram CAS answered
+ghost's last-writer-wins. **That was false.** Ghost already has
+compare-and-swap at every layer — `ErrVersionConflict` in the store,
+`--base-version` on `put`/`patch`, and `base_version` on the agent-facing
+`ghost_put` and `ghost_patch` MCP tools. Buzz's engram CAS is the same idea,
+keyed on a content hash instead of a monotonic version.
 
 ## Decision Outcome
 
-**Take D's storage primitive now; keep A, B and C rejected; hold D's identity
-half until a verifier exists.**
+**Adopt none of the four. Revisit only on a demand signal.**
 
-Ghost gains compare-and-swap: a content hash on read, a guarded write, a
-distinct conflict outcome. That beats the runner-up (D-in-full) because CAS has
-a consumer today — two turns editing one memory silently clobber each other —
-while attested identity has none until someone outside the household needs to
-check who authorized an agent.
+The decision changed while writing this. The draft recommended importing engram
+CAS into ghost; checking the code showed ghost has had compare-and-swap all
+along, including on the tool agents actually call. With that gone, no layer has
+a present consumer: transport loses on measured usage, the runtime is a peer
+rather than an upgrade, and attested identity is real but has no verifier while
+the household is the only audience.
+
+The runner-up is D's identity half, held rather than rejected — it is the one
+idea here that shell genuinely lacks.
 
 ## Consequences
 
@@ -87,6 +96,10 @@ re-evaluation because Buzz moves fast.
 Positive: no new services, no key rotation policy, no second messaging client
 for a non-technical daily user, and the family's message path stays on
 infrastructure that demonstrably delivers push.
+
+Also positive, and the real return on this evaluation: it surfaced a live
+drain-barrier regression and confirmed that shell's bridge, coalescing,
+steering and CAS choices independently match what a well-resourced team built.
 
 Revisit when: a second household machine, a third agent, or an outside
 collaborator needs to reach these agents — that is when relay-side services and
