@@ -27,15 +27,24 @@ comparison for ghost's memory injection.
 
 ## Findings
 
-### Self-hosting's floor is five containers — but self-hosting is a choice
+### Hosted relays exist, and the CLI ships with the desktop cask
+
+Verified 2026-08-08 by installing. buzz.xyz offers Block-hosted relays, so the
+container floor below is optional. `brew install --cask block-buzz` (Buzz 0.5.7,
+signed by Block, Inc. EYF346PHUG) bundles `buzz`, `buzz-acp`, `buzz-agent` and
+`buzz-dev-mcp` in `Contents/MacOS/` — no Rust toolchain is needed despite the
+CLI README documenting only `cargo install`. Two gotchas: the npm package named
+`buzz-cli` is an unrelated Vue tool, and the bundled binary is quarantined, so
+running it from a shell hangs until it is copied out and the xattr cleared.
+Hosted communities are invite-only with per-community relay URLs; no public
+endpoint resolves.
+
+### Self-hosting's floor is five containers, if you choose it
 
 `deploy/compose/` defines relay, Postgres 17, Redis 7, MinIO and a minio-init
-bootstrap, plus four named volumes. `deploy/compose/README.md` states the
-dependencies are real "today" and that "minimal mode can simplify this later."
-There is no SQLite path and no single-binary mode. The published image
-`ghcr.io/block/buzz:main` is a moving tag with no semver server release. No
-measured resource footprint exists; the only published number is a Helm default
-(512Mi request / 2Gi limit) sized for a team, not benchmarked at two users.
+bootstrap. `deploy/compose/README.md` calls these real dependencies "today";
+there is no SQLite or single-binary path, and `ghcr.io/block/buzz:main` is a
+moving tag with no semver server release.
 
 ### Push notification support could not be confirmed in the shipping client
 
@@ -55,11 +64,11 @@ audit log — or making `Update` a no-op and losing streaming.
 
 ### The agent layer would displace shell's session machinery
 
-`buzz-acp` owns the agent subprocess. shell's per-(chat,thread) `claude --resume`
-sessions, ExecutionProfile, model/effort routing, rotation and ghost injection
-live in that layer. Adopting buzz-acp replaces them rather than integrating.
-Issue #2663 (a supported receive path for external long-lived processes) is the
-prerequisite for any integration that keeps shell's agent layer.
+`buzz-acp` owns the agent subprocess, where shell's per-(chat,thread)
+`claude --resume` sessions, ExecutionProfile, model routing, rotation and ghost
+injection live. Adopting it replaces them rather than integrating. Issue #2663
+(a receive path for external long-lived processes) is the prerequisite for any
+integration that keeps shell's agent layer.
 
 ### shell's intake seam is not the obstacle
 
@@ -68,15 +77,12 @@ transport-neutral, and a producer registers by implementing three methods. This
 is why "buzz is hard to add" is *not* a reason given here — difficulty is low;
 demand and operational cost are the problems.
 
-### A live regression was found during this review
+### A live regression was found during this review (since fixed)
 
-Drain phase 2 is dead on both production agents. `waitDeliveries` counts
-`pending_turns` rows, but the 2026-08-07 cutover routed writes to the queue
-ledger, so the count is now permanently 0 and the barrier returns immediately.
-`pending_turns` is frozen at 2026-08-08 01:17 (pika) and 2026-08-07 16:12
-(umbreon) while telegram tasks continue to 03:14 and 14:28. This silently
-disables the fix for the 2026-08-01 incident where a turn replayed in front of
-the family after drain declared idle.
+Drain phase 2 was dead on both agents: `waitDeliveries` counted `pending_turns`,
+but the 2026-08-07 cutover routed writes to the queue ledger, so it read 0
+forever and the barrier passed instantly — silently disabling the fix for the
+2026-08-01 replay incident. Fixed by routing the read through `TurnLedger`.
 
 ## Code References
 
@@ -91,8 +97,7 @@ the family after drain declared idle.
 
 1. Does the mobile client actually support push? Block's blog says yes; the
    client source says no. One grep across `mobile/` settles it.
-2. Does a hosted/default relay exist that a client could just join? Never
-   investigated — the research assumed self-hosting throughout.
-3. Has issue #2663 shipped? It changes integration cost, not the verdict.
-4. Would a Go Nostr client handle buzz's NIP-42 handshake and extended NIP-01
-   filters? Untested by anyone.
+2. Has issue #2663 shipped? It changes integration cost, not the verdict.
+3. Would a Go Nostr client handle buzz's NIP-42 handshake and extended NIP-01
+   filters? Untested. The bundled CLI is now a cheaper way to answer this than
+   writing one — it can be driven as a subprocess.
