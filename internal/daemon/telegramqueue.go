@@ -97,6 +97,15 @@ func (q *queueTurnLedger) Complete(chatID int64, msgID int) error {
 	return q.store.CompleteOwnedTask(telegramTurnKey(chatID, msgID), "")
 }
 
+// Undelivered lets drain block on turns this ledger owns.
+//
+// Counts every recent message turn, not only Telegram-sourced ones: a CLI turn
+// mid-flight is also somebody waiting on a reply, and a restart that discards it
+// loses the answer just the same.
+func (q *queueTurnLedger) Undelivered(maxAge time.Duration) (int, error) {
+	return q.store.CountUndeliveredTurnsSince(scheduler.TaskKindMessageTurn, maxAge)
+}
+
 func (q *queueTurnLedger) Abandon(chatID int64, msgID int) error {
 	return q.store.AbandonOwnedTask(telegramTurnKey(chatID, msgID),
 		"handler could not deliver a reply; requeued for replay", q.owner)

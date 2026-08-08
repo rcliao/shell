@@ -1,4 +1,4 @@
-# Plan: reject buzz, re-arm the drain barrier
+# Plan: decline buzz inside shell, re-arm the drain barrier
 
 ## Overview
 
@@ -34,12 +34,13 @@ the absence of complaints, which is exactly how this went unnoticed.
 
 ## What We're NOT Doing
 
-Not adopting buzz: not as a transport, not as an agent substrate, not its event
-model. Not running a relay, Postgres, Redis or MinIO. Not adding cryptographic
-agent identity, a signed event log, or hash-chained audit — under this threat
-model both daemons hold the key, so signing buys nothing. Not adopting
-buzz-workflow; the queue plus `docs/TASKS.md` already covers it, and importing
-that framing risks rebuilding the `agent.task` kind retired on 2026-08-07. Not
+Not adopting buzz into shell: not as a transport, not as an agent substrate,
+not self-hosting its stack. The fence covers shell's operational envelope only —
+buzz as a standalone experiment, or against someone else's relay, is a separate
+question this plan neither answers nor forbids. Not adding cryptographic agent
+identity or a signed event log; both daemons hold the key, so signing buys
+nothing. Not adopting buzz-workflow — the queue already covers it, and that
+framing risks rebuilding the `agent.task` kind retired on 2026-08-07. Not
 re-litigating the ledger cutover, which is working.
 
 ## Implementation Phases
@@ -92,6 +93,6 @@ would block every restart until timeout. Mitigated by reusing the existing
 5-minute grace window, so only recent turns count.
 
 **Accepted:** the mobile-push finding rests on second-hand research
-contradicted by Block's blog. The decision does not depend on it — the ops floor
-and the absent second user are each independently disqualifying — so it is
-recorded as an open question rather than resolved.
+contradicted by Block's blog, and the ops-floor argument only applies to
+self-hosting. What survives both caveats is that no second user needs this
+channel today, so the decision rests there and the rest is recorded as open.

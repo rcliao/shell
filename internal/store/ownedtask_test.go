@@ -231,3 +231,67 @@ func TestAbandonIgnoresATaskOwnedByANewerBoot(t *testing.T) {
 		t.Fatalf("state=%q owner=%q; a stale abandon stole a live replay", after.State, after.LeaseOwner)
 	}
 }
+
+// Drain blocks on this count, so what it includes decides whether a deploy
+// waits for a reply or walks over it. Non-terminal means somebody is waiting;
+// terminal means they either have their answer or provably will not.
+func TestCountUndeliveredTurnsCountsOnlyUnsettledWork(t *testing.T) {
+	s := testStore(t)
+	const kind = "message.turn"
+
+	mk := func(key, state string) {
+		t.Helper()
+		id, _, err := s.EnqueueTask(Task{Kind: kind, IdempotencyKey: key, MaxAttempts: 2})
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", key, err)
+		}
+		switch state {
+		case TaskQueued: // already queued
+		case TaskDone:
+			if err := s.CompleteTask(id, "answered"); err != nil {
+				t.Fatal(err)
+			}
+		case TaskFailed:
+			if err := s.FailTaskPermanent(id, "gave up"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	mk("t-queued", TaskQueued) // awaiting replay — someone is waiting
+	mk("t-done", TaskDone)     // answered
+	mk("t-failed", TaskFailed) // will never be answered; do not block deploys
+
+	// And one leased, i.e. being answered right now.
+	if _, _, err := s.BeginOwnedTask(Task{
+		Kind: kind, IdempotencyKey: "t-leased", MaxAttempts: 2,
+	}, "boot-1-111", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.CountUndeliveredTurnsSince(kind, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("undelivered = %d, want 2 (queued + leased); terminal states must not block a restart", n)
+	}
+}
+
+// An ancient stuck row is a past failure. Blocking every future deploy on it
+// would turn one lost reply into a permanently un-deployable daemon.
+func TestCountUndeliveredTurnsIgnoresAncientRows(t *testing.T) {
+	s := testStore(t)
+	const kind = "message.turn"
+	if _, _, err := s.BeginOwnedTask(Task{
+		Kind: kind, IdempotencyKey: "t-old", MaxAttempts: 2,
+	}, "boot-1-111", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountUndeliveredTurnsSince(kind, 5*time.Minute); err != nil || n != 1 {
+		t.Fatalf("fresh row: n=%d err=%v, want 1", n, err)
+	}
+	if n, err := s.CountUndeliveredTurnsSince(kind, time.Nanosecond); err != nil || n != 0 {
+		t.Fatalf("aged-out row: n=%d err=%v, want 0", n, err)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/store"
@@ -355,6 +356,12 @@ type TurnLedger interface {
 	// Abandon gives up on answering in this process, leaving the message to be
 	// replayed. Distinct from Complete because the person is still unanswered.
 	Abandon(chatID int64, telegramMsgID int) error
+	// Undelivered counts turns received within maxAge whose reply has not been
+	// delivered. Drain's second phase blocks on this, so a ledger that cannot
+	// answer it turns the barrier into a no-op — which is exactly what happened
+	// when the queue cutover left drain reading the table it had stopped
+	// writing. Every ledger must answer for its OWN records.
+	Undelivered(maxAge time.Duration) (int, error)
 }
 
 // SetTurnLedger swaps in a different ledger. Unset means pending_turns, which
@@ -391,4 +398,22 @@ func (b *Bridge) AbandonPendingTurn(chatID int64, telegramMsgID int) error {
 		return b.turnLedger.Abandon(chatID, telegramMsgID)
 	}
 	return nil
+}
+
+// UndeliveredTurns counts recent turns whose reply has not landed yet, asking
+// whichever ledger is actually recording them.
+//
+// Reading the raw store here instead is what broke drain: the count came from
+// pending_turns while the writes had moved to the queue, so it answered 0
+// forever and the barrier passed instantly. Routing the READ through the same
+// interface as the WRITE makes that class of drift impossible rather than
+// merely fixed — a new ledger cannot be added without answering this.
+func (b *Bridge) UndeliveredTurns(maxAge time.Duration) (int, error) {
+	if b.turnLedger != nil {
+		return b.turnLedger.Undelivered(maxAge)
+	}
+	if b.store == nil {
+		return 0, nil
+	}
+	return b.store.UndeliveredSince(maxAge)
 }

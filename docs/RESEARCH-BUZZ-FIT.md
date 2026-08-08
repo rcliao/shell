@@ -10,21 +10,24 @@ engineer, one non-technical daily user.
 
 ## Summary
 
-No, in all three forms considered (replace Telegram, add as a third transport,
-or adopt its concepts). The blocker is not integration difficulty — shell's
-intake seam is genuinely transport-neutral and a new producer is small work.
-The blockers are that buzz's floor is five always-on containers against today's
-one Go binary plus SQLite; that its shipping mobile client appears to lack push
-notifications, which is the entire delivery mechanism the non-technical user
-depends on; and that an additional transport has no user, since the engineer
-already reaches both agents via Telegram and `shell chat`.
+Not now, in any form that puts buzz inside shell's operational envelope. The
+blocker is not integration difficulty — the intake seam is transport-neutral and
+a new producer is small work. It is that the shipping mobile client appears to
+lack push, which is the delivery mechanism the non-technical user depends on,
+and that an additional transport has no user today: the engineer already reaches
+both agents via Telegram and `shell chat`.
+
+**Framing correction (owner, 2026-08-08):** buzz need not be self-hosted. Run by
+someone else — as Telegram's servers are — it becomes a transport question, and
+the container floor below stops being a shell concern. Those findings describe
+self-hosting accurately but are not the reason to decline.
 
 One idea is worth reading without adopting: NIP-AE agent engrams, as a design
 comparison for ghost's memory injection.
 
 ## Findings
 
-### buzz's deployment floor is five containers, with no minimal mode
+### Self-hosting's floor is five containers — but self-hosting is a choice
 
 `deploy/compose/` defines relay, Postgres 17, Redis 7, MinIO and a minio-init
 bootstrap, plus four named volumes. `deploy/compose/README.md` states the
@@ -88,8 +91,8 @@ the family after drain declared idle.
 
 1. Does the mobile client actually support push? Block's blog says yes; the
    client source says no. One grep across `mobile/` settles it.
-2. Is MinIO genuinely required? `ARCHITECTURE.md` says optional,
-   `deploy/compose/README.md` says required.
+2. Does a hosted/default relay exist that a client could just join? Never
+   investigated — the research assumed self-hosting throughout.
 3. Has issue #2663 shipped? It changes integration cost, not the verdict.
-4. Would a Go Nostr client (`nbd-wtf/go-nostr`) handle buzz's NIP-42 handshake
-   and extended NIP-01 filters? Untested by anyone.
+4. Would a Go Nostr client handle buzz's NIP-42 handshake and extended NIP-01
+   filters? Untested by anyone.
