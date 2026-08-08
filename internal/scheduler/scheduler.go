@@ -148,8 +148,6 @@ type Scheduler struct {
 	// queueWake nudges workers when work is enqueued, so a fire does not wait
 	// out a poll interval before starting. See wakeWorkers.
 	queueWake chan struct{}
-	// taskResults reads back agent-written results; see agenttask.go.
-	taskResults TaskResults
 	// sinks maps transport name to delivery sink; runMessage executes an
 	// inbound message turn. See messageturn.go.
 	sinks      sinkRegistry

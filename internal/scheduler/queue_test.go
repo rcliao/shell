@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -324,76 +323,6 @@ func TestWorkerDispatchesByKind(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Errorf("an unregistered kind was left queued for retry: %+v", pending)
-	}
-}
-
-// Completion must be EVIDENCE, not assertion. An agent narrating "done!" means
-// nothing — agents in this system have reported saving things that were never
-// saved, which is why write verification exists. A queued agent task is
-// complete only when the agent actually called the completion tool, which
-// writes a result the worker can read back.
-func TestAgentTaskNeedsEvidenceNotNarration(t *testing.T) {
-	q, st := queueAdapter(t)
-
-	enqueue := func(key, prompt string) int64 {
-		t.Helper()
-		payload, _ := json.Marshal(map[string]any{"prompt": prompt, "chat_id": 42})
-		id, _, err := st.EnqueueTask(store.Task{
-			Kind: TaskKindAgent, IdempotencyKey: key,
-			Payload: string(payload), MaxAttempts: 1,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return id
-	}
-
-	// A turn that runs cleanly but never records a result must FAIL. Returning
-	// cleanly says the subprocess exited, not that the work happened.
-	silent := New(newMockStore(nil), nil, func(context.Context, int64, string) error {
-		return nil // "I did it!" — and no completion call
-	}, "UTC")
-	silent.SetQueue(q, "boot-a")
-	silent.SetAgentTaskHandler(st)
-
-	id := enqueue("k-silent", "tidy something")
-	if !silent.leaseAndRunOne(context.Background()) {
-		t.Fatal("worker found no work")
-	}
-	got, err := st.GetTask(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != store.TaskFailed {
-		t.Fatalf("state = %q, want failed — a turn with no completion call is not done", got.State)
-	}
-	if got.LastError == "" {
-		t.Error("failure recorded no reason")
-	}
-
-	// A turn that DOES call complete records its result and finishes.
-	honest := New(newMockStore(nil), nil, func(_ context.Context, _ int64, _ string) error {
-		return st.SetTaskResult(2, "filed the thing")
-	}, "UTC")
-	honest.SetQueue(q, "boot-b")
-	honest.SetAgentTaskHandler(st)
-
-	id2 := enqueue("k-honest", "file the thing")
-	if id2 != 2 {
-		t.Fatalf("expected task id 2, got %d", id2)
-	}
-	if !honest.leaseAndRunOne(context.Background()) {
-		t.Fatal("worker found no work for the honest task")
-	}
-	got2, err := st.GetTask(id2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got2.State != store.TaskDone {
-		t.Fatalf("state = %q, want done", got2.State)
-	}
-	if got2.Result != "filed the thing" {
-		t.Errorf("result = %q — this is what an assigner reads back", got2.Result)
 	}
 }
 

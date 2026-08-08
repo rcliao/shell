@@ -176,7 +176,6 @@ func New(cfg config.Config) (*Daemon, error) {
 	toolReg.Register(tool.Tool{Name: "shell_tunnel", Description: "HTTP tunnels", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_tunnel"}})
 	toolReg.Register(tool.Tool{Name: "shell_relay", Description: "Message relay", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_relay"}})
 	toolReg.Register(tool.Tool{Name: "shell_schedule", Description: "Schedules: create, describe, cancel", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_schedule"}})
-	toolReg.Register(tool.Tool{Name: "shell_task", Description: "Durable background work: create, list, get, complete", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_task"}})
 
 	// Register skill scripts.
 	if skillRegistry != nil {
@@ -778,9 +777,6 @@ func New(cfg config.Config) (*Daemon, error) {
 		if !cfg.Scheduler.DurableQueueDisabled {
 			owner := fmt.Sprintf("boot-%d-%d", os.Getpid(), time.Now().UnixNano())
 			sched.SetQueue(adapter, owner)
-			// Agent-assigned durable work. The queue owns delivery guarantees,
-			// the agent owns judgment — see internal/scheduler/agenttask.go.
-			sched.SetAgentTaskHandler(st)
 			// Message intake. Registers the CLI transport and the runner that
 			// executes a turn against the live agent — see clichat.go.
 			wireMessageTurns(sched, br, st)
@@ -931,7 +927,6 @@ func New(cfg config.Config) (*Daemon, error) {
 		sched = scheduler.New(scheduler.NewStoreAdapter(st), nil, nil, cfg.Scheduler.Timezone)
 		owner := fmt.Sprintf("boot-%d-%d", os.Getpid(), time.Now().UnixNano())
 		sched.SetQueue(scheduler.NewStoreAdapter(st), owner)
-		sched.SetAgentTaskHandler(st)
 		wireMessageTurns(sched, br, st)
 		slog.Info("queue workers enabled without scheduler", "owner", owner)
 	}

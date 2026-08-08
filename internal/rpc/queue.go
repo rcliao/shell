@@ -38,10 +38,6 @@ type QueueRequest struct {
 	SenderName string `json:"sender_name"`
 }
 
-// AgentTaskKind is the queue kind whose handler runs the payload as an agent
-// turn. Kept in sync with the scheduler's handler registration.
-const AgentTaskKind = "agent.task"
-
 // MessageTurnKind mirrors scheduler.TaskKindMessageTurn.
 const MessageTurnKind = "message.turn"
 
@@ -66,86 +62,18 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if req.Action == "" {
-		req.Action = "create"
-	}
-
 	switch req.Action {
-	case "create":
-		s.queueCreate(w, req)
 	case "list":
 		s.queueList(w, req)
 	case "get":
 		s.queueGet(w, req)
-	case "complete":
-		s.queueComplete(w, req)
 	case "chat":
 		s.queueChat(w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be create, chat, list, get or complete")
+		writeError(w, http.StatusBadRequest, "action must be chat, list or get")
 	}
 }
 
-func (s *Server) queueCreate(w http.ResponseWriter, req QueueRequest) {
-	if req.Prompt == "" {
-		writeError(w, http.StatusBadRequest, "prompt is required — it is the work to be done")
-		return
-	}
-	payload, err := json.Marshal(map[string]any{
-		"prompt":  req.Prompt,
-		"title":   req.Title,
-		"chat_id": req.ChatID,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	t := store.Task{
-		Kind:   AgentTaskKind,
-		Source: store.TaskSourceAgent,
-		// No natural key exists for self-assigned work, so the key is a content
-		// hash: a turn that retries its own tool call must not enqueue the work
-		// twice.
-		IdempotencyKey: store.DeriveIdempotencyKey(AgentTaskKind, req.Prompt, fmt.Sprint(req.ChatID)),
-		PartitionKey:   fmt.Sprintf("chat:%d", req.ChatID),
-		Payload:        string(payload),
-		// Retries are not replays. Re-running an agent turn produces SIMILAR
-		// work, not the same work — a differently worded message, a second
-		// Notion row. One attempt, then surface the failure to a human.
-		MaxAttempts: 1,
-	}
-	if req.NotBefore != "" {
-		when, err := time.Parse(time.RFC3339, req.NotBefore)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "not_before must be RFC3339, e.g. 2026-08-06T09:00:00Z")
-			return
-		}
-		utc := when.UTC()
-		t.NotBefore = &utc
-	}
-
-	id, created, err := s.store.EnqueueTask(t)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	status := "existing"
-	if created {
-		status = "created"
-	}
-	writeJSON(w, map[string]any{
-		"id": id, "status": status,
-		"note": "runs on a worker, at most once. Poll action=get for state and result.",
-	})
-}
-
-// queueChat enqueues one CLI message as a message.turn.
-//
-// It is the same kind Telegram will produce, on the same queue, with the same
-// durability — which is the point. A CLI conversation reaches the live agent's
-// session rather than spawning a throwaway one, and if the daemon dies
-// mid-answer the turn is replayed like any other.
 func (s *Server) queueChat(w http.ResponseWriter, req QueueRequest) {
 	if req.Prompt == "" {
 		writeError(w, http.StatusBadRequest, "prompt is required")
@@ -228,29 +156,6 @@ func (s *Server) queueGet(w http.ResponseWriter, req QueueRequest) {
 		return
 	}
 	writeJSON(w, summarizeTask(*t))
-}
-
-// queueComplete records the RESULT of a running task. It deliberately does not
-// change state: the worker holding the lease owns that.
-//
-// Completion has to be evidence rather than assertion. An agent saying "done!"
-// means nothing — this codebase learned that expensively, which is why write
-// verification exists. So a task is complete only when this call was actually
-// made, observable in tool_uses; a turn that ends without one fails.
-func (s *Server) queueComplete(w http.ResponseWriter, req QueueRequest) {
-	if req.ID == 0 {
-		writeError(w, http.StatusBadRequest, "id is required")
-		return
-	}
-	if req.Result == "" {
-		writeError(w, http.StatusBadRequest, "result is required — it is the evidence the work was done")
-		return
-	}
-	if err := s.store.SetTaskResult(req.ID, req.Result); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"id": req.ID, "status": "result recorded"})
 }
 
 func summarizeTask(t store.Task) map[string]any {

@@ -37,13 +37,6 @@ paused row is otherwise invisible until the reminder never arrives. action=list
 shows what is live; action=queue shows whether fires are running, replayed after
 a restart, or dropped as stale.
 
-shell_task — durable background work. action=create registers work that
-survives restarts and runs at most once; not_before delays it. Use it when
-something must happen later or must not be lost, rather than trying to hold it
-in your head across turns — a turn ends, a task does not. When you are RUNNING a
-queued task, action=complete with a result is what finishes it; saying you
-finished is not the same as finishing.
-
 shell_relay — send a message or photo to a chat. Omit chat_id to reply in the
 current chat, which is the safe default. Sending somewhere else needs both
 chat_id and cross_chat=true, so a message never leaves this conversation by
@@ -255,63 +248,6 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"id":      p.ID,
 			"chat_id": p.ChatID,
 			"all":     p.All,
-		})
-		if err != nil {
-			return errResult(err.Error()), nil
-		}
-		return textResult(jsonText(result)), nil
-	})
-
-	// shell_task — durable work an agent assigns to itself.
-	//
-	// The queue owns delivery guarantees; the agent owns judgment. Work
-	// registered here survives a restart, runs at most once, and can be read
-	// back later — which is what a turn cannot do for itself, since a turn ends.
-	server.AddTool(&gomcp.Tool{
-		Name: "shell_task",
-		Description: "Queue durable work to run in the background, and read it back later. " +
-			"action=create with a prompt registers work that survives restarts and runs at most once; " +
-			"not_before delays it (RFC3339), so \"look at this tomorrow morning\" is expressible. " +
-			"action=list shows recent tasks, action=get id=N shows one with its result. " +
-			"action=complete id=N result=... is how a task you are RUNNING reports what it did — " +
-			"a queued task is only finished when you make that call, not when you say you finished.",
-		InputSchema: schema([]string{}, map[string]map[string]any{
-			"action":     prop("string", "create (default), list, get, complete"),
-			"id":         prop("integer", "Task id — required for get and complete"),
-			"prompt":     prop("string", "The work to do, written for whoever runs it later (create)"),
-			"title":      prop("string", "Short label for listings (create, optional)"),
-			"not_before": prop("string", "Do not start before this RFC3339 time, e.g. 2026-08-06T09:00:00Z (create)"),
-			"result":     prop("string", "What you actually did — required for complete"),
-			"state":      prop("string", "list: filter by queued, leased, done, failed or expired"),
-			"limit":      prop("integer", "list: how many to return (default 20)"),
-		}),
-	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-		var p struct {
-			Action    string `json:"action"`
-			ID        int64  `json:"id"`
-			Prompt    string `json:"prompt"`
-			Title     string `json:"title"`
-			NotBefore string `json:"not_before"`
-			Result    string `json:"result"`
-			State     string `json:"state"`
-			Limit     int    `json:"limit"`
-		}
-		if err := unmarshalArgs(req, &p); err != nil {
-			return errResult(err.Error()), nil
-		}
-		if p.Action == "" {
-			p.Action = "create"
-		}
-		result, err := client.call(ctx, "/queue", map[string]any{
-			"action":     p.Action,
-			"id":         p.ID,
-			"prompt":     p.Prompt,
-			"title":      p.Title,
-			"not_before": p.NotBefore,
-			"result":     p.Result,
-			"state":      p.State,
-			"limit":      p.Limit,
-			"chat_id":    currentChatID(),
 		})
 		if err != nil {
 			return errResult(err.Error()), nil

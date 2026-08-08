@@ -613,10 +613,37 @@ scheduled work until the lease aged out. Handler paths that give up without
 answering — a placeholder send that fails past its flood retries — therefore
 requeue explicitly rather than returning silently.
 
+**Agent-assigned work — RETIRED 2026-08-07, and worth recording why.**
+
+An `agent.task` kind and a `shell_task` tool let an agent register durable work
+for itself. Both are gone. Over seven days the two live agents called the tool
+once between them, and that once was a smoke test — against a hundred
+`ghost_put` calls in the same window.
+
+Three attempts moved that number nowhere. Better tool descriptions took
+`shell_schedule` from three calls to zero. Better instructions gave `shell_task`
+zero from the start. Injecting queue state into the heartbeat, on the theory
+that the gap was perception, changed nothing — and could not have: the digest
+rendered only when work already existed, so with no tasks it was permanently
+silent and unable to bootstrap itself.
+
+What settled it was checking the OTHER task system. The legacy shared store had
+no activity since 2026-07-15. Two independent systems, three weeks, near-zero
+use. The agents were not failing to find the tool; they had nothing they wanted
+to defer. A queue is worth having where work arrives whether or not anyone
+chooses it — inbound messages, scheduled fires — and those are exactly the kinds
+that stayed.
+
+The reasoning is preserved because it is the kind of thing that gets rebuilt: a
+self-assigned task queue is an obvious idea, and the obvious next move on
+finding it unused is to promote it harder. That was tried three times.
+
 **Step 5 — a2a and delegation.** The last trigger type. The old shared task
 store is retired: its rows migrate in as tasks with `source='a2a'`,
 `~/.shell/shared/tasks.db` is archived, and `internal/transcript/taskstore.go`
 plus the `shell-task` skill are removed. The 60-minute TTL defect dies with it.
+Note that this store is already dormant — nothing has written to it since
+2026-07-15 — so this is now a cleanup, not a migration.
 
 ## Risks
 
