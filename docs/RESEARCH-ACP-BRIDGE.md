@@ -19,9 +19,10 @@ prompt. That silence is a design position: **the agent owns how it thinks, the
 client owns the conversation.** Shell inverts that, resolving model, effort and
 a six-source system prompt per turn on the bridge side.
 
-So the mismatch is architectural, not a missing field. ACP's `_meta` and `Ext*`
-are sanctioned extension points, so shell *could* comply — but the semantics of
-those keys are unstandardised, so any portability gained would be nominal.
+The mismatch is narrower than it first appears. Model selection travels as a
+standard config option — `claude-agent-acp` advertises opus, sonnet, haiku and
+fable that way — so per-turn routing survives. The genuinely unportable piece
+is the system prompt, which only `_meta` can carry.
 
 ## Findings
 
