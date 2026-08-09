@@ -1,93 +1,96 @@
 # Research: could shell's bridge↔process boundary become ACP?
 
+Second pass, 2026-08-08. The first pass concluded that core ACP "cannot carry"
+what shell sends; that framing was wrong and is corrected below.
+
 ## Research Question
 
-ACP standardises client↔agent communication and is implemented by Claude,
-codex and goose. Buzz uses it where shell uses a bespoke boundary.
+Q1. Is ACP generic enough to express what shell needs, or does it standardise a
+different division of responsibility?
 
-Q1. What crosses shell's bridge↔process boundary today, and which tuned
-subsystems depend on its shape?
-
-Q2. Can core ACP carry that, or would the parts shell relies on live outside
-the standard?
+Q2. What does shell's bridge actually do around the boundary, and what would a
+swap touch?
 
 ## Summary
 
-ACP is a real multi-vendor standard, but its core session model cannot express
-what shell's boundary carries. `NewSessionRequest` accepts only `_meta`,
-`additionalDirectories`, `cwd` and `mcpServers` — there is no system prompt, no
-model and no effort in the standard. Buzz passes the system prompt through
-`_meta`, a vendor extension, so even its working integration is not portable
-between ACP agents.
+ACP is generic where it standardises — prompts, streaming, tools, permissions,
+filesystem, terminals — and deliberately silent about model, effort and system
+prompt. That silence is a design position: **the agent owns how it thinks, the
+client owns the conversation.** Shell inverts that, resolving model, effort and
+a six-source system prompt per turn on the bridge side.
 
-Since shell's per-turn model routing, effort and rebuilt system prompt are all
-spawn-bound, adopting ACP would move them into the same extension namespace,
-buying the protocol's shape without its interoperability.
+So the mismatch is architectural, not a missing field. ACP's `_meta` and `Ext*`
+are sanctioned extension points, so shell *could* comply — but the semantics of
+those keys are unstandardised, so any portability gained would be nominal.
 
 ## Findings
 
-### [Q1] The boundary is one call carrying eleven fields
+### [Q1] `_meta` is sanctioned extensibility, not a vendor hack
 
-`Agent.Send(ctx, AgentRequest, StreamFunc) (SendResult, error)` is the whole
-turn path (`internal/process/agent.go:46`). `AgentRequest`
-(`agent.go:23`) carries chat/thread, session id, text, images, PDFs,
-`SystemPrompt`, `Model`, `Effort`, `Ephemeral` and `Timeout`. `SendResult`
-(`manager.go:46`) returns text, session id, artifacts, tool calls, usage and
-four-phase `Timings`. The interface already declares itself swappable —
-"so the implementation can be swapped (e.g. Claude CLI, HTTP API, mock)".
+Correcting the first pass. The schema states `_meta` is "reserved by ACP to
+allow clients and agents to attach additional metadata", and `ExtRequest` /
+`ExtNotification` exist for arbitrary methods "while maintaining protocol
+compatibility". Buzz passing `_meta.systemPrompt.append` is the designed path.
 
-### [Q1] Three of those fields bind only at spawn
+The catch is the next sentence: implementations "MUST NOT make assumptions
+about values at these keys". An agent that does not recognise the key ignores
+it. Compliance is preserved; meaning is not.
 
-`internal/process/args.go:39` states it plainly: `--model`, `--effort` and
-`--append-system-prompt` "take effect only at spawn. A resumed session
-(`--resume`) already carries its system prompt." This is why rotation exists as
-`KillProcess` (`agent.go:65`) — forcing a rebuilt prompt to load means killing
-the subprocess, not reconfiguring it.
+### [Q1] ACP standardises the conversation, not the configuration
 
-### [Q1] The tuned subsystems sit on the bridge side, not the process side
+24 requests and 7 notifications cover initialize, session new/load/resume/
+list/close/delete, prompt, cancel, permissions, terminals, filesystem,
+elicitation and auth. Negotiated capabilities are `auth`, `loadSession`,
+`mcpCapabilities`, `promptCapabilities` (audio/embeddedContext/image) and
+`sessionCapabilities`.
 
-ExecutionProfile (`internal/bridge/execution.go:21`) resolves model, effort,
-ephemerality, timeout and task type per turn, then hands them across as request
-fields. Rotation, prewarm, prompt fingerprinting and ghost injection all live in
-`internal/bridge/`. The process layer owns subprocess lifecycle, the
-stream-json protocol and session bookkeeping — a genuinely thin waist.
+`NewSessionRequest` carries `cwd`, `mcpServers`, `additionalDirectories`.
+`PromptRequest` carries only `sessionId` and `prompt`. Configuration is
+`SetSessionConfigOption` (boolean and select) and `SetSessionMode`. Nothing
+anywhere names a model or a system prompt — consistently, not accidentally.
 
-### [Q2] Core ACP has no system prompt, model or effort
+### [Q2] The boundary is thin; the bridge around it is thick
 
-From the v1 schema: `NewSessionRequest` properties are exactly `_meta`,
-`additionalDirectories`, `cwd`, `mcpServers`. `LoadSessionRequest` adds only
-`sessionId`. Configuration is `SetSessionConfigOptionRequest{_meta, configId,
-sessionId}` with boolean and select option types, and `SetSessionModeRequest`
-for modes. None of these carries a model id, an effort level, or prompt text.
+`HandleMessageStreaming` is **429 lines around a single `agent.Send`** at
+relative line 299. Before it: plan handling, `ensureSession`, `maybeRotate`,
+ghost injection, `buildPerTurnBlocks`, heartbeat enrichment, system-session
+pre-emption, onboarding, **six `systemPrompt +=` sources**, session tracking and
+`resolveExecutionProfile`. After it: media-note extraction and
+`processResponse`.
 
-### [Q2] Buzz's own integration proves the gap
+A swap replaces what `Send` talks to and leaves all 429 lines standing.
 
-The live handshake advertised `promptCapabilities:{embeddedContext, image}` and
-session `resume/fork/list/close/delete`. But buzz-acp sends the system prompt as
-`_meta.systemPrompt.append` on `session/new`, and applies `--model` "to every
-new ACP session after creation". Both sit outside core ACP, so buzz's agents are
-portable only across agents that honour the same extensions.
+### [Q2] Three fields bind at spawn, and rotation is built on that
 
-### [Q2] What shell would gain is a test seam, not interop
+`args.go:39`: `--model`, `--effort` and `--append-system-prompt` "take effect
+only at spawn. A resumed session already carries its system prompt." Rotation is
+therefore `KillProcess` (`agent.go:65`) — kill to reload a prompt. Under ACP the
+equivalent is closing and recreating a session, which is available
+(`sessionCapabilities.close`), so the mechanism ports; the per-turn *values*
+would have to travel in `_meta`.
 
-The credible win is a typed, documented protocol boundary with an off-the-shelf
-fake, since `Agent` is today only faked by hand. That is achievable by
-tightening the existing interface — which already anticipates substitution —
-without adopting a protocol whose standard part omits what shell sends.
+### [Q2] There is exactly one implementation and no fake
+
+`var _ Agent = (*Manager)(nil)` is the only binding, and no test implements the
+interface — bridge tests exercise other paths instead. `Injector` was
+deliberately kept *out* of `Agent` "so test doubles and alternative agents don't
+have to implement it", which shows the seam was designed for substitution that
+never happened.
 
 ## Code References
 
-- `internal/process/agent.go:23,44` — `AgentRequest`, the `Agent` interface
-- `internal/process/args.go:39` — spawn-binding of model/effort/system prompt
-- `internal/process/manager.go:46` — `SendResult`, `Timings`
-- `internal/bridge/execution.go:21` — `ExecutionProfile` per-turn resolution
-- ACP v1 `schema/v1/schema.json` — `NewSessionRequest`, `SetSessionConfigOption`
+- `internal/process/agent.go:23,44,65,78` — request, interface, `KillProcess`
+- `internal/process/args.go:39` — spawn-binding of model/effort/prompt
+- `internal/process/inject.go:43` — `Injector` kept outside the interface
+- `internal/bridge/bridge.go:747` — the 429-line turn, one `Send` at ~299
+- `internal/bridge/execution.go:21` — per-turn `ExecutionProfile`
+- ACP v1 `schema/v1/schema.json` — 168 defs; `NewSessionRequest`, `PromptRequest`
 
 ## Open Questions
 
-1. Does ACP intend model selection to arrive as a `SessionConfigSelect` option?
-   If so, the gap may close and this should be re-checked.
-2. Could `_meta` extensions be acceptable if shell only ever drives
-   claude-agent-acp — i.e. is portability actually wanted, or only the shape?
-3. What does shell lose by inserting an adapter process between bridge and
-   Claude — latency, prewarm control, rotation timing? Unmeasured.
+1. Is per-turn model selection expected to arrive as a `SessionConfigSelect`?
+   That would close the gap and change the answer.
+2. Do we want portability across agent runtimes, or only a cleaner shape? Only
+   the first justifies ACP; the second is reachable by tightening `Agent`.
+3. What does an adapter process cost in latency, prewarm control and rotation
+   timing? Entirely unmeasured, and it sits on the family's turn path.
