@@ -2,12 +2,13 @@
 
 ## Overview
 
-Reshape `process.Agent` so a second runtime — Codex via `codex-acp`, keeping
-pikamini's identity, memory and prompts — becomes a configuration choice rather
-than a rewrite. Borrow ACP's vocabulary (stop reasons, typed stream events,
-declared capabilities) inside our own interface first, then add an ACP-speaking
-implementation behind it. When done, `Agent` has two implementations and a test
-fake, and the family's turns still run on the Claude CLI path unchanged.
+Reshape `process.Agent` into an abstraction that can carry three kinds of
+runtime, then grow into it. Borrow ACP's vocabulary — stop reasons, typed
+stream events, declared capabilities — inside our own Go interface, not as a
+wire protocol. Behind it: the Claude CLI today, an ACP runtime for Codex, and
+eventually a native loop where shell owns tool-calling and swaps models
+directly. Each is an implementation of one interface; the 429 lines of turn
+preparation never move. When done, changing runtime or model is configuration.
 
 ## Current State
 
@@ -23,11 +24,11 @@ single `Send`; model and effort resolve per turn via `ExecutionProfile`
 
 ## Desired End State
 
-Two runtimes answer the same interface, selected by config, with the Claude path
-byte-identical in behaviour. Verified by: a stored transcript replays through
-the fake with no subprocess; `shell chat` returns the same reply shape on either
-runtime; and a canary agent runs a full day on Codex with no regression in the
-e2e timings already recorded in `message_map`.
+One interface, several runtimes, selected by config, with the Claude path
+unchanged in behaviour. Verified by: a stored transcript replays through the
+fake with no subprocess; `shell chat` yields a coherent conversation on a second
+runtime; and a canary agent runs a day without regressing the e2e timings
+already recorded in `message_map`.
 
 ## What We're NOT Doing
 
@@ -72,28 +73,41 @@ subprocess and no network.
 
 ### Phase 4 — Add the ACP implementation
 
-`process.ACPAgent` speaking ACP over stdio to `codex-acp`: `initialize`,
-`session/new`, `session/prompt`, `session/update` → typed events, model via
+`process.ACPAgent` over stdio to `codex-acp`: `initialize`, `session/new`,
+`session/prompt`, `session/update` → typed events, model via
 `SetSessionConfigOption`, system prompt via `_meta`, rotation via session close.
+Proves the interface carries a runtime it was not designed around — the
+cheapest possible test of that, since the alternative is writing a loop first.
 
-**Automated:** contract tests run against both implementations.
-**Manual:** `shell chat --config <canary>` holds a coherent multi-turn
-conversation on Codex.
+**Automated:** contract tests pass against both implementations.
+**Manual:** `shell chat --config <canary>` holds a multi-turn conversation on
+Codex.
 
-### Phase 5 — Canary
+### Phase 5 — Native loop, behind the same interface
 
-Run one non-family agent on the ACP path for a day. Compare against Phase 1.
+`process.NativeAgent`: shell owns prompt → model → tool calls → execute →
+repeat, calling a provider SDK directly. Tools come from MCP servers, which
+shell already speaks (`go-sdk v1.7.0`), plus the few builtins Claude Code
+supplies today. Model choice becomes a provider setting rather than a CLI flag.
 
-**Automated:** latency comparison within the recorded band.
-**Manual:** owner reads a day of transcripts and finds nothing degraded.
+Gated on Phase 4: if the interface needed reshaping for ACP it will again here,
+and an adapter teaches that cheaper than a loop does. Ends with a canary — one
+non-family agent on the new path for a day.
+
+**Automated:** same contract tests pass; a tool-calling turn runs end to end
+against `Fake` with no network; canary latency within Phase 1's band.
+**Manual:** a scripted multi-turn task completes with tool use, judged against
+the same task on the CLI path, and a day of canary transcripts reads clean.
 
 ## Risks
 
-**Phase 4 is speculative until Phase 3 exists.** If the fake proves the
-interface is wrong, stop after Phase 3 — it delivers the testability win alone.
+**Phase 5 is larger than 1-4 combined** and most likely to be wrong. Owning the
+loop means owning tool execution — Bash, Read, Write, Edit, web — which Claude
+Code supplies today. Not a safety regression on paper, since these agents
+already run `bypassPermissions`, but the responsibility moves to us. Mitigated
+by 1-4 being shippable alone; 5 starts only if 4 shows the interface holds.
 
 **The system prompt is `_meta`-only**, so on Codex it is honoured by convention.
 Accepted: verified in Phase 4's manual check, not assumed.
 
-**Scope creep into the 429 lines.** The fence above is the mitigation; a change
-there is a separate plan.
+**Scope creep into the 429 lines.** The fence above is the mitigation.

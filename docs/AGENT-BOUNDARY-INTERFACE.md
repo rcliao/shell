@@ -132,6 +132,31 @@ type ScriptedTurn struct {
 Implements `Agent` with no subprocess and no network, so a bridge turn is
 testable end to end.
 
+### Native loop (phase 5)
+
+Where the abstraction pays off: a third implementation in which shell owns the
+loop and the model becomes a provider setting.
+
+```go
+type NativeAgent struct {
+    Provider ModelProvider   // Anthropic, OpenAI, local — swappable here
+    Tools    ToolRegistry    // MCP servers (go-sdk v1.7.0) + builtins
+}
+
+type ModelProvider interface {
+    Complete(ctx context.Context, req Completion, emit func(StreamEvent)) (StopReason, error)
+    Models() []string
+}
+```
+
+The loop is prompt → model → tool calls → execute → repeat. Note what shell
+would be taking over from Claude Code: Bash, Read, Write, Edit and web access.
+MCP covers most of it — shell is already an MCP client — but the builtins and
+their failure handling become ours.
+
+This is where "swap the model" becomes real: today model choice is a CLI flag
+that only Claude Code honours; here it is a provider call.
+
 ### ACP implementation (phase 4)
 
 | our concept | ACP carrier | notes |
