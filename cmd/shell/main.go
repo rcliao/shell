@@ -607,6 +607,7 @@ func main() {
 	// or half-finished move produced a file that listed fine and failed only
 	// when a later turn tried to read it, months after the cause.
 	var mediaConfigFlag string
+	var mediaBackfillFlag bool
 	mediaCmd := &cobra.Command{
 		Use:   "media",
 		Short: "Inspect the inbound photo archive",
@@ -621,6 +622,35 @@ func main() {
 				return err
 			}
 			defer st.Close()
+
+			if mediaBackfillFlag {
+				// Establishes a baseline for FUTURE damage only. It certifies
+				// the bytes on disk today, which is all that can be known —
+				// anything already corrupt is being blessed, and saying so
+				// plainly matters more than the count.
+				rows, berr := st.AllMedia()
+				if berr != nil {
+					return berr
+				}
+				var filled, skipped int
+				for _, r := range rows {
+					if r.SHA256 != "" {
+						continue
+					}
+					sum, size, derr := store.FileDigest(r.Path)
+					if derr != nil {
+						skipped++
+						continue
+					}
+					if ok, uerr := st.BackfillMediaDigest(r.ID, sum, size); uerr != nil {
+						return uerr
+					} else if ok {
+						filled++
+					}
+				}
+				fmt.Printf("Backfilled %d digest(s), skipped %d unreadable.\n", filled, skipped)
+				fmt.Printf("These certify the bytes on disk NOW — they cannot detect damage that already happened.\n\n")
+			}
 
 			verdicts, err := st.VerifyMedia()
 			if err != nil {
@@ -650,6 +680,7 @@ func main() {
 		},
 	}
 	mediaVerifyCmd.Flags().StringVar(&mediaConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
+	mediaVerifyCmd.Flags().BoolVar(&mediaBackfillFlag, "backfill", false, "Digest pre-existing photos first. Establishes a baseline for future damage; cannot detect damage already done")
 	mediaCmd.AddCommand(mediaVerifyCmd)
 
 	// tasks command — the queue's status surface. A durable queue nobody can

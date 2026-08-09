@@ -117,3 +117,70 @@ func TestVerifyMediaReportsPreDigestRowsAsUnverifiable(t *testing.T) {
 		t.Fatalf("status = %q, want unverifiable — a legacy row must not read as corrupt", v[0].Status)
 	}
 }
+
+// Backfill must never overwrite an existing digest. Re-hashing a damaged file
+// and storing the result would make it verify forever after — silently
+// repairing the exact corruption the ledger exists to expose.
+func TestBackfillRefusesToOverwriteAnExistingDigest(t *testing.T) {
+	b, dir := verifyStore(t)
+	path := ledger(t, b, dir, "photo.jpg", "the original bytes")
+
+	rows, err := b.AllMedia()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := rows[0].SHA256
+
+	// The file is damaged, then a backfill is attempted over it.
+	if err := os.WriteFile(path, []byte("corrupted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum, size, err := FileDigest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := b.BackfillMediaDigest(rows[0].ID, sum, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("backfill overwrote an existing digest — corruption would be blessed as sound")
+	}
+
+	after, err := b.AllMedia()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after[0].SHA256 != original {
+		t.Fatal("stored digest changed")
+	}
+	v, err := b.VerifyMedia()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v[0].Status != MediaCorrupt {
+		t.Fatalf("status = %q, want corrupt after the damage", v[0].Status)
+	}
+}
+
+// And it must actually fill an empty one, or it does nothing at all.
+func TestBackfillFillsEmptyDigests(t *testing.T) {
+	b, dir := verifyStore(t)
+	path := filepath.Join(dir, "legacy.jpg")
+	if err := os.WriteFile(path, []byte("archived long ago"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.RecordMedia(-100200300, 0, 7, path, "", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := b.AllMedia()
+	sum, size, _ := FileDigest(path)
+	ok, err := b.BackfillMediaDigest(rows[0].ID, sum, size)
+	if err != nil || !ok {
+		t.Fatalf("backfill: ok=%v err=%v", ok, err)
+	}
+	v, _ := b.VerifyMedia()
+	if v[0].Status != MediaOK {
+		t.Fatalf("status = %q, want ok after backfill", v[0].Status)
+	}
+}

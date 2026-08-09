@@ -175,3 +175,21 @@ func (s *Store) VerifyMedia() ([]MediaVerdict, error) {
 	}
 	return out, nil
 }
+
+// BackfillMediaDigest records a digest for a row that predates content
+// addressing.
+//
+// Guarded to empty digests only. A backfill that could overwrite an existing
+// digest would quietly repair the very corruption the ledger exists to expose:
+// re-hashing a damaged file and storing the result makes it verify forever
+// after. Existing digests are immutable by design.
+func (s *Store) BackfillMediaDigest(id int64, sha256Hex string, sizeBytes int64) (bool, error) {
+	res, err := s.db.Exec(`
+		UPDATE media SET sha256 = ?, size_bytes = ?
+		WHERE id = ? AND sha256 = ''`, sha256Hex, sizeBytes, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
