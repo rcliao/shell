@@ -8,15 +8,15 @@ func TestMediaLedger(t *testing.T) {
 	s, cleanup := newTestStore(t)
 	defer cleanup()
 
-	id1, err := s.RecordMedia(-100, 0, 42, "/media/2026-07/a.jpg", "看看這個")
+	id1, err := s.RecordMedia(-100, 0, 42, "/media/2026-07/a.jpg", "看看這個", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := s.RecordMedia(-100, 0, 43, "/media/2026-07/b.jpg", "")
+	id2, err := s.RecordMedia(-100, 0, 43, "/media/2026-07/b.jpg", "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordMedia(555, 0, 1, "/media/2026-07/dm.jpg", "DM photo"); err != nil {
+	if _, err := s.RecordMedia(555, 0, 1, "/media/2026-07/dm.jpg", "DM photo", "", 0); err != nil {
 		t.Fatal(err)
 	}
 
