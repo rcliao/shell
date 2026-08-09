@@ -387,7 +387,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		// anyone's turn. Async — boot isn't blocked.
 		go func() {
 			start := time.Now()
-			mem.InjectContext(context.Background(), 0, "warmup")
+			mem.InjectContext(context.Background(), 0, "warmup", "")
 			slog.Info("memory embedder warmed", "secs", int(time.Since(start).Seconds()))
 		}()
 	}

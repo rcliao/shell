@@ -341,7 +341,12 @@ func (m *Memory) maybeBackgroundReflect(ns string, skipped int) {
 	go m.RunReflect(context.Background())
 }
 
-func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string) string {
+// InjectContext assembles the per-turn memory injection. sender is the
+// resolved display label of the person speaking this turn (user_labels ->
+// senderLabel at the bridge); it drives ghost's interlocutor boost so the
+// speaker's own stated facts surface first under a contested budget, and it
+// may be empty (warmup, unknown), which disables the boost.
+func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg, sender string) string {
 	start := time.Now()
 	prof := m.profileFor(chatID)
 	var sb strings.Builder
@@ -369,6 +374,7 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 				Tags:          []string{chatTag(chatID)},
 				Budget:        chatBudget,
 				Scope:         sessionScopeFor(chatID),
+				ForUser:       sender,
 				ExcludePinned: true, // pinned already in system prompt — injecting them per turn duplicated ~6 slots + tokens every turn
 			})
 		}()
@@ -378,6 +384,7 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 				NS:            prof.AgentNS,
 				Query:         userMsg,
 				Budget:        crossBudget,
+				ForUser:       sender,
 				ExcludePinned: true, // pinned already in system prompt
 			})
 		}()
@@ -391,6 +398,7 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg string
 				sb.WriteString("[Relevant memories from this chat]\n")
 				for _, mem := range result.Memories {
 					sb.WriteString("- ")
+					sb.WriteString(provenancePrefix(mem.SourceUser, mem.SourceKind))
 					sb.WriteString(mem.Content)
 					sb.WriteString("\n")
 				}
@@ -523,7 +531,27 @@ func (m *Memory) fetchGlobalContextFor(ctx context.Context, query string, namesp
 }
 
 // LogExchange stores a summary of the user/assistant exchange as episodic memory.
-func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, response string) {
+// provenancePrefix renders attribution for an injected memory: the agent can
+// already reason "her statement beats my inference" — it just needs to see
+// which is which. Empty provenance renders nothing (unknown stays silent).
+func provenancePrefix(user, kind string) string {
+	switch {
+	case user != "" && kind != "":
+		return "[" + user + ", " + kind + "] "
+	case user != "":
+		return "[" + user + "] "
+	case kind == "observed":
+		return "[inferred] "
+	case kind != "":
+		return "[" + kind + "] "
+	}
+	return ""
+}
+
+// LogExchange records one interactive turn. sender is the resolved label of
+// the person who spoke (may be empty when unknown); the exchange and the
+// facts distilled from the user's own words carry it as provenance.
+func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, response, sender string) {
 	prof := m.profileFor(chatID)
 
 	maxUser := prof.ExchangeMaxUser
@@ -568,6 +596,8 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 		Tier:       "sensory", // raw observations — promoted to stm if accessed
 		TTL:        ttl,
 		Importance: 0.3, // ephemeral exchanges — low importance, will decay naturally
+		SourceUser: sender,
+		SourceKind: provKindFor(sender),
 	})
 	if err != nil {
 		slog.Warn("failed to log exchange to memory", "error", err)
@@ -595,10 +625,30 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 			Importance: c.Importance,
 			TTL:        factTTL,
 			Dedup:      true,
+			// Distilled from the user's own turn: the speaker said it.
+			SourceUser: sender,
+			SourceKind: provKindFor(sender),
 		}); ferr != nil {
 			slog.Warn("failed to store distilled same-day fact", "error", ferr)
 		}
 	}
+}
+
+// firstNonEmpty returns the first non-empty string.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// provKindFor returns "stated" when the speaker is known and empty otherwise:
+// unknown origin stays unknown, never guessed.
+func provKindFor(sender string) string {
+	if sender == "" {
+		return ""
+	}
+	return "stated"
 }
 
 // putWithRetry wraps store.Put with a short backoff retry on SQLITE_BUSY.
@@ -626,7 +676,7 @@ func (m *Memory) putWithRetry(ctx context.Context, p agentmemory.PutParams) erro
 // Phase 1: photos become first-class, retrievable memories instead of ledger
 // rows. The caption author is the VLM that saw the image at turn time, so this
 // costs zero extra inference.
-func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, paths []string) {
+func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, paths []string, sender string) {
 	if note == "" || len(paths) == 0 {
 		return
 	}
@@ -653,13 +703,15 @@ func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, p
 		Tier:       "stm", // searchable immediately; lifecycle governs from here
 		Importance: 0.5,
 		Files:      files,
+		SourceUser: sender,
+		SourceKind: provKindFor(sender),
 	}); err != nil {
 		slog.Warn("failed to store media-note memory", "error", err)
 	}
 }
 
 // Remember stores a user-provided memory as semantic memory.
-func (m *Memory) Remember(ctx context.Context, chatID int64, content string) error {
+func (m *Memory) Remember(ctx context.Context, chatID int64, content, sender string) error {
 	prof := m.profileFor(chatID)
 	ns := prof.AgentNS
 	var tags []string
@@ -679,6 +731,8 @@ func (m *Memory) Remember(ctx context.Context, chatID int64, content string) err
 		Priority:   "high",
 		Importance: 0.8,   // user-remembered facts are high importance
 		Tier:       "ltm", // explicitly saved by user — skip stm
+		SourceUser: sender,
+		SourceKind: provKindFor(sender),
 	})
 	return err
 }
@@ -945,7 +999,7 @@ func (m *Memory) Store() agentmemory.Store {
 
 // StoreDirective stores a memory from an RPC call (equivalent to [remember] directive).
 func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind string) error {
-	return m.StoreDirectiveTagged(ctx, chatID, content, kind, nil)
+	return m.StoreDirectiveTagged(ctx, chatID, content, kind, nil, "", "")
 }
 
 // StoreDirectiveTagged stores a memory with caller-supplied tags on top of the
@@ -956,7 +1010,11 @@ func (m *Memory) StoreDirective(ctx context.Context, chatID int64, content, kind
 // shell-remember skill had no --tags flag, the RPC body had no field, and this
 // function hard-coded its own tag list. The instruction was unexecutable, which
 // is why two live syncs produced zero tagged memories.
-func (m *Memory) StoreDirectiveTagged(ctx context.Context, chatID int64, content, kind string, extraTags []string) error {
+// StoreDirectiveTagged stores an agent-authored directive. sourceUser and
+// sourceKind, when non-empty, override the default self-provenance — the RPC
+// path uses this for agent-declared origin, and the sync path maps a
+// via:<agent> tag to peer so relayed knowledge keeps its lineage.
+func (m *Memory) StoreDirectiveTagged(ctx context.Context, chatID int64, content, kind string, extraTags []string, sourceUser, sourceKind string) error {
 	prof := m.profileFor(chatID)
 	if !prof.MemoryDirectives {
 		return fmt.Errorf("memory directives disabled for chat %d", chatID)
@@ -991,6 +1049,8 @@ func (m *Memory) StoreDirectiveTagged(ctx context.Context, chatID int64, content
 		Tags:       tags,
 		Importance: 0.7,
 		Dedup:      true,
+		SourceUser: sourceUser,
+		SourceKind: firstNonEmpty(sourceKind, "self"),
 	})
 	return err
 }
@@ -1064,6 +1124,7 @@ func (m *Memory) StoreHeartbeatLearning(ctx context.Context, chatID int64, conte
 		Priority:   "high",
 		Importance: 0.7, // heartbeat learnings — moderately important, self-discovered
 		Dedup:      true,
+		SourceKind: "self",
 	})
 	if err != nil {
 		return err
@@ -1188,6 +1249,7 @@ func (m *Memory) StoreBehavioralLearning(ctx context.Context, chatID int64, cont
 		Priority:   "high",
 		Importance: 0.8, // behavioral learnings — high importance, shapes future behavior
 		Dedup:      true,
+		SourceKind: "self",
 	})
 	if err != nil {
 		return err
@@ -1287,6 +1349,7 @@ func (m *Memory) StoreReviewerLearning(ctx context.Context, namespace, content s
 		Kind:       "procedural",
 		Priority:   "high",
 		Importance: 0.75, // critical flow knowledge
+		SourceKind: "peer",
 	})
 	return err
 }
@@ -1376,19 +1439,29 @@ func (m *Memory) CorrectMemory(ctx context.Context, ns, key, newContent string) 
 
 	kind := "semantic"
 	priority := "high"
+	var baseVersion int
+	var srcUser, srcKind string
 	if len(existing) > 0 {
 		kind = existing[0].Kind
 		if existing[0].Priority != "" {
 			priority = existing[0].Priority
 		}
+		// CAS against the head we just read: a concurrent writer surfaces as
+		// a version conflict instead of being silently buried (ghost #108).
+		baseVersion = existing[0].Version
+		// A correction edits content, not origin.
+		srcUser, srcKind = existing[0].SourceUser, existing[0].SourceKind
 	}
 
 	_, err = m.store.Put(ctx, agentmemory.PutParams{
-		NS:       ns,
-		Key:      key,
-		Content:  newContent,
-		Kind:     kind,
-		Priority: priority,
+		NS:          ns,
+		Key:         key,
+		Content:     newContent,
+		Kind:        kind,
+		Priority:    priority,
+		BaseVersion: baseVersion,
+		SourceUser:  srcUser,
+		SourceKind:  srcKind,
 	})
 	return err
 }
@@ -1649,6 +1722,7 @@ func (m *Memory) StoreIdentity(ctx context.Context, chatID int64, key, content s
 		Importance: 1.0,
 		Tier:       "ltm",
 		Pinned:     true,
+		SourceKind: "self",
 	})
 	return err
 }
@@ -1806,6 +1880,7 @@ func (m *Memory) SummarizeExchanges(ctx context.Context, chatID int64) (int, err
 				Kind:       "semantic",
 				Tags:       tags,
 				Importance: 0.5,
+				SourceKind: "self",
 			})
 			if err != nil {
 				return 0, fmt.Errorf("store summary: %w", err)
@@ -1820,6 +1895,7 @@ func (m *Memory) SummarizeExchanges(ctx context.Context, chatID int64) (int, err
 			Kind:       "semantic",
 			Tags:       tags,
 			Importance: 0.5,
+			SourceKind: "self",
 		})
 		if err != nil {
 			return 0, fmt.Errorf("store summary: %w", err)
@@ -2063,6 +2139,7 @@ func (m *Memory) LogHygieneOutcome(ctx context.Context, agentNS string, reflectR
 		Tier:       "sensory",
 		Importance: 0.2,
 		TTL:        "30d",
+		SourceKind: "self",
 	})
 	if err != nil {
 		slog.Warn("failed to log hygiene outcome", "error", err)

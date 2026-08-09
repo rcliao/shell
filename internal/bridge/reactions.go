@@ -219,7 +219,7 @@ func (b *Bridge) RememberResponse(ctx context.Context, chatID int64, rc *Reactio
 		botPart = botPart[:500] + "..."
 	}
 	content := fmt.Sprintf("Q: %s\nA: %s", userPart, botPart)
-	if err := b.memory.Remember(ctx, chatID, content); err != nil {
+	if err := b.memory.Remember(ctx, chatID, content, ""); err != nil {
 		return "", fmt.Errorf("remember: %w", err)
 	}
 	return "Response saved to memory.", nil
@@ -251,7 +251,7 @@ func (b *Bridge) Remember(ctx context.Context, chatID int64, content string) (st
 	if content == "" {
 		return "Usage: /remember <text to remember>", nil
 	}
-	if err := b.memory.Remember(ctx, chatID, content); err != nil {
+	if err := b.memory.Remember(ctx, chatID, content, ""); err != nil {
 		return "", fmt.Errorf("remember: %w", err)
 	}
 	return fmt.Sprintf("Remembered: %s", content), nil

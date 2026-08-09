@@ -64,7 +64,7 @@ func TestEnrichHeartbeatPrompt_NoPriorityScaffolding(t *testing.T) {
 	if err := b.store.SaveSession(555, 0, "s-555"); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
-	b.memory.LogExchange(ctx, 555, "the user asked something", "the agent answered")
+	b.memory.LogExchange(ctx, 555, "the user asked something", "the agent answered", "")
 
 	for _, isDeep := range []bool{true, false} {
 		p := b.enrichHeartbeatPrompt(ctx, SystemChatID, "check in", isDeep)
@@ -98,7 +98,7 @@ func TestEnrichHeartbeatPrompt_ChatIDRelayInstruction(t *testing.T) {
 	if err := b.store.SaveSession(777, 0, "s-777"); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
-	b.memory.LogExchange(ctx, 777, "the user asked something", "the agent answered")
+	b.memory.LogExchange(ctx, 777, "the user asked something", "the agent answered", "")
 
 	deep := b.enrichHeartbeatPrompt(ctx, SystemChatID, "check in", true)
 	if !strings.Contains(deep, "(chat 777)") {

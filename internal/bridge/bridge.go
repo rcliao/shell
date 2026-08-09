@@ -844,7 +844,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 			}()
 		}
 		if b.memory != nil {
-			run("ghost_inject", func() { ghostAug = b.memory.InjectContext(ctx, chatID, userMsg) })
+			run("ghost_inject", func() { ghostAug = b.memory.InjectContext(ctx, chatID, userMsg, senderName) })
 		}
 		if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
 			run("transcript", func() {
@@ -1133,12 +1133,12 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 				}
 			}
 			if len(paths) > 0 {
-				go b.memory.RememberMedia(context.Background(), chatID, note, paths)
+				go b.memory.RememberMedia(context.Background(), chatID, note, paths, senderName)
 			}
 		}
 	}
 
-	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source, turnModel)
+	resp := b.processResponse(ctx, chatID, threadID, sess.ID, userMsg, isHeartbeat, result, source, turnModel, senderName)
 
 	// Runtime write-hygiene: cross-check persistence claims vs actual tool
 	// calls, optionally issue a bounded correction turn, and log the verdict.
@@ -1177,7 +1177,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 // processResponse is the post-processing pipeline for HandleMessageStreaming.
 // It parses all response directives (relay, heartbeat, memory, schedule, artifacts),
 // logs the exchange, and returns a typed AgentResponse with collected photos.
-func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source, turnModel string) AgentResponse {
+func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source, turnModel, senderName string) AgentResponse {
 	response := strings.TrimSpace(result.Text)
 
 	// Capture the deep-heartbeat journal BEFORE anything else can consume or
@@ -1332,7 +1332,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// (V2-H37): the write computes an embedding (~1s) and must not hold the
 	// session busy.
 	if b.memory != nil && source == "interactive" {
-		go b.memory.LogExchange(context.Background(), chatID, userMsg, response)
+		go b.memory.LogExchange(context.Background(), chatID, userMsg, response, senderName)
 	}
 
 	// Update session timestamp.

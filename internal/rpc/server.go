@@ -560,6 +560,11 @@ type MemoryRequest struct {
 	Content string   `json:"content"` // memory content
 	Kind    string   `json:"kind"`    // "semantic", "episodic", "procedural" (default: semantic)
 	Tags    []string `json:"tags"`    // extra tags on top of provenance (e.g. "via:umbreonmini")
+	// SourceUser/SourceKind: write provenance — the PERSON the memory
+	// originated from and how (stated|observed|self|peer). A via:<agent> tag
+	// forces peer mechanically so relayed knowledge keeps its lineage.
+	SourceUser string `json:"source_user"`
+	SourceKind string `json:"source_kind"`
 }
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
@@ -580,7 +585,14 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "remember":
-		err := s.memory.StoreDirectiveTagged(r.Context(), req.ChatID, req.Content, req.Kind, req.Tags)
+		srcKind := req.SourceKind
+		for _, t := range req.Tags {
+			if strings.HasPrefix(t, "via:") {
+				srcKind = "peer" // relayed by another agent, regardless of declaration
+				break
+			}
+		}
+		err := s.memory.StoreDirectiveTagged(r.Context(), req.ChatID, req.Content, req.Kind, req.Tags, req.SourceUser, srcKind)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to store: "+err.Error())
 			return
