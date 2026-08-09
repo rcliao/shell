@@ -36,18 +36,26 @@ The catch is the next sentence: implementations "MUST NOT make assumptions
 about values at these keys". An agent that does not recognise the key ignores
 it. Compliance is preserved; meaning is not.
 
+### [Q1] The omission is stable, and the lifecycle is LSP's, not MCP's
+
+MCP `2026-07-28` deleted its handshake — "there is no negotiation handshake" —
+and now calls `initialize`-based revisions legacy. ACP has not followed and
+shows no sign of it: v2 retains `InitializeRequest`, and searching their issues
+for "stateless" or "handshake" returns nothing. Their MCP alignment work
+(#1576, #1368) tracks *content types* and transports instead.
+
+That is coherent rather than stale. MCP dropped the handshake to allow
+stateless HTTP servers behind load balancers; ACP is stdio with one spawned
+subprocess per connection, where the process is the session and a handshake
+costs one round trip on a pipe you own. Its `initialize` is LSP heritage.
+
 ### [Q1] ACP standardises the conversation, not the configuration
 
-24 requests and 7 notifications cover initialize, session new/load/resume/
-list/close/delete, prompt, cancel, permissions, terminals, filesystem,
-elicitation and auth. Negotiated capabilities are `auth`, `loadSession`,
-`mcpCapabilities`, `promptCapabilities` (audio/embeddedContext/image) and
-`sessionCapabilities`.
-
-`NewSessionRequest` carries `cwd`, `mcpServers`, `additionalDirectories`.
-`PromptRequest` carries only `sessionId` and `prompt`. Configuration is
-`SetSessionConfigOption` (boolean and select) and `SetSessionMode`. Nothing
-anywhere names a model or a system prompt — consistently, not accidentally.
+24 requests and 7 notifications cover sessions, prompts, cancellation,
+permissions, terminals, filesystem, elicitation and auth. `NewSessionRequest`
+carries `cwd`, `mcpServers`, `additionalDirectories`; `PromptRequest` carries
+`sessionId` and `prompt`. Configuration is `SetSessionConfigOption` and
+`SetSessionMode`. Nothing names a model or system prompt — consistently.
 
 ### [Q2] The boundary is thin; the bridge around it is thick
 
@@ -88,8 +96,8 @@ never happened.
 
 ## Open Questions
 
-1. Is per-turn model selection expected to arrive as a `SessionConfigSelect`?
-   That would close the gap and change the answer.
+1. ~~Model selection via `SessionConfigSelect`?~~ **Answered:** v2 (172 defs)
+   still has no model, effort or system prompt. Stable, not immaturity.
 2. Do we want portability across agent runtimes, or only a cleaner shape? Only
    the first justifies ACP; the second is reachable by tightening `Agent`.
 3. What does an adapter process cost in latency, prewarm control and rotation
