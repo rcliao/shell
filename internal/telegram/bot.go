@@ -193,44 +193,66 @@ func (b *Bot) SendChatAction(chatID, threadID int64, action string) {
 	})
 }
 
+// turnContext detaches a handler from the long-poller's lifetime.
+//
+// Drain stops the poller by cancelling the context it was started with, so a
+// deploy stops fetching new updates. But the library hands that SAME context to
+// every handler, so cancelling it also cancelled the Telegram API calls of
+// turns already in flight — the reply was computed, then the edit that would
+// have shown it failed with "context canceled" and the owner was left looking
+// at "Thinking..." forever.
+//
+// That made drain self-defeating: it waited (correctly) for in-flight turns to
+// finish, having already guaranteed they could not deliver. Observed on
+// 2026-08-08 09:13:37 when a source edit tripped the self-restart watcher on
+// both agents while they were mid-answer.
+//
+// Detaching here restores the behaviour daemon.go always claimed: stopping the
+// poller stops INTAKE, not delivery. A turn still ends — drain bounds the wait
+// with its own timeout and proceeds regardless — but it is no longer severed
+// mid-sentence by the act of draining.
+func turnContext(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
+
 func (b *Bot) defaultHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	b.handler.HandleMessage(ctx, tgBot, update.Message)
+	b.handler.HandleMessage(turnContext(ctx), tgBot, update.Message)
 }
 
 func (b *Bot) commandHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	b.handler.HandleCommand(ctx, tgBot, update.Message)
+	b.handler.HandleCommand(turnContext(ctx), tgBot, update.Message)
 }
 
 func (b *Bot) photoHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	b.handler.HandlePhoto(ctx, tgBot, update.Message)
+	b.handler.HandlePhoto(turnContext(ctx), tgBot, update.Message)
 }
 
 func (b *Bot) stickerHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	b.handler.HandleSticker(ctx, tgBot, update.Message)
+	b.handler.HandleSticker(turnContext(ctx), tgBot, update.Message)
 }
 
 func (b *Bot) pdfHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	b.handler.HandlePDF(ctx, tgBot, update.Message)
+	b.handler.HandlePDF(turnContext(ctx), tgBot, update.Message)
 }
 
 func (b *Bot) reactionHandler(ctx context.Context, tgBot *bot.Bot, update *models.Update) {
 	if update.MessageReaction == nil {
 		return
 	}
-	b.handler.HandleReaction(ctx, tgBot, update.MessageReaction)
+	b.handler.HandleReaction(turnContext(ctx), tgBot, update.MessageReaction)
 }

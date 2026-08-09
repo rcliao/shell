@@ -121,6 +121,27 @@ func (s *Store) AbandonOwnedTask(key, reason, owner string) error {
 	return err
 }
 
+// CountUndeliveredTurnsSince counts recent message turns that have not reached
+// a terminal state — the queue's answer to "is anyone still owed a reply?".
+//
+// Non-terminal means leased (being answered now) or queued (abandoned and
+// awaiting replay). Both mean somebody is waiting. done, failed and expired are
+// all settled: the person either has their answer or provably will not get one,
+// and neither is worth holding a restart for.
+//
+// Bounded by age for the same reason the ledger version is: an ancient stuck row
+// is a past failure, and blocking every future deploy on it would turn one lost
+// reply into a permanently un-deployable daemon.
+func (s *Store) CountUndeliveredTurnsSince(kind string, maxAge time.Duration) (int, error) {
+	cutoff := time.Now().UTC().Add(-maxAge)
+	var n int
+	err := s.db.QueryRow(`
+		SELECT count(*) FROM tasks
+		WHERE kind = ? AND state IN (?, ?) AND enqueued_at >= ?
+	`, kind, TaskLeased, TaskQueued, cutoff).Scan(&n)
+	return n, err
+}
+
 // CompleteOwnedTask marks a self-run task finished by its idempotency key.
 //
 // By key rather than by id because the caller that finishes a turn is often not

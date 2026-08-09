@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/store"
 )
 
 // Inbound media archiving (V2-H19 vision memory).
@@ -53,7 +54,19 @@ func (b *Bridge) ArchiveInboundMedia(chatID, threadID int64, msgID int, caption 
 		os.Remove(img.Path)
 	}
 	img.Path = dest
-	id, err := b.store.RecordMedia(chatID, threadID, msgID, dest, caption)
+
+	// Digest the bytes that actually landed, AFTER the move. Hashing the temp
+	// file instead would certify what we downloaded rather than what we kept,
+	// and the failure this exists to catch — a half-completed copy in the
+	// fallback path above — happens between those two points.
+	sum, size, derr := store.FileDigest(dest)
+	if derr != nil {
+		// A photo we cannot digest is still a photo worth keeping; record it
+		// with an empty digest, which reads as unverifiable rather than sound.
+		slog.Warn("media archive: digest failed, ledgering without one", "path", dest, "error", derr)
+	}
+
+	id, err := b.store.RecordMedia(chatID, threadID, msgID, dest, caption, sum, size)
 	if err != nil {
 		slog.Warn("media archive: ledger write failed", "path", dest, "error", err)
 		return

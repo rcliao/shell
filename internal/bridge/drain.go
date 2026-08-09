@@ -56,11 +56,14 @@ const deliveryGraceWindow = 5 * time.Minute
 
 // waitDeliveries blocks until no recently-received turn is still undelivered.
 func (b *Bridge) waitDeliveries(deadline time.Time) bool {
-	if b.store == nil {
-		return true
-	}
+	// No nil-store short circuit here: whether this barrier can be answered is
+	// a question for the LEDGER, not for the store behind it. Gating on the
+	// store meant a bridge with a working ledger but no raw store skipped the
+	// wait entirely — the same shape of mistake as reading past the ledger.
+	// UndeliveredTurns reports 0 when nothing can answer, which lands here as
+	// "nothing outstanding" and proceeds.
 	for {
-		pending, err := b.store.UndeliveredSince(deliveryGraceWindow)
+		pending, err := b.UndeliveredTurns(deliveryGraceWindow)
 		if err != nil {
 			// Never let a ledger read failure block a restart; the pending-turn
 			// replay path still covers anything genuinely in flight.

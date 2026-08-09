@@ -599,13 +599,22 @@ func (s *Store) migrate() error {
 		path        TEXT NOT NULL,
 		caption     TEXT NOT NULL DEFAULT '',
 		description TEXT NOT NULL DEFAULT '',
-		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		sha256      TEXT NOT NULL DEFAULT '',
+		size_bytes  INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_media_chat ON media(chat_id, thread_id, id);
 	`
 	if _, err := s.db.Exec(mediaSchema); err != nil {
 		return err
 	}
+	// Content addressing, for databases created before it existed. These MUST
+	// run after the CREATE above: an ALTER against a table that does not exist
+	// yet fails silently here, leaving a fresh database without the columns
+	// while an old one gets them — the same ordering trap that bit the task
+	// index migration.
+	s.db.Exec("ALTER TABLE media ADD COLUMN sha256 TEXT NOT NULL DEFAULT ''")
+	s.db.Exec("ALTER TABLE media ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
 
 	// job_runs is the fire ledger (V3-T1): one row per fire ATTEMPT, including
 	// attempts that die before or during spawn. Without it, a schedule that

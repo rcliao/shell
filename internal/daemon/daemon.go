@@ -45,9 +45,11 @@ type Daemon struct {
 	pmMgr     *pm.Manager          // nil if disabled
 	rpcServer *rpc.Server          // nil if no RPC endpoints
 
-	// pollCancel stops the Telegram long-poller without cancelling in-flight
-	// turns (their contexts are detached via context.WithoutCancel). Set by
-	// Run, used by Drain for graceful SIGHUP restarts.
+	// pollCancel stops the Telegram long-poller. Handlers are detached from
+	// this context by turnContext (internal/telegram/bot.go); without that,
+	// cancelling here also cancelled the Telegram calls of turns already in
+	// flight, so a deploy left the owner looking at "Thinking..." forever.
+	// Set by Run, used by Drain for graceful SIGHUP restarts.
 	pollCancel context.CancelFunc
 	// restartPending is set by Drain: cancelling the poller makes Run return,
 	// and main must NOT exit on that return — the SIGHUP goroutine is about
@@ -385,7 +387,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		// anyone's turn. Async — boot isn't blocked.
 		go func() {
 			start := time.Now()
-			mem.InjectContext(context.Background(), 0, "warmup")
+			mem.InjectContext(context.Background(), 0, "warmup", "")
 			slog.Info("memory embedder warmed", "secs", int(time.Since(start).Seconds()))
 		}()
 	}

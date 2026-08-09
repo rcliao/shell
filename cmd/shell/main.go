@@ -602,6 +602,87 @@ func main() {
 	chatCmd.Flags().Int64Var(&chatThreadFlag, "thread", 0, "thread id within the chat")
 	chatCmd.Flags().DurationVar(&chatTimeoutFlag, "timeout", 5*time.Minute, "how long to wait for the reply")
 
+	// media verify — the archive is the only copy of a photo once Telegram's
+	// temp file is gone, and until now nothing checked it. A truncated download
+	// or half-finished move produced a file that listed fine and failed only
+	// when a later turn tried to read it, months after the cause.
+	var mediaConfigFlag string
+	var mediaBackfillFlag bool
+	mediaCmd := &cobra.Command{
+		Use:   "media",
+		Short: "Inspect the inbound photo archive",
+	}
+	mediaVerifyCmd := &cobra.Command{
+		Use:   "verify",
+		Short: "Re-digest every archived photo and report corrupt, missing or unverifiable ones",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigFrom(mediaConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			if mediaBackfillFlag {
+				// Establishes a baseline for FUTURE damage only. It certifies
+				// the bytes on disk today, which is all that can be known —
+				// anything already corrupt is being blessed, and saying so
+				// plainly matters more than the count.
+				rows, berr := st.AllMedia()
+				if berr != nil {
+					return berr
+				}
+				var filled, skipped int
+				for _, r := range rows {
+					if r.SHA256 != "" {
+						continue
+					}
+					sum, size, derr := store.FileDigest(r.Path)
+					if derr != nil {
+						skipped++
+						continue
+					}
+					if ok, uerr := st.BackfillMediaDigest(r.ID, sum, size); uerr != nil {
+						return uerr
+					} else if ok {
+						filled++
+					}
+				}
+				fmt.Printf("Backfilled %d digest(s), skipped %d unreadable.\n", filled, skipped)
+				fmt.Printf("These certify the bytes on disk NOW — they cannot detect damage that already happened.\n\n")
+			}
+
+			verdicts, err := st.VerifyMedia()
+			if err != nil {
+				return err
+			}
+			if len(verdicts) == 0 {
+				fmt.Println("No archived media.")
+				return nil
+			}
+			counts := map[string]int{}
+			for _, v := range verdicts {
+				counts[v.Status]++
+				// Only the problems are worth listing; a clean archive should
+				// print a summary line, not hundreds of OKs.
+				if v.Status != store.MediaOK && v.Status != store.MediaUnverifiable {
+					fmt.Printf("  %-10s #%-5d %s\n             %s\n", v.Status, v.Row.ID, v.Row.Path, v.Detail)
+				}
+			}
+			fmt.Printf("\n%d archived: %d ok, %d corrupt, %d missing, %d unverifiable (pre-digest)\n",
+				len(verdicts), counts[store.MediaOK], counts[store.MediaCorrupt],
+				counts[store.MediaMissing], counts[store.MediaUnverifiable])
+			// Non-zero exit on real damage so this can gate a backup or cron.
+			if counts[store.MediaCorrupt] > 0 || counts[store.MediaMissing] > 0 {
+				return fmt.Errorf("%d archived photo(s) failed verification", counts[store.MediaCorrupt]+counts[store.MediaMissing])
+			}
+			return nil
+		},
+	}
+	mediaVerifyCmd.Flags().StringVar(&mediaConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
+	mediaVerifyCmd.Flags().BoolVar(&mediaBackfillFlag, "backfill", false, "Digest pre-existing photos first. Establishes a baseline for future damage; cannot detect damage already done")
+	mediaCmd.AddCommand(mediaVerifyCmd)
+
 	// tasks command — the queue's status surface. A durable queue nobody can
 	// see is a queue nobody can trust: without this, "did that beat get
 	// replayed or silently dropped?" has no answer short of raw SQL.
@@ -1456,7 +1537,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, mediaCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

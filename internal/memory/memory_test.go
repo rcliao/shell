@@ -27,7 +27,7 @@ func newTestMemory(t *testing.T) *Memory {
 func TestLogExchangeDistillsSalientFact(t *testing.T) {
 	m := newTestMemory(t)
 	ctx := context.Background()
-	m.LogExchange(ctx, 42, "I always park the car in lot B on level 3.", "Got it, noted.")
+	m.LogExchange(ctx, 42, "I always park the car in lot B on level 3.", "Got it, noted.", "mami")
 
 	res, err := m.store.Search(ctx, agentmemory.SearchParams{NS: "agent:test", Query: "where did I park the car", Limit: 10})
 	if err != nil {
@@ -53,7 +53,7 @@ func TestRememberMediaPhotoSearchable(t *testing.T) {
 	ctx := context.Background()
 	m.RememberMedia(ctx, 42,
 		"the user's new Eevee Evolutions backpack from Hot Topic, brown canvas with all nine evolutions embroidered, shared while shopping online",
-		[]string{"/tmp/media/2026-07/testbot-20260714-msg1.jpg"})
+		[]string{"/tmp/media/2026-07/testbot-20260714-msg1.jpg"}, "mami")
 
 	res, err := m.store.Search(ctx, agentmemory.SearchParams{NS: "agent:test", Query: "Eevee backpack photo", Limit: 5})
 	if err != nil {
@@ -89,8 +89,8 @@ func TestRememberMediaPhotoSearchable(t *testing.T) {
 func TestRememberMediaNoNoteNoWrite(t *testing.T) {
 	m := newTestMemory(t)
 	ctx := context.Background()
-	m.RememberMedia(ctx, 42, "", []string{"/tmp/x.jpg"})
-	m.RememberMedia(ctx, 42, "a note", nil)
+	m.RememberMedia(ctx, 42, "", []string{"/tmp/x.jpg"}, "")
+	m.RememberMedia(ctx, 42, "a note", nil, "")
 	res, err := m.store.List(ctx, agentmemory.ListParams{NS: "agent:test", Tags: []string{"photo"}})
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -104,7 +104,7 @@ func TestRememberMediaNoNoteNoWrite(t *testing.T) {
 func TestLogExchangeChatterNotDistilled(t *testing.T) {
 	m := newTestMemory(t)
 	ctx := context.Background()
-	m.LogExchange(ctx, 42, "haha ok thanks", "sure thing")
+	m.LogExchange(ctx, 42, "haha ok thanks", "sure thing", "")
 
 	same, err := m.store.List(ctx, agentmemory.ListParams{NS: "agent:test", Tags: []string{"same-day"}})
 	if err != nil {
@@ -174,7 +174,7 @@ func TestStoreDirectiveTaggedAddsCallerTags(t *testing.T) {
 	const chatID = int64(-1001)
 
 	if err := m.StoreDirectiveTagged(ctx, chatID, "Umbreon checks the Notion log before answering watering dates.", "semantic",
-		[]string{"via:umbreonmini", "  ", ""}); err != nil {
+		[]string{"via:umbreonmini", "  ", ""}, "", ""); err != nil {
 		t.Fatalf("StoreDirectiveTagged: %v", err)
 	}
 	got, err2 := m.Store().List(ctx, agentmemory.ListParams{NS: m.AgentNS(chatID), Limit: 10})
