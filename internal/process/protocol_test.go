@@ -553,3 +553,31 @@ func TestNewUserMessage_WithPDF(t *testing.T) {
 		t.Errorf("expected size, got %q", content)
 	}
 }
+
+// A real transcript must come back carrying a reason, or the field exists and
+// nothing populates it.
+func TestTranscriptCarriesStopReason(t *testing.T) {
+	for _, c := range []struct {
+		name, resultLine string
+		want             StopReason
+	}{
+		{"success", `{"type":"result","subtype":"success","session_id":"s","result":"hi"}`, StopEndTurn},
+		{"max turns", `{"type":"result","subtype":"error_max_turns","session_id":"s","result":"hi"}`, StopMaxTurns},
+		{"execution error", `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s"}`, StopError},
+		{"no subtype", `{"type":"result","session_id":"s","result":"hi"}`, StopEndTurn},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			input := strings.Join([]string{
+				`{"type":"control_response","response":{"subtype":"success","request_id":"init_1"}}`,
+				`{"type":"system","subtype":"init","session_id":"s"}`,
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`,
+				c.resultLine,
+			}, "\n")
+			var stdin bytes.Buffer
+			res := parseBidirectionalEvents(strings.NewReader(input), &stdin, nil)
+			if res.StopReason != c.want {
+				t.Fatalf("StopReason = %q, want %q", res.StopReason, c.want)
+			}
+		})
+	}
+}

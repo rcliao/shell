@@ -1,43 +1,68 @@
 # Plan: an ACP-shaped agent boundary
 
+Status: **accepted, scoped to phases 1-3** (owner, 2026-08-10). Phases 4-5 are
+deferred, not rejected — see Decision below.
+
 ## Overview
 
-Reshape `process.Agent` into an abstraction that can carry three kinds of
-runtime, then grow into it. Borrow ACP's vocabulary — stop reasons, typed
-stream events, declared capabilities — inside our own Go interface, not as a
-wire protocol. Behind it: the Claude CLI today, an ACP runtime for Codex, and
-eventually a native loop where shell owns tool-calling and swaps models
-directly. Each is an implementation of one interface; the 429 lines of turn
-preparation never move. When done, changing runtime or model is configuration.
+Reshape `process.Agent` into an abstraction that can carry more than one
+runtime. Borrow ACP's vocabulary — stop reasons, typed stream events, declared
+capabilities — inside our own Go interface, not as a wire protocol.
+
+Behind it sits the Claude CLI today, and later an ACP runtime or a native loop
+if either is ever wanted. Each is one implementation of one interface. The 429
+lines of turn preparation never move.
+
+## Decision
+
+Do phases 1-3: measure the baseline, give the boundary a vocabulary, declare
+capabilities and ship a fake. These improve an abstraction we own, need no new
+dependency, and are worth doing whether or not a second runtime ever arrives.
+Finish and clean up before considering more.
+
+Phases 4-5 stay written down because the research behind them is expensive and
+perishable.
+
+Revisit phase 4 when a second runtime is actually wanted. The first step then is
+`acp-probe` against `codex-acp`, to settle whether it honours
+`_meta.systemPrompt`. That is unverified today and would decide the phase.
+
+Phase 5 needs a timeboxed spike before it can be costed.
 
 ## Current State
 
 `Agent` (`internal/process/agent.go:44`) has one implementation,
-`var _ Agent = (*Manager)(nil)` (`:78`), and no test fake. `Send` returns
-`(SendResult, error)` with no stop reason; the stream is
-`func(delta string)` — text only, so tool calls surface post hoc in
+`var _ Agent = (*Manager)(nil)` (`:78`), and no test fake.
+
+`Send` returns `(SendResult, error)` with no stop reason. The stream is
+`func(delta string)` — text only — so tool calls surface post hoc in
 `SendResult.ToolCalls` (`manager.go:46`). `Injector` sits outside the interface
 (`inject.go:43`) "so test doubles and alternative agents don't have to
-implement it". `HandleMessageStreaming` (`bridge.go:747`) is 429 lines around a
-single `Send`; model and effort resolve per turn via `ExecutionProfile`
-(`execution.go:21`), and all three spawn-bind (`args.go:39`).
+implement it".
+
+`HandleMessageStreaming` (`bridge.go:747`) is 429 lines around a single `Send`.
+Model and effort resolve per turn via `ExecutionProfile` (`execution.go:21`),
+and all three spawn-bind (`args.go:39`).
 
 ## Desired End State
 
-One interface, several runtimes, selected by config, with the Claude path
-unchanged in behaviour. Verified by: a stored transcript replays through the
-fake with no subprocess; `shell chat` yields a coherent conversation on a second
-runtime; and a canary agent runs a day without regressing the e2e timings
-already recorded in `message_map`.
+An interface a second runtime could implement, with the Claude path unchanged
+in behaviour.
+
+Verified three ways. A bridge turn runs end to end through the fake, with no
+subprocess and no network. Rotation reads a stop reason instead of inferring
+one. And the e2e timings in `message_map` stay inside the band recorded in
+phase 1.
 
 ## What We're NOT Doing
 
 Not adopting ACP as shell's own wire protocol — the bridge keeps calling a Go
-interface, not JSON-RPC. Not moving the 429 lines of turn preparation; ghost
-injection, rotation, prompt assembly and write-hygiene stay exactly where they
-are. Not replacing the Claude CLI path, which stays default. Not putting an
-adapter process in front of Claude — ACP is for the *second* runtime only. Not
-touching Telegram, the queue, or scheduling.
+interface, not JSON-RPC. Not putting an adapter process in front of Claude.
+
+Not moving the 429 lines of turn preparation: ghost injection, rotation, prompt
+assembly and write-hygiene stay exactly where they are. Not replacing the
+Claude CLI path, which stays default. Not touching Telegram, the queue, or
+scheduling.
 
 ## Implementation Phases
 
@@ -52,10 +77,11 @@ that regresses these is reverted, not tuned.
 
 ### Phase 2 — Give the boundary a vocabulary
 
-Add to `SendResult` a `StopReason` (`end_turn | max_tokens | cancelled |
-refusal | error`) which `Manager` derives from what the CLI already reports, and
-replace the bare `StreamFunc` with typed events (text delta, tool call, tool
-result, usage). Keep the old callback as an adapter so no caller changes yet.
+Add a `StopReason` to `SendResult` — `end_turn | max_tokens | cancelled |
+refusal | error` — which `Manager` derives from what the CLI already reports.
+
+Replace the bare `StreamFunc` with typed events: text delta, tool call, tool
+result, usage. The old callback stays as an adapter, so no caller changes yet.
 
 **Automated:** existing tests pass untouched; new tests assert each stop reason
 maps from a real CLI transcript.

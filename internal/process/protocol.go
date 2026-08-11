@@ -228,6 +228,21 @@ func parseBidirectionalEventsScanner(scanner *bufio.Scanner, stdin io.Writer, on
 // nil) is notified when a tool_use block is seen and when its tool_result
 // comes back, so the caller can tell mid-tool from mid-inference.
 func parseBidirectionalEventsObserved(scanner *bufio.Scanner, stdin io.Writer, onUpdate StreamFunc, obs turnObserver) SendResult {
+	return parseEvents(scanner, stdin, textOnly(onUpdate), obs)
+}
+
+// parseEvents is the event-emitting core. onUpdate-based entry points above
+// adapt down to it, so callers migrate to typed events when they have a reason
+// rather than because a signature changed.
+func parseEvents(scanner *bufio.Scanner, stdin io.Writer, emit EventFunc, obs turnObserver) SendResult {
+	// Local shim: the body below still speaks in text deltas in the places
+	// where it always did. Keeping that shape means this change adds events
+	// without rewriting the parse loop's control flow.
+	onUpdate := func(s string) {
+		if emit != nil && s != "" {
+			emit(TextDelta{Text: s})
+		}
+	}
 	var result SendResult
 	parseStart := time.Now()
 	// Track whether we've received any stream_event text deltas.
@@ -322,6 +337,9 @@ func parseBidirectionalEventsObserved(scanner *bufio.Scanner, stdin io.Writer, o
 						if obs != nil {
 							obs.toolStarted()
 						}
+						if emit != nil {
+							emit(ToolStarted{ID: block.ID, Name: block.Name, Input: block.Input})
+						}
 						slog.Info("tool use", "name", block.Name, "id", block.ID)
 					}
 				}
@@ -342,6 +360,13 @@ func parseBidirectionalEventsObserved(scanner *bufio.Scanner, stdin io.Writer, o
 						slog.Debug("bidirectional: tool_result", "tool_use_id", block.ToolUseID, "is_error", block.IsError)
 						if obs != nil {
 							obs.toolEnded()
+						}
+						if emit != nil {
+							ev := ToolFinished{ID: block.ToolUseID}
+							if block.IsError {
+								ev.Err = "tool reported an error"
+							}
+							emit(ev)
 						}
 						// Back-fill the matching tool_use: Failed flag (landed
 						// vs errored write) and execution duration (tool_use →
@@ -375,6 +400,9 @@ func parseBidirectionalEventsObserved(scanner *bufio.Scanner, stdin io.Writer, o
 			slog.Debug("bidirectional: control_response received")
 
 		case "result":
+			// Record WHY this turn ended before anything else, so an early
+			// return below cannot lose it.
+			result.StopReason = stopReasonFor(event.Subtype, event.IsError)
 			// event.Result only contains the last text turn's text. If Claude
 			// emitted text both before and after tool calls, the earlier text
 			// would be dropped. allText is a strict superset, so prefer it

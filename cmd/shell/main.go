@@ -602,6 +602,48 @@ func main() {
 	chatCmd.Flags().Int64Var(&chatThreadFlag, "thread", 0, "thread id within the chat")
 	chatCmd.Flags().DurationVar(&chatTimeoutFlag, "timeout", 5*time.Minute, "how long to wait for the reply")
 
+	// latency — the turn-path baseline. The e2e columns have recorded
+	// owner-experienced timings since V2-H33, but nothing read them back, so
+	// "did that refactor make replies slower?" has only ever been answerable
+	// from memory. Capture a distribution before changing the turn path.
+	var latencyConfigFlag, latencyWindowFlag string
+	latencyCmd := &cobra.Command{
+		Use:   "latency",
+		Short: "Turn-path latency distribution (p50/p95/max) over a window",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			window, perr := time.ParseDuration(latencyWindowFlag)
+			if perr != nil {
+				return fmt.Errorf("invalid --since %q: %w", latencyWindowFlag, perr)
+			}
+			cfg := loadConfigFrom(latencyConfigFlag)
+			st, err := store.Open(cfg.Store.DBPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			stats, err := st.TurnLatency(window)
+			if err != nil {
+				return err
+			}
+			if len(stats) == 0 || stats[0].Count == 0 {
+				fmt.Printf("No stamped turns in the last %s.\n", latencyWindowFlag)
+				return nil
+			}
+			fmt.Printf("Turn latency, last %s (unstamped turns excluded):\n\n", latencyWindowFlag)
+			for _, s := range stats {
+				fmt.Printf("  %s\n", s)
+			}
+			fmt.Printf("\n  recv_lag      Telegram receipt → handler entry\n")
+			fmt.Printf("  lock_wait     waiting on the per-topic lock\n")
+			fmt.Printf("  first_visible handler entry → first words on screen\n")
+			fmt.Printf("  total         handler entry → final delivery\n")
+			return nil
+		},
+	}
+	latencyCmd.Flags().StringVar(&latencyConfigFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
+	latencyCmd.Flags().StringVar(&latencyWindowFlag, "since", "168h", "lookback window (e.g. 24h, 168h)")
+
 	// media verify — the archive is the only copy of a photo once Telegram's
 	// temp file is gone, and until now nothing checked it. A truncated download
 	// or half-finished move produced a file that listed fine and failed only
@@ -1537,7 +1579,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, mediaCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, mediaCmd, latencyCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

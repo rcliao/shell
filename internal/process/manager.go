@@ -51,6 +51,9 @@ type SendResult struct {
 	Usage        *Usage     // token usage from result event (nil if absent)
 	Timings      Timings    // per-turn phase timings (V2-H18 latency attribution)
 	FirstEventAt time.Time  // wall time of the first stdout event this turn (protocol layer)
+	// StopReason says WHY the turn ended. Empty on paths that predate it;
+	// callers should treat "" as StopEndTurn for compatibility.
+	StopReason StopReason
 }
 
 // Timings breaks a turn's wall clock into attributable phases so the >60s

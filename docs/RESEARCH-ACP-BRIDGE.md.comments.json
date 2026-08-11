@@ -1,7 +1,7 @@
 {
   "version": "2.0",
   "documentHash": "4aaeeded859895d11577bad79081adbfc0ed672a0107c43cd8e5df1392a3993d",
-  "lastValidated": "2026-08-08T22:04:16.226133-07:00",
+  "lastValidated": "2026-08-10T20:20:04.803509-07:00",
   "threads": [
     {
       "ID": "cdpk7",
@@ -150,6 +150,49 @@
       "OriginalText": "",
       "ProposedText": "",
       "Accepted": null
+    },
+    {
+      "ID": "chlzz",
+      "Author": "pikamini",
+      "Timestamp": "2026-08-10T20:19:48.805696-07:00",
+      "Text": "I think cleaner shape to possible support different agent model and runtime later. Use case being that we may want to try out different model (like local one or gemini or gpt) if different model is better somehow later",
+      "Type": "",
+      "Line": 102,
+      "SectionID": "",
+      "SectionPath": "",
+      "Anchor": {
+        "selected_text": "2. Do we want portability across agent runtimes, or only a cleaner shape? Only",
+        "context_before": "   still has no model, effort or system prompt. Stable, not immaturity.",
+        "context_after": "   the first justifies ACP; the second is reachable by tightening `Agent`."
+      },
+      "AnchorConfidence": "exact",
+      "Resolved": false,
+      "Blocking": false,
+      "Status": "active",
+      "Priority": "medium",
+      "OriginalLine": 102,
+      "OrphanedReason": "",
+      "OrphanedAt": null,
+      "Replies": [],
+      "IsSuggestion": false,
+      "StartLine": 0,
+      "EndLine": 0,
+      "OriginalText": "",
+      "ProposedText": "",
+      "Accepted": null
     }
-  ]
+  ],
+  "reviews": [
+    {
+      "author": "pikamini",
+      "timestamp": "2026-08-09T09:12:08.107855-07:00",
+      "decision": "approved"
+    },
+    {
+      "author": "pikamini",
+      "timestamp": "2026-08-10T20:20:04.803507-07:00",
+      "decision": "approved"
+    }
+  ],
+  "template": "research"
 }

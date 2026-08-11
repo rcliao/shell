@@ -72,6 +72,10 @@ type Agent interface {
 
 	// ListSessions returns all tracked sessions.
 	ListSessions() []Session
+
+	// Capabilities reports what this runtime supports, so callers branch on a
+	// declaration instead of type-asserting optional interfaces or assuming.
+	Capabilities() Capabilities
 }
 
 // Ensure Manager satisfies Agent at compile time.
