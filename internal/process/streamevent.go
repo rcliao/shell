@@ -8,8 +8,12 @@ package process
 // caller that wanted to show tool activity live could not.
 //
 // Modelled on ACP's session/update variants (agent_message_chunk, tool_call,
-// tool_call_update, usage_update). Our own types, because the bridge calls a Go
-// interface rather than a protocol.
+// tool_call_update). Our own types, because the bridge calls a Go interface
+// rather than a protocol.
+//
+// No usage event: SendResult.Usage already carries the same numbers at the end
+// of the turn, and nothing wants them mid-flight. A declared-but-never-emitted
+// type reads as a feature and is really a liability.
 //
 // A closed set: an interface with an unexported marker method, so a new event
 // type cannot be introduced outside this package and every switch over events
@@ -36,13 +40,9 @@ type ToolFinished struct {
 	Err string
 }
 
-// UsageUpdate reports token accounting as it becomes known.
-type UsageUpdate struct{ Usage Usage }
-
 func (TextDelta) isStreamEvent()    {}
 func (ToolStarted) isStreamEvent()  {}
 func (ToolFinished) isStreamEvent() {}
-func (UsageUpdate) isStreamEvent()  {}
 
 // EventFunc receives stream events. Nil means the caller wants nothing.
 type EventFunc func(StreamEvent)

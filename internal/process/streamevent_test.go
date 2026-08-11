@@ -92,7 +92,7 @@ func TestTextOnlyAdapterForwardsTextAndNothingElse(t *testing.T) {
 	emit(TextDelta{Text: "hello"})
 	emit(ToolStarted{ID: "t", Name: "Bash"})
 	emit(ToolFinished{ID: "t"})
-	emit(UsageUpdate{})
+	emit(ToolFinished{ID: "t2"})
 	emit(TextDelta{Text: " world"})
 
 	if strings.Join(got, "") != "hello world" {

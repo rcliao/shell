@@ -1068,6 +1068,17 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}
+	// How the turn ended, on every turn. Until this, "did that session end
+	// cleanly?" was unanswerable after the fact — a run cut short at a turn cap
+	// and a normal completion looked identical in the logs. StopUnknown here
+	// means the runtime reported an outcome we do not map yet, which is worth
+	// seeing rather than smoothing over.
+	if result.StopReason != "" && result.StopReason != process.StopEndTurn {
+		slog.Warn("turn: ended abnormally", "chat_id", chatID, "thread_id", threadID,
+			"stop_reason", string(result.StopReason), "text_len", len(result.Text))
+	} else {
+		slog.Info("turn: stop", "chat_id", chatID, "stop_reason", string(result.StopReason))
+	}
 
 	// Track session ID and mark as having history — but NOT for an ephemeral
 	// turn (fable / deep heartbeat): its session id must never overwrite the

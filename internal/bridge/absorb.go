@@ -20,9 +20,16 @@ import (
 // judged injection unsafe (see process.ErrInject*).
 func (b *Bridge) InjectFollowUp(chatID, threadID int64, text, senderName string) (time.Duration, error) {
 	agent := b.resolveAgent(chatID)
+	// Ask the runtime what it supports rather than probing its type. The
+	// assertion below still exists because Injector carries the method itself,
+	// but the DECISION is now a declaration — a runtime that cannot inject
+	// says so instead of being discovered by a failed cast.
+	if !agent.Capabilities().Injection {
+		return 0, fmt.Errorf("agent does not support mid-turn injection")
+	}
 	inj, ok := agent.(process.Injector)
 	if !ok {
-		return 0, fmt.Errorf("agent does not support mid-turn injection")
+		return 0, fmt.Errorf("agent declares injection support but does not implement it")
 	}
 
 	msg := text
