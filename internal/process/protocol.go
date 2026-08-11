@@ -204,9 +204,14 @@ func writeJSON(w io.Writer, v any) error {
 //   - result         → final result text
 //   - keep_alive     → ignored
 func parseBidirectionalEvents(r io.Reader, stdin io.Writer, onUpdate StreamFunc) SendResult {
+	return parseEventsReader(r, stdin, textOnly(onUpdate))
+}
+
+// parseEventsReader is parseEvents over an io.Reader.
+func parseEventsReader(r io.Reader, stdin io.Writer, emit EventFunc) SendResult {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	return parseBidirectionalEventsScanner(scanner, stdin, onUpdate)
+	return parseEvents(scanner, stdin, emit, nil)
 }
 
 // turnObserver receives tool lifecycle callbacks from the parse loop. Used by

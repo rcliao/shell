@@ -43,6 +43,17 @@ var thinkingPhrases = []string{
 // reassurance so a slow turn (large context on a heavier model, or a slow
 // tool) reads as "still working" rather than a dead "Analyzing" — the symptom
 // the owner reported for umbreon (V2-H13).
+// toolMessage renders what the agent is actually doing right now, for the
+// placeholder. Shown instead of thinkingMessage while a tool is running: a
+// turn that spends 40s on WebSearch reads as work rather than as a stall,
+// which is the complaint thinkingMessage was already trying to soften with
+// reassurance it had no evidence for.
+func toolMessage(tick int, tool string) string {
+	frame := spinnerFrames[tick%len(spinnerFrames)]
+	dots := strings.Repeat(".", (tick%3)+1)
+	return fmt.Sprintf("%s Running %s%s", frame, tool, dots)
+}
+
 func thinkingMessage(tick int) string {
 	frame := spinnerFrames[tick%len(spinnerFrames)]
 	dots := strings.Repeat(".", (tick%3)+1)
@@ -2166,6 +2177,11 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	var firstChunkOnce sync.Once
 	stopThinking := func() { firstChunkOnce.Do(func() { close(firstChunk) }) }
 	defer stopThinking()
+	// activeTool is the name of the tool currently running, "" when the model
+	// is thinking rather than acting. Written by the event callback below and
+	// read by the placeholder ticker, hence the mutex.
+	var toolMu sync.Mutex
+	activeTool := ""
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -2176,7 +2192,13 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 				return
 			case <-ticker.C:
 				tick++
+				toolMu.Lock()
+				running := activeTool
+				toolMu.Unlock()
 				text := thinkingMessage(tick)
+				if running != "" {
+					text = toolMessage(tick, running)
+				}
 				b.EditMessageText(ctx, &bot.EditMessageTextParams{
 					ChatID:    msg.Chat.ID,
 					MessageID: msgID,
@@ -2272,16 +2294,29 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 		}
 	}()
 
-	onUpdate := func(chunk string) {
-		stopThinking()
-		mu.Lock()
-		accumulated.WriteString(chunk)
-		mu.Unlock()
-
-		// Signal the edit goroutine (non-blocking).
-		select {
-		case dirty <- struct{}{}:
-		default:
+	onEvent := func(ev process.StreamEvent) {
+		switch e := ev.(type) {
+		case process.TextDelta:
+			// First real words: the placeholder's job is over.
+			stopThinking()
+			mu.Lock()
+			accumulated.WriteString(e.Text)
+			mu.Unlock()
+			select {
+			case dirty <- struct{}{}:
+			default:
+			}
+		case process.ToolStarted:
+			// Deliberately does NOT stopThinking: no words have been shown
+			// yet, so the placeholder is still the only thing on screen — it
+			// should say what is happening instead of going quiet.
+			toolMu.Lock()
+			activeTool = e.Name
+			toolMu.Unlock()
+		case process.ToolFinished:
+			toolMu.Lock()
+			activeTool = ""
+			toolMu.Unlock()
 		}
 	}
 
@@ -2289,7 +2324,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// poller ctx is cancelled to stop new updates, but in-flight turns must
 	// run to completion (the whole point of draining).
 	turnCtx := context.WithoutCancel(ctx)
-	resp, err := h.sendWithBusyRetry(turnCtx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onUpdate)
+	resp, err := h.sendWithBusyRetry(turnCtx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onEvent)
 
 	// Stop the streaming edit goroutine and wait for it to finish.
 	// Send one final signal so the goroutine flushes any remaining text
@@ -2365,9 +2400,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// real question — group noop guidance + warm-up exemplar bled into DM).
 	if response == "" && !isGroup && len(resp.Photos) == 0 && len(resp.Videos) == 0 {
 		slog.Warn("empty response in DM — retrying with corrective note", "chat_id", msg.Chat.ID)
-		retryResp, rerr := h.bridge.HandleMessageStreaming(turnCtx, msg.Chat.ID, threadID,
+		retryResp, rerr := h.bridge.HandleMessageStreamingEvents(turnCtx, msg.Chat.ID, threadID,
 			"[system: your reply to the user's last message came back empty or [noop]. That is never valid in a direct chat — the message was addressed to you. Answer it now; if it is ambiguous, ask a brief clarifying question.]",
-			senderName, nil, nil, onUpdate)
+			senderName, nil, nil, onEvent)
 		if rerr == nil && retryResp.Text != "" {
 			response = retryResp.Text
 		}
@@ -3038,8 +3073,8 @@ var userBusyRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 *
 
 // sendWithBusyRetry runs a user turn, retrying while the session is busy with
 // a synthetic turn. Any other error returns immediately.
-func (h *Handler) sendWithBusyRetry(ctx context.Context, chatID, threadID int64, text, sender string, images []bridge.ImageInfo, pdfs []bridge.PDFInfo, onUpdate process.StreamFunc) (bridge.AgentResponse, error) {
-	resp, err := h.bridge.HandleMessageStreaming(ctx, chatID, threadID, text, sender, images, pdfs, onUpdate)
+func (h *Handler) sendWithBusyRetry(ctx context.Context, chatID, threadID int64, text, sender string, images []bridge.ImageInfo, pdfs []bridge.PDFInfo, onEvent process.EventFunc) (bridge.AgentResponse, error) {
+	resp, err := h.bridge.HandleMessageStreamingEvents(ctx, chatID, threadID, text, sender, images, pdfs, onEvent)
 	for _, delay := range userBusyRetryDelays {
 		if !errors.Is(err, process.ErrSessionBusy) {
 			return resp, err
@@ -3050,7 +3085,7 @@ func (h *Handler) sendWithBusyRetry(ctx context.Context, chatID, threadID int64,
 			return resp, err
 		case <-time.After(delay):
 		}
-		resp, err = h.bridge.HandleMessageStreaming(ctx, chatID, threadID, text, sender, images, pdfs, onUpdate)
+		resp, err = h.bridge.HandleMessageStreamingEvents(ctx, chatID, threadID, text, sender, images, pdfs, onEvent)
 	}
 	if errors.Is(err, process.ErrSessionBusy) {
 		slog.Error("user message still busy after retries — turn stays pending for replay", "chat_id", chatID, "thread_id", threadID)

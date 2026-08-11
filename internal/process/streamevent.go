@@ -53,6 +53,10 @@ type EventFunc func(StreamEvent)
 // StreamFunc and keeps working, because the protocol layer now emits events
 // and this collapses them back to text at the boundary. Callers migrate when
 // they have a reason to, not because the signature changed under them.
+// TextOnly adapts an EventFunc down to a text-delta callback. Exported so the
+// bridge can offer both entry points without duplicating the adapter.
+func TextOnly(fn StreamFunc) EventFunc { return textOnly(fn) }
+
 func textOnly(fn StreamFunc) EventFunc {
 	if fn == nil {
 		return nil

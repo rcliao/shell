@@ -79,6 +79,10 @@ func (f *Fake) LastRequest() (AgentRequest, bool) {
 }
 
 func (f *Fake) Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+	return f.SendEvents(ctx, req, textOnly(onUpdate))
+}
+
+func (f *Fake) SendEvents(ctx context.Context, req AgentRequest, emit EventFunc) (SendResult, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	i := f.turn
@@ -103,7 +107,6 @@ func (f *Fake) Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) 
 		return SendResult{StopReason: StopError}, st.Err
 	}
 
-	emit := textOnly(onUpdate)
 	var text strings.Builder
 	for _, ev := range st.Events {
 		if d, ok := ev.(TextDelta); ok {

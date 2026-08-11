@@ -744,7 +744,17 @@ func (b *Bridge) runCompaction(ctx context.Context, chatID, threadID int64, tota
 // included in the message sent to Claude (e.g. downloaded Telegram photos).
 // pdfs optionally contains downloaded PDF metadata that should be
 // included in the message sent to Claude (e.g. downloaded Telegram documents).
+// HandleMessageStreaming runs a turn, streaming text deltas. Kept as the
+// text-shaped entry point so existing callers do not change; it adapts to
+// HandleMessageStreamingEvents.
 func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, onUpdate process.StreamFunc) (AgentResponse, error) {
+	return b.HandleMessageStreamingEvents(ctx, chatID, threadID, userMsg, senderName, images, pdfs, process.TextOnly(onUpdate))
+}
+
+// HandleMessageStreamingEvents runs a turn and reports typed events —
+// text deltas, tool starts and finishes — so a caller can show what the agent
+// is doing while it does it, rather than a generic placeholder.
+func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threadID int64, userMsg, senderName string, images []ImageInfo, pdfs []PDFInfo, emit process.EventFunc) (AgentResponse, error) {
 	b.turnWG.Add(1)
 	b.turnCount.Add(1)
 	defer func() { b.turnCount.Add(-1); b.turnWG.Done() }()
@@ -1042,7 +1052,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 	if pw := time.Since(preworkStart); pw > 2*time.Second {
 		slog.Info("turn: prework", "chat_id", chatID, "prework_ms", pw.Milliseconds(), "sender", senderName)
 	}
-	result, err := agent.Send(ctx, process.AgentRequest{
+	result, err := agent.SendEvents(ctx, process.AgentRequest{
 		ChatID:          chatID,
 		MessageThreadID: threadID,
 		SessionID:       claudeSessionID,
@@ -1054,7 +1064,7 @@ func (b *Bridge) HandleMessageStreaming(ctx context.Context, chatID, threadID in
 		Ephemeral:       profile.Ephemeral,
 		Effort:          profile.Effort,
 		Timeout:         profile.Timeout,
-	}, onUpdate)
+	}, emit)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}

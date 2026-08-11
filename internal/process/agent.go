@@ -45,6 +45,11 @@ type Agent interface {
 	// Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
 	Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error)
 
+	// SendEvents is Send with typed events instead of text deltas, so a caller
+	// can observe tool activity while the turn runs rather than reading
+	// SendResult.ToolCalls after it is over.
+	SendEvents(ctx context.Context, req AgentRequest, emit EventFunc) (SendResult, error)
+
 	// Get returns the session for a (chat, thread) key.
 	Get(key SessionKey) (*Session, bool)
 

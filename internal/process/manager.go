@@ -152,7 +152,14 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 // Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
 // If the session is busy due to compaction, waits for compaction to finish before proceeding.
+// Send is the StreamFunc-shaped entry point, kept so existing callers do not
+// change. It adapts down to SendEvents, which is where the work happens.
 func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+	return m.SendEvents(ctx, req, textOnly(onUpdate))
+}
+
+// SendEvents runs a turn and reports typed events as they happen.
+func (m *Manager) SendEvents(ctx context.Context, req AgentRequest, emit EventFunc) (SendResult, error) {
 	sendStart := time.Now()
 	key := req.Key()
 	m.mu.Lock()
@@ -226,10 +233,15 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 	queueMs := dispatchStart.Sub(sendStart).Milliseconds()
 	var ttftOnce sync.Once
 	var ttftMs atomic.Int64
-	wrapped := func(delta string) {
-		ttftOnce.Do(func() { ttftMs.Store(time.Since(dispatchStart).Milliseconds()) })
-		if onUpdate != nil {
-			onUpdate(delta)
+	// TTFT is time-to-first-TEXT, deliberately: a tool call starting is not
+	// the owner seeing words appear, and counting it would flatter the metric
+	// the latency baseline compares against.
+	wrapped := func(ev StreamEvent) {
+		if d, ok := ev.(TextDelta); ok && d.Text != "" {
+			ttftOnce.Do(func() { ttftMs.Store(time.Since(dispatchStart).Milliseconds()) })
+		}
+		if emit != nil {
+			emit(ev)
 		}
 	}
 	stamp := func(r SendResult) SendResult {
@@ -283,7 +295,7 @@ func (m *Manager) Send(ctx context.Context, req AgentRequest, onUpdate StreamFun
 	return stamp(result), err
 }
 
-func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, emit EventFunc) (SendResult, error) {
 	claudeSessionID := req.SessionID
 	timeout := m.timeout
 	if req.Timeout > 0 {
@@ -378,7 +390,7 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	}
 
 	// Phase 3: Stream all responses through a single reader
-	finalResult := parseBidirectionalEvents(stdout, stdin, onUpdate)
+	finalResult := parseEventsReader(stdout, stdin, emit)
 
 	// Phase 4: Close stdin, wait for process
 	stdin.Close()

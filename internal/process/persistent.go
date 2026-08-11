@@ -187,7 +187,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 
 // sendMessage sends a user message to the persistent process and streams the response.
 // This is the persistent equivalent of runClaudeBidirectional.
-func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, emit EventFunc) (SendResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -207,7 +207,7 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, onUp
 
 	// Read events using the persistent scanner (not a new one per message).
 	// This avoids losing buffered bytes between turns.
-	result := parseBidirectionalEventsObserved(p.scanner, p.stdinW, onUpdate, &p.turn)
+	result := parseEvents(p.scanner, p.stdinW, emit, &p.turn)
 
 	// Update session ID if we got one (turn.mu: the injector reads it).
 	if result.SessionID != "" {
@@ -265,13 +265,13 @@ func (p *persistentProc) kill() {
 
 // sendPersistent tries to use a persistent process for the request.
 // Returns the result, or an error if the persistent process failed.
-func (m *Manager) sendPersistent(ctx context.Context, req AgentRequest, onUpdate StreamFunc) (SendResult, error) {
+func (m *Manager) sendPersistent(ctx context.Context, req AgentRequest, emit EventFunc) (SendResult, error) {
 	proc, err := m.getOrSpawn(ctx, req)
 	if err != nil {
 		return SendResult{}, err
 	}
 
-	result, err := proc.sendMessage(ctx, req, onUpdate)
+	result, err := proc.sendMessage(ctx, req, emit)
 	if err != nil {
 		// Process likely died — clean up and let caller retry with spawn-per-message.
 		slog.Warn("persistent process send failed, cleaning up", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
