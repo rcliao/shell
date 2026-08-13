@@ -45,6 +45,12 @@ type Memory struct {
 	systemBudget     int
 	profiles         map[string]ProfileConfig
 	chatProfiles     map[int64]string
+
+	// canonicalBySender maps resolved sender labels (and their leading name
+	// token) to the canonical short person-id used for provenance
+	// (source-identity-design.md: readable nicknames, e.g. "mami"). Senders
+	// with no mapping pass through verbatim — never guessed.
+	canonicalBySender map[string]string
 }
 
 // New opens or creates a memory store at the given path.
@@ -72,6 +78,54 @@ func New(dbPath string, budget int, globalNamespaces []string, globalBudget int,
 		profiles:         profiles,
 		chatProfiles:     chatProfiles,
 	}, nil
+}
+
+// SetSourceIdentity installs the sender-label → canonical-id map and seeds
+// the declared aliases into every profile's agent namespace, so memories
+// already stored under display labels or name variants resolve to the same
+// person as new canonical writes. Seeding failures are logged and skipped:
+// a chain rejection on a hand-declared alias must not take the daemon down.
+func (m *Memory) SetSourceIdentity(ctx context.Context, byLabel map[string]string) {
+	if len(byLabel) == 0 {
+		return
+	}
+	expanded := map[string]string{}
+	for label, canon := range byLabel {
+		if label == "" || canon == "" {
+			continue
+		}
+		expanded[label] = canon
+		if first := strings.Fields(label); len(first) > 0 && !strings.EqualFold(first[0], canon) {
+			expanded[first[0]] = canon
+		}
+	}
+	m.canonicalBySender = expanded
+
+	seen := map[string]bool{}
+	for _, prof := range m.profiles {
+		ns := prof.AgentNS
+		if ns == "" || seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		for alias, canon := range expanded {
+			if strings.EqualFold(alias, canon) {
+				continue
+			}
+			if err := m.store.SetSourceAlias(ctx, ns, alias, canon); err != nil {
+				slog.Warn("source alias seed skipped", "ns", ns, "alias", alias, "canonical", canon, "err", err)
+			}
+		}
+	}
+}
+
+// canonicalSender resolves a sender label to its canonical short id, or
+// returns it unchanged when no mapping is declared.
+func (m *Memory) canonicalSender(sender string) string {
+	if c, ok := m.canonicalBySender[sender]; ok && c != "" {
+		return c
+	}
+	return sender
 }
 
 // profileFor resolves the profile for a chat, falling back to top-level defaults.
@@ -347,6 +401,7 @@ func (m *Memory) maybeBackgroundReflect(ns string, skipped int) {
 // speaker's own stated facts surface first under a contested budget, and it
 // may be empty (warmup, unknown), which disables the boost.
 func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg, sender string) string {
+	sender = m.canonicalSender(sender)
 	start := time.Now()
 	prof := m.profileFor(chatID)
 	var sb strings.Builder
@@ -552,6 +607,7 @@ func provenancePrefix(user, kind string) string {
 // the person who spoke (may be empty when unknown); the exchange and the
 // facts distilled from the user's own words carry it as provenance.
 func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, response, sender string) {
+	sender = m.canonicalSender(sender)
 	prof := m.profileFor(chatID)
 
 	maxUser := prof.ExchangeMaxUser
@@ -677,6 +733,7 @@ func (m *Memory) putWithRetry(ctx context.Context, p agentmemory.PutParams) erro
 // rows. The caption author is the VLM that saw the image at turn time, so this
 // costs zero extra inference.
 func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, paths []string, sender string) {
+	sender = m.canonicalSender(sender)
 	if note == "" || len(paths) == 0 {
 		return
 	}
@@ -712,6 +769,7 @@ func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, p
 
 // Remember stores a user-provided memory as semantic memory.
 func (m *Memory) Remember(ctx context.Context, chatID int64, content, sender string) error {
+	sender = m.canonicalSender(sender)
 	prof := m.profileFor(chatID)
 	ns := prof.AgentNS
 	var tags []string

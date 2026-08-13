@@ -131,3 +131,82 @@ func TestProvenanceCorrectMemoryCarries(t *testing.T) {
 		t.Errorf("correction dropped origin: user=%q kind=%q — a correction edits content, not origin", u, k)
 	}
 }
+
+// Canonical source identity (ghost source-identity-design.md): the daemon
+// installs a label→canonical map at startup; every sender-carrying write
+// then records the readable nickname, and the declared aliases make
+// historical display-label rows resolve to the same person.
+func TestCanonicalSenderOnWrites(t *testing.T) {
+	m := newTestMemory(t)
+	ctx := context.Background()
+	m.SetSourceIdentity(ctx, map[string]string{"Jenny (mom / 媽媽)": "mami"})
+
+	// Display label, and its leading name token, both canonicalize.
+	m.LogExchange(ctx, 42, "The garage code changed again.", "Noted.", "Jenny (mom / 媽媽)")
+	res, err := m.store.List(ctx, agentmemory.ListParams{NS: "agent:test", SourceUser: "mami"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) == 0 {
+		t.Fatal("exchange did not store the canonical id")
+	}
+	for _, mem := range res {
+		if mem.SourceUser != "mami" {
+			t.Errorf("%s: source_user=%q, want canonical mami", mem.Key, mem.SourceUser)
+		}
+	}
+
+	// Unknown senders pass through verbatim — never guessed.
+	if got := m.canonicalSender("stranger"); got != "stranger" {
+		t.Errorf("unknown sender rewritten to %q", got)
+	}
+	if got := m.canonicalSender(""); got != "" {
+		t.Errorf("empty sender rewritten to %q", got)
+	}
+}
+
+func TestSourceIdentitySeedsAliases(t *testing.T) {
+	m := newTestMemory(t)
+	ctx := context.Background()
+	m.SetSourceIdentity(ctx, map[string]string{"Jenny (mom / 媽媽)": "mami"})
+
+	aliases, err := m.store.ListSourceAliases(ctx, "agent:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"Jenny (mom / 媽媽)": false, "Jenny": false}
+	for _, a := range aliases {
+		if a.Canonical != "mami" {
+			t.Errorf("alias %q → %q, want mami", a.Alias, a.Canonical)
+		}
+		if _, ok := want[a.Alias]; ok {
+			want[a.Alias] = true
+		}
+	}
+	for alias, seen := range want {
+		if !seen {
+			t.Errorf("alias %q not seeded", alias)
+		}
+	}
+
+	// Seeded aliases make a historical display-label row retrievable by
+	// the canonical id (resolve-at-read; no rewrites).
+	if _, err := m.store.Put(ctx, agentmemory.PutParams{
+		NS: "agent:test", Key: "old-row", Content: "Jenny prefers the window seat.",
+		Kind: "semantic", Tier: "ltm", SourceUser: "Jenny", SourceKind: "stated"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.store.List(ctx, agentmemory.ListParams{NS: "agent:test", SourceUser: "mami"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, mem := range res {
+		if mem.Key == "old-row" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("historical variant row did not resolve to the canonical id")
+	}
+}
