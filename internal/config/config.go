@@ -115,6 +115,12 @@ type TelegramConfig struct {
 	// "1234": "Alex (the developer)". Lets the agent attribute group-chat
 	// messages to the right person instead of guessing from first names.
 	UserLabels map[string]string `json:"user_labels"`
+	// UserCanonical maps a Telegram user ID to the canonical short person-id
+	// used for memory provenance (readable nickname, e.g. "1234": "mami").
+	// The display label stays in [From: ...]; memory writes and the
+	// interlocutor boost use this id, and the daemon seeds label→canonical
+	// aliases into ghost at startup so historical variants resolve too.
+	UserCanonical map[string]string `json:"user_canonical"`
 }
 
 // UnmarshalJSON replaces (rather than merges) the ReactionMap when the user

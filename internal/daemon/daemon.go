@@ -370,6 +370,20 @@ func New(cfg config.Config) (*Daemon, error) {
 			st.Close()
 			return nil, fmt.Errorf("init memory store: %w", err)
 		}
+
+		// Source identity: map display labels to canonical person-ids and
+		// seed the alias table, so provenance converges on one readable id
+		// per person (source-identity-design.md).
+		if len(cfg.Telegram.UserCanonical) > 0 {
+			byLabel := map[string]string{}
+			for id, canon := range cfg.Telegram.UserCanonical {
+				if label := cfg.Telegram.UserLabels[id]; label != "" && canon != "" {
+					byLabel[label] = canon
+				}
+			}
+			mem.SetSourceIdentity(context.Background(), byLabel)
+			slog.Info("source identity seeded", "users", len(byLabel))
+		}
 		slog.Info("memory store initialized",
 			"db", cfg.Memory.DBPath,
 			"budget", cfg.Memory.Budget,
