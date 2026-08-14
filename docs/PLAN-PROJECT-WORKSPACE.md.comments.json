@@ -1,0 +1,129 @@
+{
+  "version": "2.0",
+  "documentHash": "cd72d37037a147207e3d4cb49b5a8f2dc9825f6f63e4b48c86a3a0bea0cea8e6",
+  "lastValidated": "2026-08-13T08:05:52.598097-07:00",
+  "threads": [
+    {
+      "ID": "cz1ah",
+      "Author": "pikamini",
+      "Timestamp": "2026-08-13T07:50:01.110936-07:00",
+      "Text": "lets ensure family group project is supported",
+      "Type": "",
+      "Line": 24,
+      "SectionID": "",
+      "SectionPath": "",
+      "Anchor": {
+        "selected_text": "**Non-goals (v1):** family-group projects (DM-only first; group entry",
+        "context_after": "deferred), multi-agent project ownership (one agent owns a project),"
+      },
+      "AnchorConfidence": "exact",
+      "Resolved": false,
+      "Blocking": false,
+      "Status": "active",
+      "Priority": "medium",
+      "OriginalLine": 24,
+      "OrphanedReason": "",
+      "OrphanedAt": null,
+      "Replies": [
+        {
+          "ID": "rz1ah",
+          "Author": "claude",
+          "Timestamp": "2026-08-13T07:58:39.515117-07:00",
+          "Text": "Adopted — group projects are now in scope. Design keeps it cheap: single-agent ownership (peer has no binding, isolation does the work), group forum topic stored on the project row, deltas/pins target the topic on the SEND path so the scheduler PartitionKey stays untouched.",
+          "Type": "",
+          "Resolved": false
+        }
+      ],
+      "IsSuggestion": false,
+      "StartLine": 0,
+      "EndLine": 0,
+      "OriginalText": "",
+      "ProposedText": "",
+      "Accepted": null
+    },
+    {
+      "ID": "ckqs8",
+      "Author": "pikamini",
+      "Timestamp": "2026-08-13T07:50:59.517064-07:00",
+      "Text": "would love notion to agent to be done properly so that shell can build \"events\" of the notion actions and support future cron monitoring to event for agent to act on as trigger",
+      "Type": "",
+      "Line": 27,
+      "SectionID": "",
+      "SectionPath": "",
+      "Anchor": {
+        "selected_text": "rejected in research), two-way Notion content sync (comments + reconciled",
+        "context_before": "Telegram-as-canvas (rich messages / Threaded Mode / callback buttons —",
+        "context_after": "human edits only), Mini App dashboard (gated v2)."
+      },
+      "AnchorConfidence": "exact",
+      "Resolved": false,
+      "Blocking": false,
+      "Status": "active",
+      "Priority": "medium",
+      "OriginalLine": 27,
+      "OrphanedReason": "",
+      "OrphanedAt": null,
+      "Replies": [
+        {
+          "ID": "rkqs8",
+          "Author": "claude",
+          "Timestamp": "2026-08-13T07:58:39.515117-07:00",
+          "Text": "Adopted — the poller is now a pure event producer: normalized project.event rows (notion.comment.created / notion.page.edited) into the existing durable task queue with source-id idempotency; a consumer runs the revision turns. Webhooks and future cron monitors become additional producers of the same events with zero consumer changes.",
+          "Type": "",
+          "Resolved": false
+        }
+      ],
+      "IsSuggestion": false,
+      "StartLine": 0,
+      "EndLine": 0,
+      "OriginalText": "",
+      "ProposedText": "",
+      "Accepted": null
+    },
+    {
+      "ID": "cw6jq",
+      "Author": "pikamini",
+      "Timestamp": "2026-08-13T07:56:17.459077-07:00",
+      "Text": "once a week seems fine",
+      "Type": "",
+      "Line": 225,
+      "SectionID": "",
+      "SectionPath": "",
+      "Anchor": {
+        "selected_text": "1. Default research cadence per project (proposal: 3×/week, per-project",
+        "context_after": "   overridable) and whether a monthly per-project turn budget is wanted."
+      },
+      "AnchorConfidence": "exact",
+      "Resolved": false,
+      "Blocking": false,
+      "Status": "active",
+      "Priority": "medium",
+      "OriginalLine": 225,
+      "OrphanedReason": "",
+      "OrphanedAt": null,
+      "Replies": [
+        {
+          "ID": "rw6jq",
+          "Author": "claude",
+          "Timestamp": "2026-08-13T07:58:39.515117-07:00",
+          "Text": "Adopted — weekly default cadence, per-project overridable, no budget cap for now.",
+          "Type": "",
+          "Resolved": false
+        }
+      ],
+      "IsSuggestion": false,
+      "StartLine": 0,
+      "EndLine": 0,
+      "OriginalText": "",
+      "ProposedText": "",
+      "Accepted": null
+    }
+  ],
+  "reviews": [
+    {
+      "author": "pikamini",
+      "timestamp": "2026-08-13T07:56:38.611043-07:00",
+      "decision": "approved"
+    }
+  ]
+}

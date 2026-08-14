@@ -836,7 +836,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	isHeartbeat := strings.HasPrefix(userMsg, "[Heartbeat] ") || strings.HasPrefix(userMsg, deepHeartbeatPrefix)
 	isDeepHeartbeat := strings.HasPrefix(userMsg, deepHeartbeatPrefix)
 
-	var ghostAug, transcriptBlock, tasksBlock, activityBlock, channelBPrefix string
+	var ghostAug, transcriptBlock, tasksBlock, activityBlock, channelBPrefix, projectsBlock string
 	{
 		var wg sync.WaitGroup
 		// Named members: the fanout's slowest member gates prework, and the
@@ -880,6 +880,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 			})
 		}
 		run("channel_b", func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, userMsg) })
+		run("projects", func() { projectsBlock = b.buildProjectsBlock(chatID) })
 		wg.Wait()
 	}
 	step("context_fanout")
@@ -891,7 +892,8 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		"ghost_chars", len(ghostAug)-len(userMsg),
 		"transcript_chars", len(transcriptBlock),
 		"tasks_chars", len(tasksBlock)+len(activityBlock),
-		"channel_b_chars", len(channelBPrefix))
+		"channel_b_chars", len(channelBPrefix),
+		"projects_chars", len(projectsBlock))
 
 	augmentedMsg := userMsg
 	if ghostAug != "" {
@@ -931,6 +933,13 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 			where += fmt.Sprintf(" | thread: %d", threadID)
 		}
 		augmentedMsg = fmt.Sprintf("[From: %s | %s]\n%s", senderName, where, augmentedMsg)
+	}
+
+	// [Projects] registry block (P1): active projects for this chat, with
+	// their external doc ids — sits just inside Channel B so export_ref is
+	// visible near the top of every turn in a chat with active projects.
+	if projectsBlock != "" {
+		augmentedMsg = projectsBlock + "\n" + augmentedMsg
 	}
 
 	// Channel B prefix (current time + pinned delta + sticky topic + media +

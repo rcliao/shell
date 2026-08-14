@@ -1,0 +1,118 @@
+#!/bin/sh
+# project — project registry: create, list, get (P1)
+set -e
+
+SOCK="${SHELL_BRIDGE_SOCK:-$HOME/.shell/bridge.sock}"
+URL="http://bridge/project"
+CHAT_ID="${SHELL_CHAT_ID:-0}"
+
+usage() {
+  echo "usage: project create --title <text> [--emoji <e> --chat <id> --thread <id> --export-ref <id> --doc-path <path> --instructions <text> --lang <code>]" >&2
+  echo "       project list [--chat <id>]" >&2
+  echo "       project get <slug>" >&2
+  exit 1
+}
+
+VERB="$1"
+[ -n "$VERB" ] || usage
+shift
+
+TITLE=""
+EMOJI=""
+THREAD=""
+EXPORT_REF=""
+DOC_PATH=""
+INSTRUCTIONS=""
+LANG_CODE=""
+SLUG=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --title)        TITLE="$2"; shift 2 ;;
+    --emoji)        EMOJI="$2"; shift 2 ;;
+    --chat)         CHAT_ID="$2"; shift 2 ;;
+    --thread)       THREAD="$2"; shift 2 ;;
+    --export-ref)   EXPORT_REF="$2"; shift 2 ;;
+    --doc-path)     DOC_PATH="$2"; shift 2 ;;
+    --instructions) INSTRUCTIONS="$2"; shift 2 ;;
+    --lang)         LANG_CODE="$2"; shift 2 ;;
+    --*)            echo "unknown arg: $1" >&2; usage ;;
+    *)              SLUG="$1"; shift ;;
+  esac
+done
+
+post() {
+  RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$1")
+  if [ -z "$RESP" ]; then
+    echo "no response from bridge — is the daemon running?" >&2
+    exit 1
+  fi
+  if echo "$RESP" | grep -q '"error"'; then
+    echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || echo "$RESP"
+    exit 1
+  fi
+}
+
+case "$VERB" in
+  create)
+    if [ -z "$TITLE" ]; then
+      echo "create requires --title" >&2
+      exit 1
+    fi
+    BODY=$(TITLE="$TITLE" EMOJI="$EMOJI" CHAT_ID="$CHAT_ID" THREAD="$THREAD" \
+      EXPORT_REF="$EXPORT_REF" DOC_PATH="$DOC_PATH" INSTRUCTIONS="$INSTRUCTIONS" \
+      LANG_CODE="$LANG_CODE" python3 -c "
+import json, os
+d = {'action': 'create', 'title': os.environ['TITLE'], 'chat_id': int(os.environ['CHAT_ID'] or 0)}
+if os.environ['EMOJI']: d['emoji'] = os.environ['EMOJI']
+if os.environ['THREAD']: d['message_thread_id'] = int(os.environ['THREAD'])
+if os.environ['EXPORT_REF']: d['export_ref'] = os.environ['EXPORT_REF']
+if os.environ['DOC_PATH']: d['doc_path'] = os.environ['DOC_PATH']
+if os.environ['INSTRUCTIONS']: d['instructions'] = os.environ['INSTRUCTIONS']
+if os.environ['LANG_CODE']: d['lang'] = os.environ['LANG_CODE']
+print(json.dumps(d))
+")
+    post "$BODY"
+    # Read-back receipt: print what the SERVER stored, warning included.
+    echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print(f\"Project {r['slug']} created ({r['status']}), chat {r['chat_id']}\")
+if r.get('emoji'): print(f\"  emoji: {r['emoji']}\")
+if r.get('export_ref'): print(f\"  export: {r.get('export_kind','')}:{r['export_ref']}\")
+if r.get('doc_path'): print(f\"  doc: {r['doc_path']}\")
+if r.get('instructions'): print(f\"  instructions: {r['instructions']}\")
+print(f\"  ghost tag: {r['ghost_tag']}\")
+if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
+" 2>/dev/null || echo "$RESP"
+    ;;
+
+  list)
+    post "{\"action\": \"list\", \"chat_id\": $CHAT_ID}"
+    echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+projects = r.get('projects', [])
+if not projects:
+    print('No projects.')
+for p in projects:
+    emoji = (p.get('emoji') + ' ') if p.get('emoji') else ''
+    export = f\" | {p['export_kind']}:{p['export_ref']}\" if p.get('export_ref') else ''
+    print(f\"{emoji}{p['slug']} [{p['status']}] — {p['title']}{export}\")
+" 2>/dev/null || echo "$RESP"
+    ;;
+
+  get)
+    if [ -z "$SLUG" ]; then
+      echo "get requires a slug" >&2
+      exit 1
+    fi
+    BODY=$(SLUG="$SLUG" python3 -c "import json, os; print(json.dumps({'action': 'get', 'slug': os.environ['SLUG']}))")
+    post "$BODY"
+    echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+    ;;
+
+  *)
+    usage
+    ;;
+esac
