@@ -121,6 +121,10 @@ type TelegramConfig struct {
 	// interlocutor boost use this id, and the daemon seeds label→canonical
 	// aliases into ghost at startup so historical variants resolve too.
 	UserCanonical map[string]string `json:"user_canonical"`
+	// ChatScopes maps a Telegram chat ID (string key) to a readable canonical
+	// scope id recorded as source_scope on memories born in that chat, e.g.
+	// "-1003731277835": "family-chat". Unmapped chats record "chat:<id>".
+	ChatScopes map[string]string `json:"chat_scopes"`
 }
 
 // UnmarshalJSON replaces (rather than merges) the ReactionMap when the user

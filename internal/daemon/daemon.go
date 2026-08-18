@@ -384,6 +384,16 @@ func New(cfg config.Config) (*Daemon, error) {
 			mem.SetSourceIdentity(context.Background(), byLabel)
 			slog.Info("source identity seeded", "users", len(byLabel))
 		}
+		if len(cfg.Telegram.ChatScopes) > 0 {
+			byChat := map[int64]string{}
+			for id, scope := range cfg.Telegram.ChatScopes {
+				if cid, err := strconv.ParseInt(id, 10, 64); err == nil && scope != "" {
+					byChat[cid] = scope
+				}
+			}
+			mem.SetSourceScopes(byChat)
+			slog.Info("source scopes configured", "chats", len(byChat))
+		}
 		slog.Info("memory store initialized",
 			"db", cfg.Memory.DBPath,
 			"budget", cfg.Memory.Budget,

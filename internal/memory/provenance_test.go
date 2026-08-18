@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	agentmemory "github.com/rcliao/ghost"
 )
@@ -208,5 +209,50 @@ func TestSourceIdentitySeedsAliases(t *testing.T) {
 	}
 	if !found {
 		t.Error("historical variant row did not resolve to the canonical id")
+	}
+}
+
+// Mechanical scope (provenance-encoding-context-design.md): every
+// sender-carrying write records WHERE it was born — the configured readable
+// scope when declared, the mechanical "chat:<id>" otherwise. ForScope is
+// deliberately NOT passed by shell yet: the chat-tag SessionScope boost
+// already covers same-place recall, and stacking an unmeasured second boost
+// is the pattern the eval discipline exists to prevent.
+func TestMechanicalScopeOnWrites(t *testing.T) {
+	m := newTestMemory(t)
+	ctx := context.Background()
+	m.SetSourceScopes(map[int64]string{42: "family-chat"})
+
+	// Chat 42 is the configured profile chat; write once with the mapping
+	// and once with it cleared to exercise the mechanical fallback in the
+	// same namespace.
+	m.LogExchange(ctx, 42, "The garage code changed once more.", "Noted.", "mami")
+	m.SetSourceScopes(nil)
+	time.Sleep(2 * time.Millisecond) // exchange keys are per-millisecond
+	m.LogExchange(ctx, 42, "Different turn, no scope mapping.", "Noted.", "mami")
+
+	res, err := m.store.List(ctx, agentmemory.ListParams{NS: "agent:test", SourceUser: "mami", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) == 0 {
+		t.Fatal("no writes to inspect")
+	}
+	var sawConfigured, sawFallback bool
+	for _, mem := range res {
+		switch mem.SourceScope {
+		case "family-chat":
+			sawConfigured = true
+		case "chat:42":
+			sawFallback = true
+		case "":
+			t.Errorf("%s: write carries no scope — mechanical coverage regressed", mem.Key)
+		}
+	}
+	if !sawConfigured {
+		t.Error("configured chat did not record its readable scope id")
+	}
+	if !sawFallback {
+		t.Error("unmapped chat did not record the mechanical chat:<id> scope")
 	}
 }

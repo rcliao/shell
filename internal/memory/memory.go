@@ -51,6 +51,12 @@ type Memory struct {
 	// (source-identity-design.md: readable nicknames, e.g. "mami"). Senders
 	// with no mapping pass through verbatim — never guessed.
 	canonicalBySender map[string]string
+
+	// scopeByChat maps a chat id to its readable canonical scope id
+	// ("family-chat"). Chats without a mapping fall back to the mechanical
+	// "chat:<id>" — every sender-carrying write records WHERE it was born
+	// (provenance-encoding-context-design.md), by construction.
+	scopeByChat map[int64]string
 }
 
 // New opens or creates a memory store at the given path.
@@ -117,6 +123,20 @@ func (m *Memory) SetSourceIdentity(ctx context.Context, byLabel map[string]strin
 			}
 		}
 	}
+}
+
+// SetSourceScopes installs the chat → canonical scope-id map.
+func (m *Memory) SetSourceScopes(byChat map[int64]string) {
+	m.scopeByChat = byChat
+}
+
+// scopeFor resolves the birth scope of a chat-originated write: the
+// configured readable id when declared, else the mechanical chat scope.
+func (m *Memory) scopeFor(chatID int64) string {
+	if sc, ok := m.scopeByChat[chatID]; ok && sc != "" {
+		return sc
+	}
+	return fmt.Sprintf("chat:%d", chatID)
 }
 
 // canonicalSender resolves a sender label to its canonical short id, or
@@ -652,8 +672,9 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 		Tier:       "sensory", // raw observations — promoted to stm if accessed
 		TTL:        ttl,
 		Importance: 0.3, // ephemeral exchanges — low importance, will decay naturally
-		SourceUser: sender,
-		SourceKind: provKindFor(sender),
+		SourceUser:  sender,
+		SourceKind:  provKindFor(sender),
+		SourceScope: m.scopeFor(chatID),
 	})
 	if err != nil {
 		slog.Warn("failed to log exchange to memory", "error", err)
@@ -682,8 +703,9 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 			TTL:        factTTL,
 			Dedup:      true,
 			// Distilled from the user's own turn: the speaker said it.
-			SourceUser: sender,
-			SourceKind: provKindFor(sender),
+			SourceUser:  sender,
+			SourceKind:  provKindFor(sender),
+			SourceScope: m.scopeFor(chatID),
 		}); ferr != nil {
 			slog.Warn("failed to store distilled same-day fact", "error", ferr)
 		}
@@ -760,8 +782,9 @@ func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, p
 		Tier:       "stm", // searchable immediately; lifecycle governs from here
 		Importance: 0.5,
 		Files:      files,
-		SourceUser: sender,
-		SourceKind: provKindFor(sender),
+		SourceUser:  sender,
+		SourceKind:  provKindFor(sender),
+		SourceScope: m.scopeFor(chatID),
 	}); err != nil {
 		slog.Warn("failed to store media-note memory", "error", err)
 	}
@@ -789,8 +812,9 @@ func (m *Memory) Remember(ctx context.Context, chatID int64, content, sender str
 		Priority:   "high",
 		Importance: 0.8,   // user-remembered facts are high importance
 		Tier:       "ltm", // explicitly saved by user — skip stm
-		SourceUser: sender,
-		SourceKind: provKindFor(sender),
+		SourceUser:  sender,
+		SourceKind:  provKindFor(sender),
+		SourceScope: m.scopeFor(chatID),
 	})
 	return err
 }
