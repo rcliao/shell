@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
@@ -44,8 +45,9 @@ type projectResearchDeps struct {
 	// runTurn executes a project prompt as an agent turn on the project's
 	// (chat, thread) session and returns the visible reply text.
 	runTurn func(ctx context.Context, chatID, threadID int64, prompt string) (string, error)
-	// deliver sends the delta text to the project's chat + thread (Transport).
-	deliver func(chatID, threadID int64, text string)
+	// deliver sends the delta text to the project's chat + thread (Transport),
+	// with optional inline URL buttons (the project's doc link).
+	deliver func(chatID, threadID int64, text string, buttons []bridge.LinkButton)
 	// refreshHome updates the chat's pinned 📋 Projects message.
 	refreshHome func(chatID int64)
 
@@ -135,7 +137,13 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 	delta := strings.TrimSpace(text)
 	delivered := false
 	if delta != "" && !strings.Contains(delta, "[noop]") && d.deliver != nil {
-		d.deliver(proj.ChatID, proj.MessageThreadID, delta)
+		// One-tap doc link when the project's mirrored page URL is derivable
+		// (same export_kind=notion + rendered-block-map rule as the RPC get).
+		var buttons []bridge.LinkButton
+		if url := project.NotionPageURL(*proj); url != "" {
+			buttons = []bridge.LinkButton{{Label: "📄 開啟文件", URL: url}}
+		}
+		d.deliver(proj.ChatID, proj.MessageThreadID, delta, buttons)
 		delivered = true
 	}
 

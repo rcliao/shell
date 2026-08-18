@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
@@ -59,8 +60,11 @@ func TestProjectResearchRunsTurnAndDelivers(t *testing.T) {
 			}
 			return "updated two options", nil
 		},
-		deliver: func(chatID, threadID int64, text string) {
+		deliver: func(chatID, threadID int64, text string, buttons []bridge.LinkButton) {
 			deliveredChat, deliveredThread, deliveredText = chatID, threadID, text
+			if len(buttons) != 0 {
+				t.Errorf("buttons = %+v, want none for an unexported project", buttons)
+			}
 		},
 		refreshHome: func(chatID int64) { homeRefreshed = chatID },
 	}
@@ -182,7 +186,7 @@ func TestProjectResearchNoopSuppressesDelivery(t *testing.T) {
 		runTurn: func(ctx context.Context, chatID, threadID int64, prompt string) (string, error) {
 			return "[noop]", nil
 		},
-		deliver: func(chatID, threadID int64, text string) { delivered = true },
+		deliver: func(chatID, threadID int64, text string, buttons []bridge.LinkButton) { delivered = true },
 	}
 	result, err := deps.handleProjectEvent(context.Background(), researchTask(t, "quiet", 42, 0))
 	if err != nil {
@@ -232,5 +236,47 @@ func TestProjectEventUnknownEventIgnored(t *testing.T) {
 	})
 	if err != nil || !strings.Contains(result, "ignored") {
 		t.Errorf("result=%q err=%v, want ignore without retry", result, err)
+	}
+}
+
+// A project whose Notion page WE rendered (export_kind=notion + block map)
+// gets a one-tap doc button on its research delta; the delta text itself is
+// unchanged.
+func TestProjectResearchDeltaCarriesDocButton(t *testing.T) {
+	st, ws := newResearchFixture(t)
+	if _, err := st.CreateProject(store.Project{Title: "Linked", ChatID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a completed render: export ref + a block map with sections.
+	kind, ref := "notion", "abcd1111-2222-4333-8444-555566667777"
+	bm := `{"sections":{"## Overview":{"hash":"h1","blocks":["b1"]}}}`
+	if err := st.UpdateProjectFields("linked", store.ProjectFieldUpdate{
+		ExportKind: &kind, ExportRef: &ref, BlockMap: &bm,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotButtons []bridge.LinkButton
+	deps := projectResearchDeps{
+		store: st, workspaceDir: ws,
+		runTurn: func(ctx context.Context, chatID, threadID int64, prompt string) (string, error) {
+			return "found a new option", nil
+		},
+		deliver: func(chatID, threadID int64, text string, buttons []bridge.LinkButton) {
+			gotButtons = buttons
+		},
+	}
+	if _, err := deps.handleProjectEvent(context.Background(), researchTask(t, "linked", 42, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(gotButtons) != 1 {
+		t.Fatalf("buttons = %+v, want exactly one doc button", gotButtons)
+	}
+	if gotButtons[0].Label != "📄 開啟文件" {
+		t.Errorf("label = %q", gotButtons[0].Label)
+	}
+	if gotButtons[0].URL != "https://notion.so/abcd1111222243338444555566667777" {
+		t.Errorf("url = %q", gotButtons[0].URL)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/store"
 )
 
@@ -34,13 +35,24 @@ type HomeStore interface {
 }
 
 // HomeTransport is the slice of the bridge Transport the home renderer needs.
-// Declared here (consumer side) so this package needs no bridge import.
+// Declared here (consumer side); the bridge import is for the LinkButton
+// value type only. The home always sends through the button variants — a nil
+// slice degrades to a plain send — so the buttonless methods are not needed.
 type HomeTransport interface {
-	SendMessageID(chatID, threadID int64, text string) (int, error)
-	EditMessage(chatID int64, messageID int, text string) error
+	SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error)
+	EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error
 	PinMessage(chatID int64, messageID int, silent bool) error
 	UnpinMessage(chatID int64, messageID int) error
 }
+
+// Button-row limits: one tappable 📄 button per doc-bearing project, capped
+// so a chat with many projects does not grow a keyboard taller than the
+// message. Projects past the cap keep their list line; only the button is
+// dropped. Titles are truncated so a button stays one tap-sized line.
+const (
+	maxHomeButtons      = 6
+	maxButtonTitleRunes = 24
+)
 
 // Home maintains the pinned projects message for each chat.
 type Home struct {
@@ -90,6 +102,41 @@ func RenderHome(projects []store.Project) string {
 	return "📋 Projects\n" + strings.Join(lines, "\n")
 }
 
+// HomeButtons renders one inline URL button per active project whose Notion
+// page URL is derivable (export_kind=notion plus a block map WE rendered —
+// same rule as the RPC get), in list order, capped at maxHomeButtons.
+func HomeButtons(projects []store.Project) []bridge.LinkButton {
+	var buttons []bridge.LinkButton
+	for _, p := range projects {
+		if p.Status != "active" {
+			continue
+		}
+		url := NotionPageURL(p)
+		if url == "" {
+			continue
+		}
+		if len(buttons) == maxHomeButtons {
+			break // the rest keep their list line, just no button
+		}
+		buttons = append(buttons, bridge.LinkButton{Label: buttonLabel(p), URL: url})
+	}
+	return buttons
+}
+
+// buttonLabel renders "📄 <emoji> <title>" with the title truncated to a
+// tap-sized length.
+func buttonLabel(p store.Project) string {
+	title := []rune(p.Title)
+	if len(title) > maxButtonTitleRunes {
+		title = append(title[:maxButtonTitleRunes-1], '…')
+	}
+	label := "📄 "
+	if p.Emoji != "" {
+		label += p.Emoji + " "
+	}
+	return label + string(title)
+}
+
 // hasRecentComment reports whether any handled Notion discussion landed
 // within the recent-comment window.
 func hasRecentComment(p store.Project, now time.Time) bool {
@@ -135,7 +182,7 @@ func (h *Home) Refresh(chatID int64) {
 	h.lastEdit[chatID] = time.Now()
 	h.mu.Unlock()
 
-	text, err := h.render(chatID)
+	text, buttons, err := h.render(chatID)
 	if err != nil {
 		slog.Warn("projects home: render failed", "chat_id", chatID, "error", err)
 		return
@@ -147,7 +194,7 @@ func (h *Home) Refresh(chatID int64) {
 		return
 	}
 	if pin != nil {
-		err := h.transport.EditMessage(chatID, pin.ProjectsMsgID, text)
+		err := h.transport.EditMessageButtons(chatID, pin.ProjectsMsgID, text, buttons)
 		if err == nil {
 			return
 		}
@@ -159,7 +206,7 @@ func (h *Home) Refresh(chatID int64) {
 		// mint a fresh one.
 		slog.Info("projects home: pinned message gone, re-sending", "chat_id", chatID, "msg_id", pin.ProjectsMsgID)
 	}
-	h.sendAndPin(chatID, 0, text)
+	h.sendAndPin(chatID, 0, text, buttons)
 }
 
 // Repin sends a FRESH home message into the given thread, pins it, records
@@ -169,7 +216,7 @@ func (h *Home) Repin(chatID, threadID int64) error {
 	if h == nil {
 		return fmt.Errorf("projects home not wired")
 	}
-	text, err := h.render(chatID)
+	text, buttons, err := h.render(chatID)
 	if err != nil {
 		return err
 	}
@@ -177,7 +224,7 @@ func (h *Home) Repin(chatID, threadID int64) error {
 	if err != nil {
 		slog.Warn("projects home: pin lookup failed", "chat_id", chatID, "error", err)
 	}
-	if !h.sendAndPin(chatID, threadID, text) {
+	if !h.sendAndPin(chatID, threadID, text, buttons) {
 		return fmt.Errorf("could not send projects list")
 	}
 	if old != nil {
@@ -192,19 +239,19 @@ func (h *Home) Repin(chatID, threadID int64) error {
 	return nil
 }
 
-func (h *Home) render(chatID int64) (string, error) {
+func (h *Home) render(chatID int64) (string, []bridge.LinkButton, error) {
 	projects, err := h.store.ListProjects(chatID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return RenderHome(projects), nil
+	return RenderHome(projects), HomeButtons(projects), nil
 }
 
 // sendAndPin sends the home text, pins it silently, and records the id.
 // Reports whether the send itself succeeded — a failed PIN still leaves a
 // correct row pointing at a real message, so it only warns.
-func (h *Home) sendAndPin(chatID, threadID int64, text string) bool {
-	msgID, err := h.transport.SendMessageID(chatID, threadID, text)
+func (h *Home) sendAndPin(chatID, threadID int64, text string, buttons []bridge.LinkButton) bool {
+	msgID, err := h.transport.SendMessageIDButtons(chatID, threadID, text, buttons)
 	if err != nil {
 		slog.Warn("projects home: send failed", "chat_id", chatID, "error", err)
 		return false

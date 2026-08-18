@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/store"
 )
 
@@ -36,25 +37,29 @@ func (f *fakeHomeStore) SetChatPin(chatID int64, msgID int) error {
 }
 
 type fakeHomeTransport struct {
-	sent    []string // texts sent as fresh messages
-	edits   []int    // message ids edited
-	pins    []int    // message ids pinned
-	unpins  []int    // message ids unpinned
-	nextID  int
-	editErr error
+	sent        []string              // texts sent as fresh messages
+	sentButtons [][]bridge.LinkButton // buttons per fresh send
+	edits       []int                 // message ids edited
+	editButtons [][]bridge.LinkButton // buttons per edit
+	pins        []int                 // message ids pinned
+	unpins      []int                 // message ids unpinned
+	nextID      int
+	editErr     error
 }
 
-func (f *fakeHomeTransport) SendMessageID(chatID, threadID int64, text string) (int, error) {
+func (f *fakeHomeTransport) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
 	f.nextID++
 	f.sent = append(f.sent, text)
+	f.sentButtons = append(f.sentButtons, buttons)
 	return f.nextID, nil
 }
 
-func (f *fakeHomeTransport) EditMessage(chatID int64, messageID int, text string) error {
+func (f *fakeHomeTransport) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
 	if f.editErr != nil {
 		return f.editErr
 	}
 	f.edits = append(f.edits, messageID)
+	f.editButtons = append(f.editButtons, buttons)
 	return nil
 }
 
@@ -220,5 +225,110 @@ func TestRenderHomeRecentCommentMarker(t *testing.T) {
 	}
 	if strings.Contains(lines[2], "💬") {
 		t.Errorf("stale/legacy discussions must not mark 💬: %q", lines[2])
+	}
+}
+
+// --- HomeButtons ---
+
+// renderedBlockMap is the minimal block map that counts as "WE rendered this
+// page" — the NotionPageURL guard.
+const renderedBlockMap = `{"sections":{"## Overview":{"hash":"h1","blocks":["b1"]}}}`
+
+func exportedProject(title, emoji, ref string) store.Project {
+	return store.Project{
+		Title: title, Emoji: emoji, Status: "active", UpdatedAt: time.Now().UTC(),
+		ExportKind: "notion", ExportRef: ref, BlockMap: renderedBlockMap,
+	}
+}
+
+func TestHomeButtonsOrderLabelsAndGuards(t *testing.T) {
+	projects := []store.Project{
+		exportedProject("Housing Search", "🏠", "aaaa1111-2222-4333-8444-555566667777"),
+		// Archived: no line, no button.
+		exportedProject("Done Thing", "", "bbbb1111-2222-4333-8444-555566667777"),
+		// No export: line yes, button no.
+		activeProject("Doc-less"),
+		// export_ref without a rendered block map (human page / database id):
+		// no button — the URL shape is not ours to guess.
+		{Title: "Human Page", Status: "active", UpdatedAt: time.Now().UTC(),
+			ExportKind: "notion", ExportRef: "cccc1111-2222-4333-8444-555566667777"},
+		exportedProject("Trip Planning", "", "dddd1111-2222-4333-8444-555566667777"),
+	}
+	projects[1].Status = "archived"
+
+	got := HomeButtons(projects)
+	if len(got) != 2 {
+		t.Fatalf("buttons = %+v, want exactly the two exported active projects", got)
+	}
+	if got[0].Label != "📄 🏠 Housing Search" || got[0].URL != "https://notion.so/aaaa1111222243338444555566667777" {
+		t.Errorf("first button = %+v", got[0])
+	}
+	if got[1].Label != "📄 Trip Planning" || !strings.HasPrefix(got[1].URL, "https://notion.so/dddd1111") {
+		t.Errorf("second button = %+v (emoji-less label must not double-space)", got[1])
+	}
+}
+
+func TestHomeButtonsCapAndTruncation(t *testing.T) {
+	var projects []store.Project
+	for i := 0; i < maxHomeButtons+2; i++ {
+		ref := fmt.Sprintf("%04d1111-2222-4333-8444-555566667777", i)
+		projects = append(projects, exportedProject(fmt.Sprintf("Project %d", i), "", ref))
+	}
+	projects[0].Title = strings.Repeat("長", maxButtonTitleRunes+10)
+
+	got := HomeButtons(projects)
+	if len(got) != maxHomeButtons {
+		t.Fatalf("buttons = %d, want capped at %d", len(got), maxHomeButtons)
+	}
+	wantTitle := strings.Repeat("長", maxButtonTitleRunes-1) + "…"
+	if got[0].Label != "📄 "+wantTitle {
+		t.Errorf("truncated label = %q, want %d-rune title ending in …", got[0].Label, maxButtonTitleRunes)
+	}
+	// Order matches list order; the overflow projects are the ones dropped.
+	if got[maxHomeButtons-1].Label != fmt.Sprintf("📄 Project %d", maxHomeButtons-1) {
+		t.Errorf("last button = %+v, want list order preserved", got[maxHomeButtons-1])
+	}
+}
+
+func TestRefreshCarriesButtons(t *testing.T) {
+	st := &fakeHomeStore{projects: []store.Project{
+		exportedProject("Linked", "🔗", "eeee1111-2222-4333-8444-555566667777"),
+		activeProject("Plain"),
+	}}
+	tr := &fakeHomeTransport{}
+	h := NewHome(st, tr)
+
+	// Fresh send carries the buttons.
+	h.Refresh(42)
+	if len(tr.sentButtons) != 1 || len(tr.sentButtons[0]) != 1 {
+		t.Fatalf("sent buttons = %+v, want one button on the fresh home", tr.sentButtons)
+	}
+	if tr.sentButtons[0][0].Label != "📄 🔗 Linked" {
+		t.Errorf("button = %+v", tr.sentButtons[0][0])
+	}
+
+	// Repin (bypasses the debounce) edits nothing but re-sends with buttons.
+	if err := h.Repin(42, 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.sentButtons) != 2 || len(tr.sentButtons[1]) != 1 {
+		t.Fatalf("repin buttons = %+v", tr.sentButtons)
+	}
+}
+
+func TestRefreshEditCarriesButtons(t *testing.T) {
+	st := &fakeHomeStore{
+		projects: []store.Project{exportedProject("Linked", "", "ffff1111-2222-4333-8444-555566667777")},
+		pins:     map[int64]int{42: 9},
+	}
+	tr := &fakeHomeTransport{}
+	h := NewHome(st, tr)
+
+	h.Refresh(42)
+	if len(tr.editButtons) != 1 || len(tr.editButtons[0]) != 1 {
+		t.Fatalf("edit buttons = %+v, want the button on the in-place edit", tr.editButtons)
+	}
+	if tr.editButtons[0][0].URL != "https://notion.so/ffff1111222243338444555566667777" {
+		t.Errorf("edit button url = %q", tr.editButtons[0][0].URL)
 	}
 }

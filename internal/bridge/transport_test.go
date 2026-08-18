@@ -17,6 +17,9 @@ type fakeTransport struct {
 	edits     map[int]string
 	pinned    map[int]bool
 	nextID    int
+	// buttons records the LinkButtons attached to each button-variant call,
+	// in call order (nil entries for buttonless sends).
+	buttons [][]LinkButton
 }
 
 var _ Transport = (*fakeTransport)(nil)
@@ -57,6 +60,22 @@ func (f *fakeTransport) UnpinMessage(chatID int64, messageID int) error {
 	return nil
 }
 
+func (f *fakeTransport) NotifyButtons(chatID, threadID int64, text string, buttons []LinkButton) error {
+	f.notified = append(f.notified, text)
+	f.buttons = append(f.buttons, buttons)
+	return nil
+}
+
+func (f *fakeTransport) SendMessageIDButtons(chatID, threadID int64, text string, buttons []LinkButton) (int, error) {
+	f.buttons = append(f.buttons, buttons)
+	return f.SendMessageID(chatID, threadID, text)
+}
+
+func (f *fakeTransport) EditMessageButtons(chatID int64, messageID int, text string, buttons []LinkButton) error {
+	f.buttons = append(f.buttons, buttons)
+	return f.EditMessage(chatID, messageID, text)
+}
+
 // The pinned-message lifecycle the project home needs: send returns an id the
 // caller can pin, edit in place, and unpin — all through one Transport.
 func TestTransportPinnedMessageLifecycle(t *testing.T) {
@@ -74,6 +93,40 @@ func TestTransportPinnedMessageLifecycle(t *testing.T) {
 	}
 	if err := ft.UnpinMessage(42, id); err != nil || ft.pinned[id] {
 		t.Fatalf("unpin failed: %v", err)
+	}
+}
+
+// The button variants carry LinkButtons through in order; an empty slice is
+// a legal "no buttons" send.
+func TestTransportLinkButtons(t *testing.T) {
+	ft := newFakeTransport()
+
+	want := []LinkButton{
+		{Label: "📄 first", URL: "https://notion.so/aaaa1111"},
+		{Label: "📄 second", URL: "https://notion.so/bbbb2222"},
+	}
+	id, err := ft.SendMessageIDButtons(42, 0, "home", want)
+	if err != nil || id == 0 {
+		t.Fatalf("SendMessageIDButtons = (%d, %v)", id, err)
+	}
+	if err := ft.EditMessageButtons(42, id, "home v2", want[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := ft.NotifyButtons(42, 0, "delta", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(ft.buttons) != 3 {
+		t.Fatalf("buttons calls = %d, want 3", len(ft.buttons))
+	}
+	if len(ft.buttons[0]) != 2 || ft.buttons[0][0] != want[0] || ft.buttons[0][1] != want[1] {
+		t.Errorf("send buttons = %+v, want order preserved", ft.buttons[0])
+	}
+	if len(ft.buttons[1]) != 1 || ft.buttons[1][0] != want[0] {
+		t.Errorf("edit buttons = %+v", ft.buttons[1])
+	}
+	if len(ft.buttons[2]) != 0 {
+		t.Errorf("notify buttons = %+v, want none", ft.buttons[2])
 	}
 }
 

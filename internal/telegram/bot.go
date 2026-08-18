@@ -127,17 +127,34 @@ func (b *Bot) Start(ctx context.Context) {
 // Used for async notifications like plan progress. threadID is the Telegram
 // forum topic ID (0 = main chat / no topic).
 func (b *Bot) SendText(chatID, threadID int64, text string) {
+	// Errors are already logged inside; SendText keeps its fire-and-forget
+	// contract.
+	_ = b.SendTextButtons(chatID, threadID, text, nil)
+}
+
+// SendTextButtons is SendText plus inline URL buttons. When the text splits
+// into multiple messages the buttons ride the LAST one, so they sit under the
+// end of the notification. An empty buttons slice behaves exactly like
+// SendText; unlike SendText this returns the (last) send error so callers can
+// tell whether a delivery landed.
+func (b *Bot) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
 	if b.dedup != nil && b.dedup(chatID, threadID, text) {
-		return
+		return nil
 	}
 	ctx := context.Background()
 	chunks := splitMessage(text, maxMessageLength)
-	for _, chunk := range chunks {
+	var lastErr error
+	for i, chunk := range chunks {
+		var markup models.ReplyMarkup
+		if i == len(chunks)-1 {
+			markup = linkButtonMarkup(buttons)
+		}
 		_, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:          chatID,
 			MessageThreadID: int(threadID),
 			Text:            formatForMarkdownV2(chunk),
 			ParseMode:       models.ParseModeMarkdown,
+			ReplyMarkup:     markup,
 		})
 		if err != nil {
 			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID, "thread_id", threadID)
@@ -145,12 +162,15 @@ func (b *Bot) SendText(chatID, threadID int64, text string) {
 				ChatID:          chatID,
 				MessageThreadID: int(threadID),
 				Text:            chunk,
+				ReplyMarkup:     markup,
 			})
 			if err != nil {
 				slog.Error("failed to send notification", "error", err, "chat_id", chatID, "thread_id", threadID)
+				lastErr = err
 			}
 		}
 	}
+	return lastErr
 }
 
 // SendPhoto sends an image to a chat/topic as a Telegram photo message.
@@ -225,12 +245,20 @@ func (b *Bot) SendDocument(chatID, threadID int64, path, caption string) error {
 // chunk-split — a message whose id matters (the pinned 📋 Projects list) must
 // stay one message, so keep it short.
 func (b *Bot) SendMessageID(chatID, threadID int64, text string) (int, error) {
+	return b.SendMessageIDButtons(chatID, threadID, text, nil)
+}
+
+// SendMessageIDButtons is SendMessageID plus inline URL buttons. An empty
+// buttons slice behaves exactly like SendMessageID.
+func (b *Bot) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
 	ctx := context.Background()
+	markup := linkButtonMarkup(buttons)
 	msg, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:          chatID,
 		MessageThreadID: int(threadID),
 		Text:            formatForMarkdownV2(text),
 		ParseMode:       models.ParseModeMarkdown,
+		ReplyMarkup:     markup,
 	})
 	if err != nil {
 		slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID, "thread_id", threadID)
@@ -238,6 +266,7 @@ func (b *Bot) SendMessageID(chatID, threadID int64, text string) (int, error) {
 			ChatID:          chatID,
 			MessageThreadID: int(threadID),
 			Text:            text,
+			ReplyMarkup:     markup,
 		})
 	}
 	if err != nil {
@@ -252,21 +281,31 @@ func (b *Bot) SendMessageID(chatID, threadID int64, text string) (int, error) {
 // flood window must not be silently dropped. An "is not modified" response
 // (identical content) is treated as success.
 func (b *Bot) EditMessage(chatID int64, messageID int, text string) error {
+	return b.EditMessageButtons(chatID, messageID, text, nil)
+}
+
+// EditMessageButtons is EditMessage plus inline URL buttons; the buttons
+// replace whatever keyboard the message previously carried (an empty slice
+// clears it — Telegram edits drop an omitted reply_markup).
+func (b *Bot) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
 	ctx := context.Background()
+	markup := linkButtonMarkup(buttons)
 	err := editFinal(ctx, b.bot, &bot.EditMessageTextParams{
-		ChatID:    chatID,
-		MessageID: messageID,
-		Text:      formatForMarkdownV2(text),
-		ParseMode: models.ParseModeMarkdown,
+		ChatID:      chatID,
+		MessageID:   messageID,
+		Text:        formatForMarkdownV2(text),
+		ParseMode:   models.ParseModeMarkdown,
+		ReplyMarkup: markup,
 	})
 	if err != nil && !isNotModified(err) {
 		// Same fallback ladder as sends: the MarkdownV2 escape can be rejected
 		// for content reasons, and losing the edit entirely is worse than
 		// losing the markup.
 		err = editFinal(ctx, b.bot, &bot.EditMessageTextParams{
-			ChatID:    chatID,
-			MessageID: messageID,
-			Text:      text,
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: markup,
 		})
 	}
 	if err != nil && !isNotModified(err) {
@@ -274,6 +313,19 @@ func (b *Bot) EditMessage(chatID int64, messageID int, text string) error {
 		return err
 	}
 	return nil
+}
+
+// linkButtonMarkup renders LinkButtons as an inline keyboard, one button per
+// row. Empty input returns nil, which omits reply_markup entirely.
+func linkButtonMarkup(buttons []bridge.LinkButton) models.ReplyMarkup {
+	if len(buttons) == 0 {
+		return nil
+	}
+	rows := make([][]models.InlineKeyboardButton, 0, len(buttons))
+	for _, btn := range buttons {
+		rows = append(rows, []models.InlineKeyboardButton{{Text: btn.Label, URL: btn.URL}})
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // PinMessage pins a message in a chat; silent suppresses the notification.

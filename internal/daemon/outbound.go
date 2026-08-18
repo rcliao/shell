@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
 )
 
@@ -33,6 +34,12 @@ type outbound interface {
 	// from a send that never happened.
 	SendMessageID(chatID, threadID int64, text string) (int, error)
 	EditMessage(chatID int64, messageID int, text string) error
+	// Button variants: same sends with inline URL buttons attached (project
+	// doc links). SendTextButtons returns an error unlike SendText because
+	// its callers report whether a linked delivery landed.
+	SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error
+	SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error)
+	EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error
 	PinMessage(chatID int64, messageID int, silent bool) error
 	UnpinMessage(chatID int64, messageID int) error
 	SetOutboundDedup(check func(chatID, threadID int64, text string) bool)
@@ -85,6 +92,22 @@ func (headlessOutbound) SendMessageID(chatID, threadID int64, text string) (int,
 }
 
 func (headlessOutbound) EditMessage(chatID int64, messageID int, text string) error {
+	return errNoTransport
+}
+
+func (headlessOutbound) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
+	slog.Info("headless: outbound text dropped (no transport attached)",
+		"chat_id", chatID, "thread_id", threadID, "chars", len(text), "buttons", len(buttons))
+	return errNoTransport
+}
+
+func (headlessOutbound) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
+	slog.Info("headless: outbound message dropped (no transport attached)",
+		"chat_id", chatID, "thread_id", threadID, "chars", len(text), "buttons", len(buttons))
+	return 0, errNoTransport
+}
+
+func (headlessOutbound) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
 	return errNoTransport
 }
 

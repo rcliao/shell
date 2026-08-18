@@ -989,7 +989,10 @@ func New(cfg config.Config) (*Daemon, error) {
 				}
 				return resp.Text, nil
 			},
-			deliver:     tgTransport.Notify,
+			deliver: func(chatID, threadID int64, text string, buttons []bridge.LinkButton) {
+				// Fire-and-forget like Notify; the bot already logs failures.
+				_ = tgTransport.NotifyButtons(chatID, threadID, text, buttons)
+			},
 			refreshHome: projectHome.Refresh,
 			notion:      notionClient,
 			notionID:    &notionIdentity{},
@@ -1504,6 +1507,18 @@ func (t *telegramTransport) SendMessageID(chatID, threadID int64, text string) (
 
 func (t *telegramTransport) EditMessage(chatID int64, messageID int, text string) error {
 	return t.bot.EditMessage(chatID, messageID, text)
+}
+
+func (t *telegramTransport) NotifyButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
+	return t.bot.SendTextButtons(chatID, threadID, text, buttons)
+}
+
+func (t *telegramTransport) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
+	return t.bot.SendMessageIDButtons(chatID, threadID, text, buttons)
+}
+
+func (t *telegramTransport) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
+	return t.bot.EditMessageButtons(chatID, messageID, text, buttons)
 }
 
 func (t *telegramTransport) PinMessage(chatID int64, messageID int, silent bool) error {

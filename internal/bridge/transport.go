@@ -33,6 +33,27 @@ type Transport interface {
 
 	// UnpinMessage unpins a previously pinned message.
 	UnpinMessage(chatID int64, messageID int) error
+
+	// NotifyButtons is Notify plus inline URL buttons under the message. It
+	// returns an error (unlike Notify) because its callers decide whether a
+	// delivery with a doc link actually landed. An empty buttons slice
+	// behaves exactly like Notify.
+	NotifyButtons(chatID, threadID int64, text string, buttons []LinkButton) error
+
+	// SendMessageIDButtons is SendMessageID plus inline URL buttons.
+	SendMessageIDButtons(chatID, threadID int64, text string, buttons []LinkButton) (int, error)
+
+	// EditMessageButtons is EditMessage plus inline URL buttons; the buttons
+	// replace whatever keyboard the message previously carried.
+	EditMessageButtons(chatID int64, messageID int, text string, buttons []LinkButton) error
+}
+
+// LinkButton is one inline URL button under a message: a label the user taps
+// and the URL it opens. URL buttons only — no callback buttons, so no update
+// plumbing is needed on the receive side.
+type LinkButton struct {
+	Label string
+	URL   string
 }
 
 // AgentPool resolves which Agent handles a given chat.
