@@ -16,6 +16,7 @@ import (
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/topic"
@@ -62,6 +63,8 @@ type Bridge struct {
 	memory    *memory.Memory   // nil if disabled
 	plan      *planner.Planner // nil if not configured
 	transport Transport        // optional: push messages/photos to users
+	// projectHome maintains the pinned 📋 Projects message (/projects, P2).
+	projectHome *project.Home // nil if not wired
 
 	// Worktree isolation for plan execution
 	useWorktree bool   // whether to create worktrees for plans
@@ -359,6 +362,11 @@ func (b *Bridge) registerSystemCancel(key process.SessionKey, cancel context.Can
 // SetTransport sets the transport used to push messages/photos to users.
 func (b *Bridge) SetTransport(t Transport) {
 	b.transport = t
+}
+
+// SetProjectHome wires the pinned 📋 Projects home renderer (/projects).
+func (b *Bridge) SetProjectHome(h *project.Home) {
+	b.projectHome = h
 }
 
 // SetPool enables multi-agent routing. When set, the bridge resolves

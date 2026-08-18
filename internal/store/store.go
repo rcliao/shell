@@ -793,6 +793,20 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// chat_pins is the pinned 📋 Projects home message per chat (P2) — see
+	// internal/store/chatpins.go. PK-only table: no separate index needed, and
+	// brand-new, so a single CREATE is safe (no rebuild-then-index ordering).
+	chatPinsSchema := `
+	CREATE TABLE IF NOT EXISTS chat_pins (
+		chat_id         INTEGER PRIMARY KEY,
+		projects_msg_id INTEGER NOT NULL,
+		updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	if _, err := s.db.Exec(chatPinsSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 

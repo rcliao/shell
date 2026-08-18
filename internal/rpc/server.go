@@ -64,6 +64,9 @@ type Server struct {
 	contextManifest func(ctx context.Context, chatID int64) (any, string)
 	killSession     KillSessionFunc
 	workspaceDir    string // agent workspace root; project doc repos live under <workspaceDir>/projects/
+	// projectHomeRefresh nudges the pinned 📋 Projects message for a chat
+	// after create/status/doc-write. Nil when the daemon runs without it.
+	projectHomeRefresh func(chatID int64)
 }
 
 // KillSessionFunc terminates the live CLI subprocess for a chat (all threads
@@ -96,6 +99,8 @@ type Config struct {
 	// bridge advertises in the system prompt). Project doc repos live under
 	// <WorkspaceDir>/projects/<slug>/. Empty disables the doc layer.
 	WorkspaceDir string
+	// ProjectHomeRefresh refreshes the pinned 📋 Projects message for a chat.
+	ProjectHomeRefresh func(chatID int64)
 }
 
 // handleContext serves the live system-prompt manifest (GET /context?chat_id=N&full=1).
@@ -143,6 +148,8 @@ func New(cfg Config) *Server {
 		contextManifest: cfg.ContextManifest,
 		killSession:     cfg.KillSession,
 		workspaceDir:    cfg.WorkspaceDir,
+
+		projectHomeRefresh: cfg.ProjectHomeRefresh,
 	}
 }
 

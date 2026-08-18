@@ -147,6 +147,21 @@ func WriteDoc(dir, content, attribution string) (string, error) {
 	return commitDoc(dir, msg)
 }
 
+// ManagedDocDir resolves a project's doc directory and reports whether this
+// daemon MANAGES it — i.e. workspaceDir/projects/<slug>/.git exists. A
+// project registered with an external doc_path has no managed repo: no
+// receipts to mint, no content this layer should read.
+func ManagedDocDir(workspaceDir, slug string) (string, bool) {
+	if workspaceDir == "" || slug == "" {
+		return "", false
+	}
+	dir := filepath.Join(workspaceDir, "projects", slug)
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return "", false
+	}
+	return dir, true
+}
+
 // ReadDoc returns the doc's current content.
 func ReadDoc(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, DocFile))

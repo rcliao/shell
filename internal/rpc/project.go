@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rcliao/shell/internal/project"
+	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
 )
 
@@ -35,11 +36,23 @@ type ProjectRequest struct {
 	DocPath         string `json:"doc_path"`
 	Instructions    string `json:"instructions"`
 	Lang            string `json:"lang"`
+	// Cadence is the autonomous-research cadence registered at create:
+	// daily | weekly | monthly (default weekly, owner sign-off #1).
+	Cadence string `json:"cadence"`
 	// status action
 	Status string `json:"status"` // active | paused | archived
 	// doc-write fields
 	Content     string `json:"content"`
 	Attribution string `json:"attribution"` // optional; recorded in the commit message
+}
+
+// cadenceCrons maps a research cadence to its cron expression. 09:00 in the
+// agent's timezone: late enough to never land in quiet hours, early enough
+// that the day's delta is on the pinned list before anyone asks.
+var cadenceCrons = map[string]string{
+	"daily":   "0 9 * * *",
+	"weekly":  "0 9 * * 1",
+	"monthly": "0 9 1 * *",
 }
 
 // telegramReactionEmoji is the set of emoji Telegram accepts as message
@@ -107,6 +120,14 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusBadRequest, "chat_id is required")
 		return
 	}
+	cadence := req.Cadence
+	if cadence == "" {
+		cadence = "weekly"
+	}
+	if _, ok := cadenceCrons[cadence]; !ok {
+		writeError(w, http.StatusBadRequest, "cadence must be daily, weekly, or monthly")
+		return
+	}
 	// An export_ref without a kind defaults to notion — the only exporter in
 	// v1, and the case the skill's --export-ref flag produces.
 	kind := req.ExportKind
@@ -152,7 +173,133 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	if p.Emoji != "" && !reactionCapable(p.Emoji) {
 		resp["warning"] = "emoji not reaction-capable; reactions will fall back to 👀"
 	}
+
+	// Self-register the autonomous-research schedule: an event-mode cron whose
+	// fire enqueues project.event{research.due} for the daemon's consumer.
+	// dedup_key = project:<slug>, which is how archive/pause later finds it.
+	if ok, warn := s.registerResearchSchedule(p, cadence); ok {
+		resp["cadence"] = cadence
+	} else if warn != "" {
+		// The warning field is single-valued by contract — an earlier warning
+		// (scaffold, emoji) wins and this one lives in the log only.
+		if _, has := resp["warning"]; !has {
+			resp["warning"] = warn
+		}
+	}
+
+	s.refreshProjectHome(p.ChatID)
 	writeJSON(w, resp)
+}
+
+// registerResearchSchedule creates (idempotently) the project's research
+// schedule and stamps its dedup key onto the project row. Reports whether a
+// schedule exists, plus a warning on failure — create never fails on this:
+// the registry row is already committed and useful without a schedule.
+func (s *Server) registerResearchSchedule(p *store.Project, cadence string) (bool, string) {
+	if s.cronParse == nil {
+		// Scheduler disabled is daemon configuration, not a per-create
+		// problem — log only, no warning noise on every create.
+		slog.Info("rpc: research schedule skipped, scheduler not enabled", "slug", p.Slug)
+		return false, ""
+	}
+	expr := cadenceCrons[cadence]
+	cronExpr, err := s.cronParse(expr)
+	if err != nil {
+		slog.Warn("rpc: research schedule cron parse failed", "slug", p.Slug, "expr", expr, "error", err)
+		return false, "research schedule not registered: " + err.Error()
+	}
+	msg, err := project.ResearchScheduleMessage(p.Slug, p.ChatID, p.MessageThreadID)
+	if err != nil {
+		slog.Warn("rpc: research schedule envelope failed", "slug", p.Slug, "error", err)
+		return false, "research schedule not registered: " + err.Error()
+	}
+	loc := s.location("")
+	nextRun := cronExpr.Next(time.Now().In(loc)).UTC()
+	if nextRun.IsZero() {
+		slog.Warn("rpc: research schedule has no next run", "slug", p.Slug, "expr", expr)
+		return false, "research schedule not registered: no next run"
+	}
+	dedup := project.ScheduleDedupKey(p.Slug)
+	sched := &store.Schedule{
+		ChatID:    p.ChatID,
+		Label:     "project research: " + p.Slug,
+		Message:   msg,
+		Schedule:  expr,
+		Timezone:  s.timezone,
+		Type:      "cron",
+		Mode:      scheduler.ModeEvent,
+		NextRunAt: nextRun,
+		Enabled:   true,
+		DedupKey:  dedup, // explicit key — honored by UpsertScheduleByKey
+	}
+	id, created, err := s.store.UpsertScheduleByKey(sched)
+	if err != nil {
+		slog.Warn("rpc: research schedule upsert failed", "slug", p.Slug, "error", err)
+		return false, "research schedule not registered: " + err.Error()
+	}
+	if err := s.store.UpdateProjectFields(p.Slug, store.ProjectFieldUpdate{ScheduleDedupKey: &dedup}); err != nil {
+		slog.Warn("rpc: schedule_dedup_key update failed", "slug", p.Slug, "error", err)
+	}
+	slog.Info("rpc: project research schedule registered",
+		"slug", p.Slug, "schedule_id", id, "created", created, "cadence", cadence)
+	return true, ""
+}
+
+// syncResearchSchedule brings the project's research schedule in line with a
+// lifecycle transition: paused/archived disables it, active re-enables it
+// with the next run recomputed from NOW (missed fires are never replayed).
+// Best-effort — the status change itself has already landed.
+func (s *Server) syncResearchSchedule(p *store.Project, status string) {
+	key := p.ScheduleDedupKey
+	if key == "" {
+		key = project.ScheduleDedupKey(p.Slug)
+	}
+	sc, err := s.store.FindScheduleByDedupKey(key)
+	if err != nil {
+		slog.Warn("rpc: research schedule lookup failed", "slug", p.Slug, "error", err)
+		return
+	}
+	if sc == nil {
+		return // registry-only project (created before P2, or registration failed)
+	}
+	switch status {
+	case "paused", "archived":
+		if !sc.Enabled {
+			return
+		}
+		if err := s.store.PauseSchedule(sc.ID, "project_"+status); err != nil {
+			slog.Warn("rpc: research schedule disable failed", "slug", p.Slug, "id", sc.ID, "error", err)
+			return
+		}
+		slog.Info("rpc: research schedule disabled", "slug", p.Slug, "id", sc.ID, "status", status)
+	case "active":
+		if sc.Enabled {
+			return
+		}
+		if s.cronParse == nil {
+			slog.Warn("rpc: cannot re-enable research schedule, scheduler not enabled", "slug", p.Slug)
+			return
+		}
+		cronExpr, err := s.cronParse(sc.Schedule)
+		if err != nil {
+			slog.Warn("rpc: research schedule cron parse failed", "slug", p.Slug, "expr", sc.Schedule, "error", err)
+			return
+		}
+		nextRun := cronExpr.Next(time.Now().In(s.location(sc.Timezone))).UTC()
+		if err := s.store.EnableScheduleFrom(sc.ID, nextRun); err != nil {
+			slog.Warn("rpc: research schedule re-enable failed", "slug", p.Slug, "id", sc.ID, "error", err)
+			return
+		}
+		slog.Info("rpc: research schedule re-enabled", "slug", p.Slug, "id", sc.ID, "next_run", nextRun)
+	}
+}
+
+// refreshProjectHome nudges the pinned 📋 Projects message for a chat, when
+// the daemon wired a home renderer in.
+func (s *Server) refreshProjectHome(chatID int64) {
+	if s.projectHomeRefresh != nil {
+		s.projectHomeRefresh(chatID)
+	}
 }
 
 func (s *Server) projectGet(w http.ResponseWriter, req ProjectRequest) {
@@ -200,6 +347,10 @@ func (s *Server) projectStatus(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusInternalServerError, "read back failed")
 		return
 	}
+	// Lifecycle side effects: the research schedule follows the status, and
+	// the pinned home reflects the new list.
+	s.syncResearchSchedule(p, p.Status)
+	s.refreshProjectHome(p.ChatID)
 	writeJSON(w, projectJSON(*p))
 }
 
@@ -326,6 +477,7 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 		slog.Warn("rpc: doc-write verification log failed", "slug", p.Slug, "error", err)
 	}
 	slog.Info("rpc: project doc written", "slug", p.Slug, "rev", rev, "bytes", len(req.Content))
+	s.refreshProjectHome(p.ChatID)
 	writeJSON(w, map[string]any{
 		"slug": p.Slug, "doc_path": p.DocPath, "rev": rev, "committed": true,
 	})

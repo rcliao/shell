@@ -79,3 +79,9 @@ pass `--chat` only to register a project for a DIFFERENT chat.
 - `--doc-path <path>` — canonical doc path, e.g. `workspace/projects/<slug>/doc.md`
 - `--instructions <text>` — standing guidance injected with the project row
 - `--lang <code>` — the user's language for this project (e.g. `zh`, `en`)
+- `--cadence daily|weekly|monthly` — autonomous research cadence (default
+  `weekly`). Create registers the schedule itself; on each fire the daemon
+  runs ONE bounded research pass in the project's chat and posts a ≤3-line
+  delta there. Archiving or pausing the project disables the schedule;
+  re-activating re-enables it — never manage `project:<slug>` schedules by
+  hand via shell-schedule.

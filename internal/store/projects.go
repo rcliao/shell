@@ -237,12 +237,14 @@ func (s *Store) UpdateProjectStatus(slug, status string) error {
 
 // ProjectFieldUpdate carries targeted column updates for UpdateProjectFields.
 // Nil pointers mean "leave unchanged"; a non-nil pointer sets the column
-// (including to the zero value). Slug, status, and identity columns are
-// deliberately not here — slug is immutable, status goes through
-// UpdateProjectStatus.
+// (including to the zero value). Slug and status are deliberately not here —
+// slug is immutable, status goes through UpdateProjectStatus. The chat
+// binding IS here: `shell project bind` re-targets a project's chat/thread.
 type ProjectFieldUpdate struct {
 	Title               *string
 	Emoji               *string
+	ChatID              *int64
+	MessageThreadID     *int64
 	DocPath             *string
 	DocRev              *string
 	ExportKind          *string
@@ -274,6 +276,12 @@ func (s *Store) UpdateProjectFields(slug string, u ProjectFieldUpdate) error {
 	}
 	if u.Emoji != nil {
 		add("emoji", *u.Emoji)
+	}
+	if u.ChatID != nil {
+		add("chat_id", *u.ChatID)
+	}
+	if u.MessageThreadID != nil {
+		add("message_thread_id", *u.MessageThreadID)
 	}
 	if u.DocPath != nil {
 		add("doc_path", *u.DocPath)

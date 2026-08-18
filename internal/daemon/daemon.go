@@ -22,6 +22,7 @@ import (
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/reload"
 	"github.com/rcliao/shell/internal/rpc"
 	"github.com/rcliao/shell/internal/scheduler"
@@ -642,7 +643,14 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	// Wire transport: plan progress, relay photos → Telegram
-	br.SetTransport(&telegramTransport{bot: bot})
+	tgTransport := &telegramTransport{bot: bot}
+	br.SetTransport(tgTransport)
+
+	// Pinned 📋 Projects home (P2): edited in place via chat_pins, refreshed
+	// on project create/status/doc-write (RPC callback below), on research
+	// turn completion (project.event consumer), and by /projects.
+	projectHome := project.NewHome(st, tgTransport)
+	br.SetProjectHome(projectHome)
 
 	// Outbound dedup guard (V2-H3): suppress a proactive send whose text
 	// matches a send to the same chat within the window. Ledger rows (including
@@ -729,7 +737,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		BotUsername: cfg.Agent.BotUsername,
 		// Same workspace the bridge advertises in the system prompt — project
 		// doc repos live under <workspace>/projects/<slug>/.
-		WorkspaceDir: workspaceDir,
+		WorkspaceDir:       workspaceDir,
+		ProjectHomeRefresh: projectHome.Refresh,
 	})
 
 	// Initialize scheduler if enabled.
@@ -958,6 +967,26 @@ func New(cfg config.Config) (*Daemon, error) {
 		sched.SetQueue(scheduler.NewStoreAdapter(st), owner)
 		wireMessageTurns(sched, br, st)
 		slog.Info("queue workers enabled without scheduler", "owner", owner)
+	}
+
+	// project.event consumer (P2). Registered UNCONDITIONALLY whenever a
+	// queue worker can lease tasks — an unregistered kind fails loudly, so a
+	// project schedule firing before this ran would burn its attempts on a
+	// wiring bug. See projectevents.go for why delivery bypasses onPrompt.
+	if sched != nil {
+		wireProjectEvents(sched, projectResearchDeps{
+			store:        st,
+			workspaceDir: workspaceDir,
+			runTurn: func(ctx context.Context, chatID, threadID int64, prompt string) (string, error) {
+				resp, err := syntheticTurn(ctx, br, chatID, threadID, prompt, "project-research")
+				if err != nil {
+					return "", err
+				}
+				return resp.Text, nil
+			},
+			deliver:     tgTransport.Notify,
+			refreshHome: projectHome.Refresh,
+		})
 	}
 
 	d := &Daemon{

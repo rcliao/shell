@@ -74,6 +74,7 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) (
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/heartbeat", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/personality", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/skills", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/projects", bot.MatchTypePrefix, b.commandHandler)
 	// Register handler for photo messages.
 	tgBot.RegisterHandlerMatchFunc(
 		func(update *models.Update) bool {

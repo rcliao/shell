@@ -200,3 +200,23 @@ func TestUpdateProjectFields(t *testing.T) {
 		t.Error("expected error for unknown slug")
 	}
 }
+
+func TestUpdateProjectFieldsRebindsChat(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	if _, err := s.CreateProject(Project{Title: "Bind Me", ChatID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	chat := int64(-100200300)
+	thread := int64(7)
+	if err := s.UpdateProjectFields("bind-me", ProjectFieldUpdate{
+		ChatID: &chat, MessageThreadID: &thread,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := s.GetProjectBySlug("bind-me")
+	if p.ChatID != chat || p.MessageThreadID != thread {
+		t.Errorf("binding = (%d, %d), want (%d, %d)", p.ChatID, p.MessageThreadID, chat, thread)
+	}
+}

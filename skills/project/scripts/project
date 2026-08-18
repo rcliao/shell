@@ -7,7 +7,7 @@ URL="http://bridge/project"
 CHAT_ID="${SHELL_CHAT_ID:-0}"
 
 usage() {
-  echo "usage: project create --title <text> [--emoji <e> --chat <id> --thread <id> --export-ref <id> --doc-path <path> --instructions <text> --lang <code>]" >&2
+  echo "usage: project create --title <text> [--emoji <e> --chat <id> --thread <id> --export-ref <id> --doc-path <path> --instructions <text> --lang <code> --cadence daily|weekly|monthly]" >&2
   echo "       project list [--chat <id>]" >&2
   echo "       project get <slug>" >&2
   echo "       project doc-read <slug>" >&2
@@ -26,6 +26,7 @@ EXPORT_REF=""
 DOC_PATH=""
 INSTRUCTIONS=""
 LANG_CODE=""
+CADENCE=""
 SLUG=""
 FILE=""
 ATTRIBUTION=""
@@ -40,6 +41,7 @@ while [ $# -gt 0 ]; do
     --doc-path)     DOC_PATH="$2"; shift 2 ;;
     --instructions) INSTRUCTIONS="$2"; shift 2 ;;
     --lang)         LANG_CODE="$2"; shift 2 ;;
+    --cadence)      CADENCE="$2"; shift 2 ;;
     --file)         FILE="$2"; shift 2 ;;
     --attribution)  ATTRIBUTION="$2"; shift 2 ;;
     --*)            echo "unknown arg: $1" >&2; usage ;;
@@ -67,7 +69,7 @@ case "$VERB" in
     fi
     BODY=$(TITLE="$TITLE" EMOJI="$EMOJI" CHAT_ID="$CHAT_ID" THREAD="$THREAD" \
       EXPORT_REF="$EXPORT_REF" DOC_PATH="$DOC_PATH" INSTRUCTIONS="$INSTRUCTIONS" \
-      LANG_CODE="$LANG_CODE" python3 -c "
+      LANG_CODE="$LANG_CODE" CADENCE="$CADENCE" python3 -c "
 import json, os
 d = {'action': 'create', 'title': os.environ['TITLE'], 'chat_id': int(os.environ['CHAT_ID'] or 0)}
 if os.environ['EMOJI']: d['emoji'] = os.environ['EMOJI']
@@ -76,6 +78,7 @@ if os.environ['EXPORT_REF']: d['export_ref'] = os.environ['EXPORT_REF']
 if os.environ['DOC_PATH']: d['doc_path'] = os.environ['DOC_PATH']
 if os.environ['INSTRUCTIONS']: d['instructions'] = os.environ['INSTRUCTIONS']
 if os.environ['LANG_CODE']: d['lang'] = os.environ['LANG_CODE']
+if os.environ['CADENCE']: d['cadence'] = os.environ['CADENCE']
 print(json.dumps(d))
 ")
     post "$BODY"
@@ -89,6 +92,7 @@ if r.get('export_ref'): print(f\"  export: {r.get('export_kind','')}:{r['export_
 if r.get('doc_path'): print(f\"  doc: {r['doc_path']}\")
 if r.get('instructions'): print(f\"  instructions: {r['instructions']}\")
 print(f\"  ghost tag: {r['ghost_tag']}\")
+if r.get('cadence'): print(f\"  research cadence: {r['cadence']}\")
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 " 2>/dev/null || echo "$RESP"
     ;;
