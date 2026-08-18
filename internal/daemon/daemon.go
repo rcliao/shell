@@ -987,6 +987,15 @@ func New(cfg config.Config) (*Daemon, error) {
 			deliver:     tgTransport.Notify,
 			refreshHome: projectHome.Refresh,
 		})
+		// project.render consumer (P3 Wave C): doc writes enqueue renders; this
+		// worker mirrors the canonical doc to Notion via the block-map renderer.
+		// The client reads NOTION_TOKEN from the daemon environment (secret
+		// export above) at call time; unconfigured = per-project WARN, no-op.
+		wireProjectRender(sched, projectRenderDeps{
+			store:        st,
+			workspaceDir: workspaceDir,
+			renderer:     project.NewRenderer(project.NewNotionClient(), cfg.Notion.ProjectParentPageID),
+		})
 	}
 
 	d := &Daemon{

@@ -316,7 +316,14 @@ func (s *Server) projectGet(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusNotFound, "project not found: "+req.Slug)
 		return
 	}
-	writeJSON(w, projectJSON(*p))
+	resp := projectJSON(*p)
+	// The mirrored page's URL — only when WE rendered it (export_kind=notion
+	// plus a block map); a bare export_ref may be a database id or a human
+	// page whose URL shape is not ours to guess.
+	if url := project.NotionPageURL(*p); url != "" {
+		resp["notion_url"] = url
+	}
+	writeJSON(w, resp)
 }
 
 func (s *Server) projectList(w http.ResponseWriter, req ProjectRequest) {
@@ -475,6 +482,12 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 		ProjectID:      &pid,
 	}); err != nil {
 		slog.Warn("rpc: doc-write verification log failed", "slug", p.Slug, "error", err)
+	}
+	// Render trigger (P3 Wave C): mirror the new rev to Notion via the task
+	// queue — the render consumer does all Notion I/O off this request path.
+	// Idempotent on (slug, rev); best-effort like the ledger writes above.
+	if _, err := project.EnqueueRender(s.store, p.Slug, rev); err != nil {
+		slog.Warn("rpc: render enqueue failed", "slug", p.Slug, "error", err)
 	}
 	slog.Info("rpc: project doc written", "slug", p.Slug, "rev", rev, "bytes", len(req.Content))
 	s.refreshProjectHome(p.ChatID)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/store"
 )
 
@@ -127,6 +128,50 @@ func TestProjectDocWriteReturnsReceiptAndLogsVerification(t *testing.T) {
 	}
 	if sum.Verified != 1 {
 		t.Errorf("write_verifications verified = %d, want 1", sum.Verified)
+	}
+
+	// The write enqueued a Notion render task for exactly this rev (P3 Wave C)
+	// — the consumer does the Notion I/O later, off this request path.
+	tasks, err := st.ListTasks(store.TaskQueued, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, task := range tasks {
+		if task.Kind == project.RenderKind && task.PartitionKey == "render:receipts" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no project.render task enqueued after doc-write; queued = %+v", tasks)
+	}
+}
+
+// get on a rendered project returns the mirrored page URL; a pre-P3
+// export_ref (no block map — possibly a database id) must NOT get one.
+func TestProjectGetNotionURL(t *testing.T) {
+	s, st := newProjectTestServer(t)
+	postProject(t, s, map[string]any{
+		"action": "create", "title": "Mirrored", "chat_id": 42, "export_ref": "abc-def",
+	})
+
+	// export_ref without a block map: no URL.
+	code, out := postProject(t, s, map[string]any{"action": "get", "slug": "mirrored"})
+	if code != http.StatusOK {
+		t.Fatalf("get returned %d", code)
+	}
+	if _, has := out["notion_url"]; has {
+		t.Errorf("unrendered export_ref got a URL: %v", out["notion_url"])
+	}
+
+	// With a rendered block map: URL with dashes stripped.
+	bm := `{"sections":{"目標":{"hash":"h","blocks":["b1"]}}}`
+	if err := st.UpdateProjectFields("mirrored", store.ProjectFieldUpdate{BlockMap: &bm}); err != nil {
+		t.Fatal(err)
+	}
+	_, out = postProject(t, s, map[string]any{"action": "get", "slug": "mirrored"})
+	if out["notion_url"] != "https://notion.so/abcdef" {
+		t.Errorf("notion_url = %v", out["notion_url"])
 	}
 }
 

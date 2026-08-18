@@ -125,6 +125,16 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 		slog.Warn("project research: last_research_at update failed", "slug", slug, "error", err)
 	}
 
+	// Render trigger (P3 Wave C): mirror whatever the pass wrote to Notion.
+	// The turn's own doc-write RPC also enqueues; idempotency on (slug, rev)
+	// collapses the two. Re-read the row for the post-turn rev — a pass that
+	// wrote nothing keeps the old rev and dedupes into the already-done task.
+	if fresh, ferr := d.store.GetProjectBySlug(slug); ferr == nil && fresh != nil && fresh.DocRev != "" {
+		if _, rerr := project.EnqueueRender(d.store, fresh.Slug, fresh.DocRev); rerr != nil {
+			slog.Warn("project research: render enqueue failed", "slug", slug, "error", rerr)
+		}
+	}
+
 	// Delta delivery: text through the Transport, into the project's own
 	// (chat, thread). [noop] means the pass found nothing worth saying.
 	delta := strings.TrimSpace(text)

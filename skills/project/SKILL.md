@@ -68,6 +68,16 @@ pass `--chat` only to register a project for a DIFFERENT chat.
   (`projects/<slug>/doc.md` in your workspace, its own git repo, template
   sections 目標/限制/現況/選項/待決定/更新紀錄). Pass `--doc-path` only to
   bind an EXISTING external file — doc-read/doc-write do not work on those.
+- **Managed docs mirror to Notion automatically.** When the daemon is
+  configured (a `NOTION_TOKEN` plus `notion.project_parent_page_id` in
+  config), every successful `doc-write` queues a background render: the first
+  one creates the project's Notion page (icon = project emoji), later ones
+  update only the changed `##` sections. You never render by hand and never
+  edit that page with the notion skill — write the canonical doc; the mirror
+  follows within a minute. `get` prints `notion_url` once the page exists;
+  that is the link to share when the user asks where the doc lives. A project
+  whose `export_ref` was registered by hand (pre-existing page or database)
+  is left untouched by the mirror and gets no `notion_url`.
 
 ## Options (create)
 
