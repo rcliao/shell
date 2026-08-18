@@ -295,6 +295,12 @@ func (r *Renderer) surgicalRender(ctx context.Context, st SyncStore, p *store.Pr
 			if exists {
 				for _, id := range old.Blocks {
 					if err := r.api.DeleteBlock(ctx, id); err != nil {
+						// A block another render already archived is gone for our
+						// purposes — deleting it again must not read as a map
+						// conflict (rapid successive doc-writes hit this).
+						if isAlreadyArchived(err) {
+							continue
+						}
 						return fmt.Errorf("delete stale blocks of %q: %w", sec.Title, err)
 					}
 				}

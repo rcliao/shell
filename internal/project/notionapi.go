@@ -168,6 +168,18 @@ func IsNotionConflict(err error) bool {
 		apiErr.Status == http.StatusConflict
 }
 
+// isAlreadyArchived reports whether err is Notion refusing to touch a block
+// that is already archived — for a delete, that outcome is success, not a
+// map conflict.
+func isAlreadyArchived(err error) bool {
+	var apiErr *NotionAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Status == http.StatusBadRequest &&
+		strings.Contains(apiErr.Body, "archived")
+}
+
 // NotionClient is the real NotionAPI over HTTP. All calls serialize through
 // one mutex with a minimum inter-call spacing — a single-flight pace that
 // keeps a burst of renders under Notion's rate limit. The token is read from

@@ -19,6 +19,7 @@ type fakeNotion struct {
 	deleted    []string
 	pages      []fakePage
 	failAppend error // returned by the NEXT AppendBlocks call, then cleared
+	failDelete error // returned by every DeleteBlock call while set
 }
 
 type fakeAppend struct {
@@ -59,7 +60,7 @@ func (f *fakeNotion) AppendBlocks(_ context.Context, parent string, blocks []Not
 func (f *fakeNotion) UpdateBlock(_ context.Context, _ string, _ NotionBlock) error { return nil }
 func (f *fakeNotion) DeleteBlock(_ context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
-	return nil
+	return f.failDelete
 }
 func (f *fakeNotion) GetBlockChildren(_ context.Context, _ string) ([]NotionBlockRef, error) {
 	return nil, nil
@@ -362,5 +363,32 @@ func TestSyncConflictFallsBackToRebuildOnce(t *testing.T) {
 	// Only one page was ever created — rebuild reuses export_ref.
 	if len(api.pages) != 1 {
 		t.Errorf("rebuild created a page: %d", len(api.pages))
+	}
+}
+
+func TestSyncArchivedDeleteIsNotAConflict(t *testing.T) {
+	st, p := newSyncFixture(t)
+	api := &fakeNotion{enabled: true}
+	r := NewRenderer(api, "parent-page")
+	ctx := context.Background()
+
+	if err := r.SyncProjectPage(ctx, st, p, sampleDoc); err != nil {
+		t.Fatal(err)
+	}
+	fresh := reload(t, st, p.Slug)
+	appendsBefore := len(api.appends)
+
+	// Deleting a block another render already archived returns Notion's
+	// "can't edit archived block" 400 — the surgical update must treat it
+	// as done and NOT trigger the full-rebuild fallback.
+	api.failDelete = &NotionAPIError{Status: 400, Body: `{"code":"validation_error","message":"Can't edit block that is archived."}`}
+	edited := strings.Replace(sampleDoc, "see the castle", "see the museum", 1)
+	if err := r.SyncProjectPage(ctx, st, fresh, edited); err != nil {
+		t.Fatalf("archived delete should not fail the sync: %v", err)
+	}
+	// One changed section => exactly one new append; a rebuild would re-append
+	// every section.
+	if got := len(api.appends) - appendsBefore; got != 1 {
+		t.Fatalf("expected 1 surgical append, got %d (rebuild suspected)", got)
 	}
 }
