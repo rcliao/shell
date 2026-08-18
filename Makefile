@@ -102,7 +102,7 @@ skills:
 
 # Install skills to ~/.shell/skills/
 install-skills: skills
-	@for skill in web-search generate-image browser hello weather summarize shell-pm shell-tunnel shell-relay shell-schedule shell-remember shell-task; do \
+	@for skill in web-search generate-image browser hello weather summarize shell-pm shell-tunnel shell-relay shell-schedule shell-remember shell-task project; do \
 		mkdir -p $(SKILLS_DIR)/$$skill/scripts; \
 		cp skills/$$skill/SKILL.md $(SKILLS_DIR)/$$skill/; \
 		if [ -d skills/$$skill/scripts ]; then \

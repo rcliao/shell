@@ -747,6 +747,47 @@ func (s *Store) migrate() error {
 	// that must never block daemon startup.
 	s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_dedup ON schedules(dedup_key) WHERE dedup_key != '' AND enabled = 1`)
 
+	// projects is the first-class project registry (P1, docs/PLAN-PROJECT-
+	// WORKSPACE.md): a named unit of multi-week research work binding a living
+	// document, the conversation, scheduled research, and memory. export_ref is
+	// the doc-ID-amnesia fix — the external doc id lives HERE, injected every
+	// turn, never re-derived. Brand-new table, so CREATE TABLE + indexes in one
+	// phase is safe (the after-rebuild index ordering trap only applies to
+	// columns added to existing tables — see the media ALTERs above).
+	projectsSchema := `
+	CREATE TABLE IF NOT EXISTS projects (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		slug                   TEXT NOT NULL UNIQUE,
+		title                  TEXT NOT NULL,
+		emoji                  TEXT NOT NULL DEFAULT '',
+		status                 TEXT NOT NULL DEFAULT 'active',
+		chat_id                INTEGER NOT NULL,
+		message_thread_id      INTEGER NOT NULL DEFAULT 0,
+		doc_path               TEXT NOT NULL DEFAULT '',
+		doc_rev                TEXT NOT NULL DEFAULT '',
+		export_kind            TEXT NOT NULL DEFAULT '',
+		export_ref             TEXT NOT NULL DEFAULT '',
+		block_map              TEXT NOT NULL DEFAULT '{}',
+		handled_discussions    TEXT NOT NULL DEFAULT '[]',
+		instructions           TEXT NOT NULL DEFAULT '',
+		notify_policy          TEXT NOT NULL DEFAULT 'quiet',
+		lang                   TEXT NOT NULL DEFAULT '',
+		ghost_tag              TEXT NOT NULL DEFAULT '',
+		schedule_dedup_key     TEXT NOT NULL DEFAULT '',
+		topic_thread_ref       INTEGER,
+		review_after           DATETIME,
+		last_research_at       DATETIME,
+		last_human_activity_at DATETIME,
+		created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (topic_thread_ref) REFERENCES topic_threads(id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_projects_chat_status ON projects(chat_id, status);
+	`
+	if _, err := s.db.Exec(projectsSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 
