@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$TYPE" ] || [ -z "$MESSAGE" ]; then
-  echo "usage: shell-schedule <once|cron> --message <text> [--at <time>] [--expr <cron>] [--tz <tz>] [--mode <notify|prompt>]" >&2
+  echo "usage: shell-schedule <once|cron> --message <text> [--at <time>] [--expr <cron>] [--tz <tz>] [--mode <notify|prompt|event>]" >&2
   exit 1
 fi
 

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,11 +25,25 @@ type outbound interface {
 	SendText(chatID, threadID int64, text string)
 	SendPhoto(chatID, threadID int64, data []byte, caption string)
 	SendVideo(chatID, threadID int64, data []byte, caption string)
+	SendDocument(chatID, threadID int64, path, caption string) error
+	// SendMessageID sends a text message and returns its id for later
+	// pin/edit; EditMessage/PinMessage/UnpinMessage operate on that id.
+	// These return errors (unlike the fire-and-forget sends) because their
+	// callers hold state — a pinned message id — that must not be updated
+	// from a send that never happened.
+	SendMessageID(chatID, threadID int64, text string) (int, error)
+	EditMessage(chatID int64, messageID int, text string) error
+	PinMessage(chatID int64, messageID int, silent bool) error
+	UnpinMessage(chatID int64, messageID int) error
 	SetOutboundDedup(check func(chatID, threadID int64, text string) bool)
 	// Start runs the inbound poller. A transport with no inbound side blocks
 	// until the context is cancelled, matching the bot's lifecycle contract.
 	Start(ctx context.Context)
 }
+
+// errNoTransport is what the request/response-shaped outbound methods return
+// when no transport is attached.
+var errNoTransport = errors.New("no transport attached")
 
 // headlessOutbound is the no-Telegram implementation: an agent reachable only
 // through the CLI transport (and later a TUI).
@@ -52,6 +67,33 @@ func (headlessOutbound) SendPhoto(chatID, threadID int64, data []byte, caption s
 func (headlessOutbound) SendVideo(chatID, threadID int64, data []byte, caption string) {
 	slog.Info("headless: outbound video dropped (no transport attached)",
 		"chat_id", chatID, "thread_id", threadID, "bytes", len(data))
+}
+
+// The id-returning and id-consuming methods error instead of logging: their
+// callers keep state (a pinned message id) that a fabricated success would
+// poison.
+func (headlessOutbound) SendDocument(chatID, threadID int64, path, caption string) error {
+	slog.Info("headless: outbound document dropped (no transport attached)",
+		"chat_id", chatID, "thread_id", threadID, "path", path)
+	return errNoTransport
+}
+
+func (headlessOutbound) SendMessageID(chatID, threadID int64, text string) (int, error) {
+	slog.Info("headless: outbound message dropped (no transport attached)",
+		"chat_id", chatID, "thread_id", threadID, "chars", len(text))
+	return 0, errNoTransport
+}
+
+func (headlessOutbound) EditMessage(chatID int64, messageID int, text string) error {
+	return errNoTransport
+}
+
+func (headlessOutbound) PinMessage(chatID int64, messageID int, silent bool) error {
+	return errNoTransport
+}
+
+func (headlessOutbound) UnpinMessage(chatID int64, messageID int) error {
+	return errNoTransport
 }
 
 func (headlessOutbound) SetOutboundDedup(func(chatID, threadID int64, text string) bool) {}

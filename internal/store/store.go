@@ -96,7 +96,7 @@ type Schedule struct {
 	Schedule  string // cron expression or ISO8601 for one-shot
 	Timezone  string
 	Type      string // "cron" or "once"
-	Mode      string // "notify" or "prompt"
+	Mode      string // "notify", "prompt", or "event" (event-mode message is a JSON envelope; see scheduler/event.go)
 	NextRunAt time.Time
 	LastRunAt *time.Time
 	Enabled   bool
@@ -543,6 +543,11 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(writeVerifySchema); err != nil {
 		return err
 	}
+
+	// project_id links a verification row to the project whose doc was
+	// written (P2, docs/PLAN-PROJECT-WORKSPACE.md). Nullable: NULL for every
+	// non-project write. Idempotent for existing databases.
+	s.db.Exec("ALTER TABLE write_verifications ADD COLUMN project_id INTEGER")
 
 	// recall_verifications is the read-side twin of write_verifications.
 	// A recall-trigger turn (user asks about a previously-stored fact) is
@@ -1880,7 +1885,8 @@ type WriteVerification struct {
 	WriteFailed    bool   // a persistence tool call was observed but errored
 	ToolNames      string // comma-joined persistence tool names seen (for debugging)
 	Enforced       int    // 0=log-only, 1=correction turn issued, 2=correction no-oped (no write, no text)
-	Source         string // interactive | heartbeat | scheduler
+	Source         string // interactive | heartbeat | scheduler | rpc
+	ProjectID      *int64 // project whose doc was written; nil for non-project writes
 }
 
 // LogWriteVerification records one runtime write-hygiene observation.
@@ -1892,11 +1898,11 @@ func (s *Store) LogWriteVerification(v WriteVerification) error {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO write_verifications
-			(chat_id, session_id, classification, triggered, claimed, write_ok, write_failed, tool_names, enforced, source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(chat_id, session_id, classification, triggered, claimed, write_ok, write_failed, tool_names, enforced, source, project_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, v.ChatID, v.SessionID, v.Classification,
 		b2i(v.Triggered), b2i(v.Claimed), b2i(v.WriteOK), b2i(v.WriteFailed),
-		v.ToolNames, v.Enforced, src)
+		v.ToolNames, v.Enforced, src, v.ProjectID)
 	return err
 }
 

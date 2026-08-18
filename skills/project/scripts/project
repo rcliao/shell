@@ -10,6 +10,8 @@ usage() {
   echo "usage: project create --title <text> [--emoji <e> --chat <id> --thread <id> --export-ref <id> --doc-path <path> --instructions <text> --lang <code>]" >&2
   echo "       project list [--chat <id>]" >&2
   echo "       project get <slug>" >&2
+  echo "       project doc-read <slug>" >&2
+  echo "       project doc-write <slug> [--file <path>] [--attribution <text>]   (content from --file or stdin)" >&2
   exit 1
 }
 
@@ -25,6 +27,8 @@ DOC_PATH=""
 INSTRUCTIONS=""
 LANG_CODE=""
 SLUG=""
+FILE=""
+ATTRIBUTION=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,6 +40,8 @@ while [ $# -gt 0 ]; do
     --doc-path)     DOC_PATH="$2"; shift 2 ;;
     --instructions) INSTRUCTIONS="$2"; shift 2 ;;
     --lang)         LANG_CODE="$2"; shift 2 ;;
+    --file)         FILE="$2"; shift 2 ;;
+    --attribution)  ATTRIBUTION="$2"; shift 2 ;;
     --*)            echo "unknown arg: $1" >&2; usage ;;
     *)              SLUG="$1"; shift ;;
   esac
@@ -110,6 +116,50 @@ for p in projects:
     BODY=$(SLUG="$SLUG" python3 -c "import json, os; print(json.dumps({'action': 'get', 'slug': os.environ['SLUG']}))")
     post "$BODY"
     echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+    ;;
+
+  doc-read)
+    if [ -z "$SLUG" ]; then
+      echo "doc-read requires a slug" >&2
+      exit 1
+    fi
+    BODY=$(SLUG="$SLUG" python3 -c "import json, os; print(json.dumps({'action': 'doc-read', 'slug': os.environ['SLUG']}))")
+    post "$BODY"
+    # Doc content, prefixed with the rev it was served at.
+    echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print(f\"rev {r['rev']} ({r['doc_path']})\")
+print(r['content'])
+" 2>/dev/null || echo "$RESP"
+    ;;
+
+  doc-write)
+    if [ -z "$SLUG" ]; then
+      echo "doc-write requires a slug" >&2
+      exit 1
+    fi
+    if [ -n "$FILE" ]; then
+      [ -r "$FILE" ] || { echo "cannot read --file $FILE" >&2; exit 1; }
+      CONTENT_SRC="$FILE"
+    else
+      CONTENT_SRC="-"  # stdin
+    fi
+    BODY=$(SLUG="$SLUG" ATTRIBUTION="$ATTRIBUTION" CONTENT_SRC="$CONTENT_SRC" python3 -c "
+import json, os, sys
+src = os.environ['CONTENT_SRC']
+content = sys.stdin.read() if src == '-' else open(src, encoding='utf-8').read()
+d = {'action': 'doc-write', 'slug': os.environ['SLUG'], 'content': content}
+if os.environ['ATTRIBUTION']: d['attribution'] = os.environ['ATTRIBUTION']
+print(json.dumps(d))
+")
+    post "$BODY"
+    # Read-back receipt: the commit hash the server minted for this write.
+    echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print(f\"Doc {r['slug']} committed: rev {r['rev']}\")
+" 2>/dev/null || echo "$RESP"
     ;;
 
   *)

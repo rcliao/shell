@@ -120,6 +120,30 @@ func (a *StoreAdapter) EnqueueFire(entry ScheduleEntry, occurrence, expiresAt ti
 	return created, err
 }
 
+// EnqueueEvent registers one occurrence of an event-mode schedule as a task
+// of the event's own kind (see event.go).
+//
+// The idempotency key is kind-prefixed (schedule id, occurrence) — the same
+// house pattern as EnqueueFire: retries and replays of one occurrence never
+// double-enqueue, while each successive fire enqueues its own row. Attempts
+// use the queue default; the consumer owns retry semantics beyond that.
+func (a *StoreAdapter) EnqueueEvent(kind, payload, partitionKey string, scheduleID int64, occurrence, expiresAt time.Time) (bool, error) {
+	exp := expiresAt
+	_, created, err := a.s.EnqueueTask(store.Task{
+		Kind:   kind,
+		Source: store.TaskSourceScheduler,
+		IdempotencyKey: store.DeriveIdempotencyKey(
+			kind,
+			strconv.FormatInt(scheduleID, 10),
+			occurrence.UTC().Format(time.RFC3339Nano),
+		),
+		PartitionKey: partitionKey,
+		Payload:      payload,
+		ExpiresAt:    &exp,
+	})
+	return created, err
+}
+
 // LeaseNext claims the next ready task of any kind. Decoding is the handler's
 // job — this layer stays generic so a new kind needs no change here.
 func (a *StoreAdapter) LeaseNext(owner string, leaseFor time.Duration) (*LeasedTask, error) {

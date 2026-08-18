@@ -727,6 +727,9 @@ func New(cfg config.Config) (*Daemon, error) {
 		Timezone:    cfg.Scheduler.Timezone,
 		TaskStore:   taskStore,
 		BotUsername: cfg.Agent.BotUsername,
+		// Same workspace the bridge advertises in the system prompt — project
+		// doc repos live under <workspace>/projects/<slug>/.
+		WorkspaceDir: workspaceDir,
 	})
 
 	// Initialize scheduler if enabled.
@@ -1440,6 +1443,26 @@ func (t *telegramTransport) SendPhoto(chatID, threadID int64, data []byte, capti
 
 func (t *telegramTransport) SendVideo(chatID, threadID int64, data []byte, caption string) {
 	t.bot.SendVideo(chatID, threadID, data, caption)
+}
+
+func (t *telegramTransport) SendDocument(chatID, threadID int64, path, caption string) error {
+	return t.bot.SendDocument(chatID, threadID, path, caption)
+}
+
+func (t *telegramTransport) SendMessageID(chatID, threadID int64, text string) (int, error) {
+	return t.bot.SendMessageID(chatID, threadID, text)
+}
+
+func (t *telegramTransport) EditMessage(chatID int64, messageID int, text string) error {
+	return t.bot.EditMessage(chatID, messageID, text)
+}
+
+func (t *telegramTransport) PinMessage(chatID int64, messageID int, silent bool) error {
+	return t.bot.PinMessage(chatID, messageID, silent)
+}
+
+func (t *telegramTransport) UnpinMessage(chatID int64, messageID int) error {
+	return t.bot.UnpinMessage(chatID, messageID)
 }
 
 // resolveAgentNS returns the first AgentNS found in config profiles, or "" for legacy mode.

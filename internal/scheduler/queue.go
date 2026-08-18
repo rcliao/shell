@@ -86,6 +86,11 @@ type TaskQueue interface {
 	// EnqueueFire registers one occurrence. Idempotent on (schedule, occurrence):
 	// enqueuing the same occurrence twice returns created=false.
 	EnqueueFire(entry ScheduleEntry, occurrence time.Time, expiresAt time.Time, maxAttempts int) (created bool, err error)
+	// EnqueueEvent registers one occurrence of an event-mode schedule as a
+	// task of an arbitrary kind. Idempotent on (kind, schedule, occurrence):
+	// the same occurrence offered twice returns created=false, while
+	// successive occurrences each enqueue their own row.
+	EnqueueEvent(kind, payload, partitionKey string, scheduleID int64, occurrence, expiresAt time.Time) (created bool, err error)
 	// LeaseNext claims the next ready task of ANY kind, or nil when none is
 	// ready. Kind-specific decoding belongs to that kind's handler, not here:
 	// the queue is generic infrastructure and scheduled fires are one producer.

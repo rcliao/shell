@@ -18,6 +18,7 @@ import (
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/memory"
+	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/transcript"
 )
@@ -62,6 +63,7 @@ type Server struct {
 	botUsername     string // this agent's bot username
 	contextManifest func(ctx context.Context, chatID int64) (any, string)
 	killSession     KillSessionFunc
+	workspaceDir    string // agent workspace root; project doc repos live under <workspaceDir>/projects/
 }
 
 // KillSessionFunc terminates the live CLI subprocess for a chat (all threads
@@ -90,6 +92,10 @@ type Config struct {
 	ContextManifest func(ctx context.Context, chatID int64) (any, string)
 	// KillSession reaps live subprocesses in the daemon's manager.
 	KillSession KillSessionFunc
+	// WorkspaceDir is the agent's persistent workspace root (same value the
+	// bridge advertises in the system prompt). Project doc repos live under
+	// <WorkspaceDir>/projects/<slug>/. Empty disables the doc layer.
+	WorkspaceDir string
 }
 
 // handleContext serves the live system-prompt manifest (GET /context?chat_id=N&full=1).
@@ -136,6 +142,7 @@ func New(cfg Config) *Server {
 		botUsername:     cfg.BotUsername,
 		contextManifest: cfg.ContextManifest,
 		killSession:     cfg.KillSession,
+		workspaceDir:    cfg.WorkspaceDir,
 	}
 }
 
@@ -367,8 +374,8 @@ type ScheduleRequest struct {
 	Type    string `json:"type"`    // "once" or "cron"
 	At      string `json:"at"`      // RFC3339 or local datetime (for type=once)
 	Cron    string `json:"cron"`    // cron expression (for type=cron)
-	Message string `json:"message"` // schedule message/label
-	Mode    string `json:"mode"`    // "notify" or "prompt" (default: notify)
+	Message string `json:"message"` // schedule message/label; for mode=event: JSON {"kind": ..., "payload": {...}}
+	Mode    string `json:"mode"`    // "notify", "prompt", or "event" (default: notify)
 	TZ      string `json:"tz"`      // timezone override
 }
 
@@ -383,18 +390,37 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if req.ChatID == 0 || req.Message == "" {
-		writeError(w, http.StatusBadRequest, "chat_id and message are required")
+	if req.Message == "" {
+		writeError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+	mode := req.Mode
+	if mode == "" {
+		mode = "notify"
+	}
+	switch mode {
+	case "notify", "prompt":
+		if req.ChatID == 0 {
+			writeError(w, http.StatusBadRequest, "chat_id and message are required")
+			return
+		}
+	case scheduler.ModeEvent:
+		// An event schedule delivers to the task queue, not a chat, so a chat
+		// binding is optional (it lives in the payload when the consumer needs
+		// one). The envelope is validated HERE so a malformed one is rejected
+		// at registration instead of auto-pausing on its first fire.
+		if _, _, err := scheduler.ParseEventMessage(req.Message); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "mode must be notify, prompt, or event")
 		return
 	}
 
 	tz := req.TZ
 	if tz == "" {
 		tz = s.timezone
-	}
-	mode := req.Mode
-	if mode == "" {
-		mode = "notify"
 	}
 
 	sched := &store.Schedule{
