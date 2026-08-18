@@ -109,6 +109,20 @@ func newProjectCmd() *cobra.Command {
 				fmt.Printf("  last human activity: %s\n", p.LastHumanActivityAt.Local().Format("2006-01-02 15:04"))
 			}
 
+			// Comment loop state (Wave D): processed discussions + the poll
+			// watermark (the page's last seen last_edited_time).
+			handled := store.ParseHandledDiscussions(p.HandledDiscussions)
+			if len(handled) > 0 {
+				line := fmt.Sprintf("  comments handled: %d", len(handled))
+				if last := handled[len(handled)-1]; !last.At.IsZero() {
+					line += ", last " + last.At.Local().Format("2006-01-02 15:04")
+				}
+				fmt.Println(line)
+			}
+			if p.NotionWatermark != "" {
+				fmt.Printf("  notion watermark: %s\n", p.NotionWatermark)
+			}
+
 			// Research schedule state, found by its explicit dedup key.
 			key := p.ScheduleDedupKey
 			if key == "" {

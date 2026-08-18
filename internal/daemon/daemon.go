@@ -974,6 +974,11 @@ func New(cfg config.Config) (*Daemon, error) {
 	// project schedule firing before this ran would burn its attempts on a
 	// wiring bug. See projectevents.go for why delivery bypasses onPrompt.
 	if sched != nil {
+		// ONE Notion client shared by the renderer, the poller, and the
+		// comment consumer, so every Notion call serializes under the same
+		// global pacing. It reads NOTION_TOKEN from the daemon environment
+		// (secret export above) at call time; unconfigured = WARN + no-op.
+		notionClient := project.NewNotionClient()
 		wireProjectEvents(sched, projectResearchDeps{
 			store:        st,
 			workspaceDir: workspaceDir,
@@ -986,16 +991,22 @@ func New(cfg config.Config) (*Daemon, error) {
 			},
 			deliver:     tgTransport.Notify,
 			refreshHome: projectHome.Refresh,
+			notion:      notionClient,
+			notionID:    &notionIdentity{},
 		})
 		// project.render consumer (P3 Wave C): doc writes enqueue renders; this
 		// worker mirrors the canonical doc to Notion via the block-map renderer.
-		// The client reads NOTION_TOKEN from the daemon environment (secret
-		// export above) at call time; unconfigured = per-project WARN, no-op.
 		wireProjectRender(sched, projectRenderDeps{
 			store:        st,
 			workspaceDir: workspaceDir,
-			renderer:     project.NewRenderer(project.NewNotionClient(), cfg.Notion.ProjectParentPageID),
+			renderer:     project.NewRenderer(notionClient, cfg.Notion.ProjectParentPageID),
 		})
+		// Notion comment loop (P3 Wave D): the ONE global poll schedule that
+		// produces notion.* events. Registered only when the schedule tick
+		// runs — without it the cron would sit inert.
+		if cfg.Scheduler.Enabled {
+			registerNotionPollSchedule(st, cfg.Scheduler.Timezone)
+		}
 	}
 
 	d := &Daemon{

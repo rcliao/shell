@@ -228,7 +228,7 @@ func TestProjectEventUnknownEventIgnored(t *testing.T) {
 	deps := projectResearchDeps{store: st, workspaceDir: ws}
 
 	result, err := deps.handleProjectEvent(context.Background(), scheduler.LeasedTask{
-		ID: 1, Kind: project.EventKind, Payload: `{"event":"notion.comment.created","slug":"x"}`,
+		ID: 1, Kind: project.EventKind, Payload: `{"event":"future.unknown","slug":"x"}`,
 	})
 	if err != nil || !strings.Contains(result, "ignored") {
 		t.Errorf("result=%q err=%v, want ignore without retry", result, err)

@@ -43,6 +43,13 @@ func (f *renderFakeNotion) GetBlockChildren(_ context.Context, _ string) ([]proj
 func (f *renderFakeNotion) GetPageLastEdited(_ context.Context, _ string) (time.Time, error) {
 	return time.Time{}, nil
 }
+func (f *renderFakeNotion) ListComments(_ context.Context, _, _ string) ([]project.NotionComment, string, error) {
+	return nil, "", nil
+}
+func (f *renderFakeNotion) CreateComment(_ context.Context, _ string, _ []project.NotionRichText) (string, error) {
+	return "", nil
+}
+func (f *renderFakeNotion) Me(_ context.Context) (string, error) { return "bot-user", nil }
 
 func renderTask(t *testing.T, st *store.Store, slug, rev string) scheduler.LeasedTask {
 	t.Helper()

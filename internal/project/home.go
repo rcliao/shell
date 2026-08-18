@@ -16,6 +16,11 @@ import (
 // place rather than sending a new one, so the chat is not spammed every time
 // a doc write lands.
 
+// recentCommentWindow bounds the 💬 marker: a project whose Notion comment
+// loop processed a discussion this recently is marked as having an active
+// conversation — the cheap needs-you precursor (Wave D).
+const recentCommentWindow = 24 * time.Hour
+
 // homeDebounce bounds edits to one per chat per window. EditMessage retries
 // flood errors but does not debounce (Wave A note) — a burst of doc writes
 // must not turn into a burst of Telegram edits.
@@ -69,9 +74,13 @@ func RenderHome(projects []store.Project) string {
 		sb.WriteString(p.Title)
 		sb.WriteString(" — ")
 		sb.WriteString(lastActivity(p).Format("2006-01-02"))
-		// Needs-you hint goes here in P4 (comment loop lands the signal).
 		if p.DocPath != "" {
 			sb.WriteString(" 📄")
+		}
+		// Comment-loop activity marker (Wave D): a discussion processed in
+		// the last day means a live conversation on the project's page.
+		if hasRecentComment(p, time.Now()) {
+			sb.WriteString(" 💬")
 		}
 		lines = append(lines, sb.String())
 	}
@@ -79,6 +88,17 @@ func RenderHome(projects []store.Project) string {
 		return "📋 Projects\n(no active projects)"
 	}
 	return "📋 Projects\n" + strings.Join(lines, "\n")
+}
+
+// hasRecentComment reports whether any handled Notion discussion landed
+// within the recent-comment window.
+func hasRecentComment(p store.Project, now time.Time) bool {
+	for _, h := range store.ParseHandledDiscussions(p.HandledDiscussions) {
+		if !h.At.IsZero() && now.Sub(h.At) < recentCommentWindow {
+			return true
+		}
+	}
+	return false
 }
 
 // lastActivity picks the most recent thing that happened to a project: a

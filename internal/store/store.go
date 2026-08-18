@@ -774,6 +774,7 @@ func (s *Store) migrate() error {
 		export_ref             TEXT NOT NULL DEFAULT '',
 		block_map              TEXT NOT NULL DEFAULT '{}',
 		handled_discussions    TEXT NOT NULL DEFAULT '[]',
+		notion_watermark       TEXT NOT NULL DEFAULT '',
 		instructions           TEXT NOT NULL DEFAULT '',
 		notify_policy          TEXT NOT NULL DEFAULT 'quiet',
 		lang                   TEXT NOT NULL DEFAULT '',
@@ -792,6 +793,10 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(projectsSchema); err != nil {
 		return err
 	}
+	// notion_watermark (P3 Wave D) landed after the table shipped: best-effort
+	// ALTER for DBs created from the earlier schema (duplicate-column error on
+	// fresh DBs is expected and ignored). No index, so ordering is safe.
+	s.db.Exec("ALTER TABLE projects ADD COLUMN notion_watermark TEXT NOT NULL DEFAULT ''")
 
 	// chat_pins is the pinned 📋 Projects home message per chat (P2) — see
 	// internal/store/chatpins.go. PK-only table: no separate index needed, and

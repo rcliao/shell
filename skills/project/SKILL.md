@@ -79,6 +79,27 @@ pass `--chat` only to register a project for a DIFFERENT chat.
   whose `export_ref` was registered by hand (pre-existing page or database)
   is left untouched by the mirror and gets no `notion_url`.
 
+## Comment loop (Notion feedback)
+
+The daemon polls each project's Notion page (~every 30 min) for new comment
+threads and direct page edits. When the user comments, YOU get a bounded
+revision turn in the project's chat session with the comment text. Contract:
+
+- **The conversation happens in Notion.** Your turn's visible reply is posted
+  back INTO the user's comment thread on the page — do NOT also message the
+  chat, relay, or notify anyone unless the user explicitly asked for that in
+  the comment itself.
+- One fix pass per comment thread: apply exactly what the comment asks via
+  `doc-write` (the printed rev is the receipt), then reply in ≤2 lines in the
+  project's language describing what changed. A question gets an answer in
+  the reply; touch the doc only if needed. Never re-dump the doc.
+- The user resolving the comment in the Notion UI is the acknowledgment —
+  each thread is answered once; there is no back-and-forth loop.
+- Direct page edits are folded into the canonical doc automatically as
+  `human-edit(notion)` commits and the page is re-rendered — you never
+  reconcile the page by hand, and `doc-read` always reflects human edits
+  after the next poll.
+
 ## Options (create)
 
 - `--title <text>` — required; the human-readable project name

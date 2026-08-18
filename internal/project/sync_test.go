@@ -67,6 +67,13 @@ func (f *fakeNotion) GetBlockChildren(_ context.Context, _ string) ([]NotionBloc
 func (f *fakeNotion) GetPageLastEdited(_ context.Context, _ string) (time.Time, error) {
 	return time.Time{}, nil
 }
+func (f *fakeNotion) ListComments(_ context.Context, _, _ string) ([]NotionComment, string, error) {
+	return nil, "", nil
+}
+func (f *fakeNotion) CreateComment(_ context.Context, _ string, _ []NotionRichText) (string, error) {
+	return "", nil
+}
+func (f *fakeNotion) Me(_ context.Context) (string, error) { return "bot-user", nil }
 
 func (f *fakeNotion) mutations() int { return len(f.appends) + len(f.deleted) + len(f.pages) }
 

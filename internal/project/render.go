@@ -21,6 +21,7 @@ const preambleSection = "_preamble"
 type DocSection struct {
 	Title  string // the `## ` heading text (map key); preambleSection for the preamble
 	Hash   string // content hash of the section's raw markdown — the diff unit
+	Raw    string // the section's raw markdown (heading line included) — what the reconciler keeps verbatim
 	Blocks []NotionBlock
 }
 
@@ -146,7 +147,7 @@ func (a *docSectionAccum) finish() (DocSection, bool) {
 	} else if !a.hasBody {
 		return DocSection{}, false
 	}
-	return DocSection{Title: a.title, Hash: sectionHash(a.raw), Blocks: blocks}, true
+	return DocSection{Title: a.title, Hash: sectionHash(a.raw), Raw: strings.Join(a.raw, "\n"), Blocks: blocks}, true
 }
 
 // parseInline converts one text run into rich text: `**bold**` and

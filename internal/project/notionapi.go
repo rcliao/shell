@@ -1,6 +1,6 @@
 // Notion REST client (P3 Wave C, docs/PLAN-PROJECT-WORKSPACE.md). Raw REST
-// against api.notion.com — no SDK dependency; the six operations the renderer
-// and the (Wave D) poller need, nothing more. The NotionAPI interface exists
+// against api.notion.com — no SDK dependency; only the operations the renderer
+// and the Wave D comment loop need, nothing more. The NotionAPI interface exists
 // so everything above this file is tested against a fake: the sandbox blocks
 // httptest listeners, so the client itself is unit-tested at the
 // request-building layer via an injected RoundTripper.
@@ -57,6 +57,27 @@ type NotionAPI interface {
 	GetBlockChildren(ctx context.Context, blockID string) ([]NotionBlockRef, error)
 	// GetPageLastEdited returns the page's last_edited_time.
 	GetPageLastEdited(ctx context.Context, pageID string) (time.Time, error)
+	// ListComments returns one page of open comments on a block or page
+	// (Notion's listing is NOT recursive: a page id returns page-level
+	// comments only, never comments anchored to child blocks). Empty cursor
+	// starts at the beginning; a non-empty next cursor means more pages.
+	ListComments(ctx context.Context, blockOrPageID, cursor string) (comments []NotionComment, nextCursor string, err error)
+	// CreateComment replies INTO an existing discussion thread. Page-level
+	// thread creation is deliberately absent — the loop only ever answers.
+	CreateComment(ctx context.Context, discussionID string, rich []NotionRichText) (commentID string, err error)
+	// Me returns the integration's own bot user id (GET /users/me) — how the
+	// poller tells its replies apart from human comments. Callers cache it.
+	Me(ctx context.Context) (string, error)
+}
+
+// NotionComment is one comment in a discussion thread on a page or block.
+type NotionComment struct {
+	ID           string
+	DiscussionID string
+	ParentID     string // parent block id, or the page id for page-level comments
+	Plain        string // concatenated plain_text of the rich text
+	CreatedByID  string // Notion user id of the author
+	CreatedTime  time.Time
 }
 
 // NotionRichText is one styled run of text. The converter is deliberately
@@ -113,10 +134,12 @@ func blockJSON(b NotionBlock) map[string]any {
 	}
 }
 
-// NotionBlockRef identifies one existing block on a page.
+// NotionBlockRef identifies one existing block on a page, with its rich text
+// when the type carries one — what the Wave D inverse converter reads back.
 type NotionBlockRef struct {
 	ID   string
 	Type string
+	Rich []NotionRichText
 }
 
 // NotionAPIError is a non-2xx Notion response. Status is kept so the renderer
@@ -315,7 +338,31 @@ func (c *NotionClient) DeleteBlock(ctx context.Context, blockID string) error {
 	return c.do(ctx, http.MethodDelete, "/blocks/"+blockID, nil, nil)
 }
 
+// notionRichItem is the wire shape of one rich-text run on the read side.
+type notionRichItem struct {
+	PlainText   string  `json:"plain_text"`
+	Href        *string `json:"href"`
+	Annotations struct {
+		Bold bool `json:"bold"`
+	} `json:"annotations"`
+}
+
+// richFromWire converts read-side rich text to the converter's shape.
+func richFromWire(items []notionRichItem) []NotionRichText {
+	var out []NotionRichText
+	for _, it := range items {
+		r := NotionRichText{Text: it.PlainText, Bold: it.Annotations.Bold}
+		if it.Href != nil {
+			r.Link = *it.Href
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // GetBlockChildren lists direct children of blockID, following pagination.
+// Rich text is decoded for the block types the converter speaks; unknown
+// types come back with their Type set and no rich text.
 func (c *NotionClient) GetBlockChildren(ctx context.Context, blockID string) ([]NotionBlockRef, error) {
 	var refs []NotionBlockRef
 	cursor := ""
@@ -325,18 +372,36 @@ func (c *NotionClient) GetBlockChildren(ctx context.Context, blockID string) ([]
 			path += "&start_cursor=" + cursor
 		}
 		var out struct {
-			Results []struct {
-				ID   string `json:"id"`
-				Type string `json:"type"`
-			} `json:"results"`
-			HasMore    bool   `json:"has_more"`
-			NextCursor string `json:"next_cursor"`
+			Results    []json.RawMessage `json:"results"`
+			HasMore    bool              `json:"has_more"`
+			NextCursor string            `json:"next_cursor"`
 		}
 		if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 			return refs, err
 		}
-		for _, r := range out.Results {
-			refs = append(refs, NotionBlockRef{ID: r.ID, Type: r.Type})
+		for _, raw := range out.Results {
+			var meta struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(raw, &meta); err != nil {
+				continue
+			}
+			ref := NotionBlockRef{ID: meta.ID, Type: meta.Type}
+			// The block's content lives under a key named after its type:
+			// {"type": "paragraph", "paragraph": {"rich_text": [...]}}.
+			var byKey map[string]json.RawMessage
+			if json.Unmarshal(raw, &byKey) == nil {
+				if body, ok := byKey[meta.Type]; ok {
+					var content struct {
+						Rich []notionRichItem `json:"rich_text"`
+					}
+					if json.Unmarshal(body, &content) == nil {
+						ref.Rich = richFromWire(content.Rich)
+					}
+				}
+			}
+			refs = append(refs, ref)
 		}
 		if !out.HasMore || out.NextCursor == "" {
 			return refs, nil
@@ -359,6 +424,100 @@ func (c *NotionClient) GetPageLastEdited(ctx context.Context, pageID string) (ti
 		return time.Time{}, fmt.Errorf("notion: bad last_edited_time %q: %w", out.LastEdited, err)
 	}
 	return t, nil
+}
+
+// ListComments returns ONE page of open comments on a block or page. The
+// cursor rides in the signature (unlike GetBlockChildren) because the Wave D
+// poller owns the loop — it sweeps many blocks and wants one place to bound
+// the work.
+func (c *NotionClient) ListComments(ctx context.Context, blockOrPageID, cursor string) ([]NotionComment, string, error) {
+	path := "/comments?block_id=" + blockOrPageID + "&page_size=100"
+	if cursor != "" {
+		path += "&start_cursor=" + cursor
+	}
+	var out struct {
+		Results []struct {
+			ID           string `json:"id"`
+			DiscussionID string `json:"discussion_id"`
+			Parent       struct {
+				Type    string `json:"type"`
+				PageID  string `json:"page_id"`
+				BlockID string `json:"block_id"`
+			} `json:"parent"`
+			CreatedTime string `json:"created_time"`
+			CreatedBy   struct {
+				ID string `json:"id"`
+			} `json:"created_by"`
+			Rich []notionRichItem `json:"rich_text"`
+		} `json:"results"`
+		HasMore    bool   `json:"has_more"`
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, "", err
+	}
+	comments := make([]NotionComment, 0, len(out.Results))
+	for _, r := range out.Results {
+		cm := NotionComment{
+			ID:           r.ID,
+			DiscussionID: r.DiscussionID,
+			ParentID:     r.Parent.BlockID,
+			CreatedByID:  r.CreatedBy.ID,
+		}
+		if cm.ParentID == "" {
+			cm.ParentID = r.Parent.PageID
+		}
+		if t, err := time.Parse(time.RFC3339, r.CreatedTime); err == nil {
+			cm.CreatedTime = t
+		}
+		var plain strings.Builder
+		for _, run := range r.Rich {
+			plain.WriteString(run.PlainText)
+		}
+		cm.Plain = plain.String()
+		comments = append(comments, cm)
+	}
+	next := ""
+	if out.HasMore {
+		next = out.NextCursor
+	}
+	return comments, next, nil
+}
+
+// CreateComment posts a reply into an existing discussion thread.
+func (c *NotionClient) CreateComment(ctx context.Context, discussionID string, rich []NotionRichText) (string, error) {
+	wire := []map[string]any{}
+	for _, r := range rich {
+		wire = append(wire, richTextJSON(r)...)
+	}
+	body := map[string]any{
+		"discussion_id": discussionID,
+		"rich_text":     wire,
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/comments", body, &out); err != nil {
+		return "", err
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("notion: create comment returned no id")
+	}
+	return out.ID, nil
+}
+
+// Me returns the integration's own bot user id.
+func (c *NotionClient) Me(ctx context.Context) (string, error) {
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/users/me", nil, &out); err != nil {
+		return "", err
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("notion: users/me returned no id")
+	}
+	return out.ID, nil
 }
 
 // notionPageURL builds https://notion.so/<id-no-dashes> from a page id.

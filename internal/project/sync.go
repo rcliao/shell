@@ -50,6 +50,26 @@ func ParseBlockMap(raw string) BlockMap {
 	return bm
 }
 
+// SectionForBlock returns the `## ` title of the section containing blockID,
+// or "" when the block is unknown or in the preamble — the comment-anchor
+// resolution for Wave D revision prompts.
+func (bm BlockMap) SectionForBlock(blockID string) string {
+	if blockID == "" {
+		return ""
+	}
+	for title, sec := range bm.Sections {
+		for _, id := range sec.Blocks {
+			if id == blockID {
+				if title == preambleSection {
+					return ""
+				}
+				return title
+			}
+		}
+	}
+	return ""
+}
+
 // Rendered reports whether this map records sections WE rendered — the guard
 // that keeps the renderer off pages it did not create (pre-P3 export_refs:
 // human pages, or the health-log DATABASE id, which is not even a page).

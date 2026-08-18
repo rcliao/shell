@@ -41,13 +41,21 @@ const projectResearchRedoWindow = time.Hour
 type projectResearchDeps struct {
 	store        *store.Store
 	workspaceDir string
-	// runTurn executes the research prompt as an agent turn on the project's
+	// runTurn executes a project prompt as an agent turn on the project's
 	// (chat, thread) session and returns the visible reply text.
 	runTurn func(ctx context.Context, chatID, threadID int64, prompt string) (string, error)
 	// deliver sends the delta text to the project's chat + thread (Transport).
 	deliver func(chatID, threadID int64, text string)
 	// refreshHome updates the chat's pinned 📋 Projects message.
 	refreshHome func(chatID int64)
+
+	// notion is the shared Notion client (Wave D): the poll consumer reads
+	// comments and page state through it, the revision consumer replies
+	// through it. Sharing ONE client with the renderer keeps every Notion
+	// call under the client's global pacing. Nil/disabled = comment loop off.
+	notion project.NotionAPI
+	// notionID caches the integration's bot user id across polls.
+	notionID *notionIdentity
 }
 
 // wireProjectEvents registers the project.event handler. Registration is
@@ -67,6 +75,12 @@ func (d projectResearchDeps) handleProjectEvent(ctx context.Context, t scheduler
 	switch p.Event {
 	case project.EventResearchDue:
 		return d.runResearch(ctx, p.Slug)
+	case project.EventNotionPoll:
+		return d.runNotionPoll(ctx)
+	case project.EventNotionCommentCreated:
+		return d.runCommentRevision(ctx, p)
+	case project.EventNotionPageEdited:
+		return d.runPageEditReconcile(ctx, p)
 	default:
 		// A future producer emitting an event this build does not know is not
 		// an error worth retrying — record it and move on.
@@ -97,22 +111,10 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 		return "skipped: research already ran at " + proj.LastResearchAt.UTC().Format(time.RFC3339), nil
 	}
 
-	// Doc content rides in the prompt only for MANAGED docs — doc_path is
-	// workspace-relative and an external doc has no repo here to read.
-	var doc string
-	if dir, ok := project.ManagedDocDir(d.workspaceDir, proj.Slug); ok {
-		if content, rerr := project.ReadDoc(dir); rerr == nil {
-			doc = content
-		} else {
-			slog.Warn("project research: doc read failed", "slug", slug, "error", rerr)
-		}
-	}
-	prompt := project.ResearchPrompt(proj.Slug, proj.Title, proj.Instructions, proj.Lang, doc)
+	prompt := project.ResearchPrompt(proj.Slug, proj.Title, proj.Instructions, proj.Lang, d.readManagedDoc(slug))
 
-	turnCtx, cancel := context.WithTimeout(ctx, projectResearchTimeout)
-	defer cancel()
 	started := time.Now().UTC()
-	text, err := d.runTurn(turnCtx, proj.ChatID, proj.MessageThreadID, prompt)
+	text, err := d.runProjectTurn(ctx, proj, prompt)
 	if err != nil {
 		d.recordOutcome(proj, started, store.OutcomeTurnFailed, err.Error())
 		return "", fmt.Errorf("research turn for %q: %w", slug, err)
@@ -126,14 +128,7 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 	}
 
 	// Render trigger (P3 Wave C): mirror whatever the pass wrote to Notion.
-	// The turn's own doc-write RPC also enqueues; idempotency on (slug, rev)
-	// collapses the two. Re-read the row for the post-turn rev — a pass that
-	// wrote nothing keeps the old rev and dedupes into the already-done task.
-	if fresh, ferr := d.store.GetProjectBySlug(slug); ferr == nil && fresh != nil && fresh.DocRev != "" {
-		if _, rerr := project.EnqueueRender(d.store, fresh.Slug, fresh.DocRev); rerr != nil {
-			slog.Warn("project research: render enqueue failed", "slug", slug, "error", rerr)
-		}
-	}
+	d.enqueueRenderForCurrentRev(slug)
 
 	// Delta delivery: text through the Transport, into the project's own
 	// (chat, thread). [noop] means the pass found nothing worth saying.
@@ -153,6 +148,43 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 	return fmt.Sprintf("research pass done (delivered=%t)", delivered), nil
 }
 
+// readManagedDoc returns the project's doc content when this daemon manages
+// it, "" otherwise — doc_path is workspace-relative and an external doc has
+// no repo here to read.
+func (d projectResearchDeps) readManagedDoc(slug string) string {
+	dir, ok := project.ManagedDocDir(d.workspaceDir, slug)
+	if !ok {
+		return ""
+	}
+	content, err := project.ReadDoc(dir)
+	if err != nil {
+		slog.Warn("project event: doc read failed", "slug", slug, "error", err)
+		return ""
+	}
+	return content
+}
+
+// runProjectTurn runs one bounded agent turn on the project's (chat, thread),
+// under the shared project-turn timeout. Both the research and comment
+// consumers go through here.
+func (d projectResearchDeps) runProjectTurn(ctx context.Context, proj *store.Project, prompt string) (string, error) {
+	turnCtx, cancel := context.WithTimeout(ctx, projectResearchTimeout)
+	defer cancel()
+	return d.runTurn(turnCtx, proj.ChatID, proj.MessageThreadID, prompt)
+}
+
+// enqueueRenderForCurrentRev re-reads the project row and enqueues a render
+// for its current doc rev. The turn's own doc-write RPC also enqueues;
+// idempotency on (slug, rev) collapses the two, and a turn that wrote nothing
+// keeps the old rev and dedupes into the already-done task. Best-effort.
+func (d projectResearchDeps) enqueueRenderForCurrentRev(slug string) {
+	if fresh, ferr := d.store.GetProjectBySlug(slug); ferr == nil && fresh != nil && fresh.DocRev != "" {
+		if _, rerr := project.EnqueueRender(d.store, fresh.Slug, fresh.DocRev); rerr != nil {
+			slog.Warn("project event: render enqueue failed", "slug", slug, "error", rerr)
+		}
+	}
+}
+
 // recordOutcome writes the consumer-side job_runs row for the project's
 // research schedule, found by its explicit dedup key. The fire ledger already
 // recorded "event enqueued"; this row records what running it produced (and,
@@ -162,7 +194,13 @@ func (d projectResearchDeps) recordOutcome(proj *store.Project, started time.Tim
 	if key == "" {
 		key = project.ScheduleDedupKey(proj.Slug)
 	}
-	sc, err := d.store.FindScheduleByDedupKey(key)
+	d.recordScheduleRun(key, started, outcome, errMsg)
+}
+
+// recordScheduleRun writes a consumer-side job_runs row against the schedule
+// carrying dedupKey. Best-effort: no schedule, no row.
+func (d projectResearchDeps) recordScheduleRun(dedupKey string, started time.Time, outcome, errMsg string) {
+	sc, err := d.store.FindScheduleByDedupKey(dedupKey)
 	if err != nil || sc == nil {
 		return
 	}
@@ -176,6 +214,6 @@ func (d projectResearchDeps) recordOutcome(proj *store.Project, started time.Tim
 		Outcome:        outcome,
 		ErrorMessage:   errMsg,
 	}); err != nil {
-		slog.Warn("project research: job run record failed", "slug", proj.Slug, "error", err)
+		slog.Warn("project event: job run record failed", "dedup_key", dedupKey, "error", err)
 	}
 }

@@ -200,3 +200,25 @@ func TestRepinSendsFreshUnpinsOldBypassesDebounce(t *testing.T) {
 		t.Errorf("recorded pin %d != pinned msg %d", st.pins[42], tr.pins[0])
 	}
 }
+
+func TestRenderHomeRecentCommentMarker(t *testing.T) {
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	stale := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+	projects := []store.Project{
+		{Title: "Chatty", Status: "active",
+			HandledDiscussions: `[{"id":"d1","at":"` + recent + `"}]`},
+		{Title: "Quiet", Status: "active",
+			HandledDiscussions: `[{"id":"d2","at":"` + stale + `"}, "legacy-id"]`},
+	}
+	text := RenderHome(projects)
+	lines := strings.Split(text, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("home = %q", text)
+	}
+	if !strings.Contains(lines[1], "💬") {
+		t.Errorf("recent-comment project missing 💬: %q", lines[1])
+	}
+	if strings.Contains(lines[2], "💬") {
+		t.Errorf("stale/legacy discussions must not mark 💬: %q", lines[2])
+	}
+}

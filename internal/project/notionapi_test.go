@@ -265,3 +265,131 @@ func TestNotionClientDisabledWithoutToken(t *testing.T) {
 		t.Error("calls without a token must error, not silently no-op at this layer")
 	}
 }
+
+func TestNotionListCommentsRequestAndPagination(t *testing.T) {
+	ft := &fakeTransport{replies: []fakeReply{
+		{200, `{"results": [
+			{"id": "c1", "discussion_id": "d1",
+			 "parent": {"type": "block_id", "block_id": "blk-9"},
+			 "created_time": "2026-08-17T10:00:00.000Z",
+			 "created_by": {"id": "user-1"},
+			 "rich_text": [{"plain_text": "make it "}, {"plain_text": "cheaper"}]}
+		], "has_more": true, "next_cursor": "cur-2"}`},
+		{200, `{"results": [
+			{"id": "c2", "discussion_id": "d2",
+			 "parent": {"type": "page_id", "page_id": "page-1"},
+			 "created_time": "2026-08-17T11:00:00.000Z",
+			 "created_by": {"id": "bot-1"},
+			 "rich_text": []}
+		], "has_more": false}`},
+	}}
+	c := newFakeClient(ft)
+
+	got, next, err := c.ListComments(context.Background(), "page-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != "cur-2" {
+		t.Errorf("next cursor = %q, want cur-2", next)
+	}
+	if req := ft.reqs[0]; req.method != "GET" || req.path != "/v1/comments?block_id=page-1&page_size=100" {
+		t.Errorf("got %s %s", req.method, req.path)
+	}
+	if len(got) != 1 {
+		t.Fatalf("comments = %d, want 1", len(got))
+	}
+	cm := got[0]
+	if cm.ID != "c1" || cm.DiscussionID != "d1" || cm.ParentID != "blk-9" || cm.CreatedByID != "user-1" {
+		t.Errorf("comment = %+v", cm)
+	}
+	if cm.Plain != "make it cheaper" {
+		t.Errorf("plain = %q", cm.Plain)
+	}
+	if cm.CreatedTime.IsZero() {
+		t.Error("created_time not parsed")
+	}
+
+	// Follow-up page: cursor rides in the query, page-level parent resolves
+	// to the page id.
+	got, next, err = c.ListComments(context.Background(), "page-1", "cur-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != "" {
+		t.Errorf("final page next = %q, want empty", next)
+	}
+	if req := ft.reqs[1]; !strings.Contains(req.path, "start_cursor=cur-2") {
+		t.Errorf("cursor missing from %s", req.path)
+	}
+	if got[0].ParentID != "page-1" {
+		t.Errorf("page-level parent = %q, want page-1", got[0].ParentID)
+	}
+}
+
+func TestNotionCreateCommentRequest(t *testing.T) {
+	ft := &fakeTransport{replies: []fakeReply{{200, `{"id": "c9"}`}}}
+	c := newFakeClient(ft)
+
+	id, err := c.CreateComment(context.Background(), "d1", []NotionRichText{{Text: "done, added option B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "c9" {
+		t.Errorf("comment id = %q", id)
+	}
+	req := ft.reqs[0]
+	if req.method != "POST" || req.path != "/v1/comments" {
+		t.Errorf("got %s %s, want POST /v1/comments", req.method, req.path)
+	}
+	if req.body["discussion_id"] != "d1" {
+		t.Errorf("discussion_id = %v", req.body["discussion_id"])
+	}
+	rich := req.body["rich_text"].([]any)
+	text := rich[0].(map[string]any)["text"].(map[string]any)
+	if text["content"] != "done, added option B" {
+		t.Errorf("rich text = %v", text)
+	}
+}
+
+func TestNotionMe(t *testing.T) {
+	ft := &fakeTransport{replies: []fakeReply{{200, `{"object": "user", "id": "bot-user-1", "type": "bot"}`}}}
+	c := newFakeClient(ft)
+	id, err := c.Me(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "bot-user-1" {
+		t.Errorf("me = %q", id)
+	}
+	if req := ft.reqs[0]; req.method != "GET" || req.path != "/v1/users/me" {
+		t.Errorf("got %s %s", req.method, req.path)
+	}
+}
+
+func TestNotionGetBlockChildrenDecodesRichText(t *testing.T) {
+	ft := &fakeTransport{replies: []fakeReply{{200, `{"results": [
+		{"id": "b1", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [
+			{"plain_text": "option A", "annotations": {"bold": true}},
+			{"plain_text": "link", "href": "https://example.com", "annotations": {}}
+		]}},
+		{"id": "b2", "type": "table", "table": {}}
+	], "has_more": false}`}}}
+	c := newFakeClient(ft)
+
+	refs, err := c.GetBlockChildren(context.Background(), "page-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs = %d, want 2", len(refs))
+	}
+	if refs[0].Rich[0].Text != "option A" || !refs[0].Rich[0].Bold {
+		t.Errorf("rich[0] = %+v", refs[0].Rich[0])
+	}
+	if refs[0].Rich[1].Link != "https://example.com" {
+		t.Errorf("rich[1] = %+v", refs[0].Rich[1])
+	}
+	if refs[1].Type != "table" || len(refs[1].Rich) != 0 {
+		t.Errorf("unknown type ref = %+v", refs[1])
+	}
+}
