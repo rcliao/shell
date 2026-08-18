@@ -116,14 +116,14 @@ type TelegramConfig struct {
 	// messages to the right person instead of guessing from first names.
 	UserLabels map[string]string `json:"user_labels"`
 	// UserCanonical maps a Telegram user ID to the canonical short person-id
-	// used for memory provenance (readable nickname, e.g. "1234": "mami").
+	// used for memory provenance (readable nickname, e.g. "1234": "alex").
 	// The display label stays in [From: ...]; memory writes and the
 	// interlocutor boost use this id, and the daemon seeds label→canonical
 	// aliases into ghost at startup so historical variants resolve too.
 	UserCanonical map[string]string `json:"user_canonical"`
 	// ChatScopes maps a Telegram chat ID (string key) to a readable canonical
 	// scope id recorded as source_scope on memories born in that chat, e.g.
-	// "-1003731277835": "family-chat". Unmapped chats record "chat:<id>".
+	// "-100200300": "family-chat". Unmapped chats record "chat:<id>".
 	ChatScopes map[string]string `json:"chat_scopes"`
 }
 
