@@ -21,7 +21,7 @@ const pinAuditMinDropped = 3
 //
 //  1. The system-prompt cut — operating pins that did NOT make it into the
 //     composed prompt this generation. Measured 2026-09-02 on pikamini: 8 of
-//     15 operating pins were in, 7 were out, and the seven included the dairy
+//     15 operating pins were in, 7 were out, and the seven included a health
 //     hypothesis, the medication-logging rule and the family's explicit
 //     no-unprompted-media order. The daemon had warned about this on every
 //     turn for weeks while this block told the agent "all N are still in
