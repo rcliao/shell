@@ -356,6 +356,24 @@ Periodic check-ins routed through Claude with full context:
 6. Claude uses `scripts/shell-task complete --id N` for task completion
 7. Memory reflection runs after each heartbeat cycle
 
+Every Nth beat (`scheduler.deep_reflect_interval`) is a **deep reflection**
+beat on the `heartbeat_deep` model. It carries extra context and is journaled
+to the `reflections` table:
+
+- **Pinned memory audit.** Two cuts, in order of consequence: the
+  *system-prompt cut* (operating pins that did not fit `memory.system_budget`
+  this generation — packed newest-created-first by `packOperatingPins`, the
+  same helper the composed prompt uses, exposed via `SystemPromptPinCut`) and
+  the *retrieval cut* (what `ghost_context` can surface under its
+  importance-ranked sub-budget). The system-prompt half has no minimum: one
+  dropped pin is a rule the agent lacks on conversation turns. The beat's first
+  job is to shrink the pin set (merge / trim / unpin) until nothing is dropped.
+- **Journal contract.** A deep beat with nothing to send writes `[noop]` on the
+  first line, then a short journal. The bridge blanks any response containing
+  `[noop]` before delivery, so the journal is recorded but never reaches a chat.
+- The skill-inventory retro block is not injected: its usage meter is only
+  written by the `run-skill` wrapper, which the agent bypasses.
+
 Quiet hours (default 10 PM–7 AM) suppress heartbeat firing.
 
 ## Scheduler
