@@ -96,7 +96,7 @@ func renderPinAudit(sys systemCut, retrieval []pinRow, pinBudget int) string {
 			}
 			fmt.Fprintf(&sb, "  - %s (%d tok)%s\n", e.key, e.tok, lock)
 		}
-		sb.WriteString("How the cut works: pins are packed newest-CREATED first until the budget is full. Patching an old pin does not move it up. Every new pin you create pushes the oldest toward the cut. Importance plays no part here.\n")
+		sb.WriteString("How the cut works: pins are admitted newest-CREATED first. A pin that does not fit the remaining room is skipped, and smaller, older pins after it may still be admitted — so a newer pin can be OUT while an older one is IN. Patching an old pin does not move it up. Every new pin you create pushes the oldest toward the cut. Importance plays no part here.\n")
 		fmt.Fprintf(&sb, "Target: total operating pins ≤ %d tokens so nothing is dropped. This is the first priority of a deep beat whenever it appears. Fixes, in order of preference:\n", sys.budget)
 		sb.WriteString("  1. Merge overlapping rules into one (ghost_get each → write one concise rule → ghost_consolidate). Two 900-token rules about verification are one 400-token rule.\n")
 		sb.WriteString("  2. Trim a bloated pin: rewrite it shorter with ghost_put (same key) — keep the rule, drop the evidence trail into an unpinned memory.\n")
