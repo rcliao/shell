@@ -158,3 +158,17 @@ func TestPersistentAbandonedTurnBecomesFollowUp(t *testing.T) {
 	default:
 	}
 }
+
+// A CLI-initiated turn that never ends must not stall a send forever: after
+// claimWait the send fails with ErrStalledBehindCLITurn (the manager then
+// kills the process and falls back to a one-shot resume).
+func TestPersistentStallBehindCLITurnIsBounded(t *testing.T) {
+	f := newFakeCLI(t)
+	f.proc.claimWait = 100 * time.Millisecond
+	f.emit(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"still going"}]}}`)
+	time.Sleep(30 * time.Millisecond)
+	_, err := f.send(context.Background())
+	if !errors.Is(err, ErrStalledBehindCLITurn) {
+		t.Fatalf("err = %v", err)
+	}
+}

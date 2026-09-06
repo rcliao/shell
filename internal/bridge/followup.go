@@ -31,6 +31,16 @@ func (b *Bridge) HandleUnsolicitedTurn(key process.SessionKey, result process.Se
 		return
 	}
 	model := resolveExecutionProfile(b.claudeCfg, turnKind{}).Model
+	if noopMarkerRe.MatchString(result.Text) {
+		// The agent chose silence after its background work (nothing worth
+		// saying). processResponse would blank the text and then substitute
+		// a tool summary — right for a user turn whose caller suppresses it,
+		// wrong here where the text goes straight to the chat. Journal usage
+		// and stop.
+		resp := b.processResponse(context.Background(), chatID, threadID, sess.ID, "", false, result, "followup", model, "")
+		slog.Info("follow-up was [noop], not delivered", "chat_id", chatID, "thread_id", threadID, "tool_calls", len(result.ToolCalls), "chars_after", len(resp.Text))
+		return
+	}
 	resp := b.processResponse(context.Background(), chatID, threadID, sess.ID, "", false, result, "followup", model, "")
 
 	if b.transport == nil {

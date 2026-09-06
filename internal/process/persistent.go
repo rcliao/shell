@@ -53,6 +53,7 @@ type persistentProc struct {
 	turnOpen      bool            // a turn (ours or the CLI's) has started streaming
 	idle          chan struct{}   // closed while no turn is open; replaced when one opens
 	onUnsolicited func(SessionKey, SendResult)
+	claimWait     time.Duration // max wait behind a CLI-initiated turn (claimTurnMaxWait; tests shorten it)
 }
 
 // ErrTurnAbandoned is returned by sendMessage when the caller's context ends
@@ -61,6 +62,18 @@ type persistentProc struct {
 // (delivered as a follow-up) instead of being lost. Callers must not fall
 // back to a second subprocess on this error — the session is still busy.
 var ErrTurnAbandoned = errors.New("turn abandoned: caller context ended while the turn was in flight")
+
+// ErrStalledBehindCLITurn is returned when a send waited claimTurnMaxWait for
+// a CLI-initiated turn to finish and it never did. sendPersistent treats it
+// like a dead process: kill, clean up, fall back to a one-shot resume — the
+// owner's message is answered within a bounded time; the CLI turn's
+// follow-up is lost. Nothing above the process layer bounds a persistent
+// send, so without this a runaway continuation could stall a chat until the
+// 10-minute idle kill.
+var ErrStalledBehindCLITurn = errors.New("send stalled behind a CLI-initiated turn")
+
+// claimTurnMaxWait bounds how long a send waits for a CLI-initiated turn.
+const claimTurnMaxWait = 2 * time.Minute
 
 // newPersistentProc wires the reader and pump around an already-started
 // process (or, in tests, an io.Pipe). It does not send the initialize
@@ -79,6 +92,7 @@ func newPersistentProc(stdin io.WriteCloser, stdout io.Reader, key SessionKey, m
 		pumpDone:      make(chan struct{}),
 		idle:          idle,
 		onUnsolicited: onUnsolicited,
+		claimWait:     claimTurnMaxWait,
 	}
 	go p.readLoop()
 	go p.pump()
@@ -218,11 +232,20 @@ func (p *persistentProc) pump() {
 			p.turnOpen = false
 			close(p.idle)
 		}
+		if w != nil {
+			// Deliver under the lock: the waiter is buffered(1) and carries
+			// exactly one result, so this cannot block, and an abandoning
+			// sender that nils p.waiter under the same lock either finds the
+			// result already in its channel or sees nil here and we route
+			// it to the handler below — never a send into a channel nobody
+			// will read.
+			w <- res
+		}
 		p.dispatch.Unlock()
 
 		switch {
 		case w != nil:
-			w <- res
+			// delivered above
 		case src.eof:
 			// nothing to deliver
 		case res.Text != "" || res.Usage != nil || len(res.ToolCalls) > 0:
@@ -230,7 +253,10 @@ func (p *persistentProc) pump() {
 				"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID,
 				"chars", len(res.Text), "tool_calls", len(res.ToolCalls))
 			if p.onUnsolicited != nil {
-				p.onUnsolicited(p.key, res)
+				// Off the pump: delivery does store writes and a Telegram
+				// send; blocking here would back up the reader and stall the
+				// CLI on stdout.
+				go p.onUnsolicited(p.key, res)
 			}
 		}
 		if src.eof {
@@ -239,24 +265,35 @@ func (p *persistentProc) pump() {
 	}
 }
 
-// waitIdle blocks until no turn is open on the process, so the next turn
-// parsed is the one we are about to start. A CLI-initiated turn that is
+// claimTurn waits until no turn is open on the process and, under the same
+// lock as that check, registers the caller as the waiter for the next turn.
+// Checking idle and claiming in two lock regions would leave a gap in which
+// a CLI-initiated turn could open and then be handed to the new waiter — the
+// off-by-one in a window of our own making. A CLI-initiated turn that is
 // mid-stream finishes first and is delivered as a follow-up.
-func (p *persistentProc) waitIdle(ctx context.Context) error {
+func (p *persistentProc) claimTurn(ctx context.Context, emit EventFunc) (chan SendResult, error) {
 	for {
 		p.dispatch.Lock()
-		open, ch := p.turnOpen, p.idle
-		p.dispatch.Unlock()
-		if !open {
-			return nil
+		if !p.turnOpen {
+			w := make(chan SendResult, 1)
+			p.waiter = w
+			p.emit = emit
+			p.dispatch.Unlock()
+			return w, nil
 		}
+		ch := p.idle
+		p.dispatch.Unlock()
 		slog.Info("persistent: waiting for CLI-initiated turn before sending", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
 		select {
 		case <-ch:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-p.pumpDone:
-			return errors.New("persistent process exited")
+			return nil, errors.New("persistent process exited")
+		case <-time.After(p.claimWait):
+			slog.Warn("persistent: CLI-initiated turn did not finish; abandoning process",
+				"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID, "waited", p.claimWait)
+			return nil, fmt.Errorf("%w after %s", ErrStalledBehindCLITurn, p.claimWait)
 		}
 	}
 }
@@ -388,7 +425,10 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	proc.stderr = stderr
 	proc.cancel = cancel
 
-	// Set up idle timer to kill the process if no messages arrive.
+	// Set up idle timer to kill the process if no messages arrive. Assigned
+	// under dispatch because noteLine (pump goroutine, already running) reads
+	// it there to keep a CLI-initiated turn alive.
+	proc.dispatch.Lock()
 	proc.idleTimer = time.AfterFunc(idleTimeout, func() {
 		slog.Info("persistent process idle timeout", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 		proc.kill()
@@ -396,6 +436,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 		delete(m.persistent, key)
 		m.mu.Unlock()
 	})
+	proc.dispatch.Unlock()
 
 	return proc, nil
 }
@@ -416,16 +457,11 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, emit
 	defer p.turn.end()
 
 	// A CLI-initiated turn may be mid-stream; let the pump finish and route
-	// it as a follow-up, so the next parsed turn is ours.
-	if err := p.waitIdle(ctx); err != nil {
+	// it as a follow-up, then claim the next turn as ours.
+	waiter, err := p.claimTurn(ctx, emit)
+	if err != nil {
 		return SendResult{}, err
 	}
-
-	waiter := make(chan SendResult, 1)
-	p.dispatch.Lock()
-	p.waiter = waiter
-	p.emit = emit
-	p.dispatch.Unlock()
 
 	abandon := func() chan SendResult {
 		p.dispatch.Lock()
@@ -469,7 +505,7 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, emit
 			select {
 			case late := <-w:
 				if p.onUnsolicited != nil {
-					p.onUnsolicited(p.key, late)
+					go p.onUnsolicited(p.key, late)
 				}
 			default:
 			}
