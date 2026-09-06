@@ -89,6 +89,9 @@ type Manager struct {
 	ghostDB         string
 	botUsername     string
 	permissionMode  string
+	// onUnsolicited receives turns the CLI produced on its own inside a
+	// persistent process (background subagent completions). Nil = log and drop.
+	onUnsolicited func(SessionKey, SendResult)
 }
 
 type ManagerConfig struct {
@@ -148,6 +151,14 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	mgr.readyCond = sync.NewCond(&mgr.mu)
 	return mgr
+}
+
+// SetUnsolicitedHandler installs the sink for CLI-initiated turns on
+// persistent processes (see persistentProc). Set before any turn runs.
+func (m *Manager) SetUnsolicitedHandler(fn func(SessionKey, SendResult)) {
+	m.mu.Lock()
+	m.onUnsolicited = fn
+	m.mu.Unlock()
 }
 
 // Send sends a prompt and streams text deltas via onUpdate (nil for no streaming).
@@ -281,6 +292,12 @@ func (m *Manager) SendEvents(ctx context.Context, req AgentRequest, emit EventFu
 	}
 	if err == nil {
 		return stamp(result), nil
+	}
+	if errors.Is(err, ErrTurnAbandoned) {
+		// The persistent turn is still running and will surface as a
+		// follow-up. Spawning a second process on the same session here would
+		// interleave two transcripts — the one thing worse than a late reply.
+		return stamp(result), err
 	}
 
 	// Fall back to spawn-per-message.
