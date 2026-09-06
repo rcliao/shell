@@ -461,6 +461,10 @@ func New(cfg config.Config) (*Daemon, error) {
 
 	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, tunnelMgr, pmMgr, skillRegistry)
 	br.SetClaudeConfig(cfg.Claude)
+	// Turns the CLI starts on its own inside a persistent process (background
+	// subagent completions) are delivered as follow-up messages instead of
+	// being read as the next user message's answer.
+	proc.SetUnsolicitedHandler(br.HandleUnsolicitedTurn)
 
 	// Track skill directories for hot reload.
 	var skillDirs []string

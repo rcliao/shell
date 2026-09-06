@@ -184,8 +184,22 @@ stdout (CLI → SDK):
   - stream_event → text deltas (onUpdate callback)
   - assistant → tool_use blocks (ToolCall extraction)
   - control_request → auto-allow (can_use_tool)
-  - result → final text, terminates the event loop
+  - result → final text, terminates the turn
+  - user (non tool_result) → a turn the CLI started itself (e.g. a background
+    Agent subagent's <task-notification>); logged as a turn boundary
 ```
+
+Persistent processes (one per chat/thread) are read by a dedicated reader
+goroutine and a turn pump, never by the sender: a turn the CLI produces on
+its own between messages (a background subagent finishing after the agent
+already replied) is parsed as a whole and handed to
+`Bridge.HandleUnsolicitedTurn`, which runs the normal response pipeline with
+source `followup` and pushes it to the chat as a follow-up message. Before
+this (2026-09-05) such a turn sat in the pipe and the next user message
+consumed it as its answer, shifting every reply one message behind. A send
+whose caller context ends mid-turn returns `ErrTurnAbandoned`; the process is
+kept, no fallback subprocess is spawned, and the late result also arrives as a
+follow-up.
 
 Environment variables set on Claude subprocess:
 - `SHELL_CHAT_ID` — current Telegram chat ID
