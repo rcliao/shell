@@ -30,7 +30,7 @@ func (b *Bridge) HandleUnsolicitedTurn(key process.SessionKey, result process.Se
 		slog.Warn("follow-up dropped: no session row", "chat_id", chatID, "thread_id", threadID, "error", err)
 		return
 	}
-	model := resolveExecutionProfile(b.claudeCfg, turnKind{}).Model
+	model := resolveExecutionProfile(b.claudeCfg, turnKind{chatID: chatID}).Model
 	if noopMarkerRe.MatchString(result.Text) {
 		// The agent chose silence after its background work (nothing worth
 		// saying). processResponse would blank the text and then substitute

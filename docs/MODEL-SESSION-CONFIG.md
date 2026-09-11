@@ -44,6 +44,7 @@ per-turn granularity, reconciled only by accident.**
 │ Layer 1  EXECUTION PROFILE   (pure fn of task_type)          │
 │   task_type → { model, effort, persistence, ctxProfile }     │
 │   e.g. conversation → {opus,  none, PERSISTENT, full}        │
+│        conversation in chat X → {chat_models[X], …, same}    │
 │        heartbeat    → {sonnet,none, EPHEMERAL,  hb-light}    │
 │        heartbeat_deep→{opus,  max,  EPHEMERAL,  hb-deep}     │
 │        compaction   → {haiku, none, EPHEMERAL,  none}        │
@@ -91,6 +92,27 @@ The warm persistent cache only pays off for a stable, back-to-back conversation.
 are all **stateless one-shots that carry their own context in the message** — they gain nothing
 from `--resume` and today only muddy the persistent proc's model/effort. Make persistence a
 declared profile property, default `EPHEMERAL`, opt into `PERSISTENT` only for `conversation`.
+
+### Per-chat conversation model (`model_routing.chat_models`, 2026-09-11)
+
+`conversation` is the one task type keyed by *where* the turn happens. `chat_models` maps a
+Telegram chat id (string) to a model; `ClaudeConfig.ResolveChatModel("conversation", chatID)`
+consults it and falls through to `ResolveModel` for unlisted chats and every other task type.
+It is keyed by chat, not thread, so a chat's persistent process keeps one model across threads
+and never trips the manager's model-mismatch fallback. Heartbeats run on chat 0 and never see
+it; the `fable` keyword and deep heartbeat stay ephemeral and keep their own model.
+
+Why: the 2026-09-04 Sonnet trial showed one model per agent is the wrong grain. Family chats
+need the tier that holds Traditional Chinese and tense across a trip thread; the owner's DM
+mostly runs scheduled research that any tier completes once subagent fan-out is blocked.
+Data: 0/450 Simplified-character replies on Fable → 7/325 on Sonnet in the family chats, while
+the peer agent on Opus in the same chats stayed at 0/734.
+
+```json
+"model_routing": {
+  "chat_models": { "-100200300": "claude-opus-5", "42": "claude-opus-5" }
+}
+```
 
 ## Concrete decisions this settles
 

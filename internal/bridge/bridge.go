@@ -1064,6 +1064,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		isHeartbeat:     isHeartbeat,
 		isDeepHeartbeat: isDeepHeartbeat,
 		fableTurn:       fableTurn,
+		chatID:          chatID,
 	})
 	turnModel := profile.Model
 	ephemeralTurn := profile.Ephemeral

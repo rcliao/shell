@@ -68,3 +68,43 @@ func TestClaudeConfig_Validate_NoStarveWhenRotateHigher(t *testing.T) {
 		t.Error("no starvation expected when rotate cap is above compaction cap")
 	}
 }
+
+func TestResolveChatModel(t *testing.T) {
+	c := ClaudeConfig{Model: "claude-sonnet-5", ModelRouting: &ModelRouting{
+		Heartbeat:  "claude-haiku-4-5",
+		ChatModels: map[string]string{"-100200300": "claude-fable-5-1", "42": ""},
+	}}
+	cases := []struct {
+		task   string
+		chatID int64
+		want   string
+	}{
+		{"conversation", -100200300, "claude-fable-5-1"}, // listed chat
+		{"conversation", 7, "claude-sonnet-5"},           // unlisted → default
+		{"conversation", 42, "claude-sonnet-5"},          // empty entry → default
+		{"heartbeat", -100200300, "claude-haiku-4-5"},    // non-conversation ignores the map
+		{"compaction", -100200300, "claude-sonnet-5"},
+	}
+	for _, tc := range cases {
+		if got := c.ResolveChatModel(tc.task, tc.chatID); got != tc.want {
+			t.Errorf("ResolveChatModel(%q, %d) = %q, want %q", tc.task, tc.chatID, got, tc.want)
+		}
+	}
+	// nil routing must not panic.
+	if got := (ClaudeConfig{Model: "m"}).ResolveChatModel("conversation", 1); got != "m" {
+		t.Errorf("nil routing: got %q", got)
+	}
+}
+
+func TestValidateChatModelsKeys(t *testing.T) {
+	c := ClaudeConfig{Model: "claude-sonnet-5", ModelRouting: &ModelRouting{
+		ChatModels: map[string]string{"family": "claude-fable-5-1", "42": ""},
+	}}
+	w := strings.Join(c.Validate(), "\n")
+	if !strings.Contains(w, `chat_models key "family"`) {
+		t.Errorf("expected a warning for the non-numeric key, got: %s", w)
+	}
+	if !strings.Contains(w, "chat_models[42] is empty") {
+		t.Errorf("expected a warning for the empty entry, got: %s", w)
+	}
+}

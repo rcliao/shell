@@ -31,6 +31,7 @@ type turnKind struct {
 	isHeartbeat     bool
 	isDeepHeartbeat bool
 	fableTurn       bool
+	chatID          int64 // conversation turns consult model_routing.chat_models for this chat
 }
 
 // modelResolver is the slice of config.ClaudeConfig that profile resolution
@@ -38,6 +39,7 @@ type turnKind struct {
 // without a full Bridge/config.
 type modelResolver interface {
 	ResolveModel(taskType string) string
+	ResolveChatModel(taskType string, chatID int64) string
 	ResolveEffort(taskType string) string
 }
 
@@ -51,7 +53,9 @@ type modelResolver interface {
 //     effort). Ephemeral is the only way effort=max actually reaches the CLI.
 //   - The fable keyword is a one-shot experiment on a distinct model, isolated
 //     from the persistent session.
-//   - Everything else is a normal conversation turn on the persistent session.
+//   - Everything else is a normal conversation turn on the persistent session,
+//     on the chat's model if model_routing.chat_models names one (the family
+//     chats and the owner's DM need different tiers), else the default.
 func resolveExecutionProfile(r modelResolver, k turnKind) ExecutionProfile {
 	taskType := "conversation"
 	switch {
@@ -62,7 +66,7 @@ func resolveExecutionProfile(r modelResolver, k turnKind) ExecutionProfile {
 	}
 
 	p := ExecutionProfile{
-		Model:    r.ResolveModel(taskType),
+		Model:    r.ResolveChatModel(taskType, k.chatID),
 		Effort:   r.ResolveEffort(taskType), // spawn-bound; applies from each generation's first turn
 		TaskType: taskType,
 	}

@@ -425,7 +425,7 @@ Key operations:
 ```json
 {
   "telegram": { "token_env", "allowed_users", "reaction_map" },
-  "claude": { "binary", "model", "timeout", "max_sessions", "work_dir", "allowed_tools", "setting_sources" },
+  "claude": { "binary", "model", "model_routing": { "conversation", "heartbeat", "heartbeat_deep", "compaction", "chat_models": { "<chat_id>": "<model>" } }, "timeout", "max_sessions", "work_dir", "allowed_tools", "disallowed_tools", "setting_sources" },
   "store": { "db_path" },
   "memory": { "enabled", "db_path", "budget", "profiles", "chat_profiles" },
   "planner": { "enabled", "test_cmd", "conventions", "max_retries", "worktree" },
