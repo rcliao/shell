@@ -118,7 +118,12 @@ the peer agent on Opus in the same chats stayed at 0/734.
 
 1. **Deep heartbeat → ephemeral profile.** Immediate: `Ephemeral: isDeepHeartbeat || fableTurn`
    at `bridge.go:925`. Validates the whole analysis (S1) with one line and near-zero risk — deep
-   heartbeats already don't want the warm persistent cache.
+   heartbeats already don't want the warm persistent cache. *Extended 2026-09-17 to every
+   heartbeat* (`execution.go`): light beats resumed the system chat's session and, with the
+   1–2h gap outliving the cache, re-created ~88k tokens per beat for a `[noop]`. Project
+   research/comment turns (`ProjectTurnSender`) stay persistent but carry a 20m `Timeout`, since
+   the manager's 5m default otherwise bounds the fresh-spawn path regardless of the caller's
+   context deadline.
 2. **Rotation respawns.** `rotateSession` (or `maybeRotate`) calls `agent.Kill(key)` after
    bumping the generation, so the next `Send` spawns fresh with the rebuilt system prompt (S3).
 3. **Typed rotation reason.** Replace the `rotate_pending` boolean with an enum

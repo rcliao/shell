@@ -50,7 +50,7 @@ func TestResolveExecutionProfile(t *testing.T) {
 		{
 			name: "heartbeat ignores chat_models (chat 0 is never a family chat)",
 			kind: turnKind{isHeartbeat: true, chatID: -100200300},
-			want: ExecutionProfile{Model: "claude-sonnet-5", Effort: "", Ephemeral: false, TaskType: "heartbeat"},
+			want: ExecutionProfile{Model: "claude-sonnet-5", Effort: "", Ephemeral: true, Timeout: deepHeartbeatTimeout, TaskType: "heartbeat"},
 		},
 		{
 			name: "fable keyword still wins over the chat's model",
@@ -58,9 +58,14 @@ func TestResolveExecutionProfile(t *testing.T) {
 			want: ExecutionProfile{Model: fableModel, Effort: "", Ephemeral: true, TaskType: "conversation"},
 		},
 		{
-			name: "light heartbeat → its model, persistent, no effort",
+			name: "light heartbeat → its model, ephemeral (no --resume replay), no effort",
 			kind: turnKind{isHeartbeat: true},
-			want: ExecutionProfile{Model: "claude-sonnet-5", Effort: "", Ephemeral: false, TaskType: "heartbeat"},
+			want: ExecutionProfile{Model: "claude-sonnet-5", Effort: "", Ephemeral: true, Timeout: deepHeartbeatTimeout, TaskType: "heartbeat"},
+		},
+		{
+			name: "project turn → persistent on the chat's model, 20m timeout",
+			kind: turnKind{projectTurn: true, chatID: -100200300},
+			want: ExecutionProfile{Model: "claude-fable-5-1", Effort: "", Ephemeral: false, Timeout: projectTurnTimeout, TaskType: "conversation"},
 		},
 		{
 			name: "deep heartbeat → high effort, ephemeral, longer timeout (S1 + timeout fix)",

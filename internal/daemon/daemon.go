@@ -987,7 +987,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			store:        st,
 			workspaceDir: workspaceDir,
 			runTurn: func(ctx context.Context, chatID, threadID int64, prompt string) (string, error) {
-				resp, err := syntheticTurn(ctx, br, chatID, threadID, prompt, "project-research")
+				resp, err := syntheticTurn(ctx, br, chatID, threadID, prompt, bridge.ProjectTurnSender)
 				if err != nil {
 					return "", err
 				}
