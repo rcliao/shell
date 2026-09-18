@@ -332,6 +332,68 @@ shorter duration; an oversize write is refused and a shrinking one lands;
 an owner comment on an adopted page produces an in-thread reply; the next
 Monday research run finishes inside its timeout.
 
+**P3.6 — Focus: a thread per project, a coordinator, one "needs you" view
+(owner-approved 2026-09-18).** Prompted by the redesigned Claude Code Projects
+(2026-09-17: a coordinator that decides whether each request belongs in an
+existing thread or a new one, shared project memory that keeps decisions, and
+an overview of what needs the user). Shell has most of the parts; they are not
+wired for focus. What a month of data said:
+
+- Topic labels are categories, not workstreams: "family" 496 turns, "meals"
+  498, and "travel" mixing three different trips. 609 of 633 topic threads
+  have ≤2 turns — leftovers of a finer classifier, still in the table.
+- The family group already uses Telegram forum topics, and thread-bound
+  routing is in this plan (see *Attributed turn*) — nothing binds the two.
+- The [Project] block lists every active project for the chat, never the one
+  in play. Open commitments pile up unseen (27 and 21 in the top two topics).
+- The doc budget worked on its first live run with no prompt help: a 101 KB
+  doc was refused an append and rewritten to 10 KB 27 seconds later. The
+  bloat was 99% update log; every other section was untouched.
+
+Five units, each shippable alone, in this order:
+
+1. **Log budget + decisions section (doc template).** The six headings stay
+   (live docs and section hashes depend on them) and gain roles:
+   目標/限制 protected; 現況/選項 current state, prunable; 待決定 = "needs
+   you" (feeds unit 4); 更新紀錄 capped. New heading **決定** — dated one-line
+   decisions, the project's shared memory, never cut by consolidation.
+   `CheckBudget` gains a per-section cap for 更新紀錄 (8 KB — a daily-briefing
+   doc logs ~1.2 KB a day, so this holds about a week) with the same
+   asymmetry as the doc budget: over the cap AND larger than before →
+   refused, naming the section; shrinking always accepted. Enforcement only —
+   the refusal message proved sufficient, so no new prompt text.
+2. **Forum topic per group project, scoped context.** `project create` in a
+   forum-enabled group creates a Telegram topic named after the project and
+   stores its id in `message_thread_id`; archive closes it, re-activate
+   reopens it. A turn in that (chat, thread) gets a [Project] block for THAT
+   project only — slug, doc path, export ref, 決定 and 待決定 — instead of
+   the chat-wide list. Deterministic: no classifier. Needs the bot to be a
+   group admin with *Manage Topics*; without it create still succeeds,
+   unbound, and says so once. Groups only — DMs keep topic-bound routing
+   (threaded DMs were rejected in research).
+3. **Coordinator in the general thread.** A message in the general thread
+   that matches an active project (project title/slug/ghost-tag terms — NOT
+   the coarse topic label) gets that project's scoped block and a one-line
+   tag on the reply pointing at the project's topic. Decision 5 stands:
+   classification is never load-bearing for project WRITES — a match scopes
+   context and tags the reply; it never writes a doc by itself. The promotion
+   ask (sign-off 2: ≥3 distinct days, ≥2 open commitments) ships here.
+4. **"Needs you" on the pinned list + one digest.** Each pinned project row
+   shows its open 待決定 count; the heartbeat carries one digest line instead
+   of scattered asks. Topic open commitments older than 14 days are asked
+   about once, then dropped.
+5. **Topic table hygiene.** Threads with ≤2 turns and no activity in 30 days
+   are archived (soft, reversible), after a backup and an FK check. Last,
+   because it is a production data operation and nothing else depends on it.
+
+Out of scope: parallel worker threads (no work to split in a family
+assistant; the release itself notes they exhaust usage limits faster),
+per-section budgets beyond the log, topics in DMs.
+*Verify:* unit tests per unit; live: a log-only append over the cap is
+refused and a trimmed one lands; a project created in the group gets its own
+topic and a turn there sees one project, not the list; a general-thread
+message about the trip is tagged; the pinned row shows a needs-you count.
+
 **P4 — Consolidation + attribution (~1 wk).** Topic binding at create +
 `project_hook` routing + emoji reactions + disclosure tiers + correction
 flow (pinned override, revert-reapply repair, `human_correction` ledger) +
