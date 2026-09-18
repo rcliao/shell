@@ -475,6 +475,17 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Doc budget (P3.5): this handler is the AGENT's write path — human edits
+	// reconcile through the daemon and are never refused. An unreadable prev
+	// (first write) counts as empty, so only a genuinely oversize first draft
+	// can trip it.
+	prev, _ := project.ReadDoc(dir)
+	if berr := project.CheckBudget(prev, req.Content, 0); berr != nil {
+		slog.Info("rpc: project doc write refused, over budget", "slug", p.Slug,
+			"bytes", len(req.Content), "prev_bytes", len(prev))
+		writeError(w, http.StatusUnprocessableEntity, berr.Error())
+		return
+	}
 	rev, err := project.WriteDoc(dir, req.Content, req.Attribution)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "doc write: "+err.Error())

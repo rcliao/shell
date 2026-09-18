@@ -130,6 +130,9 @@ func ResearchPrompt(slug, title, instructions, lang, doc string) string {
 	}
 	b.WriteString("\nDo ONE bounded research pass for this project now. Hard rules:\n")
 	b.WriteString("- Update the doc via the project skill's doc-write (full revised content); the printed commit rev is your receipt — no rev, no claim.\n")
+	if doc != "" {
+		b.WriteString(BudgetPromptLine(doc, 0))
+	}
 	b.WriteString("- Reply with the DELTA only: at most 3 short lines on what changed or was found. Never re-dump the doc.\n")
 	b.WriteString("- Text only — no images, files, or generated media.\n")
 	b.WriteString("- If nothing new was found, reply [noop].\n")

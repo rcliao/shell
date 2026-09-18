@@ -298,11 +298,11 @@ headings, bullets and paragraphs, and these pages hold tables and checkboxes
 `last_human_activity_at` and nothing else. The adopted map is refreshed from
 the page on each full poll, since humans add and remove blocks freely.
 
-*Doc budget.* A doc has a soft budget (default 24 KB, per-project
-overridable). Two layers, prompt then mechanism:
-1. The research and comment-revision prompts state the current size and the
-   budget, and say: over budget → consolidate before adding. This makes the
-   weekly research turn the maintenance job; no new schedule.
+*Doc budget.* A doc has a soft budget of 24 KB — one default for every
+project until a real doc needs more. Two layers, prompt then mechanism:
+1. The research prompt states the current size and the budget, and says:
+   over budget → consolidate before adding. This makes the weekly research
+   turn the maintenance job; no new schedule.
 2. `doc-write` refuses an **agent** write that is over budget *and* larger
    than the doc it replaces, with an error that names the largest sections.
    A write that shrinks an over-budget doc is always accepted, so the way out
