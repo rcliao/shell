@@ -320,9 +320,19 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistent
 		if proc.model != reqModel {
 			return nil, fmt.Errorf("model mismatch: proc=%q req=%q", proc.model, reqModel)
 		}
-		// Process is still running — reset idle timer.
-		proc.idleTimer.Reset(idleTimeout)
-		return proc, nil
+		// Process is still running — reset idle timer. Reset returns false
+		// when the AfterFunc already fired (or was stopped): the idle
+		// callback is closing stdin right now, and writing to this proc
+		// would hit "broken pipe" and fall back to a cold spawn after the
+		// fact. Treat it as dead and spawn fresh instead of racing it.
+		if proc.idleTimer.Reset(idleTimeout) {
+			return proc, nil
+		}
+		// Reset on an already-fired AfterFunc re-arms it; Stop so the old
+		// callback does not fire again in 10m against the replacement.
+		proc.idleTimer.Stop()
+		slog.Info("persistent process idle-expired during lookup, respawning",
+			"chat_id", key.ChatID, "thread_id", key.ThreadID)
 	}
 
 	// Clean up dead process if any.
@@ -432,8 +442,14 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	proc.idleTimer = time.AfterFunc(idleTimeout, func() {
 		slog.Info("persistent process idle timeout", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 		proc.kill()
+		// Compare-and-delete: getOrSpawn may already have replaced this
+		// proc under the same key (it spawns fresh when it sees the timer
+		// has fired). Deleting by key alone would evict the healthy
+		// replacement and orphan its process.
 		m.mu.Lock()
-		delete(m.persistent, key)
+		if m.persistent[key] == proc {
+			delete(m.persistent, key)
+		}
 		m.mu.Unlock()
 	})
 	proc.dispatch.Unlock()
