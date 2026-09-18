@@ -314,8 +314,8 @@ or a doc write in the last 7 days is polled every tick (30 min); a quiet one
 every 6 h. Not gated on the page's `last_edited_time`: a new comment does not
 reliably move it (see the poller's comment).
 
-*Stagger.* Research schedules register at minute `(project id × 20) mod 60`
-of the 09:00 hour plus a 20-minute base, so they never pile onto :00.
+*Stagger.* Research schedules register at minute `10 + (project id mod 5) × 10`
+of the 09:00 hour — :10 through :50, never :00, stable per project.
 
 *Staleness ask.* Per sign-off 2: 10 days without human activity, or
 `review_after` passed → the heartbeat asks once (archive / pause / keep).

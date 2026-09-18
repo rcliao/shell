@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,20 @@ var cadenceCrons = map[string]string{
 	"daily":   "0 9 * * *",
 	"weekly":  "0 9 * * 1",
 	"monthly": "0 9 1 * *",
+}
+
+// researchCron is the cadence's cron with the minute staggered by project id
+// into :10/:20/:30/:40/:50. Every project registering at :00 put the research
+// turns on top of each other and of the top-of-the-hour prompt schedules;
+// turns that share a chat serialize, and the ones that do not still compete
+// for the same tools. Never :00, and stable for a given project.
+func researchCron(cadence string, projectID int64) string {
+	expr, ok := cadenceCrons[cadence]
+	if !ok {
+		return ""
+	}
+	minute := 10 + (projectID%5)*10
+	return strconv.FormatInt(minute, 10) + strings.TrimPrefix(expr, "0")
 }
 
 // telegramReactionEmoji is the set of emoji Telegram accepts as message
@@ -202,7 +217,7 @@ func (s *Server) registerResearchSchedule(p *store.Project, cadence string) (boo
 		slog.Info("rpc: research schedule skipped, scheduler not enabled", "slug", p.Slug)
 		return false, ""
 	}
-	expr := cadenceCrons[cadence]
+	expr := researchCron(cadence, p.ID)
 	cronExpr, err := s.cronParse(expr)
 	if err != nil {
 		slog.Warn("rpc: research schedule cron parse failed", "slug", p.Slug, "expr", expr, "error", err)
