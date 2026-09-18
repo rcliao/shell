@@ -781,6 +781,14 @@ func New(cfg config.Config) (*Daemon, error) {
 			for _, photo := range resp.Photos {
 				bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)
 			}
+			// A prompt-mode schedule whose default is silence ([noop], or a
+			// turn that ended on a tool call) yields empty text. Telegram
+			// rejects an empty message, so skip it instead of logging a
+			// nightly "message text is empty" error.
+			if strings.TrimSpace(resp.Text) == "" {
+				slog.Info("scheduler prompt produced no text, nothing to send", "chat_id", chatID, "photos", len(resp.Photos))
+				return nil
+			}
 			bot.SendText(chatID, 0, resp.Text)
 			return nil
 		}
