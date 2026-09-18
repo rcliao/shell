@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -13,7 +16,7 @@ import (
 )
 
 // shell project — owner ops for the project registry (P2, docs/
-// PLAN-PROJECT-WORKSPACE.md): list/show/archive/bind. Direct store access,
+// PLAN-PROJECT-WORKSPACE.md): list/show/archive/bind/adopt. Direct store access,
 // same as `shell status` and `shell session`; the agent-facing surface is the
 // RPC + skill, and the family user gets natural language only.
 func newProjectCmd() *cobra.Command {
@@ -21,7 +24,7 @@ func newProjectCmd() *cobra.Command {
 
 	projectCmd := &cobra.Command{
 		Use:   "project",
-		Short: "Manage projects: list, show, archive, bind",
+		Short: "Manage projects: list, show, archive, bind, adopt",
 	}
 	projectCmd.PersistentFlags().StringVar(&configFlag, "config", "",
 		"agent config path (e.g. ~/.shell/agents/<agent>/config.json); default ~/.shell/config.json")
@@ -233,7 +236,95 @@ func newProjectCmd() *cobra.Command {
 	bindCmd.Flags().Int64Var(&bindChatFlag, "chat", 0, "target chat id")
 	bindCmd.Flags().Int64Var(&bindThreadFlag, "thread", 0, "Telegram forum topic id (0 = main chat)")
 
-	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd)
+	var adoptTitle, adoptEmoji string
+	var adoptChat, adoptThread int64
+	adoptCmd := &cobra.Command{
+		Use:   "adopt <slug> <notion-url-or-page-id>",
+		Short: "Watch an existing, human-made Notion page for comments (never rendered)",
+		Long: `Bind a project to a Notion page a human made, WATCH-ONLY: comments on the
+page reach the agent and get an in-thread reply; the page is never rendered or
+reconciled, because it holds blocks (tables, checkboxes) the renderer cannot
+express and would erase.
+
+If <slug> does not exist it is created as a registry-only project (no managed
+doc, no research schedule); --title and --chat are then required. The page
+must be shared with the Notion integration first (page ••• menu → Connections).`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			slug := args[0]
+			pageID, err := project.ParseNotionPageID(args[1])
+			if err != nil {
+				return err
+			}
+			cfg, st, err := openStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			// Same token contract as the daemon: the configured secret, handed
+			// to the client through the env var it reads.
+			tokenName := cfg.Notion.TokenSecret
+			if tokenName == "" {
+				tokenName = "NOTION_TOKEN"
+			}
+			if tok := cfg.Secret(tokenName); tok != "" {
+				os.Setenv("NOTION_TOKEN", tok)
+			}
+
+			p, err := st.GetProjectBySlug(slug)
+			if err != nil {
+				return err
+			}
+			if p != nil {
+				if bm := project.ParseBlockMap(p.BlockMap); bm.Rendered() && !bm.Adopted {
+					return fmt.Errorf("project %q already renders its own Notion page (%s) — adopting would orphan it; create a new slug for the human page", slug, p.ExportRef)
+				}
+			} else if adoptTitle == "" || adoptChat == 0 {
+				return fmt.Errorf("project %q does not exist: pass --title and --chat to create it", slug)
+			}
+
+			// Verify access and read the block list BEFORE writing anything.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			blockMap, n, err := project.AdoptPage(ctx, project.NewNotionClient(), pageID)
+			if err != nil {
+				return err
+			}
+
+			kind := "notion"
+			if p == nil {
+				if _, err := st.CreateProject(store.Project{
+					Slug: slug, Title: adoptTitle, Emoji: adoptEmoji,
+					ChatID: adoptChat, MessageThreadID: adoptThread,
+					ExportKind: kind, ExportRef: pageID, BlockMap: blockMap,
+				}); err != nil {
+					return err
+				}
+			} else if err := st.UpdateProjectFields(slug, store.ProjectFieldUpdate{
+				ExportKind: &kind, ExportRef: &pageID, BlockMap: &blockMap,
+			}); err != nil {
+				return err
+			}
+
+			got, err := st.GetProjectBySlug(slug)
+			if err != nil {
+				return err
+			}
+			if got == nil || got.ExportRef != pageID || !project.ParseBlockMap(got.BlockMap).Adopted {
+				return fmt.Errorf("adopt read-back failed for %q", slug)
+			}
+			fmt.Printf("Project %s adopted page %s (watch-only, %d top-level blocks).\n", slug, pageID, n)
+			fmt.Println("Comments are picked up by the next Notion poll tick (every 30 min).")
+			return nil
+		},
+	}
+	adoptCmd.Flags().StringVar(&adoptTitle, "title", "", "project title (when creating)")
+	adoptCmd.Flags().StringVar(&adoptEmoji, "emoji", "", "project emoji (when creating)")
+	adoptCmd.Flags().Int64Var(&adoptChat, "chat", 0, "chat id the project belongs to (when creating)")
+	adoptCmd.Flags().Int64Var(&adoptThread, "thread", 0, "Telegram forum topic id (0 = main chat)")
+
+	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd, adoptCmd)
 	return projectCmd
 }
 

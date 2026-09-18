@@ -484,3 +484,54 @@ func TestNotionPollDue(t *testing.T) {
 		}
 	}
 }
+
+// An adopted (human-made) page is watch-only: comments flow exactly as for a
+// rendered page, but a page edit must NEVER enqueue a reconcile — that path
+// ends in a re-render, which would erase blocks the renderer cannot express.
+func TestNotionPollAdoptedPageIsWatchOnly(t *testing.T) {
+	st, _, fake, deps := notionFixture(t)
+	fake.children = []project.NotionBlockRef{{ID: "tbl-1"}, {ID: "todo-1"}}
+	adopted, _, err := project.AdoptPage(context.Background(), fake, "page-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateProjectFields("demo", store.ProjectFieldUpdate{BlockMap: &adopted}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline poll, then a human edits the page AND adds a block AND comments on it.
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+	fake.lastEdited = fake.lastEdited.Add(time.Hour)
+	fake.children = append(fake.children, project.NotionBlockRef{ID: "new-1"})
+	fake.comments["todo-1"] = []project.NotionComment{
+		{ID: "c1", DiscussionID: "d1", ParentID: "todo-1", Plain: "add sunscreen", CreatedByID: "user-1", CreatedTime: fake.lastEdited},
+	}
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+
+	if events := queuedEvents(t, st, project.EventNotionPageEdited); len(events) != 0 {
+		t.Fatalf("adopted page enqueued a reconcile: %+v", events)
+	}
+	comments := queuedEvents(t, st, project.EventNotionCommentCreated)
+	if len(comments) != 1 || comments[0].DiscussionID != "d1" || comments[0].AnchorBlock != "todo-1" {
+		t.Fatalf("comment events = %+v, want the one on todo-1", comments)
+	}
+
+	p, _ := st.GetProjectBySlug("demo")
+	if p.LastHumanActivityAt == nil {
+		t.Error("an edit on an adopted page must count as human activity")
+	}
+	bm := project.ParseBlockMap(p.BlockMap)
+	if !bm.Adopted || !strings.Contains(p.BlockMap, "new-1") {
+		t.Errorf("adopted map was not refreshed with the new block: %s", p.BlockMap)
+	}
+
+	// Belt and braces: even a stray reconcile event is a no-op.
+	out, err := deps.runPageEditReconcile(context.Background(), project.EventPayload{Slug: "demo"})
+	if err != nil || !strings.Contains(out, "watch-only") {
+		t.Errorf("reconcile on adopted = %q, %v; want a watch-only skip", out, err)
+	}
+}
