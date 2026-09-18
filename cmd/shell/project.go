@@ -236,7 +236,7 @@ func newProjectCmd() *cobra.Command {
 	bindCmd.Flags().Int64Var(&bindChatFlag, "chat", 0, "target chat id")
 	bindCmd.Flags().Int64Var(&bindThreadFlag, "thread", 0, "Telegram forum topic id (0 = main chat)")
 
-	var adoptTitle, adoptEmoji string
+	var adoptTitle, adoptEmoji, adoptLang string
 	var adoptReplace bool
 	var adoptChat, adoptThread int64
 	adoptCmd := &cobra.Command{
@@ -311,7 +311,7 @@ must be shared with the Notion integration first (page ••• menu → Connec
 			if p == nil {
 				if _, err := st.CreateProject(store.Project{
 					Slug: slug, Title: adoptTitle, Emoji: adoptEmoji,
-					ChatID: adoptChat, MessageThreadID: adoptThread,
+					ChatID: adoptChat, MessageThreadID: adoptThread, Lang: adoptLang,
 					ExportKind: kind, ExportRef: pageID, BlockMap: blockMap,
 				}); err != nil {
 					return err
@@ -336,6 +336,7 @@ must be shared with the Notion integration first (page ••• menu → Connec
 	}
 	adoptCmd.Flags().StringVar(&adoptTitle, "title", "", "project title (when creating)")
 	adoptCmd.Flags().StringVar(&adoptEmoji, "emoji", "", "project emoji (when creating)")
+	adoptCmd.Flags().StringVar(&adoptLang, "lang", "", "language for in-thread replies, e.g. zh-TW (when creating; an existing project keeps its own)")
 	adoptCmd.Flags().Int64Var(&adoptChat, "chat", 0, "chat id the project belongs to (when creating)")
 	adoptCmd.Flags().BoolVar(&adoptReplace, "replace", false, "replace an existing, different export binding (prints the old one)")
 	adoptCmd.Flags().Int64Var(&adoptThread, "thread", 0, "Telegram forum topic id (0 = main chat)")
