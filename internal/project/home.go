@@ -61,6 +61,59 @@ type Home struct {
 
 	mu       sync.Mutex
 	lastEdit map[int64]time.Time // chat_id → last edit, for the debounce
+
+	workspaceDir string // set via SetWorkspace; "" = no needs-you counts
+}
+
+// SetWorkspace tells Home where managed docs live, enabling the per-project
+// "needs you" count. Without it the list renders as before.
+func (h *Home) SetWorkspace(dir string) { h.workspaceDir = dir }
+
+// ToDecideSection is the doc heading whose open bullets are questions waiting
+// on a human — the "needs you" signal (P3.6 unit 4).
+const ToDecideSection = "待決定"
+
+// OpenQuestions counts the open items under 待決定: top-level list items
+// (bulleted or numbered — live docs use both) that are neither checked off
+// nor struck through. Prose in the section is not counted — a count the
+// reader cannot match to lines they can see would be worse than none.
+func OpenQuestions(doc string) int {
+	_, sections := ParseDoc(doc)
+	n := 0
+	for _, sec := range sections {
+		if sec.Title != ToDecideSection {
+			continue
+		}
+		for _, line := range strings.Split(sec.Raw, "\n") {
+			item, ok := listItem(line)
+			if !ok || item == "" {
+				continue
+			}
+			if strings.HasPrefix(item, "[x]") || strings.HasPrefix(item, "[X]") || strings.HasPrefix(item, "~~") {
+				continue // resolved
+			}
+			n++
+		}
+	}
+	return n
+}
+
+// listItem returns the text of a TOP-LEVEL markdown list item ("- ", "* ",
+// "1. ", "1) "); indented lines are details of the item above, not items.
+func listItem(line string) (string, bool) {
+	for _, p := range []string{"- ", "* "} {
+		if rest, ok := strings.CutPrefix(line, p); ok {
+			return strings.TrimSpace(rest), true
+		}
+	}
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == 0 || i+1 >= len(line) || (line[i] != '.' && line[i] != ')') || line[i+1] != ' ' {
+		return "", false
+	}
+	return strings.TrimSpace(line[i+2:]), true
 }
 
 // NewHome creates a Home over the given store and transport.
@@ -73,6 +126,13 @@ func NewHome(st HomeStore, tr HomeTransport) *Home {
 // (plan §Lifecycle: archive removes finally, pause removes revivably).
 // Plain text on purpose — the transport's send/edit path owns escaping.
 func RenderHome(projects []store.Project) string {
+	return RenderHomeWithNeeds(projects, nil)
+}
+
+// RenderHomeWithNeeds is RenderHome plus a "❓N" marker on each project with
+// open questions (needs is slug → count; nil or 0 renders nothing). The list
+// is where people look first, so it says which project is waiting on them.
+func RenderHomeWithNeeds(projects []store.Project, needs map[string]int) string {
 	var lines []string
 	for _, p := range projects {
 		if p.Status != "active" {
@@ -93,6 +153,9 @@ func RenderHome(projects []store.Project) string {
 		// the last day means a live conversation on the project's page.
 		if hasRecentComment(p, time.Now()) {
 			sb.WriteString(" 💬")
+		}
+		if n := needs[p.Slug]; n > 0 {
+			fmt.Fprintf(&sb, " ❓%d", n)
 		}
 		lines = append(lines, sb.String())
 	}
@@ -244,7 +307,31 @@ func (h *Home) render(chatID int64) (string, []bridge.LinkButton, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return RenderHome(projects), HomeButtons(projects), nil
+	return RenderHomeWithNeeds(projects, h.needs(projects)), HomeButtons(projects), nil
+}
+
+// needs reads each active managed doc's open-question count. Best effort: an
+// unreadable doc simply has no marker.
+func (h *Home) needs(projects []store.Project) map[string]int {
+	if h.workspaceDir == "" {
+		return nil
+	}
+	out := map[string]int{}
+	for _, p := range projects {
+		if p.Status != "active" {
+			continue
+		}
+		dir, ok := ManagedDocDir(h.workspaceDir, p.Slug)
+		if !ok {
+			continue
+		}
+		if doc, err := ReadDoc(dir); err == nil {
+			if n := OpenQuestions(doc); n > 0 {
+				out[p.Slug] = n
+			}
+		}
+	}
+	return out
 }
 
 // sendAndPin sends the home text, pins it silently, and records the id.

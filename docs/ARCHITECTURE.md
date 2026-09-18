@@ -463,6 +463,10 @@ whose id is the project's `message_thread_id` — the turn gets a scoped
 is classified. Anywhere else the turn gets the chat-wide `[Projects]` list.
 Two projects claiming one thread is ambiguous and falls back to the list.
 
+**Needs you.** The pinned 📋 list marks each active project with `❓N`, the
+number of open items under its doc's 待決定 section — bulleted or numbered,
+not checked off, not struck through.
+
 **Rules the write and poll paths enforce.**
 - *Doc budget (24 KB) and log cap (8 KB).* The research prompt states size vs
   budget; `doc-write` refuses an agent write that leaves the doc, or its

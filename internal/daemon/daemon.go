@@ -654,6 +654,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	// on project create/status/doc-write (RPC callback below), on research
 	// turn completion (project.event consumer), and by /projects.
 	projectHome := project.NewHome(st, tgTransport)
+	projectHome.SetWorkspace(workspaceDir) // enables the ❓ needs-you count
 	br.SetProjectHome(projectHome)
 
 	// Outbound dedup guard (V2-H3): suppress a proactive send whose text

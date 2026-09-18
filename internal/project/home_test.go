@@ -332,3 +332,36 @@ func TestRefreshEditCarriesButtons(t *testing.T) {
 		t.Errorf("edit button url = %q", tr.editButtons[0][0].URL)
 	}
 }
+
+func TestOpenQuestionsCountsOpenBulletsOnly(t *testing.T) {
+	doc := "# T\n\n## 現況\n\n- not a question\n\n## 待決定\n\nsome framing prose\n\n- which week in February?\n* ryokan or hotel?\n- [x] flights — booked\n- [ ] rail pass?\n-   \n  - a nested detail, not its own question\n\n## 更新紀錄\n\n- 2026-09-01 noise\n"
+	if got := OpenQuestions(doc); got != 3 {
+		t.Errorf("OpenQuestions = %d, want 3 (two bullets + one unchecked box)", got)
+	}
+	// The live shape: a numbered list where resolved items are struck through.
+	numbered := "# T\n\n## 待決定\n\n1. ⭐ **can it run into April?**\n2. budget range\n3. ~~which airport~~ → settled\n4) wait for the forecast\n10. tax\n2026 is not an item\n"
+	if got := OpenQuestions(numbered); got != 4 {
+		t.Errorf("OpenQuestions(numbered) = %d, want 4 (struck-through is resolved)", got)
+	}
+	if got := OpenQuestions("# T\n\n## 現況\n\n- x\n"); got != 0 {
+		t.Errorf("no 待決定 section must count 0, got %d", got)
+	}
+}
+
+func TestRenderHomeMarksProjectsThatNeedYou(t *testing.T) {
+	projects := []store.Project{
+		{Slug: "japan", Title: "Japan", Status: "active"},
+		{Slug: "quiet", Title: "Quiet", Status: "active"},
+		{Slug: "old", Title: "Old", Status: "archived"},
+	}
+	out := RenderHomeWithNeeds(projects, map[string]int{"japan": 2, "old": 5})
+	if !strings.Contains(out, "Japan") || !strings.Contains(out, "❓2") {
+		t.Errorf("project with open questions must be marked: %q", out)
+	}
+	if strings.Count(out, "❓") != 1 || strings.Contains(out, "Old") {
+		t.Errorf("only ACTIVE projects with questions get a marker: %q", out)
+	}
+	if RenderHome(projects) != RenderHomeWithNeeds(projects, nil) {
+		t.Error("RenderHome must be the no-needs rendering")
+	}
+}
