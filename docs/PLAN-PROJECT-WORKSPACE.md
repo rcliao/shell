@@ -283,7 +283,7 @@ unused. What the numbers said, and what each item does about it:
 | One doc grew 0.9 KB → 101 KB, 25 appends, 0 compactions. The research prompt embeds the whole doc and demands the whole doc back, so research turns slowed until 5 of 7 timed out. Every "tidy this doc" request removed ~45% of the content. | **Doc budget**, enforced at the write path |
 | Sweep time 34 s → 190 s: one `ListComments` per mapped block, per project, every 30 min, whether or not anyone has touched the project in weeks. | **Poll backoff** for quiet projects |
 | Every research schedule registers at 09:00, next to the daily briefing; two share a chat and serialize. | **Stagger** research fire times |
-| `review_after` is NULL on every row; nothing ever asked about the trip that ended. | **Staleness ask** (decision 3 stands: ask once, never automatic) |
+| `review_after` is NULL on every row; nothing ever asked about the trip that ended. | Archived by hand now; the **staleness ask** stays in P4 (decision 3 stands: ask once, never automatic) |
 
 *Adopt (watch-only).* `shell project adopt <slug> <notion-url>` binds a page a
 human made. Data flow: owner runs adopt → CLI verifies the integration can
@@ -317,9 +317,11 @@ reliably move it (see the poller's comment).
 *Stagger.* Research schedules register at minute `10 + (project id mod 5) × 10`
 of the 09:00 hour — :10 through :50, never :00, stable per project.
 
-*Staleness ask.* Per sign-off 2: 10 days without human activity, or
-`review_after` passed → the heartbeat asks once (archive / pause / keep).
-The ask is recorded so it is not repeated.
+*Staleness ask — NOT built here.* It stays in P4 with the other lifecycle
+asks (sign-off 2: 10 days without human activity, or `review_after` passed →
+the heartbeat asks once). It changes what the heartbeat says to the family,
+which deserves its own change. Until then archiving is an owner action:
+`shell project archive <slug>`.
 
 Out of scope: webhooks (still P5), section ownership between two agents on
 one page, folding the weekly AI-briefing project into the daily briefing
