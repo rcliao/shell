@@ -122,7 +122,7 @@ func (d projectResearchDeps) runNotionPoll(ctx context.Context) (string, error) 
 	}
 
 	started := time.Now().UTC()
-	polled, comments, edits, failures := 0, 0, 0, 0
+	polled, deferred, comments, edits, failures := 0, 0, 0, 0, 0
 	for i := range projects {
 		p := &projects[i]
 		if p.Status != "active" || p.ExportKind != "notion" || p.ExportRef == "" {
@@ -132,6 +132,10 @@ func (d projectResearchDeps) runNotionPoll(ctx context.Context) (string, error) 
 		if !bm.Rendered() {
 			continue
 		}
+		if !notionPollDue(p, started) {
+			deferred++
+			continue
+		}
 		polled++
 		c, e, perr := d.pollProject(ctx, p, bm)
 		comments += c
@@ -139,6 +143,12 @@ func (d projectResearchDeps) runNotionPoll(ctx context.Context) (string, error) 
 		if perr != nil {
 			failures++
 			slog.Warn("notion poll: project poll failed", "slug", p.Slug, "error", perr)
+			continue
+		}
+		// Only a COMPLETED sweep counts: a failed one must be retried on the
+		// next tick, not pushed out by the quiet interval.
+		if merr := d.store.MarkProjectPolled(p.Slug, started); merr != nil {
+			slog.Warn("notion poll: mark polled failed", "slug", p.Slug, "error", merr)
 		}
 	}
 
@@ -149,9 +159,39 @@ func (d projectResearchDeps) runNotionPoll(ctx context.Context) (string, error) 
 		errMsg = fmt.Sprintf("%d project polls failed (see log)", failures)
 	}
 	d.recordScheduleRun(project.NotionPollDedupKey, started, store.OutcomeFiredOK, errMsg)
-	slog.Info("notion poll: sweep completed", "projects", polled, "comment_events", comments,
+	slog.Info("notion poll: sweep completed", "projects", polled, "deferred", deferred, "comment_events", comments,
 		"edit_events", edits, "failures", failures, "duration", time.Since(started).Round(time.Second))
 	return result, nil
+}
+
+// Poll backoff (P3.5). A sweep costs one ListComments call per mapped block,
+// so a quiet project is the expensive kind to keep checking: a month of
+// production sweeps found nothing while the per-tick cost grew 5x with the
+// docs. A project someone touched recently keeps the full tick rate; a quiet
+// one drops to notionQuietPollInterval — a comment there waits hours, not
+// minutes, which is the right trade for a page nobody is reading.
+const (
+	notionActiveWindow      = 7 * 24 * time.Hour
+	notionQuietPollInterval = 6 * time.Hour
+)
+
+// notionPollDue reports whether p should be swept on this tick. "Recent" is
+// human activity, a research pass, or creation — NOT updated_at, which the
+// poller's own bookkeeping would keep fresh forever.
+func notionPollDue(p *store.Project, now time.Time) bool {
+	if p.NotionPolledAt == nil {
+		return true
+	}
+	recent := p.CreatedAt
+	for _, t := range []*time.Time{p.LastHumanActivityAt, p.LastResearchAt} {
+		if t != nil && t.After(recent) {
+			recent = *t
+		}
+	}
+	if now.Sub(recent) <= notionActiveWindow {
+		return true
+	}
+	return now.Sub(*p.NotionPolledAt) >= notionQuietPollInterval
 }
 
 // pollProject polls one project's page, returning how many comment and edit

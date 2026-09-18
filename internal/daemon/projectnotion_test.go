@@ -459,3 +459,28 @@ func TestRegisterNotionPollScheduleIdempotent(t *testing.T) {
 		t.Errorf("payload = %+v err=%v", p, err)
 	}
 }
+
+func TestNotionPollDue(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	ago := func(d time.Duration) *time.Time { t := now.Add(-d); return &t }
+	old := now.Add(-60 * 24 * time.Hour)
+
+	cases := []struct {
+		name string
+		p    store.Project
+		want bool
+	}{
+		{"never polled", store.Project{CreatedAt: old}, true},
+		{"quiet, polled 1h ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Hour)}, false},
+		{"quiet, polled 6h ago", store.Project{CreatedAt: old, NotionPolledAt: ago(6 * time.Hour)}, true},
+		{"human active 2d ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Minute), LastHumanActivityAt: ago(48 * time.Hour)}, true},
+		{"researched 3d ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Minute), LastResearchAt: ago(72 * time.Hour)}, true},
+		{"researched 8d ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Hour), LastResearchAt: ago(8 * 24 * time.Hour)}, false},
+		{"new project", store.Project{CreatedAt: now.Add(-time.Hour), NotionPolledAt: ago(time.Minute)}, true},
+	}
+	for _, c := range cases {
+		if got := notionPollDue(&c.p, now); got != c.want {
+			t.Errorf("%s: due = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

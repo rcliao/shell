@@ -273,6 +273,63 @@ handled ledger + human-edit reconciliation + `last_human_activity_at`.
 in-thread reply; direct-edit reconciliation test; poller idempotence
 (restart mid-cycle, no double-processing).
 
+**P3.5 — Adoption, doc budget, poll economy (from the 2026-09-18 review).**
+A month of production data showed the plumbing works and the human surface is
+unused. What the numbers said, and what each item does about it:
+
+| Evidence (08-18 → 09-18) | Change |
+|---|---|
+| 1,419 comment sweeps, 0 comments ever. The Notion pages people actually open are hand-made shared pages that match no project's `export_ref`. | **Adopt** an existing page (watch-only) |
+| One doc grew 0.9 KB → 101 KB, 25 appends, 0 compactions. The research prompt embeds the whole doc and demands the whole doc back, so research turns slowed until 5 of 7 timed out. Every "tidy this doc" request removed ~45% of the content. | **Doc budget**, enforced at the write path |
+| Sweep time 34 s → 190 s: one `ListComments` per mapped block, per project, every 30 min, whether or not anyone has touched the project in weeks. | **Poll backoff** for quiet projects |
+| Every research schedule registers at 09:00, next to the daily briefing; two share a chat and serialize. | **Stagger** research fire times |
+| `review_after` is NULL on every row; nothing ever asked about the trip that ended. | **Staleness ask** (decision 3 stands: ask once, never automatic) |
+
+*Adopt (watch-only).* `shell project adopt <slug> <notion-url>` binds a page a
+human made. Data flow: owner runs adopt → CLI verifies the integration can
+read the page (fails loudly if the page was never shared with it) → lists the
+page's top-level blocks → stores `export_ref` and a block map flagged
+`adopted: true`. From then on the poller lists comments on those blocks and
+emits the same `notion.comment.created` events as for a rendered page; the
+agent replies in-thread. What adoption must never do: the renderer and the
+edit reconciler are **hard no-ops** for an adopted map. Both only speak
+headings, bullets and paragraphs, and these pages hold tables and checkboxes
+— a render pass would erase them. A page edit on an adopted project moves
+`last_human_activity_at` and nothing else. The adopted map is refreshed from
+the page on each full poll, since humans add and remove blocks freely.
+
+*Doc budget.* A doc has a soft budget (default 24 KB, per-project
+overridable). Two layers, prompt then mechanism:
+1. The research and comment-revision prompts state the current size and the
+   budget, and say: over budget → consolidate before adding. This makes the
+   weekly research turn the maintenance job; no new schedule.
+2. `doc-write` refuses an **agent** write that is over budget *and* larger
+   than the doc it replaces, with an error that names the largest sections.
+   A write that shrinks an over-budget doc is always accepted, so the way out
+   is never blocked. Human edits are never refused. Git history is the
+   archive — nothing is lost by cutting.
+
+*Poll backoff.* New column `notion_polled_at`. A project with human activity
+or a doc write in the last 7 days is polled every tick (30 min); a quiet one
+every 6 h. Not gated on the page's `last_edited_time`: a new comment does not
+reliably move it (see the poller's comment).
+
+*Stagger.* Research schedules register at minute `(project id × 20) mod 60`
+of the 09:00 hour plus a 20-minute base, so they never pile onto :00.
+
+*Staleness ask.* Per sign-off 2: 10 days without human activity, or
+`review_after` passed → the heartbeat asks once (archive / pause / keep).
+The ask is recorded so it is not repeated.
+
+Out of scope: webhooks (still P5), section ownership between two agents on
+one page, folding the weekly AI-briefing project into the daily briefing
+schedule (undecided), a long-turn path for interactive "tidy the doc"
+requests (the budget removes the need to ask).
+*Verify:* unit tests per item; live: sweep log shows fewer projects and a
+shorter duration; an oversize write is refused and a shrinking one lands;
+an owner comment on an adopted page produces an in-thread reply; the next
+Monday research run finishes inside its timeout.
+
 **P4 — Consolidation + attribution (~1 wk).** Topic binding at create +
 `project_hook` routing + emoji reactions + disclosure tiers + correction
 flow (pinned override, revert-reapply repair, `human_correction` ledger) +
