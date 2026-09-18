@@ -22,6 +22,10 @@ const (
 	TriggerSchedule = "schedule" // the scheduler tick found the row due
 	TriggerManual   = "manual"   // an operator/agent fired it by hand
 	TriggerReplay   = "replay"   // a replayed fire after a crash/drain
+	// TriggerEvent marks a run recorded by an event CONSUMER rather than the
+	// fire path: for an event-mode schedule the fire ledger row only says "the
+	// event was enqueued"; the consumer records what running it produced.
+	TriggerEvent = "event"
 )
 
 // Job run outcomes.
@@ -334,8 +338,15 @@ func ScheduleDedupKey(chatID int64, schedType, expr, message string) string {
 // on, and a failure there costs the family a reminder, so the read is gone: the
 // partial unique index (dedup_key, enabled = 1) does the deduplication and the
 // SELECT only runs after a conflict has already told us a row exists.
+// A caller may pre-set sched.DedupKey to a stable EXPLICIT key (e.g.
+// "project:<slug>" for a project's research schedule) so the row can later be
+// found and disabled/re-enabled by that key; otherwise the content-derived
+// key is computed here.
 func (s *Store) UpsertScheduleByKey(sched *Schedule) (id int64, created bool, err error) {
-	key := ScheduleDedupKey(sched.ChatID, sched.Type, sched.Schedule, sched.Message)
+	key := sched.DedupKey
+	if key == "" {
+		key = ScheduleDedupKey(sched.ChatID, sched.Type, sched.Schedule, sched.Message)
+	}
 	sched.DedupKey = key
 
 	enabled := 0
@@ -466,8 +477,39 @@ func (s *Store) GetScheduleByID(id int64) (*Schedule, error) {
 	return &sc, nil
 }
 
-// scanScheduleFull scans the full column list shared by ListAllSchedules and
-// GetScheduleByID.
+// FindScheduleByDedupKey returns the schedule carrying an explicit dedup key,
+// or nil when none exists. Enabled rows win; among disabled rows (the partial
+// unique index only covers enabled = 1, so several may share a key) the
+// newest wins. This is how a project's research schedule is found for
+// disable-on-archive and re-enable-on-activate without storing its row id.
+func (s *Store) FindScheduleByDedupKey(key string) (*Schedule, error) {
+	if key == "" {
+		return nil, fmt.Errorf("dedup key is required")
+	}
+	rows, err := s.db.Query(`
+		SELECT id, chat_id, label, message, schedule, timezone, type, mode,
+		       next_run_at, last_run_at, enabled, created_at,
+		       COALESCE(dedup_key, ''), COALESCE(paused_reason, ''),
+		       expected_next_at, last_success_at
+		FROM schedules WHERE dedup_key = ?
+		ORDER BY enabled DESC, id DESC LIMIT 1
+	`, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	sc, err := scanScheduleFull(rows)
+	if err != nil {
+		return nil, err
+	}
+	return &sc, nil
+}
+
+// scanScheduleFull scans the full column list shared by ListAllSchedules,
+// GetScheduleByID, and FindScheduleByDedupKey.
 func scanScheduleFull(rows *sql.Rows) (Schedule, error) {
 	var sc Schedule
 	var lastRun, expectedNext, lastSuccess sql.NullTime

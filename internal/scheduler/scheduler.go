@@ -74,7 +74,7 @@ type ScheduleEntry struct {
 	Schedule  string // cron expr or ISO8601
 	Timezone  string
 	Type      string // "cron" or "once"
-	Mode      string // "notify" or "prompt"
+	Mode      string // "notify", "prompt", or "event"
 	NextRunAt time.Time
 	// Overlap is the stored overlap policy; empty means the type default.
 	Overlap string
@@ -478,8 +478,11 @@ func (s *Scheduler) execute(ctx context.Context, sc ScheduleEntry, runID int64) 
 	// Heartbeats are exempt: chat_id 0 is their NORMAL state — the system
 	// chat — and the bridge decides where (or whether) their output lands.
 	// Treating 0 as missing paused a live heartbeat on the first fire after
-	// this check shipped (7/29).
-	if sc.ChatID == 0 && sc.Type != "heartbeat" {
+	// this check shipped (7/29). Event-mode schedules are exempt for a
+	// different reason: they deliver to the task queue, not to a chat, so a
+	// chat binding is optional (it lives in the payload when the consumer
+	// needs one).
+	if sc.ChatID == 0 && sc.Type != "heartbeat" && sc.Mode != ModeEvent {
 		slog.Error("scheduler: schedule has no chat_id, auto-pausing", "id", sc.ID, "label", sc.Label)
 		s.pause(sc.ID, PauseMissingChat)
 		return OutcomeSpawnFailed, "missing chat_id", nil
@@ -569,6 +572,9 @@ func (s *Scheduler) execute(ctx context.Context, sc ScheduleEntry, runID int64) 
 	}
 
 	switch sc.Mode {
+	case ModeEvent:
+		// No NotifyFunc/PromptFunc: the fire IS the enqueue. See event.go.
+		return s.fireEvent(sc)
 	case "prompt":
 		if s.onPrompt == nil {
 			slog.Error("scheduler: prompt-mode schedule fired with no prompt handler", "id", sc.ID)

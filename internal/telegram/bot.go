@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -71,6 +74,7 @@ func NewBot(token string, auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) (
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/heartbeat", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/personality", bot.MatchTypePrefix, b.commandHandler)
 	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/skills", bot.MatchTypePrefix, b.commandHandler)
+	tgBot.RegisterHandler(bot.HandlerTypeMessageText, "/projects", bot.MatchTypePrefix, b.commandHandler)
 	// Register handler for photo messages.
 	tgBot.RegisterHandlerMatchFunc(
 		func(update *models.Update) bool {
@@ -123,17 +127,34 @@ func (b *Bot) Start(ctx context.Context) {
 // Used for async notifications like plan progress. threadID is the Telegram
 // forum topic ID (0 = main chat / no topic).
 func (b *Bot) SendText(chatID, threadID int64, text string) {
+	// Errors are already logged inside; SendText keeps its fire-and-forget
+	// contract.
+	_ = b.SendTextButtons(chatID, threadID, text, nil)
+}
+
+// SendTextButtons is SendText plus inline URL buttons. When the text splits
+// into multiple messages the buttons ride the LAST one, so they sit under the
+// end of the notification. An empty buttons slice behaves exactly like
+// SendText; unlike SendText this returns the (last) send error so callers can
+// tell whether a delivery landed.
+func (b *Bot) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
 	if b.dedup != nil && b.dedup(chatID, threadID, text) {
-		return
+		return nil
 	}
 	ctx := context.Background()
 	chunks := splitMessage(text, maxMessageLength)
-	for _, chunk := range chunks {
+	var lastErr error
+	for i, chunk := range chunks {
+		var markup models.ReplyMarkup
+		if i == len(chunks)-1 {
+			markup = linkButtonMarkup(buttons)
+		}
 		_, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:          chatID,
 			MessageThreadID: int(threadID),
 			Text:            formatForMarkdownV2(chunk),
 			ParseMode:       models.ParseModeMarkdown,
+			ReplyMarkup:     markup,
 		})
 		if err != nil {
 			slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID, "thread_id", threadID)
@@ -141,12 +162,15 @@ func (b *Bot) SendText(chatID, threadID int64, text string) {
 				ChatID:          chatID,
 				MessageThreadID: int(threadID),
 				Text:            chunk,
+				ReplyMarkup:     markup,
 			})
 			if err != nil {
 				slog.Error("failed to send notification", "error", err, "chat_id", chatID, "thread_id", threadID)
+				lastErr = err
 			}
 		}
 	}
+	return lastErr
 }
 
 // SendPhoto sends an image to a chat/topic as a Telegram photo message.
@@ -181,6 +205,160 @@ func (b *Bot) SendVideo(chatID, threadID int64, videoData []byte, caption string
 	if err != nil {
 		slog.Error("failed to send video", "error", err, "chat_id", chatID, "thread_id", threadID)
 	}
+}
+
+// SendDocument sends a file (by path) to a chat/topic as a Telegram document.
+// Flood-retried like the media sends: document delivery is a receipt surface
+// and must not be silently dropped by a 429.
+func (b *Bot) SendDocument(chatID, threadID int64, path, caption string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		slog.Error("failed to open document", "error", err, "path", path)
+		return err
+	}
+	defer f.Close()
+	ctx := context.Background()
+	err = withFloodRetry(ctx, func() error {
+		if _, serr := f.Seek(0, io.SeekStart); serr != nil {
+			return serr
+		}
+		_, serr := b.bot.SendDocument(ctx, &bot.SendDocumentParams{
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Document: &models.InputFileUpload{
+				Filename: filepath.Base(path),
+				Data:     f,
+			},
+			Caption: caption,
+		})
+		return serr
+	})
+	if err != nil {
+		slog.Error("failed to send document", "error", err, "chat_id", chatID, "thread_id", threadID, "path", path)
+	}
+	return err
+}
+
+// SendMessageID sends a single text message and returns its message ID, so
+// callers can pin or edit it later (SendText returns nothing). MarkdownV2 is
+// tried first with a plain-text fallback, same as SendText; the text is NOT
+// chunk-split — a message whose id matters (the pinned 📋 Projects list) must
+// stay one message, so keep it short.
+func (b *Bot) SendMessageID(chatID, threadID int64, text string) (int, error) {
+	return b.SendMessageIDButtons(chatID, threadID, text, nil)
+}
+
+// SendMessageIDButtons is SendMessageID plus inline URL buttons. An empty
+// buttons slice behaves exactly like SendMessageID.
+func (b *Bot) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
+	ctx := context.Background()
+	markup := linkButtonMarkup(buttons)
+	msg, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:          chatID,
+		MessageThreadID: int(threadID),
+		Text:            formatForMarkdownV2(text),
+		ParseMode:       models.ParseModeMarkdown,
+		ReplyMarkup:     markup,
+	})
+	if err != nil {
+		slog.Warn("MarkdownV2 send failed, retrying as plain text", "error", err, "chat_id", chatID, "thread_id", threadID)
+		msg, err = b.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Text:            text,
+			ReplyMarkup:     markup,
+		})
+	}
+	if err != nil {
+		slog.Error("failed to send message", "error", err, "chat_id", chatID, "thread_id", threadID)
+		return 0, err
+	}
+	return msg.ID, nil
+}
+
+// EditMessage replaces the text of a previously sent message in place,
+// through the flood-retry path — a pinned-list update that lands during a
+// flood window must not be silently dropped. An "is not modified" response
+// (identical content) is treated as success.
+func (b *Bot) EditMessage(chatID int64, messageID int, text string) error {
+	return b.EditMessageButtons(chatID, messageID, text, nil)
+}
+
+// EditMessageButtons is EditMessage plus inline URL buttons; the buttons
+// replace whatever keyboard the message previously carried (an empty slice
+// clears it — Telegram edits drop an omitted reply_markup).
+func (b *Bot) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
+	ctx := context.Background()
+	markup := linkButtonMarkup(buttons)
+	err := editFinal(ctx, b.bot, &bot.EditMessageTextParams{
+		ChatID:      chatID,
+		MessageID:   messageID,
+		Text:        formatForMarkdownV2(text),
+		ParseMode:   models.ParseModeMarkdown,
+		ReplyMarkup: markup,
+	})
+	if err != nil && !isNotModified(err) {
+		// Same fallback ladder as sends: the MarkdownV2 escape can be rejected
+		// for content reasons, and losing the edit entirely is worse than
+		// losing the markup.
+		err = editFinal(ctx, b.bot, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: markup,
+		})
+	}
+	if err != nil && !isNotModified(err) {
+		slog.Error("failed to edit message", "error", err, "chat_id", chatID, "message_id", messageID)
+		return err
+	}
+	return nil
+}
+
+// linkButtonMarkup renders LinkButtons as an inline keyboard, one button per
+// row. Empty input returns nil, which omits reply_markup entirely.
+func linkButtonMarkup(buttons []bridge.LinkButton) models.ReplyMarkup {
+	if len(buttons) == 0 {
+		return nil
+	}
+	rows := make([][]models.InlineKeyboardButton, 0, len(buttons))
+	for _, btn := range buttons {
+		rows = append(rows, []models.InlineKeyboardButton{{Text: btn.Label, URL: btn.URL}})
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// PinMessage pins a message in a chat; silent suppresses the notification.
+func (b *Bot) PinMessage(chatID int64, messageID int, silent bool) error {
+	ctx := context.Background()
+	err := withFloodRetry(ctx, func() error {
+		_, serr := b.bot.PinChatMessage(ctx, &bot.PinChatMessageParams{
+			ChatID:              chatID,
+			MessageID:           messageID,
+			DisableNotification: silent,
+		})
+		return serr
+	})
+	if err != nil {
+		slog.Error("failed to pin message", "error", err, "chat_id", chatID, "message_id", messageID)
+	}
+	return err
+}
+
+// UnpinMessage unpins a previously pinned message.
+func (b *Bot) UnpinMessage(chatID int64, messageID int) error {
+	ctx := context.Background()
+	err := withFloodRetry(ctx, func() error {
+		_, serr := b.bot.UnpinChatMessage(ctx, &bot.UnpinChatMessageParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+		})
+		return serr
+	})
+	if err != nil {
+		slog.Error("failed to unpin message", "error", err, "chat_id", chatID, "message_id", messageID)
+	}
+	return err
 }
 
 // SendChatAction sends a chat action (e.g. "upload_photo", "typing") to a chat/topic.

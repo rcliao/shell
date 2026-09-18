@@ -82,7 +82,7 @@ and re-create rather than telling the user it's set.
 - `--expr <cron>` — cron expression or alias (@daily, @hourly, @weekly, @monthly)
 - `--message <text>` — schedule message/label
 - `--tz <timezone>` — timezone override (default: scheduler timezone)
-- `--mode <notify|prompt>` — notify sends plain text, prompt routes through Claude (default: notify)
+- `--mode <notify|prompt|event>` — notify sends plain text, prompt routes through Claude (default: notify). `event` is infrastructure mode: the schedule delivers nothing to chat — on fire it enqueues its message as a durable task-queue row. The message MUST then be JSON of the form `{"kind": "<queue kind>", "payload": {...}}` (rejected at create time otherwise), and a consumer registered for that kind owns everything downstream. You will normally never create event schedules by hand; the project system registers them itself.
 
 The SHELL_CHAT_ID environment variable is used automatically.
 

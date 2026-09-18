@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -1608,6 +1610,35 @@ func sendVideo(ctx context.Context, b *bot.Bot, chatID, threadID int64, videoDat
 	}
 }
 
+// sendDocument sends a file (by path) to a chat/topic as a Telegram document.
+// Same flood-retry treatment as photos/videos.
+func sendDocument(ctx context.Context, b *bot.Bot, chatID, threadID int64, path, caption string) {
+	f, err := os.Open(path)
+	if err != nil {
+		slog.Error("failed to open document", "error", err, "path", path)
+		return
+	}
+	defer f.Close()
+	err = withFloodRetry(ctx, func() error {
+		if _, serr := f.Seek(0, io.SeekStart); serr != nil {
+			return serr
+		}
+		_, serr := b.SendDocument(ctx, &bot.SendDocumentParams{
+			ChatID:          chatID,
+			MessageThreadID: int(threadID),
+			Document: &models.InputFileUpload{
+				Filename: filepath.Base(path),
+				Data:     f,
+			},
+			Caption: caption,
+		})
+		return serr
+	})
+	if err != nil {
+		slog.Error("failed to send document", "error", err, "chat_id", chatID, "thread_id", threadID, "path", path)
+	}
+}
+
 // looksLikeClarification checks if a response appears to be asking the user
 // for clarification (i.e. it ends with a question mark).
 func looksLikeClarification(response string) bool {
@@ -1795,6 +1826,9 @@ func (h *Handler) handleRegenerate(ctx context.Context, b *bot.Bot, chatID, thre
 	}
 	for _, video := range resp.Videos {
 		sendVideo(ctx, b, chatID, threadID, video.Data, video.Caption)
+	}
+	for _, doc := range resp.Documents {
+		sendDocument(ctx, b, chatID, threadID, doc.Path, doc.Caption)
 	}
 
 	response := resp.Text
@@ -2367,7 +2401,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	response := resp.Text
 
 	// Autonomous group noop: agent decided not to speak — suppress silently.
-	if isGroup && h.groupMode == "autonomous" && response == "" && len(resp.Photos) == 0 && len(resp.Videos) == 0 {
+	if isGroup && h.groupMode == "autonomous" && response == "" && len(resp.Photos) == 0 && len(resp.Videos) == 0 && len(resp.Documents) == 0 {
 		slog.Info("autonomous noop: agent chose not to speak", "chat_id", msg.Chat.ID, "bot", h.botUsername)
 		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
 			ChatID:    msg.Chat.ID,
@@ -2382,6 +2416,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	}
 	for _, video := range resp.Videos {
 		sendVideo(ctx, b, msg.Chat.ID, threadID, video.Data, video.Caption)
+	}
+	for _, doc := range resp.Documents {
+		sendDocument(ctx, b, msg.Chat.ID, threadID, doc.Path, doc.Caption)
 	}
 
 	// If final response is empty but we already streamed content to the user,
@@ -2398,7 +2435,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// addressed to the agent. Retry once with a corrective note instead of
 	// sending "(empty response)" (7/14: a post-rotation DM turn noop'd a
 	// real question — group noop guidance + warm-up exemplar bled into DM).
-	if response == "" && !isGroup && len(resp.Photos) == 0 && len(resp.Videos) == 0 {
+	if response == "" && !isGroup && len(resp.Photos) == 0 && len(resp.Videos) == 0 && len(resp.Documents) == 0 {
 		slog.Warn("empty response in DM — retrying with corrective note", "chat_id", msg.Chat.ID)
 		retryResp, rerr := h.bridge.HandleMessageStreamingEvents(turnCtx, msg.Chat.ID, threadID,
 			"[system: your reply to the user's last message came back empty or [noop]. That is never valid in a direct chat — the message was addressed to you. Answer it now; if it is ambiguous, ask a brief clarifying question.]",
@@ -2778,6 +2815,9 @@ func (h *Handler) processAlbum(ctx context.Context, b *bot.Bot, groupID string) 
 	}
 	for _, video := range resp.Videos {
 		sendVideo(ctx, b, first.Chat.ID, threadID, video.Data, video.Caption)
+	}
+	for _, doc := range resp.Documents {
+		sendDocument(ctx, b, first.Chat.ID, threadID, doc.Path, doc.Caption)
 	}
 
 	response := resp.Text

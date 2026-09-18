@@ -168,10 +168,12 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	// decides what (if anything) most deserves this beat; the context above
 	// is information, not a to-do list.
 	if isDeep {
-		// Skill inventory retro: ground-truth usage stats + action menu.
-		if retro := b.buildSkillRetroBlock(); retro != "" {
-			sb.WriteString(retro)
-		}
+		// Skill inventory retro: NOT injected. Its usage meter (USAGE.jsonl)
+		// is only written by the run-skill wrapper, which the agent never
+		// uses — it invokes skill scripts by path. As of 2026-09-02 zero
+		// USAGE.jsonl files existed anywhere, every skill showed 0 runs, and
+		// every deep beat spent calls re-discovering that before ignoring the
+		// block. buildSkillRetroBlock stays for when the meter is real.
 		// Pin hygiene: importance decides what a budget-constrained retrieval
 		// keeps, but nothing maintains it, so it drifts out of line with
 		// consequence. Surface the cut and let the agent re-rank its own pins.
@@ -186,6 +188,7 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("\n\n---\n**[Deep Reflection]**\n")
 		sb.WriteString("This is your deep-reflection heartbeat — the one turn where you think as hard as you can about getting better. ultrathink: don't settle for the first observation, trace root causes, weigh alternatives, and be honest about your own failures. Everything above is context, not a checklist — judge what most deserves this beat's attention and do that one thing well. Typical moves, any one of which can be the whole beat:\n")
 		sb.WriteString("- Complete a due task (scripts/shell-task complete --id <id>), or open a task row for in-flight multi-step work that has none (scripts/shell-task add --description \"<work>\") so it survives session rotation.\n")
+		sb.WriteString("- If a [Pinned memory audit — system prompt] block appears above, that is this beat's first job: shrink the operating pin set until nothing is outside the budget (merge, trim, unpin — never a new pin). A rule outside the system prompt is a rule you do not have on family turns.\n")
 		sb.WriteString("- Consolidate any flagged memory clusters above: ghost_get the full content, write a concise summary, ghost_consolidate.\n")
 		sb.WriteString("- Distill what recent conversations actually taught you — a correction, a missed expectation, a recurring pattern — into ONE stored adjustment (scripts/shell-remember --action behavioral --content \"<specific behavior change>\" --kind procedural), or sharpen/retire a vague or superseded learning shown above. Specific and testable beats \"be more helpful\".\n")
 		sb.WriteString("- Formalize a routine you've now done manually 2+ times as a schedule you author yourself (scripts/shell-schedule cron --expr \"<cron>\" --message \"<msg>\" --mode <prompt|notify>, or once --at \"<HH:MM or ISO>\"). Under-scheduling is the common failure mode; each agent's own schedule library is where differentiation comes from.\n")
@@ -198,7 +201,16 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		sb.WriteString("\n\n---\nDecide what, if anything, this beat needs — the context above is information, not a to-do list. Typical moves: complete a due task (scripts/shell-task complete --id <id>), consolidate any flagged memory clusters above (ghost_get → concise summary → ghost_consolidate), or record a genuinely new insight from recent conversations (scripts/shell-remember --action heartbeat-learning --content \"<specific, actionable insight>\"). Never send media unprompted, and don't re-send reminders that a notify-mode schedule already owns — [noop] is the normal outcome for most heartbeats.\n")
 	}
 
-	sb.WriteString("\nIf there is nothing that needs a user-facing message, respond with just: [noop]\n")
+	if isDeep {
+		// Deep beats are journaled (reflections table). A bare [noop] used to
+		// throw the whole narrative away — 4 of 12 beats in the week of 8/25
+		// made 14–27 tool calls incl. memory patches and left a 6-char row.
+		// The bridge blanks any response containing [noop] before delivery,
+		// so the journal below the marker can never reach a chat.
+		sb.WriteString("\nIf there is nothing that needs a user-facing message, put [noop] alone on the first line, then a short journal (5–15 lines): what you checked, what you changed (keys, schedule ids, rev ids), and what you deliberately left alone and why. The journal is recorded for the owner's review and is never delivered to any chat.\n")
+	} else {
+		sb.WriteString("\nIf there is nothing that needs a user-facing message, respond with just: [noop]\n")
+	}
 
 	return sb.String()
 }
@@ -224,11 +236,17 @@ func (b *Bridge) activeHeartbeatChats() []int64 {
 	if err != nil {
 		return nil
 	}
+	// One entry per CHAT, not per session row: a group with several forum
+	// threads has one active session per thread, and before this dedupe its
+	// recent history was appended once per thread (3–5× in the family group,
+	// observed 7/28, 8/6, 9/12, 9/14), inflating every heartbeat prompt.
 	chats := make([]int64, 0, len(sessions))
+	seen := make(map[int64]bool, len(sessions))
 	for _, sess := range sessions {
-		if IsSystemChat(sess.ChatID) {
+		if IsSystemChat(sess.ChatID) || seen[sess.ChatID] {
 			continue
 		}
+		seen[sess.ChatID] = true
 		chats = append(chats, sess.ChatID)
 	}
 	return chats
@@ -292,7 +310,7 @@ func (b *Bridge) captureReflection(ctx context.Context, chatID int64, response s
 		Model:      turnModel,
 		Text:       response,
 		ToolCalls:  len(result.ToolCalls),
-		Noop:       response == "",
+		Noop:       response == "" || noopMarkerRe.MatchString(response),
 		DurationMS: result.Timings.TotalMs,
 	})
 	if err != nil {
@@ -301,5 +319,5 @@ func (b *Bridge) captureReflection(ctx context.Context, chatID int64, response s
 	}
 	slog.Info("reflection captured",
 		"id", id, "chat_id", chatID, "job_run_id", meta.RunID, "beat", meta.Count,
-		"chars", len(response), "tool_calls", len(result.ToolCalls), "noop", response == "")
+		"chars", len(response), "tool_calls", len(result.ToolCalls), "noop", response == "" || noopMarkerRe.MatchString(response))
 }

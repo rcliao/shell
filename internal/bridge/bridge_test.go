@@ -524,7 +524,7 @@ func TestParseArtifacts(t *testing.T) {
 Hope you like it!`
 
 	var photos []Photo
-	cleaned := b.parseArtifacts(response, &photos, new([]Video))
+	cleaned := b.parseArtifacts(response, &photos, new([]Video), new([]DocumentAttachment))
 
 	// Should strip the artifact marker
 	if strings.Contains(cleaned, "[artifact") {
@@ -561,7 +561,7 @@ Enjoy!`
 
 	var photos []Photo
 	var videos []Video
-	cleaned := b.parseArtifacts(response, &photos, &videos)
+	cleaned := b.parseArtifacts(response, &photos, &videos, new([]DocumentAttachment))
 
 	if strings.Contains(cleaned, "[artifact") {
 		t.Error("artifact marker should be stripped")
@@ -584,7 +584,7 @@ func TestParseArtifacts_NoMatch(t *testing.T) {
 	b := testBridge(t)
 	response := "just plain text, no artifacts"
 	var photos []Photo
-	cleaned := b.parseArtifacts(response, &photos, new([]Video))
+	cleaned := b.parseArtifacts(response, &photos, new([]Video), new([]DocumentAttachment))
 	if cleaned != response {
 		t.Errorf("should return unchanged, got %q", cleaned)
 	}
@@ -688,7 +688,7 @@ func TestParseArtifacts_MissingFile(t *testing.T) {
 
 	response := `[artifact type="image" path="/nonexistent/file.png" caption="test"]`
 	var photos []Photo
-	cleaned := b.parseArtifacts(response, &photos, new([]Video))
+	cleaned := b.parseArtifacts(response, &photos, new([]Video), new([]DocumentAttachment))
 	if !strings.Contains(cleaned, "failed to read image") {
 		t.Errorf("should contain error message, got %q", cleaned)
 	}

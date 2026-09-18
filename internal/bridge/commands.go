@@ -63,6 +63,8 @@ func (b *Bridge) HandleCommand(ctx context.Context, chatID, threadID int64, cmd,
 		return b.Personality(ctx, chatID, args)
 	case "skills":
 		return b.Skills(ctx, chatID, args)
+	case "projects":
+		return b.Projects(chatID, threadID)
 	default:
 		return fmt.Sprintf("Unknown command: /%s", cmd), nil
 	}
@@ -158,7 +160,8 @@ func (b *Bridge) Help() string {
 		"- `/personality` — Show agent identity\n" +
 		"- `/personality reset` — Archive identity and re-onboard\n" +
 		"- `/skills` — List loaded skills\n" +
-		"- `/skills reload` — Hot-reload skills from disk\n"
+		"- `/skills reload` — Hot-reload skills from disk\n" +
+		"- `/projects` — Re-pin the 📋 Projects list in this chat\n"
 
 	if b.plan != nil {
 		help += "\n### Plan execution\n\n" +
@@ -335,4 +338,17 @@ func (b *Bridge) SwitchAgent(ctx context.Context, chatID int64, args string) (st
 	}
 
 	return fmt.Sprintf("Switched to agent **%s**. Starting fresh session.", args), nil
+}
+
+// Projects handles /projects: re-render the 📋 Projects home, send it FRESH
+// into the invoking thread, pin it, and unpin the previous one. The pinned
+// message itself is the answer; the returned line is just the receipt.
+func (b *Bridge) Projects(chatID, threadID int64) (string, error) {
+	if b.projectHome == nil {
+		return "Projects home is not enabled on this agent.", nil
+	}
+	if err := b.projectHome.Repin(chatID, threadID); err != nil {
+		return "", err
+	}
+	return "📋 Project list refreshed and pinned.", nil
 }

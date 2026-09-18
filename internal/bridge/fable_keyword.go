@@ -7,7 +7,11 @@ import (
 
 // fableModel is the model a "fable"-keyworded turn runs on. Kept here (not in
 // per-agent config) so the experiment behaves identically for every agent.
-const fableModel = "claude-fable-5"
+//
+// The CLI alias "fable" resolves to the latest Fable release (claude-fable-5-1
+// as of 2026-09-01), so keyword turns track new Fable versions without a code
+// change. Note the usage table records the alias, not the resolved model id.
+const fableModel = "fable"
 
 // fableKeywordRe matches the standalone token "fable" (case-insensitive),
 // ultracode-style: including it in an otherwise-normal message routes THAT turn

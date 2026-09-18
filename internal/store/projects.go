@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,7 +29,8 @@ type Project struct {
 	ExportKind         string // e.g. "notion"
 	ExportRef          string // external doc id (doc-ID amnesia fix)
 	BlockMap           string // JSON: section -> external block id
-	HandledDiscussions string // JSON array: comment threads already processed
+	HandledDiscussions string // JSON array: comment threads already processed (see HandledDiscussion)
+	NotionWatermark    string // last seen Notion page last_edited_time (RFC3339); Wave D poll short-circuit
 
 	Instructions string
 	NotifyPolicy string // quiet | announce
@@ -125,12 +127,12 @@ func (s *Store) CreateProject(p Project) (*Project, error) {
 		INSERT INTO projects
 		  (slug, title, emoji, status, chat_id, message_thread_id,
 		   doc_path, doc_rev, export_kind, export_ref, block_map, handled_discussions,
-		   instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
+		   notion_watermark, instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
 		   topic_thread_ref, review_after, last_research_at, last_human_activity_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Slug, p.Title, p.Emoji, p.Status, p.ChatID, p.MessageThreadID,
 		p.DocPath, p.DocRev, p.ExportKind, p.ExportRef, p.BlockMap, p.HandledDiscussions,
-		p.Instructions, p.NotifyPolicy, p.Lang, p.GhostTag, p.ScheduleDedupKey,
+		p.NotionWatermark, p.Instructions, p.NotifyPolicy, p.Lang, p.GhostTag, p.ScheduleDedupKey,
 		p.TopicThreadRef, p.ReviewAfter, p.LastResearchAt, p.LastHumanActivityAt)
 	if err != nil {
 		return nil, err
@@ -140,7 +142,7 @@ func (s *Store) CreateProject(p Project) (*Project, error) {
 
 const projectColumns = `id, slug, title, emoji, status, chat_id, message_thread_id,
 	doc_path, doc_rev, export_kind, export_ref, block_map, handled_discussions,
-	instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
+	notion_watermark, instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
 	topic_thread_ref, review_after, last_research_at, last_human_activity_at,
 	created_at, updated_at`
 
@@ -151,7 +153,7 @@ func scanProject(scan func(dest ...any) error) (*Project, error) {
 	var reviewAfter, lastResearch, lastHuman sql.NullTime
 	err := scan(&p.ID, &p.Slug, &p.Title, &p.Emoji, &p.Status, &p.ChatID, &p.MessageThreadID,
 		&p.DocPath, &p.DocRev, &p.ExportKind, &p.ExportRef, &p.BlockMap, &p.HandledDiscussions,
-		&p.Instructions, &p.NotifyPolicy, &p.Lang, &p.GhostTag, &p.ScheduleDedupKey,
+		&p.NotionWatermark, &p.Instructions, &p.NotifyPolicy, &p.Lang, &p.GhostTag, &p.ScheduleDedupKey,
 		&topicRef, &reviewAfter, &lastResearch, &lastHuman,
 		&p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
@@ -237,18 +239,21 @@ func (s *Store) UpdateProjectStatus(slug, status string) error {
 
 // ProjectFieldUpdate carries targeted column updates for UpdateProjectFields.
 // Nil pointers mean "leave unchanged"; a non-nil pointer sets the column
-// (including to the zero value). Slug, status, and identity columns are
-// deliberately not here — slug is immutable, status goes through
-// UpdateProjectStatus.
+// (including to the zero value). Slug and status are deliberately not here —
+// slug is immutable, status goes through UpdateProjectStatus. The chat
+// binding IS here: `shell project bind` re-targets a project's chat/thread.
 type ProjectFieldUpdate struct {
 	Title               *string
 	Emoji               *string
+	ChatID              *int64
+	MessageThreadID     *int64
 	DocPath             *string
 	DocRev              *string
 	ExportKind          *string
 	ExportRef           *string
 	BlockMap            *string
 	HandledDiscussions  *string
+	NotionWatermark     *string
 	Instructions        *string
 	NotifyPolicy        *string
 	Lang                *string
@@ -275,6 +280,12 @@ func (s *Store) UpdateProjectFields(slug string, u ProjectFieldUpdate) error {
 	if u.Emoji != nil {
 		add("emoji", *u.Emoji)
 	}
+	if u.ChatID != nil {
+		add("chat_id", *u.ChatID)
+	}
+	if u.MessageThreadID != nil {
+		add("message_thread_id", *u.MessageThreadID)
+	}
 	if u.DocPath != nil {
 		add("doc_path", *u.DocPath)
 	}
@@ -292,6 +303,9 @@ func (s *Store) UpdateProjectFields(slug string, u ProjectFieldUpdate) error {
 	}
 	if u.HandledDiscussions != nil {
 		add("handled_discussions", *u.HandledDiscussions)
+	}
+	if u.NotionWatermark != nil {
+		add("notion_watermark", *u.NotionWatermark)
 	}
 	if u.Instructions != nil {
 		add("instructions", *u.Instructions)
@@ -337,4 +351,79 @@ func (s *Store) UpdateProjectFields(slug string, u ProjectFieldUpdate) error {
 		return fmt.Errorf("project %q does not exist", slug)
 	}
 	return nil
+}
+
+// HandledDiscussion is one processed Notion comment thread, recorded in
+// projects.handled_discussions (JSON array). The timestamp exists for the
+// pinned home's recent-comment marker; the id is the replay guard.
+type HandledDiscussion struct {
+	ID string    `json:"id"`
+	At time.Time `json:"at"`
+}
+
+// ParseHandledDiscussions decodes projects.handled_discussions leniently:
+// the current shape is an array of {"id","at"} objects, but rows written
+// before the timestamp existed may carry plain strings — those parse with a
+// zero time. Invalid input returns an empty list, never an error: a broken
+// ledger must degrade to "nothing handled yet", not block the poller.
+func ParseHandledDiscussions(raw string) []HandledDiscussion {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil
+	}
+	var out []HandledDiscussion
+	for _, item := range items {
+		var h HandledDiscussion
+		if err := json.Unmarshal(item, &h); err == nil && h.ID != "" {
+			out = append(out, h)
+			continue
+		}
+		var id string
+		if err := json.Unmarshal(item, &id); err == nil && id != "" {
+			out = append(out, HandledDiscussion{ID: id})
+		}
+	}
+	return out
+}
+
+// HandledDiscussionSet returns the handled ids as a set for O(1) guards.
+func HandledDiscussionSet(raw string) map[string]bool {
+	entries := ParseHandledDiscussions(raw)
+	set := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		set[e.ID] = true
+	}
+	return set
+}
+
+// AppendHandledDiscussion marks one comment thread as processed. Idempotent:
+// an id already present leaves the row untouched. Read-modify-write is safe
+// here — the daemon is the single writer, same as CreateProject's slug check.
+func (s *Store) AppendHandledDiscussion(slug, discussionID string) error {
+	if discussionID == "" {
+		return fmt.Errorf("discussion id required")
+	}
+	p, err := s.GetProjectBySlug(slug)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %q does not exist", slug)
+	}
+	entries := ParseHandledDiscussions(p.HandledDiscussions)
+	for _, e := range entries {
+		if e.ID == discussionID {
+			return nil
+		}
+	}
+	entries = append(entries, HandledDiscussion{ID: discussionID, At: time.Now().UTC()})
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	encoded := string(data)
+	return s.UpdateProjectFields(slug, ProjectFieldUpdate{HandledDiscussions: &encoded})
 }

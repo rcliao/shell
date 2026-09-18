@@ -41,6 +41,12 @@ type NotionConfig struct {
 	TokenSecret string   `json:"token_secret"` // secret/env name holding the Notion integration token (default "NOTION_TOKEN")
 	Command     string   `json:"command"`      // launcher, default "npx"
 	Args        []string `json:"args"`         // default ["-y", "@notionhq/notion-mcp-server"]
+	// ProjectParentPageID is the Notion page under which managed project docs
+	// are mirrored as child pages (P3 Wave C; independent of Enabled, which
+	// gates only the MCP server). The integration must be shared with this
+	// page. Empty = page creation skipped with one WARN per project; the
+	// registry and doc layer keep working.
+	ProjectParentPageID string `json:"project_parent_page_id"`
 }
 
 // AgentIdentity configures a bot's identity for multi-agent group chats.
@@ -172,6 +178,13 @@ type ModelRouting struct {
 	// "low" cuts silent pre-answer thinking on simple turns (V2-H33: a
 	// 4-word arithmetic answer spent 40s thinking). Empty = CLI default.
 	ConversationEffort string `json:"conversation_effort"`
+	// ChatModels overrides the conversation model per Telegram chat
+	// (chatID string → model). Only conversation turns consult it; heartbeats,
+	// compaction, the classifier and the fable keyword keep their own routing.
+	// Motivation (2026-09-11): one model per agent forced the same tier onto
+	// family chats (where Traditional-Chinese fidelity and tense tracking
+	// matter) and the owner's DM (where scheduled research just needs to run).
+	ChatModels map[string]string `json:"chat_models"`
 }
 
 type ClaudeConfig struct {
@@ -205,6 +218,20 @@ func (c ClaudeConfig) ResolveEffort(taskType string) string {
 		return c.ModelRouting.ConversationEffort
 	}
 	return ""
+}
+
+// ResolveChatModel is ResolveModel with a per-chat override: a conversation
+// turn in a chat listed in model_routing.chat_models runs on that chat's
+// model. Every other task type, and any chat not listed, falls through to
+// ResolveModel. The override is keyed by chat only (not thread) so a chat's
+// persistent process keeps one stable model across its threads.
+func (c ClaudeConfig) ResolveChatModel(taskType string, chatID int64) string {
+	if taskType == "conversation" && c.ModelRouting != nil {
+		if m := c.ModelRouting.ChatModels[strconv.FormatInt(chatID, 10)]; m != "" {
+			return m
+		}
+	}
+	return c.ResolveModel(taskType)
 }
 
 // ResolveModel returns the model for a given task type, falling back to
@@ -250,6 +277,19 @@ func (c ClaudeConfig) Validate() []string {
 	// the dangerous case.
 	if c.ResolveModel("conversation") == "" {
 		warnings = append(warnings, "claude.model (conversation) resolves to empty — the CLI will silently pick its own default model; set claude.model or claude.model_routing.conversation")
+	}
+
+	// chat_models keys must be Telegram chat IDs; a typo here silently routes
+	// nothing, so surface it.
+	if c.ModelRouting != nil {
+		for k, v := range c.ModelRouting.ChatModels {
+			if _, err := strconv.ParseInt(k, 10, 64); err != nil {
+				warnings = append(warnings, fmt.Sprintf("claude.model_routing.chat_models key %q is not a chat id; that entry is ignored", k))
+			}
+			if v == "" {
+				warnings = append(warnings, fmt.Sprintf("claude.model_routing.chat_models[%s] is empty; that chat falls back to the conversation model", k))
+			}
+		}
 	}
 
 	// S4 — a rotation cap below the compaction cap means rotation always fires

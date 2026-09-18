@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,21 +20,282 @@ import (
 // (chat, message_thread_id) key. Messages are sent via stdin and responses
 // streamed from stdout.
 type persistentProc struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdinW  *syncWriter // all protocol writes go through this (parse loop + V2-H46 injector run concurrently)
-	stdout  io.ReadCloser
-	stderr  bytes.Buffer
-	scanner *bufio.Scanner // persistent scanner across messages — avoids losing buffered bytes
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdinW *syncWriter // all protocol writes go through this (parse loop + V2-H46 injector run concurrently)
+	stdout io.Reader
+	stderr bytes.Buffer
 
 	sessionID string // Claude session ID (from init response); guarded by turn.mu (read by the mid-turn injector)
 	key       SessionKey
 	model     string // model used when spawning this process
 
-	mu        sync.Mutex // guards turn dispatch and scanner reads
+	mu        sync.Mutex // serializes sendMessage callers
 	turn      turnState  // live-turn tracking for mid-turn injection (V2-H46)
 	cancel    context.CancelFunc
 	idleTimer *time.Timer
+
+	// Continuous reader (2026-09-05 off-by-one incident). stdout used to be
+	// read only inside sendMessage, until the first "result". The CLI can
+	// produce a whole turn on its own between our messages — a background
+	// Agent subagent finishing injects a <task-notification> user message,
+	// the model answers it, and a "result" follows. The next sendMessage
+	// consumed that buffered turn as its answer and every reply after it was
+	// the answer to the previous message. Now a reader goroutine owns stdout
+	// and a pump parses turns continuously; a turn nobody asked for is handed
+	// to onUnsolicited (the bridge delivers it as a follow-up message).
+	lines    chan []byte   // fed by readLoop; closed on EOF
+	pumpDone chan struct{} // closed when pump exits (EOF)
+
+	dispatch      sync.Mutex      // guards waiter, emit, turnOpen, idle
+	waiter        chan SendResult // the in-flight sendMessage, if any (buffered 1)
+	emit          EventFunc       // that turn's event sink; nil when idle
+	turnOpen      bool            // a turn (ours or the CLI's) has started streaming
+	idle          chan struct{}   // closed while no turn is open; replaced when one opens
+	onUnsolicited func(SessionKey, SendResult)
+	claimWait     time.Duration // max wait behind a CLI-initiated turn (claimTurnMaxWait; tests shorten it)
+}
+
+// ErrTurnAbandoned is returned by sendMessage when the caller's context ends
+// while the turn is still running. The process is NOT killed: the turn keeps
+// going and its result, when it lands, is routed to the unsolicited handler
+// (delivered as a follow-up) instead of being lost. Callers must not fall
+// back to a second subprocess on this error — the session is still busy.
+var ErrTurnAbandoned = errors.New("turn abandoned: caller context ended while the turn was in flight")
+
+// ErrStalledBehindCLITurn is returned when a send waited claimTurnMaxWait for
+// a CLI-initiated turn to finish and it never did. sendPersistent treats it
+// like a dead process: kill, clean up, fall back to a one-shot resume — the
+// owner's message is answered within a bounded time; the CLI turn's
+// follow-up is lost. Nothing above the process layer bounds a persistent
+// send, so without this a runaway continuation could stall a chat until the
+// 10-minute idle kill.
+var ErrStalledBehindCLITurn = errors.New("send stalled behind a CLI-initiated turn")
+
+// claimTurnMaxWait bounds how long a send waits for a CLI-initiated turn.
+const claimTurnMaxWait = 2 * time.Minute
+
+// newPersistentProc wires the reader and pump around an already-started
+// process (or, in tests, an io.Pipe). It does not send the initialize
+// request; the caller does that before or after — the pump treats the init
+// system/control_response events as housekeeping, not as a turn.
+func newPersistentProc(stdin io.WriteCloser, stdout io.Reader, key SessionKey, model string, onUnsolicited func(SessionKey, SendResult)) *persistentProc {
+	idle := make(chan struct{})
+	close(idle)
+	p := &persistentProc{
+		stdin:         stdin,
+		stdinW:        &syncWriter{w: stdin},
+		stdout:        stdout,
+		key:           key,
+		model:         model,
+		lines:         make(chan []byte, 256),
+		pumpDone:      make(chan struct{}),
+		idle:          idle,
+		onUnsolicited: onUnsolicited,
+		claimWait:     claimTurnMaxWait,
+	}
+	go p.readLoop()
+	go p.pump()
+	return p
+}
+
+// readLoop is the only reader of stdout. Each line is copied (the scanner
+// reuses its buffer) and queued for the pump. Closes lines on EOF.
+func (p *persistentProc) readLoop() {
+	defer close(p.lines)
+	sc := bufio.NewScanner(p.stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		cp := make([]byte, len(line))
+		copy(cp, line)
+		p.lines <- cp
+	}
+	if err := sc.Err(); err != nil {
+		slog.Debug("persistent: stdout read ended", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID, "error", err)
+	}
+}
+
+// chanSource adapts the line channel to lineSource for parseEvents and
+// notes turn boundaries as lines go by.
+type chanSource struct {
+	p   *persistentProc
+	cur []byte
+	eof bool
+}
+
+func (c *chanSource) Scan() bool {
+	line, ok := <-c.p.lines
+	if !ok {
+		c.eof = true
+		c.cur = nil
+		return false
+	}
+	c.cur = line
+	c.p.noteLine(line)
+	return true
+}
+
+func (c *chanSource) Bytes() []byte { return c.cur }
+
+// noteLine marks the turn open on the first event that is actually part of
+// a turn. Init/control/keep-alive events never open one — otherwise the very
+// first sendMessage would wait forever for "idle" behind the init handshake.
+func (p *persistentProc) noteLine(line []byte) {
+	var ev struct {
+		Type    string         `json:"type"`
+		Message *stdoutMessage `json:"message,omitempty"`
+	}
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return
+	}
+	meaningful := false
+	switch ev.Type {
+	case "assistant", "stream_event":
+		meaningful = true
+	case "user":
+		meaningful = ev.Message != nil && !isToolResultOnly(ev.Message)
+	}
+	if !meaningful {
+		return
+	}
+	p.dispatch.Lock()
+	if !p.turnOpen {
+		p.turnOpen = true
+		p.idle = make(chan struct{})
+		if p.waiter == nil {
+			// Nobody asked: the CLI started this turn itself. Keep the
+			// process alive for it — an idle kill mid-continuation would
+			// lose the follow-up silently, the failure this exists to fix.
+			slog.Info("persistent: CLI-initiated turn started", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
+			if p.idleTimer != nil {
+				p.idleTimer.Reset(idleTimeout)
+			}
+		}
+	}
+	p.dispatch.Unlock()
+}
+
+// gatedObserver forwards tool lifecycle to the injector's turnState only for
+// turns the bridge initiated; tools of a CLI-initiated turn are not on an
+// injectable turn.
+type gatedObserver struct{ p *persistentProc }
+
+func (g gatedObserver) toolStarted() {
+	g.p.dispatch.Lock()
+	ours := g.p.waiter != nil
+	g.p.dispatch.Unlock()
+	if ours {
+		g.p.turn.toolStarted()
+	}
+}
+
+func (g gatedObserver) toolEnded() {
+	g.p.dispatch.Lock()
+	ours := g.p.waiter != nil
+	g.p.dispatch.Unlock()
+	if ours {
+		g.p.turn.toolEnded()
+	}
+}
+
+// emitCurrent routes stream events to the in-flight sendMessage's sink, or
+// drops them while idle (a CLI-initiated turn streams to nobody; its text
+// arrives whole in the result).
+func (p *persistentProc) emitCurrent(ev StreamEvent) {
+	p.dispatch.Lock()
+	e := p.emit
+	p.dispatch.Unlock()
+	if e != nil {
+		e(ev)
+	}
+}
+
+// pump parses turns from the line stream forever. Each completed turn goes
+// to the waiting sendMessage if there is one, else to onUnsolicited. On EOF
+// a waiting sender gets an empty result (parity with the old scanner-ended
+// shape, which the manager already treats as "retry fresh").
+func (p *persistentProc) pump() {
+	defer close(p.pumpDone)
+	src := &chanSource{p: p}
+	for {
+		res := parseEvents(src, p.stdinW, p.emitCurrent, gatedObserver{p})
+
+		p.dispatch.Lock()
+		w := p.waiter
+		p.waiter = nil
+		p.emit = nil
+		if p.turnOpen {
+			p.turnOpen = false
+			close(p.idle)
+		}
+		if w != nil {
+			// Deliver under the lock: the waiter is buffered(1) and carries
+			// exactly one result, so this cannot block, and an abandoning
+			// sender that nils p.waiter under the same lock either finds the
+			// result already in its channel or sees nil here and we route
+			// it to the handler below — never a send into a channel nobody
+			// will read.
+			w <- res
+		}
+		p.dispatch.Unlock()
+
+		switch {
+		case w != nil:
+			// delivered above
+		case src.eof:
+			// nothing to deliver
+		case res.Text != "" || res.Usage != nil || len(res.ToolCalls) > 0:
+			slog.Info("persistent: CLI-initiated turn finished, routing as follow-up",
+				"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID,
+				"chars", len(res.Text), "tool_calls", len(res.ToolCalls))
+			if p.onUnsolicited != nil {
+				// Off the pump: delivery does store writes and a Telegram
+				// send; blocking here would back up the reader and stall the
+				// CLI on stdout.
+				go p.onUnsolicited(p.key, res)
+			}
+		}
+		if src.eof {
+			return
+		}
+	}
+}
+
+// claimTurn waits until no turn is open on the process and, under the same
+// lock as that check, registers the caller as the waiter for the next turn.
+// Checking idle and claiming in two lock regions would leave a gap in which
+// a CLI-initiated turn could open and then be handed to the new waiter — the
+// off-by-one in a window of our own making. A CLI-initiated turn that is
+// mid-stream finishes first and is delivered as a follow-up.
+func (p *persistentProc) claimTurn(ctx context.Context, emit EventFunc) (chan SendResult, error) {
+	for {
+		p.dispatch.Lock()
+		if !p.turnOpen {
+			w := make(chan SendResult, 1)
+			p.waiter = w
+			p.emit = emit
+			p.dispatch.Unlock()
+			return w, nil
+		}
+		ch := p.idle
+		p.dispatch.Unlock()
+		slog.Info("persistent: waiting for CLI-initiated turn before sending", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-p.pumpDone:
+			return nil, errors.New("persistent process exited")
+		case <-time.After(p.claimWait):
+			slog.Warn("persistent: CLI-initiated turn did not finish; abandoning process",
+				"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID, "waited", p.claimWait)
+			return nil, fmt.Errorf("%w after %s", ErrStalledBehindCLITurn, p.claimWait)
+		}
+	}
 }
 
 // idleTimeout is how long a persistent process stays alive without messages.
@@ -58,9 +320,19 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistent
 		if proc.model != reqModel {
 			return nil, fmt.Errorf("model mismatch: proc=%q req=%q", proc.model, reqModel)
 		}
-		// Process is still running — reset idle timer.
-		proc.idleTimer.Reset(idleTimeout)
-		return proc, nil
+		// Process is still running — reset idle timer. Reset returns false
+		// when the AfterFunc already fired (or was stopped): the idle
+		// callback is closing stdin right now, and writing to this proc
+		// would hit "broken pipe" and fall back to a cold spawn after the
+		// fact. Treat it as dead and spawn fresh instead of racing it.
+		if proc.idleTimer.Reset(idleTimeout) {
+			return proc, nil
+		}
+		// Reset on an already-fired AfterFunc re-arms it; Stop so the old
+		// callback does not fire again in 10m against the replacement.
+		proc.idleTimer.Stop()
+		slog.Info("persistent process idle-expired during lookup, respawning",
+			"chat_id", key.ChatID, "thread_id", key.ThreadID)
 	}
 
 	// Clean up dead process if any.
@@ -158,29 +430,29 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 		return nil, fmt.Errorf("send initialize: %w", err)
 	}
 
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	proc := newPersistentProc(stdin, stdout, key, model, m.onUnsolicited)
+	proc.cmd = cmd
+	proc.stderr = stderr
+	proc.cancel = cancel
 
-	proc := &persistentProc{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdinW:  &syncWriter{w: stdin},
-		stdout:  stdout,
-		stderr:  stderr,
-		scanner: sc,
-		key:     key,
-		model:   model,
-		cancel:  cancel,
-	}
-
-	// Set up idle timer to kill the process if no messages arrive.
+	// Set up idle timer to kill the process if no messages arrive. Assigned
+	// under dispatch because noteLine (pump goroutine, already running) reads
+	// it there to keep a CLI-initiated turn alive.
+	proc.dispatch.Lock()
 	proc.idleTimer = time.AfterFunc(idleTimeout, func() {
 		slog.Info("persistent process idle timeout", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 		proc.kill()
+		// Compare-and-delete: getOrSpawn may already have replaced this
+		// proc under the same key (it spawns fresh when it sees the timer
+		// has fired). Deleting by key alone would evict the healthy
+		// replacement and orphan its process.
 		m.mu.Lock()
-		delete(m.persistent, key)
+		if m.persistent[key] == proc {
+			delete(m.persistent, key)
+		}
 		m.mu.Unlock()
 	})
+	proc.dispatch.Unlock()
 
 	return proc, nil
 }
@@ -200,23 +472,62 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, emit
 	p.turn.begin()
 	defer p.turn.end()
 
+	// A CLI-initiated turn may be mid-stream; let the pump finish and route
+	// it as a follow-up, then claim the next turn as ours.
+	waiter, err := p.claimTurn(ctx, emit)
+	if err != nil {
+		return SendResult{}, err
+	}
+
+	abandon := func() chan SendResult {
+		p.dispatch.Lock()
+		w := p.waiter
+		p.waiter = nil
+		p.emit = nil
+		p.dispatch.Unlock()
+		return w
+	}
+
 	// Send user message.
 	if err := writeJSON(p.stdinW, newUserMessage(req, sessionID)); err != nil {
+		abandon()
 		return SendResult{}, fmt.Errorf("send user message: %w", err)
 	}
 
-	// Read events using the persistent scanner (not a new one per message).
-	// This avoids losing buffered bytes between turns.
-	result := parseEvents(p.scanner, p.stdinW, emit, &p.turn)
-
-	// Update session ID if we got one (turn.mu: the injector reads it).
-	if result.SessionID != "" {
-		p.turn.mu.Lock()
-		p.sessionID = result.SessionID
-		p.turn.mu.Unlock()
+	select {
+	case result := <-waiter:
+		// Update session ID if we got one (turn.mu: the injector reads it).
+		if result.SessionID != "" {
+			p.turn.mu.Lock()
+			p.sessionID = result.SessionID
+			p.turn.mu.Unlock()
+		}
+		return result, nil
+	case <-p.pumpDone:
+		// Reader hit EOF. The pump delivers an empty result to a waiter
+		// before exiting, so drain it; an empty SendResult is what the old
+		// code returned when the scanner ended, and the manager retries fresh.
+		select {
+		case result := <-waiter:
+			return result, nil
+		default:
+			return SendResult{}, nil
+		}
+	case <-ctx.Done():
+		// The caller gave up but the turn is still running. Detach: any
+		// result that lands from here on is routed to onUnsolicited by the
+		// pump (waiter is nil) — or by us, if it landed in the gap.
+		if w := abandon(); w != nil {
+			select {
+			case late := <-w:
+				if p.onUnsolicited != nil {
+					go p.onUnsolicited(p.key, late)
+				}
+			default:
+			}
+		}
+		return SendResult{}, fmt.Errorf("%w: %v", ErrTurnAbandoned, ctx.Err())
 	}
-
-	return result, nil
 }
 
 // stdinCloseGrace is how long the CLI gets to exit on its own after stdin is
@@ -272,6 +583,12 @@ func (m *Manager) sendPersistent(ctx context.Context, req AgentRequest, emit Eve
 	}
 
 	result, err := proc.sendMessage(ctx, req, emit)
+	if errors.Is(err, ErrTurnAbandoned) {
+		// The turn is still running in a healthy process; its result will be
+		// delivered as a follow-up. Do not kill, do not fall back.
+		slog.Warn("persistent turn abandoned by caller; result will arrive as follow-up", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
+		return SendResult{}, err
+	}
 	if err != nil {
 		// Process likely died — clean up and let caller retry with spawn-per-message.
 		slog.Warn("persistent process send failed, cleaning up", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)

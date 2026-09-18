@@ -239,7 +239,17 @@ func parseBidirectionalEventsObserved(scanner *bufio.Scanner, stdin io.Writer, o
 // parseEvents is the event-emitting core. onUpdate-based entry points above
 // adapt down to it, so callers migrate to typed events when they have a reason
 // rather than because a signature changed.
-func parseEvents(scanner *bufio.Scanner, stdin io.Writer, emit EventFunc, obs turnObserver) SendResult {
+// lineSource is what parseEvents reads from: one stdout line per Scan. A
+// *bufio.Scanner satisfies it directly (the one-shot paths); the persistent
+// process feeds it from a reader goroutine instead (see persistent.go), so
+// the parse loop never owns the pipe and lines emitted between turns are
+// still consumed.
+type lineSource interface {
+	Scan() bool
+	Bytes() []byte
+}
+
+func parseEvents(scanner lineSource, stdin io.Writer, emit EventFunc, obs turnObserver) SendResult {
 	// Local shim: the body below still speaks in text deltas in the places
 	// where it always did. Keeping that shape means this change adds events
 	// without rewriting the parse loop's control flow.
@@ -265,6 +275,12 @@ func parseEvents(scanner *bufio.Scanner, stdin io.Writer, emit EventFunc, obs tu
 	// inserts "\n\n" so the pre-tool and post-tool prose don't get glued
 	// together with no whitespace.
 	var pendingSeparator bool
+	// Text is also kept as SEGMENTS split at tool_use boundaries, so the
+	// bridge can tell a pre-tool aside ("Let me check the schedule first")
+	// from the answer that follows the tool. allText stays the full
+	// concatenation; TextSegments is the same text, split.
+	var segments []string
+	var curSegment strings.Builder
 	appendText := func(s string) {
 		if s == "" {
 			return
@@ -274,9 +290,21 @@ func parseEvents(scanner *bufio.Scanner, stdin io.Writer, emit EventFunc, obs tu
 			if onUpdate != nil {
 				onUpdate("\n\n")
 			}
+			if curSegment.Len() > 0 {
+				segments = append(segments, curSegment.String())
+				curSegment.Reset()
+			}
 		}
 		pendingSeparator = false
 		allText.WriteString(s)
+		curSegment.WriteString(s)
+	}
+	flushSegments := func() []string {
+		if curSegment.Len() > 0 {
+			segments = append(segments, curSegment.String())
+			curSegment.Reset()
+		}
+		return segments
 	}
 
 	for scanner.Scan() {
@@ -358,7 +386,13 @@ func parseEvents(scanner *bufio.Scanner, stdin io.Writer, emit EventFunc, obs tu
 			}
 
 		case "user":
-			// Tool results echoed by CLI
+			// Tool results echoed by CLI. Anything else here is a user turn
+			// the CLI injected itself (e.g. a background-subagent
+			// <task-notification>) — the boundary of a CLI-initiated turn.
+			// Logged so the shape can be studied; not yet used as a marker.
+			if event.Message != nil && !isToolResultOnly(event.Message) {
+				slog.Info("bidirectional: CLI-injected user message", "preview", previewText(event.Message, 80))
+			}
 			if event.Message != nil {
 				for _, block := range event.Message.Content.Blocks {
 					if block.Type == "tool_result" {
@@ -414,8 +448,12 @@ func parseEvents(scanner *bufio.Scanner, stdin io.Writer, emit EventFunc, obs tu
 			// and fall back to event.Result only if nothing was accumulated.
 			if allText.Len() > 0 {
 				result.Text = allText.String()
+				result.TextSegments = flushSegments()
 			} else {
 				result.Text = event.Result
+				if event.Result != "" {
+					result.TextSegments = []string{event.Result}
+				}
 			}
 			if event.SessionID != "" {
 				result.SessionID = event.SessionID
@@ -445,6 +483,42 @@ func parseEvents(scanner *bufio.Scanner, stdin io.Writer, emit EventFunc, obs tu
 	}
 
 	return result
+}
+
+// isToolResultOnly reports whether a user event carries nothing but
+// tool_result blocks — the CLI echoing tool output — as opposed to a real
+// or CLI-injected user turn.
+func isToolResultOnly(m *stdoutMessage) bool {
+	if m.Content.Text != "" {
+		return false
+	}
+	if len(m.Content.Blocks) == 0 {
+		return true
+	}
+	for _, b := range m.Content.Blocks {
+		if b.Type != "tool_result" {
+			return false
+		}
+	}
+	return true
+}
+
+// previewText returns the first n characters of a message's text content.
+func previewText(m *stdoutMessage, n int) string {
+	text := m.Content.Text
+	if text == "" {
+		for _, b := range m.Content.Blocks {
+			if b.Type == "text" && b.Text != "" {
+				text = b.Text
+				break
+			}
+		}
+	}
+	text = strings.ReplaceAll(text, "\n", " ")
+	if len(text) > n {
+		return text[:n] + "…"
+	}
+	return text
 }
 
 // handleControlRequest responds to a control_request from the CLI (stdout).

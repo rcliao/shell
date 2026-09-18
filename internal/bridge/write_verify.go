@@ -338,14 +338,14 @@ func (b *Bridge) verifyWriteHygiene(ctx context.Context, agent process.Agent, ch
 				MessageThreadID: threadID,
 				SessionID:       result.SessionID,
 				Text:            writeCorrectionPrompt,
-				Model:           b.claudeCfg.ResolveModel("conversation"),
+				Model:           b.claudeCfg.ResolveChatModel("conversation", chatID),
 			}, nil)
 			if err != nil {
 				slog.Warn("write-hygiene correction turn failed", "chat_id", chatID, "error", err)
 			} else {
 				enforced = 1
 				corrText := stripDirectives(strings.TrimSpace(corr.Text))
-				corrText = b.parseArtifacts(corrText, &resp.Photos, &resp.Videos)
+				corrText = b.parseArtifacts(corrText, &resp.Photos, &resp.Videos, &resp.Documents)
 				if corrText != "" {
 					if resp.Text != "" {
 						resp.Text += "\n\n" + corrText

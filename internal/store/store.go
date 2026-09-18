@@ -96,7 +96,7 @@ type Schedule struct {
 	Schedule  string // cron expression or ISO8601 for one-shot
 	Timezone  string
 	Type      string // "cron" or "once"
-	Mode      string // "notify" or "prompt"
+	Mode      string // "notify", "prompt", or "event" (event-mode message is a JSON envelope; see scheduler/event.go)
 	NextRunAt time.Time
 	LastRunAt *time.Time
 	Enabled   bool
@@ -544,6 +544,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// project_id links a verification row to the project whose doc was
+	// written (P2, docs/PLAN-PROJECT-WORKSPACE.md). Nullable: NULL for every
+	// non-project write. Idempotent for existing databases.
+	s.db.Exec("ALTER TABLE write_verifications ADD COLUMN project_id INTEGER")
+
 	// recall_verifications is the read-side twin of write_verifications.
 	// A recall-trigger turn (user asks about a previously-stored fact) is
 	// "grounded" when the answer is backed by a real read — either the agent
@@ -769,6 +774,7 @@ func (s *Store) migrate() error {
 		export_ref             TEXT NOT NULL DEFAULT '',
 		block_map              TEXT NOT NULL DEFAULT '{}',
 		handled_discussions    TEXT NOT NULL DEFAULT '[]',
+		notion_watermark       TEXT NOT NULL DEFAULT '',
 		instructions           TEXT NOT NULL DEFAULT '',
 		notify_policy          TEXT NOT NULL DEFAULT 'quiet',
 		lang                   TEXT NOT NULL DEFAULT '',
@@ -785,6 +791,24 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_projects_chat_status ON projects(chat_id, status);
 	`
 	if _, err := s.db.Exec(projectsSchema); err != nil {
+		return err
+	}
+	// notion_watermark (P3 Wave D) landed after the table shipped: best-effort
+	// ALTER for DBs created from the earlier schema (duplicate-column error on
+	// fresh DBs is expected and ignored). No index, so ordering is safe.
+	s.db.Exec("ALTER TABLE projects ADD COLUMN notion_watermark TEXT NOT NULL DEFAULT ''")
+
+	// chat_pins is the pinned 📋 Projects home message per chat (P2) — see
+	// internal/store/chatpins.go. PK-only table: no separate index needed, and
+	// brand-new, so a single CREATE is safe (no rebuild-then-index ordering).
+	chatPinsSchema := `
+	CREATE TABLE IF NOT EXISTS chat_pins (
+		chat_id         INTEGER PRIMARY KEY,
+		projects_msg_id INTEGER NOT NULL,
+		updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	if _, err := s.db.Exec(chatPinsSchema); err != nil {
 		return err
 	}
 
@@ -1099,8 +1123,8 @@ func (s *Store) SaveMessageMap(chatID int64, userMessageID, botMessageID int, se
 }
 
 // LastUserMessageAt returns the newest user-message time for a session
-// (zero time if none) — used to scope cache keep-alives to chats with
-// recent real activity, not chats kept alive only by the pings themselves.
+// (zero time if none) — used to scope the post-boot warm to chats with
+// recent real activity, not chats touched only by background pings.
 func (s *Store) LastUserMessageAt(sessionID int64) (time.Time, error) {
 	var ts sql.NullString
 	err := s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE session_id = ? AND role = 'user'`, sessionID).Scan(&ts)
@@ -1880,7 +1904,8 @@ type WriteVerification struct {
 	WriteFailed    bool   // a persistence tool call was observed but errored
 	ToolNames      string // comma-joined persistence tool names seen (for debugging)
 	Enforced       int    // 0=log-only, 1=correction turn issued, 2=correction no-oped (no write, no text)
-	Source         string // interactive | heartbeat | scheduler
+	Source         string // interactive | heartbeat | scheduler | rpc
+	ProjectID      *int64 // project whose doc was written; nil for non-project writes
 }
 
 // LogWriteVerification records one runtime write-hygiene observation.
@@ -1892,11 +1917,11 @@ func (s *Store) LogWriteVerification(v WriteVerification) error {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO write_verifications
-			(chat_id, session_id, classification, triggered, claimed, write_ok, write_failed, tool_names, enforced, source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(chat_id, session_id, classification, triggered, claimed, write_ok, write_failed, tool_names, enforced, source, project_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, v.ChatID, v.SessionID, v.Classification,
 		b2i(v.Triggered), b2i(v.Claimed), b2i(v.WriteOK), b2i(v.WriteFailed),
-		v.ToolNames, v.Enforced, src)
+		v.ToolNames, v.Enforced, src, v.ProjectID)
 	return err
 }
 

@@ -62,6 +62,8 @@ type Bridge struct {
 	memory    *memory.Memory   // nil if disabled
 	plan      *planner.Planner // nil if not configured
 	transport Transport        // optional: push messages/photos to users
+	// projectHome maintains the pinned 📋 Projects message (/projects, P2).
+	projectHome ProjectHome // nil if not wired
 
 	// Worktree isolation for plan execution
 	useWorktree bool   // whether to create worktrees for plans
@@ -359,6 +361,19 @@ func (b *Bridge) registerSystemCancel(key process.SessionKey, cancel context.Can
 // SetTransport sets the transport used to push messages/photos to users.
 func (b *Bridge) SetTransport(t Transport) {
 	b.transport = t
+}
+
+// ProjectHome is the slice of the project home the /projects command needs.
+// Declared here (consumer side) so the bridge does not import the project
+// package — project imports bridge for the LinkButton type, and a two-way
+// import would cycle.
+type ProjectHome interface {
+	Repin(chatID, threadID int64) error
+}
+
+// SetProjectHome wires the pinned 📋 Projects home renderer (/projects).
+func (b *Bridge) SetProjectHome(h ProjectHome) {
+	b.projectHome = h
 }
 
 // SetPool enables multi-agent routing. When set, the bridge resolves
@@ -1049,6 +1064,8 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		isHeartbeat:     isHeartbeat,
 		isDeepHeartbeat: isDeepHeartbeat,
 		fableTurn:       fableTurn,
+		projectTurn:     senderName == ProjectTurnSender,
+		chatID:          chatID,
 	})
 	turnModel := profile.Model
 	ephemeralTurn := profile.Ephemeral
@@ -1143,6 +1160,9 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	if archivedCount > 0 {
 		cleaned, note := extractMediaNote(result.Text)
 		result.Text = cleaned
+		for i, seg := range result.TextSegments {
+			result.TextSegments[i], _ = extractMediaNote(seg)
+		}
 		if note != "" && b.store != nil {
 			for _, img := range images {
 				if img.MediaID != 0 {
@@ -1208,7 +1228,11 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 // It parses all response directives (relay, heartbeat, memory, schedule, artifacts),
 // logs the exchange, and returns a typed AgentResponse with collected photos.
 func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source, turnModel, senderName string) AgentResponse {
-	response := strings.TrimSpace(result.Text)
+	// A person reads the answer, not the asides the model emitted before its
+	// tool calls (2.8% of replies 9/1–9/16 opened with "Let me check…" or a
+	// verbalised self-check). Journals keep the full text — see reply_text.go.
+	journal := isHeartbeat || IsSystemChat(chatID)
+	response := strings.TrimSpace(applyUserFacingText(chatID, journal, source, result.TextSegments, result.Text))
 
 	// Capture the deep-heartbeat journal BEFORE anything else can consume or
 	// discard the text. Deep beats are where the agent audits its own past
@@ -1279,25 +1303,37 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// Parse task delegation directives ([task to=...], [task-result id=...]).
 	response = b.parseTaskDirectives(chatID, response)
 
-	// If text is empty but tools were used, summarize what was done.
+	// If text is empty but tools were used, summarize what was done — for
+	// system turns only, where the summary lands in a journal. A person once
+	// received "✓ mcp__shell-bridge__shell_schedule ×2, Bash ×2" as the
+	// answer to "so who set it?" (9/14); interactive chats get the existing
+	// empty-reply handling instead (DM corrective retry, group silence).
 	if response == "" && len(result.ToolCalls) > 0 {
-		response = summarizeToolCalls(result.ToolCalls)
+		if journal {
+			response = summarizeToolCalls(result.ToolCalls)
+		} else {
+			slog.Info("reply: tools ran but no text; not sending tool summary to chat",
+				"chat_id", chatID, "source", source, "tools", summarizeToolCalls(result.ToolCalls))
+		}
 	}
 
-	// Collect photos and videos from artifact markers (skill output).
+	// Collect photos, videos, and documents from artifact markers (skill output).
 	var photos []Photo
 	var videos []Video
-	response = b.parseArtifacts(response, &photos, &videos)
+	var documents []DocumentAttachment
+	response = b.parseArtifacts(response, &photos, &videos, &documents)
 
 	// No unprompted media: heartbeats never deliver media; user turns must
-	// have asked for it (enforcement behind media_gate_enforce).
+	// have asked for it (enforcement behind media_gate_enforce). Documents are
+	// deliberately outside the gate: they are requested work product (a doc
+	// export), not generated media.
 	response += b.gateMedia(userMsg, isHeartbeat, &photos, &videos)
 
 	// Log assistant response. Skip empty/noop responses (parseArtifacts strips
 	// [noop] markers; heartbeats with nothing to report leave response="").
 	// Cycle 83: prevents ~10% of message rows from being empty placeholders
 	// that pollute bench counts, retrieval, and storage.
-	if response != "" || len(photos) > 0 || len(videos) > 0 {
+	if response != "" || len(photos) > 0 || len(videos) > 0 || len(documents) > 0 {
 		if err := b.store.LogMessage(sessID, "assistant", response); err != nil {
 			slog.Warn("failed to log assistant message", "error", err)
 		}
@@ -1370,7 +1406,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		slog.Warn("failed to update session", "error", err)
 	}
 
-	return AgentResponse{Text: response, Photos: photos, Videos: videos}
+	return AgentResponse{Text: response, Photos: photos, Videos: videos, Documents: documents}
 }
 
 // ensureSession returns the existing session for a (chat, thread) key or creates a new one.

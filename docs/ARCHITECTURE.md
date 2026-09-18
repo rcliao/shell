@@ -184,8 +184,36 @@ stdout (CLI → SDK):
   - stream_event → text deltas (onUpdate callback)
   - assistant → tool_use blocks (ToolCall extraction)
   - control_request → auto-allow (can_use_tool)
-  - result → final text, terminates the event loop
+  - result → final text, terminates the turn
+  - user (non tool_result) → a turn the CLI started itself (e.g. a background
+    Agent subagent's <task-notification>); logged as a turn boundary
 ```
+
+The parser keeps every assistant text block (`SendResult.Text`) and the same
+text split at tool_use boundaries (`SendResult.TextSegments`). What a person
+receives is decided in the bridge (`reply_text.go`): a short segment (≤160
+bytes, and shorter than what follows it) that precedes a tool call is an
+aside — "Let me check the schedule first", or the agent reciting a self-check
+— and is dropped from replies bound for a real chat and logged; long pre-tool
+prose, a short answer followed by "Memory saved", and anything after the last
+tool call stay. Journal turns (heartbeats, anything on the system chat) keep
+the full narrative. The destination decides, not the sender: a prompt-mode
+schedule is system-initiated but replies into a real chat, so it is filtered.
+Before this (2026-09-17) 2.8% of replies opened with such an aside. A turn
+that used tools but produced no text is summarised ("✓ Bash ×2") only for
+journal turns; a real chat gets the normal empty-reply handling instead.
+
+Persistent processes (one per chat/thread) are read by a dedicated reader
+goroutine and a turn pump, never by the sender: a turn the CLI produces on
+its own between messages (a background subagent finishing after the agent
+already replied) is parsed as a whole and handed to
+`Bridge.HandleUnsolicitedTurn`, which runs the normal response pipeline with
+source `followup` and pushes it to the chat as a follow-up message. Before
+this (2026-09-05) such a turn sat in the pipe and the next user message
+consumed it as its answer, shifting every reply one message behind. A send
+whose caller context ends mid-turn returns `ErrTurnAbandoned`; the process is
+kept, no fallback subprocess is spawned, and the late result also arrives as a
+follow-up.
 
 Environment variables set on Claude subprocess:
 - `SHELL_CHAT_ID` — current Telegram chat ID
@@ -356,6 +384,31 @@ Periodic check-ins routed through Claude with full context:
 6. Claude uses `scripts/shell-task complete --id N` for task completion
 7. Memory reflection runs after each heartbeat cycle
 
+Every beat is an ephemeral turn: a fresh CLI spawn with no `--resume`. The
+enrichment carries all the context a beat needs, and resuming the system
+chat's session only replayed its growing history after the cache had lapsed
+(~88k cache-creation tokens per hourly beat for a `[noop]`, vs ~30k cold).
+The enrichment lists recent history once per chat, not once per session
+row (a forum group has one session per thread).
+
+Every Nth beat (`scheduler.deep_reflect_interval`) is a **deep reflection**
+beat on the `heartbeat_deep` model. It carries extra context and is journaled
+to the `reflections` table:
+
+- **Pinned memory audit.** Two cuts, in order of consequence: the
+  *system-prompt cut* (operating pins that did not fit `memory.system_budget`
+  this generation — packed newest-created-first by `packOperatingPins`, the
+  same helper the composed prompt uses, exposed via `SystemPromptPinCut`) and
+  the *retrieval cut* (what `ghost_context` can surface under its
+  importance-ranked sub-budget). The system-prompt half has no minimum: one
+  dropped pin is a rule the agent lacks on conversation turns. The beat's first
+  job is to shrink the pin set (merge / trim / unpin) until nothing is dropped.
+- **Journal contract.** A deep beat with nothing to send writes `[noop]` on the
+  first line, then a short journal. The bridge blanks any response containing
+  `[noop]` before delivery, so the journal is recorded but never reaches a chat.
+- The skill-inventory retro block is not injected: its usage meter is only
+  written by the `run-skill` wrapper, which the agent bypasses.
+
 Quiet hours (default 10 PM–7 AM) suppress heartbeat firing.
 
 ## Scheduler
@@ -393,7 +446,7 @@ Key operations:
 ```json
 {
   "telegram": { "token_env", "allowed_users", "reaction_map" },
-  "claude": { "binary", "model", "timeout", "max_sessions", "work_dir", "allowed_tools", "setting_sources" },
+  "claude": { "binary", "model", "model_routing": { "conversation", "heartbeat", "heartbeat_deep", "compaction", "chat_models": { "<chat_id>": "<model>" } }, "timeout", "max_sessions", "work_dir", "allowed_tools", "disallowed_tools", "setting_sources" },
   "store": { "db_path" },
   "memory": { "enabled", "db_path", "budget", "profiles", "chat_profiles" },
   "planner": { "enabled", "test_cmd", "conventions", "max_retries", "worktree" },

@@ -200,3 +200,97 @@ func TestUpdateProjectFields(t *testing.T) {
 		t.Error("expected error for unknown slug")
 	}
 }
+
+func TestUpdateProjectFieldsRebindsChat(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	if _, err := s.CreateProject(Project{Title: "Bind Me", ChatID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	chat := int64(-100200300)
+	thread := int64(7)
+	if err := s.UpdateProjectFields("bind-me", ProjectFieldUpdate{
+		ChatID: &chat, MessageThreadID: &thread,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := s.GetProjectBySlug("bind-me")
+	if p.ChatID != chat || p.MessageThreadID != thread {
+		t.Errorf("binding = (%d, %d), want (%d, %d)", p.ChatID, p.MessageThreadID, chat, thread)
+	}
+}
+
+func TestNotionWatermarkRoundTrip(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+	if _, err := s.CreateProject(Project{Title: "Wm", ChatID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	wm := "2026-08-17T10:00:00.000Z"
+	if err := s.UpdateProjectFields("wm", ProjectFieldUpdate{NotionWatermark: &wm}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.GetProjectBySlug("wm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.NotionWatermark != wm {
+		t.Errorf("notion_watermark = %q, want %q", p.NotionWatermark, wm)
+	}
+}
+
+func TestAppendHandledDiscussionIdempotent(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+	if _, err := s.CreateProject(Project{Title: "Disc", ChatID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendHandledDiscussion("disc", "d1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendHandledDiscussion("disc", "d1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendHandledDiscussion("disc", "d2"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := s.GetProjectBySlug("disc")
+	entries := ParseHandledDiscussions(p.HandledDiscussions)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v, want 2 distinct ids", entries)
+	}
+	if entries[0].ID != "d1" || entries[1].ID != "d2" {
+		t.Errorf("ids = %q, %q", entries[0].ID, entries[1].ID)
+	}
+	if entries[0].At.IsZero() || entries[1].At.IsZero() {
+		t.Error("timestamps must be stamped")
+	}
+	if !HandledDiscussionSet(p.HandledDiscussions)["d2"] {
+		t.Error("set lookup failed")
+	}
+	if err := s.AppendHandledDiscussion("no-such", "d1"); err == nil {
+		t.Error("unknown slug must error")
+	}
+	if err := s.AppendHandledDiscussion("disc", ""); err == nil {
+		t.Error("empty discussion id must error")
+	}
+}
+
+func TestParseHandledDiscussionsLenient(t *testing.T) {
+	// Legacy plain-string arrays parse with zero times; garbage parses empty.
+	entries := ParseHandledDiscussions(`["d1", "d2"]`)
+	if len(entries) != 2 || entries[0].ID != "d1" || !entries[0].At.IsZero() {
+		t.Errorf("legacy parse = %+v", entries)
+	}
+	if got := ParseHandledDiscussions("not json"); got != nil {
+		t.Errorf("garbage parse = %+v, want nil", got)
+	}
+	if got := ParseHandledDiscussions(""); got != nil {
+		t.Errorf("empty parse = %+v, want nil", got)
+	}
+	mixed := ParseHandledDiscussions(`[{"id":"d1","at":"2026-08-17T10:00:00Z"}, "d2"]`)
+	if len(mixed) != 2 || mixed[0].At.IsZero() || mixed[1].ID != "d2" {
+		t.Errorf("mixed parse = %+v", mixed)
+	}
+}

@@ -581,3 +581,42 @@ func TestTranscriptCarriesStopReason(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBidirectionalEvents_TextSegmentsSplitAtToolBoundaries(t *testing.T) {
+	// Text before a tool call and text after it are separate segments so the
+	// bridge can drop a pre-tool aside for a person while Text keeps the whole
+	// narrative for journals. Text must still equal the joined segments.
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-seg"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check the schedule first."},{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"ls"}}]}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":""}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Your reminder is set for 7:00."}]}}`,
+		`{"type":"result","result":"Your reminder is set for 7:00.","session_id":"sess-seg"}`,
+	}, "\n")
+
+	var stdinBuf bytes.Buffer
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, nil)
+
+	wantSegs := []string{"Let me check the schedule first.", "Your reminder is set for 7:00."}
+	if len(result.TextSegments) != 2 || result.TextSegments[0] != wantSegs[0] || result.TextSegments[1] != wantSegs[1] {
+		t.Fatalf("segments = %q, want %q", result.TextSegments, wantSegs)
+	}
+	if want := strings.Join(wantSegs, "\n\n"); result.Text != want {
+		t.Errorf("Text = %q, want %q", result.Text, want)
+	}
+}
+
+func TestParseBidirectionalEvents_TextSegmentsNoTools(t *testing.T) {
+	input := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello "}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"there."}}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello there."}]}}`,
+		`{"type":"result","result":"Hello there.","session_id":"s"}`,
+	}, "\n")
+	var stdinBuf bytes.Buffer
+	result := parseBidirectionalEvents(strings.NewReader(input), &stdinBuf, nil)
+	if len(result.TextSegments) != 1 || result.TextSegments[0] != "Hello there." {
+		t.Fatalf("segments = %q, want one segment", result.TextSegments)
+	}
+}

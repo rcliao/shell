@@ -10,7 +10,16 @@ const (
 	// deepHeartbeatTimeout: background reflection isn't user-facing, so it gets a
 	// longer budget than the 5m user-turn timeout as a safety margin.
 	deepHeartbeatTimeout = 12 * time.Minute
+	// projectTurnTimeout: a project research/comment turn reads a doc, searches,
+	// and writes a draft; 5m (the user-turn default) cut every weekly research
+	// pass on 9/14 short, three attempts in a row. Mirrors projectevents.go's
+	// context deadline so the fresh-spawn path enforces the same bound.
+	projectTurnTimeout = 20 * time.Minute
 )
+
+// ProjectTurnSender is the senderName the daemon's project consumers use for
+// research and comment turns.
+const ProjectTurnSender = "project-research"
 
 // ExecutionProfile is the resolved per-turn execution decision: which model, at
 // what reasoning effort, and whether the turn runs as an isolated one-shot
@@ -31,6 +40,8 @@ type turnKind struct {
 	isHeartbeat     bool
 	isDeepHeartbeat bool
 	fableTurn       bool
+	projectTurn     bool  // daemon project research/comment turn (long, not user-paced)
+	chatID          int64 // conversation turns consult model_routing.chat_models for this chat
 }
 
 // modelResolver is the slice of config.ClaudeConfig that profile resolution
@@ -38,6 +49,7 @@ type turnKind struct {
 // without a full Bridge/config.
 type modelResolver interface {
 	ResolveModel(taskType string) string
+	ResolveChatModel(taskType string, chatID int64) string
 	ResolveEffort(taskType string) string
 }
 
@@ -51,7 +63,17 @@ type modelResolver interface {
 //     effort). Ephemeral is the only way effort=max actually reaches the CLI.
 //   - The fable keyword is a one-shot experiment on a distinct model, isolated
 //     from the persistent session.
-//   - Everything else is a normal conversation turn on the persistent session.
+//   - EVERY heartbeat is ephemeral. A beat carries its whole context in the
+//     message (enrichment + ghost inject) and gains nothing from --resume;
+//     resuming cost ~88k cache-creation tokens per hourly beat (the growing
+//     chat-0 history replayed after the cache lapsed, gen 75 on 9/17) to
+//     produce a 6-token "[noop]". A fresh spawn is ~30k.
+//   - Project research/comment turns keep the persistent session but carry a
+//     20m timeout, because the daemon's context deadline only bounds the
+//     persistent path; the fresh-spawn path enforces req.Timeout.
+//   - Everything else is a normal conversation turn on the persistent session,
+//     on the chat's model if model_routing.chat_models names one (the family
+//     chats and the owner's DM need different tiers), else the default.
 func resolveExecutionProfile(r modelResolver, k turnKind) ExecutionProfile {
 	taskType := "conversation"
 	switch {
@@ -62,14 +84,24 @@ func resolveExecutionProfile(r modelResolver, k turnKind) ExecutionProfile {
 	}
 
 	p := ExecutionProfile{
-		Model:    r.ResolveModel(taskType),
+		Model:    r.ResolveChatModel(taskType, k.chatID),
 		Effort:   r.ResolveEffort(taskType), // spawn-bound; applies from each generation's first turn
 		TaskType: taskType,
+	}
+	if k.isHeartbeat {
+		// Ephemeral spawns take the manager's 5m default unless told
+		// otherwise; the persistent path this replaced was bounded only by
+		// the scheduler's job context. Keep the deep beat's margin.
+		p.Ephemeral = true
+		p.Timeout = deepHeartbeatTimeout
 	}
 	if k.isDeepHeartbeat {
 		p.Effort = deepHeartbeatEffort
 		p.Ephemeral = true
 		p.Timeout = deepHeartbeatTimeout
+	}
+	if k.projectTurn {
+		p.Timeout = projectTurnTimeout
 	}
 	if k.fableTurn {
 		p.Model = fableModel

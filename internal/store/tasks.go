@@ -348,6 +348,22 @@ func (s *Store) GetTask(id int64) (*Task, error) {
 	return &out[0], nil
 }
 
+// GetTaskByIdempotencyKey returns the task carrying the given key, or nil.
+// The Wave D poller uses it to ask whether a render for the current doc rev
+// already ran — the "did we cause this page edit ourselves" heuristic.
+func (s *Store) GetTaskByIdempotencyKey(key string) (*Task, error) {
+	rows, err := s.db.Query(taskSelect+` WHERE idempotency_key = ?`, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanTasks(rows)
+	if err != nil || len(out) == 0 {
+		return nil, err
+	}
+	return &out[0], nil
+}
+
 // ListTasks returns tasks in a state, newest first. Empty state = all.
 func (s *Store) ListTasks(state string, limit int) ([]Task, error) {
 	if limit <= 0 {

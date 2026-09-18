@@ -1,6 +1,6 @@
 ---
 name: project
-description: Project registry — create, list, and look up first-class projects (multi-week research work bound to a doc, chat, and schedule)
+description: Project registry — create, list, and look up first-class projects (multi-week research work bound to a doc, chat, and schedule); read/write the canonical project doc with commit receipts
 usage: ~/.shell/skills/project/scripts/project create --title "..." [--emoji E --export-ref ID --doc-path PATH --instructions "..." --lang L]
 allowed-tools: Bash
 tier: hot
@@ -33,6 +33,12 @@ pass `--chat` only to register a project for a DIFFERENT chat.
 
 # Show one project in full
 ~/.shell/skills/project/scripts/project get housing-search-2026
+
+# Read the canonical doc (printed with the rev it was served at)
+~/.shell/skills/project/scripts/project doc-read housing-search-2026
+
+# Write the canonical doc (full content, from a file or stdin) — prints the commit rev
+~/.shell/skills/project/scripts/project doc-write housing-search-2026 --file /tmp/doc.md --attribution "research pass"
 ```
 
 ## Hard rules
@@ -49,6 +55,50 @@ pass `--chat` only to register a project for a DIFFERENT chat.
 - `export_ref` is the external doc id (Notion page id). Registering it here
   is what makes it appear in your `[Projects]` block every turn — set it as
   soon as the doc exists.
+- **Never claim a doc was saved without the printed rev.** `doc-write` prints
+  `Doc <slug> committed: rev <hash>` — that hash is the receipt. No printed
+  rev = no write happened; re-read the error and retry. Never invent or
+  paraphrase a rev.
+- `doc-write` replaces the WHOLE doc: always `doc-read` first, edit, then
+  write the full revised content. If the user edited the doc file on disk,
+  their version is auto-committed separately before yours (look for
+  `human-edit(local):` in history) — never overwrite it silently without
+  reading first.
+- Projects created without `--doc-path` get a managed doc automatically
+  (`projects/<slug>/doc.md` in your workspace, its own git repo, template
+  sections 目標/限制/現況/選項/待決定/更新紀錄). Pass `--doc-path` only to
+  bind an EXISTING external file — doc-read/doc-write do not work on those.
+- **Managed docs mirror to Notion automatically.** When the daemon is
+  configured (a `NOTION_TOKEN` plus `notion.project_parent_page_id` in
+  config), every successful `doc-write` queues a background render: the first
+  one creates the project's Notion page (icon = project emoji), later ones
+  update only the changed `##` sections. You never render by hand and never
+  edit that page with the notion skill — write the canonical doc; the mirror
+  follows within a minute. `get` prints `notion_url` once the page exists;
+  that is the link to share when the user asks where the doc lives. A project
+  whose `export_ref` was registered by hand (pre-existing page or database)
+  is left untouched by the mirror and gets no `notion_url`.
+
+## Comment loop (Notion feedback)
+
+The daemon polls each project's Notion page (~every 30 min) for new comment
+threads and direct page edits. When the user comments, YOU get a bounded
+revision turn in the project's chat session with the comment text. Contract:
+
+- **The conversation happens in Notion.** Your turn's visible reply is posted
+  back INTO the user's comment thread on the page — do NOT also message the
+  chat, relay, or notify anyone unless the user explicitly asked for that in
+  the comment itself.
+- One fix pass per comment thread: apply exactly what the comment asks via
+  `doc-write` (the printed rev is the receipt), then reply in ≤2 lines in the
+  project's language describing what changed. A question gets an answer in
+  the reply; touch the doc only if needed. Never re-dump the doc.
+- The user resolving the comment in the Notion UI is the acknowledgment —
+  each thread is answered once; there is no back-and-forth loop.
+- Direct page edits are folded into the canonical doc automatically as
+  `human-edit(notion)` commits and the page is re-rendered — you never
+  reconcile the page by hand, and `doc-read` always reflects human edits
+  after the next poll.
 
 ## Options (create)
 
@@ -60,3 +110,9 @@ pass `--chat` only to register a project for a DIFFERENT chat.
 - `--doc-path <path>` — canonical doc path, e.g. `workspace/projects/<slug>/doc.md`
 - `--instructions <text>` — standing guidance injected with the project row
 - `--lang <code>` — the user's language for this project (e.g. `zh`, `en`)
+- `--cadence daily|weekly|monthly` — autonomous research cadence (default
+  `weekly`). Create registers the schedule itself; on each fire the daemon
+  runs ONE bounded research pass in the project's chat and posts a ≤3-line
+  delta there. Archiving or pausing the project disables the schedule;
+  re-activating re-enables it — never manage `project:<slug>` schedules by
+  hand via shell-schedule.

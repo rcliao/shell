@@ -22,6 +22,7 @@ import (
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/reload"
 	"github.com/rcliao/shell/internal/rpc"
 	"github.com/rcliao/shell/internal/scheduler"
@@ -460,6 +461,10 @@ func New(cfg config.Config) (*Daemon, error) {
 
 	br := bridge.New(proc, st, mem, pl, cfg.Planner.Worktree, cfg.Claude.WorkDir, cfg.Telegram.ReactionMap, tunnelMgr, pmMgr, skillRegistry)
 	br.SetClaudeConfig(cfg.Claude)
+	// Turns the CLI starts on its own inside a persistent process (background
+	// subagent completions) are delivered as follow-up messages instead of
+	// being read as the next user message's answer.
+	proc.SetUnsolicitedHandler(br.HandleUnsolicitedTurn)
 
 	// Track skill directories for hot reload.
 	var skillDirs []string
@@ -642,7 +647,14 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	// Wire transport: plan progress, relay photos → Telegram
-	br.SetTransport(&telegramTransport{bot: bot})
+	tgTransport := &telegramTransport{bot: bot}
+	br.SetTransport(tgTransport)
+
+	// Pinned 📋 Projects home (P2): edited in place via chat_pins, refreshed
+	// on project create/status/doc-write (RPC callback below), on research
+	// turn completion (project.event consumer), and by /projects.
+	projectHome := project.NewHome(st, tgTransport)
+	br.SetProjectHome(projectHome)
 
 	// Outbound dedup guard (V2-H3): suppress a proactive send whose text
 	// matches a send to the same chat within the window. Ledger rows (including
@@ -727,6 +739,10 @@ func New(cfg config.Config) (*Daemon, error) {
 		Timezone:    cfg.Scheduler.Timezone,
 		TaskStore:   taskStore,
 		BotUsername: cfg.Agent.BotUsername,
+		// Same workspace the bridge advertises in the system prompt — project
+		// doc repos live under <workspace>/projects/<slug>/.
+		WorkspaceDir:       workspaceDir,
+		ProjectHomeRefresh: projectHome.Refresh,
 	})
 
 	// Initialize scheduler if enabled.
@@ -764,6 +780,14 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			for _, photo := range resp.Photos {
 				bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)
+			}
+			// A prompt-mode schedule whose default is silence ([noop], or a
+			// turn that ended on a tool call) yields empty text. Telegram
+			// rejects an empty message, so skip it instead of logging a
+			// nightly "message text is empty" error.
+			if strings.TrimSpace(resp.Text) == "" {
+				slog.Info("scheduler prompt produced no text, nothing to send", "chat_id", chatID, "photos", len(resp.Photos))
+				return nil
 			}
 			bot.SendText(chatID, 0, resp.Text)
 			return nil
@@ -955,6 +979,49 @@ func New(cfg config.Config) (*Daemon, error) {
 		sched.SetQueue(scheduler.NewStoreAdapter(st), owner)
 		wireMessageTurns(sched, br, st)
 		slog.Info("queue workers enabled without scheduler", "owner", owner)
+	}
+
+	// project.event consumer (P2). Registered UNCONDITIONALLY whenever a
+	// queue worker can lease tasks — an unregistered kind fails loudly, so a
+	// project schedule firing before this ran would burn its attempts on a
+	// wiring bug. See projectevents.go for why delivery bypasses onPrompt.
+	if sched != nil {
+		// ONE Notion client shared by the renderer, the poller, and the
+		// comment consumer, so every Notion call serializes under the same
+		// global pacing. It reads NOTION_TOKEN from the daemon environment
+		// (secret export above) at call time; unconfigured = WARN + no-op.
+		notionClient := project.NewNotionClient()
+		wireProjectEvents(sched, projectResearchDeps{
+			store:        st,
+			workspaceDir: workspaceDir,
+			runTurn: func(ctx context.Context, chatID, threadID int64, prompt string) (string, error) {
+				resp, err := syntheticTurn(ctx, br, chatID, threadID, prompt, bridge.ProjectTurnSender)
+				if err != nil {
+					return "", err
+				}
+				return resp.Text, nil
+			},
+			deliver: func(chatID, threadID int64, text string, buttons []bridge.LinkButton) {
+				// Fire-and-forget like Notify; the bot already logs failures.
+				_ = tgTransport.NotifyButtons(chatID, threadID, text, buttons)
+			},
+			refreshHome: projectHome.Refresh,
+			notion:      notionClient,
+			notionID:    &notionIdentity{},
+		})
+		// project.render consumer (P3 Wave C): doc writes enqueue renders; this
+		// worker mirrors the canonical doc to Notion via the block-map renderer.
+		wireProjectRender(sched, projectRenderDeps{
+			store:        st,
+			workspaceDir: workspaceDir,
+			renderer:     project.NewRenderer(notionClient, cfg.Notion.ProjectParentPageID),
+		})
+		// Notion comment loop (P3 Wave D): the ONE global poll schedule that
+		// produces notion.* events. Registered only when the schedule tick
+		// runs — without it the cron would sit inert.
+		if cfg.Scheduler.Enabled {
+			registerNotionPollSchedule(st, cfg.Scheduler.Timezone)
+		}
 	}
 
 	d := &Daemon{
@@ -1440,6 +1507,38 @@ func (t *telegramTransport) SendPhoto(chatID, threadID int64, data []byte, capti
 
 func (t *telegramTransport) SendVideo(chatID, threadID int64, data []byte, caption string) {
 	t.bot.SendVideo(chatID, threadID, data, caption)
+}
+
+func (t *telegramTransport) SendDocument(chatID, threadID int64, path, caption string) error {
+	return t.bot.SendDocument(chatID, threadID, path, caption)
+}
+
+func (t *telegramTransport) SendMessageID(chatID, threadID int64, text string) (int, error) {
+	return t.bot.SendMessageID(chatID, threadID, text)
+}
+
+func (t *telegramTransport) EditMessage(chatID int64, messageID int, text string) error {
+	return t.bot.EditMessage(chatID, messageID, text)
+}
+
+func (t *telegramTransport) NotifyButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
+	return t.bot.SendTextButtons(chatID, threadID, text, buttons)
+}
+
+func (t *telegramTransport) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
+	return t.bot.SendMessageIDButtons(chatID, threadID, text, buttons)
+}
+
+func (t *telegramTransport) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
+	return t.bot.EditMessageButtons(chatID, messageID, text, buttons)
+}
+
+func (t *telegramTransport) PinMessage(chatID int64, messageID int, silent bool) error {
+	return t.bot.PinMessage(chatID, messageID, silent)
+}
+
+func (t *telegramTransport) UnpinMessage(chatID int64, messageID int) error {
+	return t.bot.UnpinMessage(chatID, messageID)
 }
 
 // resolveAgentNS returns the first AgentNS found in config profiles, or "" for legacy mode.

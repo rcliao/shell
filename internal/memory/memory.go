@@ -48,7 +48,7 @@ type Memory struct {
 
 	// canonicalBySender maps resolved sender labels (and their leading name
 	// token) to the canonical short person-id used for provenance
-	// (source-identity-design.md: readable nicknames, e.g. "mami"). Senders
+	// (source-identity-design.md: readable nicknames, e.g. "<nickname>"). Senders
 	// with no mapping pass through verbatim — never guessed.
 	canonicalBySender map[string]string
 
@@ -216,6 +216,91 @@ Do this when:
 - You're unsure about user preferences, family details, or running jokes
 - A topic feels familiar but you lack specifics`
 
+// splitOperatingPins separates the layered identity pins (charter /
+// personality / lore, tagged layer:*) from the unlayered operating tail.
+// layerOf maps key → layer tag for the layered ones.
+func splitOperatingPins(pinned []agentmemory.Memory) (operating []agentmemory.Memory, layerOf map[string]string) {
+	layerOf = map[string]string{}
+	for _, mem := range pinned {
+		for _, tag := range mem.Tags {
+			if strings.HasPrefix(tag, "layer:") {
+				layerOf[mem.Key] = tag
+				break
+			}
+		}
+	}
+	for _, mem := range pinned {
+		if _, ok := layerOf[mem.Key]; !ok {
+			operating = append(operating, mem)
+		}
+	}
+	return operating, layerOf
+}
+
+// packOperatingPins admits operating pins into the system prompt under
+// budget (tokens; ~4 bytes each), in the order given. The store lists pins
+// created_at DESC, so the newest-CREATED pin wins the room — patching an old
+// pin does not move it up, and every new pin pushes the oldest toward the
+// cut. A pin that no longer fits is skipped, not truncated, and smaller pins
+// after it may still be admitted. Pure, so the deep-beat pin audit can
+// report exactly the cut the composed prompt applies.
+func packOperatingPins(operating []agentmemory.Memory, budget int) (kept, dropped []agentmemory.Memory) {
+	charBudget := budget * 4
+	used := 0
+	for _, mem := range operating {
+		if used+len(mem.Content) > charBudget {
+			dropped = append(dropped, mem)
+			continue
+		}
+		used += len(mem.Content)
+		kept = append(kept, mem)
+	}
+	return kept, dropped
+}
+
+// SystemPromptPinCut reports which operating pins the composed system prompt
+// carries and which it drops, using the exact packing systemPromptFromAgent
+// applies for this chat's profile. Identity layers are never cut and are not
+// reported. This is the cut that interactive turns actually experience — not
+// the retrieval cut PinAudit reports — and it is what the deep-beat audit
+// must show, because a pin outside the system prompt is a rule the agent
+// does not have.
+func (m *Memory) SystemPromptPinCut(ctx context.Context, chatID int64) (kept, dropped []PinnedEntry, budget int, err error) {
+	prof := m.profileFor(chatID)
+	if prof.AgentNS == "" || m.store == nil {
+		return nil, nil, 0, nil
+	}
+	pins, err := m.store.List(ctx, agentmemory.ListParams{NS: prof.AgentNS, PinnedOnly: true, Limit: 500})
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	budget = prof.SystemBudget
+	if budget <= 0 {
+		budget = 3000
+	}
+	operating, _ := splitOperatingPins(pins)
+	k, d := packOperatingPins(operating, budget)
+	return pinnedEntries(k), pinnedEntries(d), budget, nil
+}
+
+func pinnedEntries(mems []agentmemory.Memory) []PinnedEntry {
+	out := make([]PinnedEntry, 0, len(mems))
+	for _, p := range mems {
+		tok := p.EstTokens
+		if tok <= 0 {
+			tok = (len(p.Content) / 4) + 20
+		}
+		locked := false
+		for _, t := range p.Tags {
+			if t == "locked" {
+				locked = true
+			}
+		}
+		out = append(out, PinnedEntry{Key: p.Key, Importance: p.Importance, Tokens: tok, Locked: locked})
+	}
+	return out
+}
+
 // systemPromptFromAgent loads pinned memories from the agent namespace via Context().
 func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) string {
 	budget := prof.SystemBudget
@@ -259,36 +344,19 @@ func (m *Memory) systemPromptFromAgent(ctx context.Context, prof ProfileConfig) 
 	// store; the prompt gives it the same guarantee. The unlayered operating
 	// tail is packed under SystemBudget, newest-first, with drops logged —
 	// never silent.
-	layerOf := map[string]string{}
-	for _, mem := range pinnedAll {
-		for _, tag := range mem.Tags {
-			if strings.HasPrefix(tag, "layer:") {
-				layerOf[mem.Key] = tag
-				break
-			}
-		}
-	}
-	var operating []agentmemory.Memory
+	operating, layerOf := splitOperatingPins(pinnedAll)
 	for _, mem := range pinnedAll {
 		if lt, ok := layerOf[mem.Key]; ok {
 			layers[lt] = append(layers[lt], mem.Content)
-		} else {
-			operating = append(operating, mem)
 		}
 	}
 	// Pack operating knowledge under the budget (identity layers ride free —
-	// they're small and guaranteed). List returns newest-first; keep that
-	// order so recent corrections win the budget over stale rules.
-	opCharBudget := budget * 4
-	opChars, dropped := 0, 0
-	for _, mem := range operating {
-		if opChars+len(mem.Content) > opCharBudget {
-			dropped++
-			continue
-		}
-		opChars += len(mem.Content)
+	// they're small and guaranteed). See packOperatingPins for the order.
+	kept, droppedPins := packOperatingPins(operating, budget)
+	for _, mem := range kept {
 		layers[""] = append(layers[""], mem.Content)
 	}
+	dropped := len(droppedPins)
 	if dropped > 0 {
 		// Loud on purpose: silent pin-dropping is how a security-relevant pin
 		// vanished unnoticed for 11 days (7/16–7/27). The budget is a curation
@@ -664,14 +732,14 @@ func (m *Memory) LogExchange(ctx context.Context, chatID int64, userMsg, respons
 	}
 
 	err := m.putWithRetry(ctx, agentmemory.PutParams{
-		NS:         ns,
-		Key:        fmt.Sprintf("exchange-%d", time.Now().UnixMilli()),
-		Content:    content,
-		Kind:       "episodic",
-		Tags:       tags,
-		Tier:       "sensory", // raw observations — promoted to stm if accessed
-		TTL:        ttl,
-		Importance: 0.3, // ephemeral exchanges — low importance, will decay naturally
+		NS:          ns,
+		Key:         fmt.Sprintf("exchange-%d", time.Now().UnixMilli()),
+		Content:     content,
+		Kind:        "episodic",
+		Tags:        tags,
+		Tier:        "sensory", // raw observations — promoted to stm if accessed
+		TTL:         ttl,
+		Importance:  0.3, // ephemeral exchanges — low importance, will decay naturally
 		SourceUser:  sender,
 		SourceKind:  provKindFor(sender),
 		SourceScope: m.scopeFor(chatID),
@@ -774,14 +842,14 @@ func (m *Memory) RememberMedia(ctx context.Context, chatID int64, note string, p
 		files = append(files, agentmemory.FileParam{Path: p, Rel: "created"})
 	}
 	if _, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:         ns,
-		Key:        fmt.Sprintf("media-note-%d", time.Now().UnixMilli()),
-		Content:    "[photo] " + note,
-		Kind:       "episodic",
-		Tags:       tags,
-		Tier:       "stm", // searchable immediately; lifecycle governs from here
-		Importance: 0.5,
-		Files:      files,
+		NS:          ns,
+		Key:         fmt.Sprintf("media-note-%d", time.Now().UnixMilli()),
+		Content:     "[photo] " + note,
+		Kind:        "episodic",
+		Tags:        tags,
+		Tier:        "stm", // searchable immediately; lifecycle governs from here
+		Importance:  0.5,
+		Files:       files,
 		SourceUser:  sender,
 		SourceKind:  provKindFor(sender),
 		SourceScope: m.scopeFor(chatID),
@@ -804,14 +872,14 @@ func (m *Memory) Remember(ctx context.Context, chatID int64, content, sender str
 
 	key := sanitizeKey(content)
 	_, err := m.store.Put(ctx, agentmemory.PutParams{
-		NS:         ns,
-		Key:        key,
-		Content:    content,
-		Kind:       "semantic",
-		Tags:       tags,
-		Priority:   "high",
-		Importance: 0.8,   // user-remembered facts are high importance
-		Tier:       "ltm", // explicitly saved by user — skip stm
+		NS:          ns,
+		Key:         key,
+		Content:     content,
+		Kind:        "semantic",
+		Tags:        tags,
+		Priority:    "high",
+		Importance:  0.8,   // user-remembered facts are high importance
+		Tier:        "ltm", // explicitly saved by user — skip stm
 		SourceUser:  sender,
 		SourceKind:  provKindFor(sender),
 		SourceScope: m.scopeFor(chatID),
@@ -2348,11 +2416,12 @@ type PinnedEntry struct {
 // cut falls.
 //
 // This exists because "pinned" means two different things depending on who
-// assembles the context. The system prompt lists pinned memories UNBOUNDED
-// (see pinnedMemories), so the agent always carries all of them. But ghost's
-// Context() gives pinned only a sub-budget — Budget/2 — and admits them by
-// importance descending, silently dropping the tail. So when the agent
-// queries its OWN memory, it sees a truncated pin set.
+// assembles the context. The system prompt packs operating pins under
+// SystemBudget newest-created-first (see SystemPromptPinCut for that cut).
+// Ghost's Context() gives pinned a different sub-budget — Budget/2 — and
+// admits them by importance descending, silently dropping the tail. So when
+// the agent queries its OWN memory, it sees a truncated pin set that need
+// not match what its system prompt carries.
 //
 // That is fine until importance stops tracking consequence. Measured
 // 2026-08-01, both agents had every health and allergy fact sitting at the

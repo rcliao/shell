@@ -27,9 +27,10 @@ var noopMarkerRe = regexp.MustCompile(`(?i)\[noop\]`)
 var legacyDirectiveRe = regexp.MustCompile(`(?s)\[(?:relay|schedule|remember|browser|pm|tunnel|heartbeat-learning|task-complete|noop)(?:\s[^\]]*)?\](?:.*?\[/(?:relay|schedule|remember|browser|pm|tunnel|heartbeat-learning|task-complete)\])?`)
 
 // parseArtifacts extracts [artifact type="..." path="..." caption="..."] markers
-// from the response, collects image artifacts into photos and video artifacts
-// into videos, and returns the cleaned response text.
-func (b *Bridge) parseArtifacts(response string, photos *[]Photo, videos *[]Video) string {
+// from the response, collects image artifacts into photos, video artifacts
+// into videos, and document artifacts into docs, and returns the cleaned
+// response text.
+func (b *Bridge) parseArtifacts(response string, photos *[]Photo, videos *[]Video, docs *[]DocumentAttachment) string {
 	matches := artifactRe.FindAllStringSubmatchIndex(response, -1)
 	if len(matches) == 0 {
 		return response
@@ -64,6 +65,17 @@ func (b *Bridge) parseArtifacts(response string, photos *[]Photo, videos *[]Vide
 			}
 			*videos = append(*videos, Video{Data: data, Caption: caption})
 			b.archiveArtifact(path)
+		case "document":
+			// Path-based and NOT archived: a document is typically a living
+			// file (a project doc, an export) sent from where it lives —
+			// moving it would both break the later path-based send and steal
+			// the original.
+			if _, err := os.Stat(path); err != nil {
+				slog.Error("artifact: document not readable", "path", path, "error", err)
+				clean = clean[:m[0]] + "(failed to read document)" + clean[m[1]:]
+				continue
+			}
+			*docs = append(*docs, DocumentAttachment{Path: path, Caption: caption})
 		default:
 			slog.Warn("artifact: unknown type", "type", artifactType, "path", path)
 		}
