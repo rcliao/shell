@@ -384,6 +384,13 @@ Periodic check-ins routed through Claude with full context:
 6. Claude uses `scripts/shell-task complete --id N` for task completion
 7. Memory reflection runs after each heartbeat cycle
 
+Every beat is an ephemeral turn: a fresh CLI spawn with no `--resume`. The
+enrichment carries all the context a beat needs, and resuming the system
+chat's session only replayed its growing history after the cache had lapsed
+(~88k cache-creation tokens per hourly beat for a `[noop]`, vs ~30k cold).
+The enrichment lists recent history once per chat, not once per session
+row (a forum group has one session per thread).
+
 Every Nth beat (`scheduler.deep_reflect_interval`) is a **deep reflection**
 beat on the `heartbeat_deep` model. It carries extra context and is journaled
 to the `reflections` table:

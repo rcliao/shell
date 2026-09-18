@@ -236,11 +236,17 @@ func (b *Bridge) activeHeartbeatChats() []int64 {
 	if err != nil {
 		return nil
 	}
+	// One entry per CHAT, not per session row: a group with several forum
+	// threads has one active session per thread, and before this dedupe its
+	// recent history was appended once per thread (3–5× in the family group,
+	// observed 7/28, 8/6, 9/12, 9/14), inflating every heartbeat prompt.
 	chats := make([]int64, 0, len(sessions))
+	seen := make(map[int64]bool, len(sessions))
 	for _, sess := range sessions {
-		if IsSystemChat(sess.ChatID) {
+		if IsSystemChat(sess.ChatID) || seen[sess.ChatID] {
 			continue
 		}
+		seen[sess.ChatID] = true
 		chats = append(chats, sess.ChatID)
 	}
 	return chats

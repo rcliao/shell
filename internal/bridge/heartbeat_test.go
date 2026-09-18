@@ -111,3 +111,25 @@ func TestEnrichHeartbeatPrompt_ChatIDRelayInstruction(t *testing.T) {
 		t.Error("prompt missing the never-default-to-group instruction")
 	}
 }
+
+// A group with several forum threads has one active session per thread. The
+// heartbeat aggregates recent history per CHAT; before the dedupe the family
+// group's exchanges were appended once per thread (3–5× observed).
+func TestActiveHeartbeatChats_OnePerChat(t *testing.T) {
+	b := testBridge(t)
+	for _, s := range []struct{ chat, thread int64 }{
+		{-100200300, 0}, {-100200300, 2479}, {-100200300, 10859}, {42, 0}, {SystemChatID, 0},
+	} {
+		if err := b.store.SaveSession(s.chat, s.thread, "uuid"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chats := b.activeHeartbeatChats()
+	seen := map[int64]int{}
+	for _, c := range chats {
+		seen[c]++
+	}
+	if seen[-100200300] != 1 || seen[42] != 1 || seen[SystemChatID] != 0 || len(chats) != 2 {
+		t.Fatalf("activeHeartbeatChats = %v, want each real chat exactly once", chats)
+	}
+}
