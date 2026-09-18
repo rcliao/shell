@@ -309,8 +309,7 @@ func (d projectResearchDeps) pollProject(ctx context.Context, p *store.Project, 
 		// watermark move is a human's, or the agent's own edit answering a
 		// human's comment — either way the page is in use.
 		if !prev.IsZero() && !lastEdited.Equal(prev) {
-			humanAt = lastEdited
-			editEvents++
+			humanAt = lastEdited // activity only: no event is enqueued, so none is counted
 		}
 		if prev.IsZero() || !lastEdited.Equal(prev) {
 			d.refreshAdoptedMap(ctx, p)
@@ -350,7 +349,9 @@ func (d projectResearchDeps) pollProject(ctx context.Context, p *store.Project, 
 
 // refreshAdoptedMap re-reads an adopted page's top-level blocks into the
 // block map, so comments on blocks added since adoption are found. Best
-// effort: a failure keeps the previous map and the next edit retries.
+// effort: a failure keeps the previous map, and since the watermark still
+// advances, blocks added in that edit go unwatched until the page is edited
+// again. Page-level comments are unaffected.
 func (d projectResearchDeps) refreshAdoptedMap(ctx context.Context, p *store.Project) {
 	encoded, n, err := project.AdoptPage(ctx, d.notion, p.ExportRef)
 	if err != nil {

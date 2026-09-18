@@ -24,13 +24,13 @@ type Project struct {
 	ChatID          int64
 	MessageThreadID int64 // Telegram forum topic ID (0 = DM / main chat)
 
-	DocPath            string // workspace/projects/<slug>/doc.md
-	DocRev             string // last rendered commit
-	ExportKind         string // e.g. "notion"
-	ExportRef          string // external doc id (doc-ID amnesia fix)
-	BlockMap           string // JSON: section -> external block id
-	HandledDiscussions string // JSON array: comment threads already processed (see HandledDiscussion)
-	NotionWatermark    string // last seen Notion page last_edited_time (RFC3339); Wave D poll short-circuit
+	DocPath            string     // workspace/projects/<slug>/doc.md
+	DocRev             string     // last rendered commit
+	ExportKind         string     // e.g. "notion"
+	ExportRef          string     // external doc id (doc-ID amnesia fix)
+	BlockMap           string     // JSON: section -> external block id
+	HandledDiscussions string     // JSON array: comment threads already processed (see HandledDiscussion)
+	NotionWatermark    string     // last seen Notion page last_edited_time (RFC3339); Wave D poll short-circuit
 	NotionPolledAt     *time.Time // last completed comment sweep; quiet projects are polled less often (P3.5)
 
 	Instructions string

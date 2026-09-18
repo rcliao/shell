@@ -41,4 +41,22 @@ func TestProjectDocWriteEnforcesBudget(t *testing.T) {
 	if _, read := postProject(t, s, map[string]any{"action": "doc-read", "slug": "budget"}); read["rev"] != okRev {
 		t.Errorf("a refused write changed the doc: rev %v, want %v", read["rev"], okRev)
 	}
+
+	// The way out: a doc that is ALREADY over budget (it grew before the rule
+	// existed) must accept a write that shrinks it, even while still oversize.
+	p, _ := st.GetProjectBySlug("budget")
+	dir, err := s.projectDocDir(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := project.WriteDoc(dir, doc(project.DefaultDocBudget*3), "legacy growth"); err != nil {
+		t.Fatal(err)
+	}
+	code, out = write(doc(project.DefaultDocBudget * 2))
+	if code != http.StatusOK {
+		t.Fatalf("shrinking an over-budget doc returned %d, want 200: %v", code, out)
+	}
+	if code, out = write(doc(project.DefaultDocBudget*2 + 100)); code != http.StatusUnprocessableEntity {
+		t.Errorf("growing it again returned %d, want 422: %v", code, out)
+	}
 }

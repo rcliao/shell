@@ -237,6 +237,7 @@ func newProjectCmd() *cobra.Command {
 	bindCmd.Flags().Int64Var(&bindThreadFlag, "thread", 0, "Telegram forum topic id (0 = main chat)")
 
 	var adoptTitle, adoptEmoji string
+	var adoptReplace bool
 	var adoptChat, adoptThread int64
 	adoptCmd := &cobra.Command{
 		Use:   "adopt <slug> <notion-url-or-page-id>",
@@ -277,8 +278,18 @@ must be shared with the Notion integration first (page ••• menu → Connec
 				return err
 			}
 			if p != nil {
-				if bm := project.ParseBlockMap(p.BlockMap); bm.Rendered() && !bm.Adopted {
+				bm := project.ParseBlockMap(p.BlockMap)
+				switch {
+				case bm.Rendered() && !bm.Adopted:
 					return fmt.Errorf("project %q already renders its own Notion page (%s) — adopting would orphan it; create a new slug for the human page", slug, p.ExportRef)
+				case p.ExportRef != "" && p.ExportRef != pageID && !adoptReplace:
+					// A hand-bound doc (the agent's only pointer to it), or a
+					// first render still in flight whose map is not stored yet.
+					// Either way, never overwrite a binding silently.
+					return fmt.Errorf("project %q is already bound to %s %q — adopting would replace that binding. Use a new slug, or pass --replace if the old binding is really obsolete", slug, p.ExportKind, p.ExportRef)
+				}
+				if p.ExportRef != "" && p.ExportRef != pageID {
+					fmt.Printf("Replacing previous binding: %s %s\n", p.ExportKind, p.ExportRef)
 				}
 			} else if adoptTitle == "" || adoptChat == 0 {
 				return fmt.Errorf("project %q does not exist: pass --title and --chat to create it", slug)
@@ -322,6 +333,7 @@ must be shared with the Notion integration first (page ••• menu → Connec
 	adoptCmd.Flags().StringVar(&adoptTitle, "title", "", "project title (when creating)")
 	adoptCmd.Flags().StringVar(&adoptEmoji, "emoji", "", "project emoji (when creating)")
 	adoptCmd.Flags().Int64Var(&adoptChat, "chat", 0, "chat id the project belongs to (when creating)")
+	adoptCmd.Flags().BoolVar(&adoptReplace, "replace", false, "replace an existing, different export binding (prints the old one)")
 	adoptCmd.Flags().Int64Var(&adoptThread, "thread", 0, "Telegram forum topic id (0 = main chat)")
 
 	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd, adoptCmd)

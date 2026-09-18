@@ -19,6 +19,9 @@ func TestParseNotionPageID(t *testing.T) {
 		// The query can carry OTHER ids (a view, a peeked page) — never pick those.
 		{"https://www.notion.so/Trip-" + id + "?v=ffffffffffffffffffffffffffffffff&p=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", id},
 		{"https://www.notion.so/Trip-" + id + "/", id},
+		// A title ending in digits must not donate them to the id.
+		{"https://www.notion.so/ws/Budget-20260918-" + id + "?pvs=4", id},
+		{"https://www.notion.so/ws/Trip-2026-" + id, id},
 	}
 	for _, c := range cases {
 		got, err := ParseNotionPageID(c.in)
@@ -45,6 +48,14 @@ func TestAdoptedBlockMapRoundTrips(t *testing.T) {
 	// An empty page still adopts: page-level comments need no blocks.
 	if empty := ParseBlockMap(AdoptedBlockMap(nil).encode()); !empty.Adopted || !empty.Rendered() {
 		t.Errorf("empty adopted page must still be pollable: %+v", empty)
+	}
+	// Fail closed: a mangled flag must not turn a human's page into a
+	// "rendered" one — the reserved section alone marks it adopted.
+	if !ParseBlockMap(`{"sections":{"_adopted":{"blocks":["b1"]}},"adopted":"yes"}`).Adopted {
+		t.Error("a type-mismatched adopted flag failed OPEN")
+	}
+	if !ParseBlockMap(`{"sections":{"_adopted":{"blocks":["b1"]}}}`).Adopted {
+		t.Error("a missing adopted flag failed OPEN")
 	}
 	// A rendered map never reads as adopted.
 	if ParseBlockMap(`{"sections":{"A":{"hash":"h","blocks":["x"]}}}`).Adopted {

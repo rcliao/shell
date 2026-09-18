@@ -50,6 +50,13 @@ func ParseBlockMap(raw string) BlockMap {
 	if bm.Sections == nil {
 		bm.Sections = map[string]BlockMapSection{}
 	}
+	// Fail closed. json.Unmarshal fills what it can and reports a type error
+	// for the rest, so a mangled "adopted" field would leave a map that looks
+	// rendered — and the renderer would then delete every block of a human's
+	// page as a "removed section". The reserved section is the second witness.
+	if _, ok := bm.Sections[adoptedSection]; ok {
+		bm.Adopted = true
+	}
 	return bm
 }
 

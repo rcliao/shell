@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +27,8 @@ type pollFakeNotion struct {
 	children   []project.NotionBlockRef
 	replies    []string // "discussion|text" of every CreateComment
 	replyErr   error
+	listErr    error // returned by every ListComments call while set
+	listCalls  int
 }
 
 func (f *pollFakeNotion) Enabled() bool { return f.enabled }
@@ -44,6 +49,10 @@ func (f *pollFakeNotion) GetPageLastEdited(_ context.Context, _ string) (time.Ti
 	return f.lastEdited, nil
 }
 func (f *pollFakeNotion) ListComments(_ context.Context, id, _ string) ([]project.NotionComment, string, error) {
+	f.listCalls++
+	if f.listErr != nil {
+		return nil, "", f.listErr
+	}
 	return f.comments[id], "", nil
 }
 func (f *pollFakeNotion) CreateComment(_ context.Context, discussionID string, rich []project.NotionRichText) (string, error) {
@@ -533,5 +542,57 @@ func TestNotionPollAdoptedPageIsWatchOnly(t *testing.T) {
 	out, err := deps.runPageEditReconcile(context.Background(), project.EventPayload{Slug: "demo"})
 	if err != nil || !strings.Contains(out, "watch-only") {
 		t.Errorf("reconcile on adopted = %q, %v; want a watch-only skip", out, err)
+	}
+}
+
+// The backoff wiring in the sweep loop: a quiet project that was just polled
+// is deferred; a completed sweep is recorded; a FAILED sweep is not, so it
+// retries on the next tick instead of waiting out the quiet interval.
+func TestNotionPollBackoffWiring(t *testing.T) {
+	st, ws, fake, deps := notionFixture(t)
+	age := func() {
+		// A second connection: the store has no raw-SQL door, on purpose.
+		t.Helper()
+		db, err := sql.Open("sqlite", filepath.Join(filepath.Dir(ws), "shell.db")+"?_pragma=busy_timeout(5000)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`UPDATE projects SET created_at = datetime('now','-60 days')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	polledAt := func() *time.Time {
+		p, _ := st.GetProjectBySlug("demo")
+		return p.NotionPolledAt
+	}
+	age()
+
+	// A failing sweep leaves no poll record.
+	fake.listErr = errors.New("notion 502")
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+	if polledAt() != nil {
+		t.Fatal("a failed sweep was recorded as polled — it would not retry for 6h")
+	}
+
+	// A completed sweep is recorded...
+	fake.listErr = nil
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+	if polledAt() == nil {
+		t.Fatal("a completed sweep was not recorded")
+	}
+
+	// ...and the quiet project is then deferred: no Notion calls at all.
+	before := fake.listCalls
+	out, err := deps.handleProjectEvent(context.Background(), pollTask())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.listCalls != before || !strings.Contains(out, "polled 0 projects") {
+		t.Errorf("quiet project was swept again (list calls %d -> %d): %s", before, fake.listCalls, out)
 	}
 }

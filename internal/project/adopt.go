@@ -25,8 +25,10 @@ import (
 // page's top-level block ids, which are the comment-poll targets.
 const adoptedSection = "_adopted"
 
-// notionIDPattern matches a Notion id: 32 hex chars, dashed or not.
-var notionIDPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}`)
+// notionIDPattern matches a Notion id at the END of a string: 32 hex chars,
+// dashed or not. Anchored on purpose — a title ending in digits ("Budget-
+// 20260918-<id>") would otherwise donate its date to the front of the match.
+var notionIDPattern = regexp.MustCompile(`(?i)([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
 
 // ParseNotionPageID extracts the page id from a Notion URL or a bare id and
 // returns it undashed and lowercase. In a URL the id is the tail of the last
@@ -41,11 +43,10 @@ func ParseNotionPageID(ref string) (string, error) {
 	if i := strings.LastIndex(s, "/"); i >= 0 {
 		s = s[i+1:]
 	}
-	matches := notionIDPattern.FindAllString(s, -1)
-	if len(matches) == 0 {
-		return "", fmt.Errorf("no Notion page id found in %q", ref)
+	id := notionIDPattern.FindString(s)
+	if id == "" {
+		return "", fmt.Errorf("no Notion page id found at the end of %q", ref)
 	}
-	id := matches[len(matches)-1]
 	return strings.ToLower(strings.ReplaceAll(id, "-", "")), nil
 }
 

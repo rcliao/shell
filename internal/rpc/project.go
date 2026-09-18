@@ -2,7 +2,9 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -476,10 +478,16 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 		return
 	}
 	// Doc budget (P3.5): this handler is the AGENT's write path — human edits
-	// reconcile through the daemon and are never refused. An unreadable prev
+	// reconcile through the daemon and are never refused. A missing prev
 	// (first write) counts as empty, so only a genuinely oversize first draft
 	// can trip it.
-	prev, _ := project.ReadDoc(dir)
+	prev, rerr := project.ReadDoc(dir)
+	if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		// Treating an unreadable doc as empty would refuse the very write
+		// the budget promises to accept: one that shrinks an oversize doc.
+		writeError(w, http.StatusInternalServerError, "doc read before write: "+rerr.Error())
+		return
+	}
 	if berr := project.CheckBudget(prev, req.Content, 0); berr != nil {
 		slog.Info("rpc: project doc write refused, over budget", "slug", p.Slug,
 			"bytes", len(req.Content), "prev_bytes", len(prev))
