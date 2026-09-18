@@ -101,3 +101,55 @@ func TestCheckBudgetCapsTheLogSection(t *testing.T) {
 		t.Error("an absent section must measure 0")
 	}
 }
+
+// Cases an independent review found: the log rule must never refuse a step in
+// the right direction just because the section was hard to MEASURE.
+func TestLogCapSurvivesMessyDocs(t *testing.T) {
+	x := func(n int) string { return strings.Repeat("x", n) }
+	head := "# T\n\n## 目標\n\ngoal\n\n"
+
+	cases := []struct {
+		name       string
+		prev, next string
+		refused    bool
+	}{
+		{"two log sections merged into one smaller total",
+			head + "## 更新紀錄\n\n" + x(5000) + "\n\n## 更新紀錄\n\n" + x(6000) + "\n",
+			head + "## 更新紀錄\n\n" + x(9000) + "\n", false},
+		{"appending to a SECOND log section is still an append",
+			head + "## 更新紀錄\n\n" + x(3000) + "\n\n## 更新紀錄\n\n" + x(6000) + "\n",
+			head + "## 更新紀錄\n\n" + x(3000) + "\n\n## 更新紀錄\n\n" + x(15000) + "\n", true},
+		{"decorated heading renamed to canonical while shrinking",
+			head + "## 📝 更新紀錄\n\n" + x(12000) + "\n",
+			head + "## 更新紀錄\n\n" + x(9000) + "\n", false},
+		{"decorated heading still counts as the log when it grows",
+			head + "## 更新紀錄 (log)\n\n" + x(9000) + "\n",
+			head + "## 更新紀錄 (log)\n\n" + x(10000) + "\n", true},
+		{"a fenced '## ' line does not split the log",
+			head + "## 更新紀錄\n\n" + x(3000) + "\n```\n## in fence\n```\n" + x(7000) + "\n",
+			head + "## 更新紀錄\n\n" + x(3000) + "\n```\n## in fence\n```\n" + x(5500) + "\n", false},
+		{"whole doc shrinks while the log gains a 'consolidated' line",
+			head + "## 現況\n\n" + x(12000) + "\n\n## 更新紀錄\n\n" + x(9000) + "\n",
+			head + "## 現況\n\n" + x(4000) + "\n\n## 更新紀錄\n\n" + x(9500) + "\n", false},
+	}
+	for _, c := range cases {
+		if err := CheckBudget(c.prev, c.next, 0); (err != nil) != c.refused {
+			t.Errorf("%s: err = %v, refused want %v", c.name, err, c.refused)
+		}
+	}
+}
+
+func TestHeadingNamedNeedsABoundary(t *testing.T) {
+	yes := []string{"決定", " 決定 ", "📌 決定", "決定 (decisions)", "✅決定"}
+	no := []string{"待決定", "決定權", "尚待決定事項", "", "現況"}
+	for _, h := range yes {
+		if !headingNamed(h, DecisionsSection) {
+			t.Errorf("headingNamed(%q, 決定) = false, want true", h)
+		}
+	}
+	for _, h := range no {
+		if headingNamed(h, DecisionsSection) {
+			t.Errorf("headingNamed(%q, 決定) = true — 待決定 must never read as 決定", h)
+		}
+	}
+}

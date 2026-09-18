@@ -84,7 +84,7 @@ pass `--chat` only to register a project for a DIFFERENT chat.
     summary line. Git history keeps the detail.
 - Projects created without `--doc-path` get a managed doc automatically
   (`projects/<slug>/doc.md` in your workspace, its own git repo, template
-  sections 目標/限制/現況/選項/待決定/更新紀錄). Pass `--doc-path` only to
+  sections 目標/限制/決定/現況/選項/待決定/更新紀錄). Pass `--doc-path` only to
   bind an EXISTING external file — doc-read/doc-write do not work on those.
 - **Managed docs mirror to Notion automatically.** When the daemon is
   configured (a `NOTION_TOKEN` plus `notion.project_parent_page_id` in

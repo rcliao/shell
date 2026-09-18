@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // DefaultDocBudget is the soft size limit for a project doc, in bytes. Sized
@@ -82,23 +84,96 @@ func CheckBudget(prev, next string, budget int) error {
 	if len(next) > budget && len(next) > len(prev) {
 		return &BudgetError{Size: len(next), Prev: len(prev), Budget: budget, Largest: LargestSections(next, 3)}
 	}
-	// Same asymmetry for the log: it may always shrink, it may not grow past
-	// its cap.
-	if nl, pl := SectionBytes(next, LogSection), SectionBytes(prev, LogSection); nl > LogBudget && nl > pl {
+	// Same asymmetry for the log, plus one more way out: the cap only bites
+	// when the WHOLE doc grew too. A consolidation that shrinks the doc while
+	// adding its own "consolidated today" line, or one that renames a
+	// variant heading this scanner could not measure before, is a step in the
+	// right direction and is never refused. What is refused is the plain
+	// append: more log, bigger doc.
+	if nl, pl := SectionBytes(next, LogSection), SectionBytes(prev, LogSection); nl > LogBudget && nl > pl && len(next) > len(prev) {
 		return &BudgetError{Size: nl, Prev: pl, Budget: LogBudget, Section: LogSection}
 	}
 	return nil
 }
 
-// SectionBytes is the size of the named section of md, 0 when absent.
-func SectionBytes(md, title string) int {
-	_, sections := ParseDoc(md)
-	for _, s := range sections {
-		if s.Title == title {
-			return len(s.Raw)
+// rawSection is one "## " section as written: its heading text and the lines
+// under it.
+type rawSection struct {
+	Title string
+	Body  []string
+}
+
+// scanSections splits md at "## " headings, ignoring any inside a fenced code
+// block. Deliberately NOT ParseDoc: that parser feeds the renderer's section
+// hashes, renames duplicate headings ("x #2"), and has no fence awareness —
+// all fine for rendering, all wrong for measuring. A briefing log is exactly
+// where a fenced snippet containing "## " shows up.
+func scanSections(md string) []rawSection {
+	var out []rawSection
+	inFence := false
+	for _, line := range strings.Split(md, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+		}
+		if !inFence && strings.HasPrefix(line, "## ") {
+			out = append(out, rawSection{Title: strings.TrimSpace(strings.TrimPrefix(line, "## "))})
+			continue
+		}
+		if len(out) > 0 {
+			out[len(out)-1].Body = append(out[len(out)-1].Body, line)
 		}
 	}
-	return 0
+	return out
+}
+
+// sectionsNamed returns every section whose heading names title (see
+// headingNamed). Not plain equality: live docs decorate headings ("📝 更新紀錄", "更新紀錄 (log)"), and
+// a doc can carry the same heading twice. Measuring only an exact first match
+// reads such a section as absent — and then a write that merges or renames it
+// looks like growth from zero.
+func sectionsNamed(md, title string) []rawSection {
+	var out []rawSection
+	for _, sec := range scanSections(md) {
+		if headingNamed(sec.Title, title) {
+			out = append(out, sec)
+		}
+	}
+	return out
+}
+
+// headingNamed reports whether a "## " heading names title: equal, or title
+// decorated on either side by non-letters ("📝 更新紀錄", "更新紀錄 (log)").
+// A boundary is required because 待決定 contains 決定 — a substring match
+// would file open questions under decisions.
+func headingNamed(heading, title string) bool {
+	heading = strings.TrimSpace(heading)
+	for from := 0; ; {
+		i := strings.Index(heading[from:], title)
+		if i < 0 {
+			return false
+		}
+		i += from
+		before, _ := utf8.DecodeLastRuneInString(heading[:i])
+		after, _ := utf8.DecodeRuneInString(heading[i+len(title):])
+		if (i == 0 || !unicode.IsLetter(before)) && (i+len(title) == len(heading) || !unicode.IsLetter(after)) {
+			return true
+		}
+		from = i + len(title)
+	}
+}
+
+// SectionBytes is the total size of the section(s) named title in md — heading
+// lines included, duplicates summed — and 0 when absent.
+func SectionBytes(md, title string) int {
+	n := 0
+	for _, sec := range sectionsNamed(md, title) {
+		n += len("## "+sec.Title) + 1
+		for _, l := range sec.Body {
+			n += len(l) + 1
+		}
+	}
+	return n
 }
 
 // LargestSections returns the n biggest sections of md, largest first.

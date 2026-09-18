@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rcliao/shell/internal/store"
 )
@@ -121,17 +123,20 @@ func (b *Bridge) readProjectDoc(docPath string) string {
 	return string(data)
 }
 
-// docSection returns the trimmed body under the "## <heading>" line of md, up
-// to the next "## " heading. "" when the heading is absent or empty.
+// docSection returns the trimmed body of every "## " section whose heading
+// names heading (docs decorate headings, and can repeat one), joined in
+// order. "## " lines inside a fenced code block are content, not headings.
+// "" when absent or empty. Mirrors internal/project's scanSections, which
+// cannot be imported from here.
 func docSection(md, heading string) string {
 	var body []string
-	in := false
+	in, inFence := false, false
 	for _, line := range strings.Split(md, "\n") {
-		if strings.HasPrefix(line, "## ") {
-			if in {
-				break
-			}
-			in = strings.TrimSpace(strings.TrimPrefix(line, "## ")) == heading
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			inFence = !inFence
+		}
+		if !inFence && strings.HasPrefix(line, "## ") {
+			in = headingNamed(strings.TrimPrefix(line, "## "), heading)
 			continue
 		}
 		if in {
@@ -139,6 +144,27 @@ func docSection(md, heading string) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(body, "\n"))
+}
+
+// headingNamed reports whether a "## " heading names title: equal, or title
+// decorated on either side by non-letters ("📝 更新紀錄", "更新紀錄 (log)").
+// A boundary is required because 待決定 contains 決定 — a substring match
+// would file open questions under decisions.
+func headingNamed(heading, title string) bool {
+	heading = strings.TrimSpace(heading)
+	for from := 0; ; {
+		i := strings.Index(heading[from:], title)
+		if i < 0 {
+			return false
+		}
+		i += from
+		before, _ := utf8.DecodeLastRuneInString(heading[:i])
+		after, _ := utf8.DecodeRuneInString(heading[i+len(title):])
+		if (i == 0 || !unicode.IsLetter(before)) && (i+len(title) == len(heading) || !unicode.IsLetter(after)) {
+			return true
+		}
+		from = i + len(title)
+	}
 }
 
 // truncateRunesTo bounds s to n runes — docs are mostly CJK.

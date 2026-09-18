@@ -3,6 +3,8 @@ package project
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -78,13 +80,17 @@ const ToDecideSection = "待決定"
 // nor struck through. Prose in the section is not counted — a count the
 // reader cannot match to lines they can see would be worse than none.
 func OpenQuestions(doc string) int {
-	_, sections := ParseDoc(doc)
 	n := 0
-	for _, sec := range sections {
-		if sec.Title != ToDecideSection {
-			continue
-		}
-		for _, line := range strings.Split(sec.Raw, "\n") {
+	for _, sec := range sectionsNamed(doc, ToDecideSection) {
+		inFence := false
+		for _, line := range sec.Body {
+			if t := strings.TrimSpace(line); strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+				inFence = !inFence
+				continue
+			}
+			if inFence {
+				continue
+			}
 			item, ok := listItem(line)
 			if !ok || item == "" {
 				continue
@@ -98,10 +104,11 @@ func OpenQuestions(doc string) int {
 	return n
 }
 
-// listItem returns the text of a TOP-LEVEL markdown list item ("- ", "* ",
-// "1. ", "1) "); indented lines are details of the item above, not items.
+// listItem returns the text of a TOP-LEVEL list item: "- ", "* ", "+ ", the
+// "▫️ " bullet these docs use, "1. " or "1) ". Indented lines are details of
+// the item above, not items.
 func listItem(line string) (string, bool) {
-	for _, p := range []string{"- ", "* "} {
+	for _, p := range []string{"- ", "* ", "+ ", "▫️ ", "▫ "} {
 		if rest, ok := strings.CutPrefix(line, p); ok {
 			return strings.TrimSpace(rest), true
 		}
@@ -321,14 +328,8 @@ func (h *Home) needs(projects []store.Project) map[string]int {
 		if p.Status != "active" {
 			continue
 		}
-		dir, ok := ManagedDocDir(h.workspaceDir, p.Slug)
-		if !ok {
-			continue
-		}
-		if doc, err := ReadDoc(dir); err == nil {
-			if n := OpenQuestions(doc); n > 0 {
-				out[p.Slug] = n
-			}
+		if n := OpenQuestions(h.readDoc(p)); n > 0 {
+			out[p.Slug] = n
 		}
 	}
 	return out
@@ -359,4 +360,27 @@ func messageGone(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "message to edit not found") ||
 		strings.Contains(s, "MESSAGE_ID_INVALID")
+}
+
+// readDoc finds a project's doc the way the bridge's scoped block does, so
+// the two never disagree: the managed repo first, else the registry's
+// doc_path resolved inside the workspace (a --doc-path project has no repo).
+func (h *Home) readDoc(p store.Project) string {
+	if dir, ok := ManagedDocDir(h.workspaceDir, p.Slug); ok {
+		if doc, err := ReadDoc(dir); err == nil {
+			return doc
+		}
+	}
+	if p.DocPath == "" {
+		return ""
+	}
+	rel := filepath.Clean(strings.TrimPrefix(p.DocPath, "workspace/"))
+	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(h.workspaceDir, rel))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }

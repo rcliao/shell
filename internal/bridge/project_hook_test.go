@@ -158,3 +158,62 @@ func TestReadProjectDocRefusesEscapes(t *testing.T) {
 		}
 	}
 }
+
+func TestScopedBlockOnMessyState(t *testing.T) {
+	b, st := newProjectHookBridge(t)
+	ws := t.TempDir()
+	b.workspaceDir = ws
+
+	// Legacy "workspace/" doc_path, read from disk for real. 待決定 must not
+	// be quoted as 決定 (substring!), a decorated second 決定 section counts,
+	// and a fenced "## " line neither ends the section nor starts one.
+	doc := "# H\n\n## 待決定\n\n- OPEN-Q\n\n## 決定\n\n- DECISION-1\n```\n## fenced heading\n- DECISION-IN-FENCE\n```\n- DECISION-2\n\n## 現況\n\nSTATUS\n\n## 📌 決定\n\n- DECISION-3\n"
+	if err := os.MkdirAll(filepath.Join(ws, "projects", "housing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "projects", "housing", "doc.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateProject(store.Project{Title: "Housing", ChatID: -100200300, MessageThreadID: 9,
+		DocPath: "workspace/projects/housing/doc.md"}); err != nil {
+		t.Fatal(err)
+	}
+	// A paused project on the same thread must NOT make it ambiguous.
+	if _, err := st.CreateProject(store.Project{Title: "Paused Twin", ChatID: -100200300, MessageThreadID: 9, Status: "paused"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := b.buildProjectsBlock(-100200300, 9)
+	if !strings.HasPrefix(got, "[Project] ") {
+		t.Fatalf("a paused twin must not defeat scoping: %q", got)
+	}
+	decisions := got[strings.Index(got, "\n決定:"):strings.Index(got, "\n待決定:")]
+	for _, want := range []string{"DECISION-1", "DECISION-IN-FENCE", "DECISION-2", "DECISION-3"} {
+		if !strings.Contains(decisions, want) {
+			t.Errorf("decisions quote missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(decisions, "OPEN-Q") || strings.Contains(got, "STATUS") {
+		t.Errorf("待決定 leaked into 決定, or status was quoted:\n%s", got)
+	}
+	if !strings.Contains(got[strings.Index(got, "\n待決定:"):], "OPEN-Q") {
+		t.Errorf("open questions missing:\n%s", got)
+	}
+}
+
+func TestReadProjectDocCannotReachAPlantedSecret(t *testing.T) {
+	b, _ := newProjectHookBridge(t)
+	root := t.TempDir()
+	b.workspaceDir = filepath.Join(root, "workspace")
+	if err := os.MkdirAll(b.workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "secret.md"), []byte("SECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"../secret.md", "workspace/../../secret.md", "projects/../../secret.md", "./../secret.md", filepath.Join(root, "secret.md")} {
+		if got := b.readProjectDoc(p); got != "" {
+			t.Errorf("readProjectDoc(%q) escaped the workspace and read %q", p, got)
+		}
+	}
+}

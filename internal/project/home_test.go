@@ -2,6 +2,8 @@ package project
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -363,5 +365,40 @@ func TestRenderHomeMarksProjectsThatNeedYou(t *testing.T) {
 	}
 	if RenderHome(projects) != RenderHomeWithNeeds(projects, nil) {
 		t.Error("RenderHome must be the no-needs rendering")
+	}
+}
+
+func TestOpenQuestionsOnMessyDocs(t *testing.T) {
+	// Two sections, the docs' own ▫️ bullet, "+", and a fence whose lines are
+	// neither headings nor questions.
+	doc := "# T\n\n## 待決定\n\n▫️ which week?\n+ budget?\n```\n## not a heading\n- not a question\n```\n- after the fence\n\n## 決定\n\n- 2026-09-01 decided, NOT a question\n\n## ❓ 待決定\n\n- second section counts too\n"
+	if got := OpenQuestions(doc); got != 4 {
+		t.Errorf("OpenQuestions = %d, want 4", got)
+	}
+}
+
+// Refresh path end to end: a real doc on disk → ❓ in the rendered list; and
+// no workspace → the old rendering, not a crash.
+func TestHomeNeedsReadsDocsFromDisk(t *testing.T) {
+	ws := t.TempDir()
+	dir := filepath.Join(ws, "legacy")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# P\n\n## 待決定\n\n1. a\n2. b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A --doc-path project: no managed repo, legacy "workspace/" prefix.
+	projects := []store.Project{{Slug: "legacy", Title: "Legacy", Status: "active", DocPath: "workspace/legacy/plan.md"},
+		{Slug: "escape", Title: "Escape", Status: "active", DocPath: "../../etc/passwd"}}
+
+	h := NewHome(nil, nil)
+	if got := h.needs(projects); got != nil {
+		t.Errorf("no workspace must mean no counts, got %v", got)
+	}
+	h.SetWorkspace(ws)
+	got := h.needs(projects)
+	if got["legacy"] != 2 || len(got) != 1 {
+		t.Errorf("needs = %v, want legacy:2 only", got)
 	}
 }
