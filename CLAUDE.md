@@ -2,73 +2,7 @@
 
 Telegram Bot to Claude Code CLI bridge. One Claude Code session per Telegram chat, persisted in SQLite.
 
-## Architecture
-
-- `cmd/shell/main.go` — Cobra CLI entrypoint
-- `internal/config/` — JSON config from ~/.shell/config.json
-- `internal/store/` — SQLite persistence (sessions + message log)
-- `internal/process/` — Claude CLI subprocess lifecycle
-- `internal/bridge/` — Core routing: Telegram ↔ Claude Code
-- `internal/telegram/` — Bot wrapper, handlers, auth, photo download
-- `internal/daemon/` — Daemon lifecycle, PID file, signal handling
-- `internal/memory/` — Optional memory store integration (ghost)
-- `internal/mcp/` — MCP stdio server: exposes PM, tunnel, relay as native Claude tools
-- `internal/rpc/` — HTTP-over-Unix-socket RPC for skill scripts and MCP server
-- `internal/planner/` — Optional plan-execute-review loop
-- `internal/reload/` — Live reload watcher (rebuild + syscall.Exec)
-- `internal/worktree/` — Git worktree isolation for plan execution
-- `internal/skill/` — Skill registry: loads `~/.shell/skills/` and `.agent/skills/` for system prompt
-- `internal/scheduler/` — Cron/one-shot scheduler with SQLite persistence
-- `cmd/shell-search/` — Standalone web search CLI (skill binary)
-- `cmd/shell-imagen/` — Standalone image generation CLI (skill binary)
-- `skills/` — Skill definitions (SKILL.md + scripts)
-
-## Commands
-
-- `shell init` — Create config directory and default config
-- `shell daemon` — Start the bot daemon (`--watch` for live reload)
-- `shell restart` — Send SIGHUP to running daemon (graceful restart)
-- `shell stop` — Send SIGTERM to running daemon (graceful shutdown)
-- `shell send "msg"` — One-shot test without Telegram
-- `shell status` — Show active sessions
-- `shell session list|kill <chat-id>` — Session management
-- `shell pairing list|approve|allowlist|revoke` — Pairing and allowlist management
-- `shell mcp` — MCP stdio server (spawned by Claude CLI, not run manually)
-
-## Build & Test
-
-```bash
-make build           # Build binary
-make test            # Run tests
-make vet             # Run go vet
-make watch           # Build and run with --watch
-make skills          # Build skill binaries (web-search, generate-image)
-make install-skills  # Build and install skills to ~/.shell/skills/
-```
-
-## Key Patterns
-
-- Each Telegram message → `bridge.HandleMessageStreaming()` → `process.Agent.Send(AgentRequest, onUpdate)` → Claude CLI
-- Bidirectional protocol: `--input-format stream-json --output-format stream-json` with stdin/stdout JSON control protocol
-- Typed boundaries: `AgentRequest` (bridge→process), `SendResult` (process→bridge), `AgentResponse` (bridge→telegram)
-- Response processing via `processResponse()`: collects `Photo`s from artifacts, logs exchange
-- Sessions persist across restarts via SQLite
-- Allowlist-based auth by Telegram user ID
-- Streaming responses with live Telegram message edits
-- Photo/image attachments: downloaded to temp files, sent as typed `ImageAttachment`/`PDFAttachment`
-- Album support: multiple photos buffered with 500ms debounce, sent as single message
-- PID file at `~/.shell/shell.pid` for restart/stop commands
-- SIGHUP triggers graceful restart via syscall.Exec (same pattern as reload.go)
-- Config: `~/.shell/config.json` with `allowed_tools` for auto-approving Claude CLI tools
-- Emoji reactions map to actions (go, stop, cancel, status, regenerate, remember, forget, retry)
-- Heartbeat: `/heartbeat <interval> <message>` — periodic check-in routed through Claude with session context (one per chat)
-  - Quiet hours: heartbeats suppressed during configurable window (default 10 PM - 7 AM in scheduler timezone)
-  - Proactive checks: heartbeat prompts Claude to check for anything needing attention
-  - Memory reflection: includes memory context for heartbeat to reflect on stored knowledge
-  - Background tasks: `/task add|list|done|delete` — queue tasks for heartbeat to pick up
-  - Noop suppression: heartbeat responses with nothing to report are not sent to chat
-  - Check-in messages: every ~4 heartbeats, a friendly check-in hint is included
-- Scheduler config: `{"scheduler": {"enabled": true, "timezone": "UTC", "quiet_hour_start": 22, "quiet_hour_end": 7}}` in config.json
+Layout, commands and build targets: `docs/ARCHITECTURE.md`, `shell --help`, `Makefile`.
 
 ## Tool System (Three Layers)
 
