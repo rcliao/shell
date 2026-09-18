@@ -2,12 +2,15 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +56,20 @@ var cadenceCrons = map[string]string{
 	"daily":   "0 9 * * *",
 	"weekly":  "0 9 * * 1",
 	"monthly": "0 9 1 * *",
+}
+
+// researchCron is the cadence's cron with the minute staggered by project id
+// into :10/:20/:30/:40/:50. Every project registering at :00 put the research
+// turns on top of each other and of the top-of-the-hour prompt schedules;
+// turns that share a chat serialize, and the ones that do not still compete
+// for the same tools. Never :00, and stable for a given project.
+func researchCron(cadence string, projectID int64) string {
+	expr, ok := cadenceCrons[cadence]
+	if !ok {
+		return ""
+	}
+	minute := 10 + (projectID%5)*10
+	return strconv.FormatInt(minute, 10) + strings.TrimPrefix(expr, "0")
 }
 
 // telegramReactionEmoji is the set of emoji Telegram accepts as message
@@ -202,7 +219,7 @@ func (s *Server) registerResearchSchedule(p *store.Project, cadence string) (boo
 		slog.Info("rpc: research schedule skipped, scheduler not enabled", "slug", p.Slug)
 		return false, ""
 	}
-	expr := cadenceCrons[cadence]
+	expr := researchCron(cadence, p.ID)
 	cronExpr, err := s.cronParse(expr)
 	if err != nil {
 		slog.Warn("rpc: research schedule cron parse failed", "slug", p.Slug, "expr", expr, "error", err)
@@ -458,6 +475,23 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 	dir, err := s.projectDocDir(p)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Doc budget (P3.5): this handler is the AGENT's write path — human edits
+	// reconcile through the daemon and are never refused. A missing prev
+	// (first write) counts as empty, so only a genuinely oversize first draft
+	// can trip it.
+	prev, rerr := project.ReadDoc(dir)
+	if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		// Treating an unreadable doc as empty would refuse the very write
+		// the budget promises to accept: one that shrinks an oversize doc.
+		writeError(w, http.StatusInternalServerError, "doc read before write: "+rerr.Error())
+		return
+	}
+	if berr := project.CheckBudget(prev, req.Content, 0); berr != nil {
+		slog.Info("rpc: project doc write refused, over budget", "slug", p.Slug,
+			"bytes", len(req.Content), "prev_bytes", len(prev))
+		writeError(w, http.StatusUnprocessableEntity, berr.Error())
 		return
 	}
 	rev, err := project.WriteDoc(dir, req.Content, req.Attribution)

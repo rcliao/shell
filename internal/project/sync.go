@@ -29,6 +29,9 @@ type BlockMap struct {
 	// preceding section's last block.
 	Order  []string `json:"order,omitempty"`
 	Footer string   `json:"footer,omitempty"` // footer paragraph block id
+	// Adopted marks a page a human made (see adopt.go): watched for comments,
+	// never rendered or reconciled.
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 // BlockMapSection records one rendered section.
@@ -46,6 +49,13 @@ func ParseBlockMap(raw string) BlockMap {
 	}
 	if bm.Sections == nil {
 		bm.Sections = map[string]BlockMapSection{}
+	}
+	// Fail closed. json.Unmarshal fills what it can and reports a type error
+	// for the rest, so a mangled "adopted" field would leave a map that looks
+	// rendered — and the renderer would then delete every block of a human's
+	// page as a "removed section". The reserved section is the second witness.
+	if _, ok := bm.Sections[adoptedSection]; ok {
+		bm.Adopted = true
 	}
 	return bm
 }
@@ -165,6 +175,13 @@ func (r *Renderer) SyncProjectPage(ctx context.Context, st SyncStore, p *store.P
 		// Pre-P3 binding or a page/database a human created: not ours to touch.
 		slog.Info("notion render: export_ref without a block map — leaving the external doc alone",
 			"slug", p.Slug, "export_ref", p.ExportRef)
+		return nil
+	}
+
+	if bm.Adopted {
+		// A human's page. Rendering would archive every block we cannot
+		// express (tables, checkboxes, ...). Never — not even via rebuild.
+		slog.Info("notion render: adopted page is watch-only, not rendering", "slug", p.Slug)
 		return nil
 	}
 
