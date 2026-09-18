@@ -21,9 +21,26 @@ import (
 // ones that drew "this is a mess" complaints were past 40 KB.
 const DefaultDocBudget = 24 * 1024
 
-// BudgetError is an agent write refused for growing an over-budget doc.
+// The update log gets its own cap. When the doc budget first fired in
+// production, 99% of a 101 KB doc was this one section — dated entries
+// appended daily and never trimmed — while goals, constraints and open items
+// had not changed in a month. A doc under its total budget can still be
+// mostly log, so the log is bounded separately.
+const (
+	LogSection = "更新紀錄"
+	LogBudget  = 8 * 1024
+)
+
+// DecisionsSection holds dated one-line decisions: the project's shared
+// memory. Consolidation must never cut it (the skill text says so; nothing
+// here caps it).
+const DecisionsSection = "決定"
+
+// BudgetError is an agent write refused for growing an over-budget doc, or —
+// when Section is set — an over-budget section of it.
 type BudgetError struct {
 	Size, Prev, Budget int
+	Section            string // "" = the whole doc
 	Largest            []SectionSize
 }
 
@@ -35,6 +52,14 @@ type SectionSize struct {
 
 func (e *BudgetError) Error() string {
 	var b strings.Builder
+	if e.Section != "" {
+		fmt.Fprintf(&b, "section %q is over its cap: %s, cap %s, and this write makes it larger (was %s). ",
+			e.Section, kb(e.Size), kb(e.Budget), kb(e.Prev))
+		b.WriteString("It is a log, not the doc: keep the most recent entries in full, fold older ones into ONE dated summary line ")
+		fmt.Fprintf(&b, "(git history keeps the detail), and move anything that was decided into %q. ", DecisionsSection)
+		b.WriteString("A write that shrinks the section is accepted.")
+		return b.String()
+	}
 	fmt.Fprintf(&b, "doc is over budget: %s, budget %s, and this write makes it larger (was %s). ",
 		kb(e.Size), kb(e.Budget), kb(e.Prev))
 	b.WriteString("Consolidate before adding: keep decisions and current facts, cut superseded drafts, ")
@@ -54,10 +79,26 @@ func CheckBudget(prev, next string, budget int) error {
 	if budget <= 0 {
 		budget = DefaultDocBudget
 	}
-	if len(next) <= budget || len(next) <= len(prev) {
-		return nil
+	if len(next) > budget && len(next) > len(prev) {
+		return &BudgetError{Size: len(next), Prev: len(prev), Budget: budget, Largest: LargestSections(next, 3)}
 	}
-	return &BudgetError{Size: len(next), Prev: len(prev), Budget: budget, Largest: LargestSections(next, 3)}
+	// Same asymmetry for the log: it may always shrink, it may not grow past
+	// its cap.
+	if nl, pl := SectionBytes(next, LogSection), SectionBytes(prev, LogSection); nl > LogBudget && nl > pl {
+		return &BudgetError{Size: nl, Prev: pl, Budget: LogBudget, Section: LogSection}
+	}
+	return nil
+}
+
+// SectionBytes is the size of the named section of md, 0 when absent.
+func SectionBytes(md, title string) int {
+	_, sections := ParseDoc(md)
+	for _, s := range sections {
+		if s.Title == title {
+			return len(s.Raw)
+		}
+	}
+	return 0
 }
 
 // LargestSections returns the n biggest sections of md, largest first.

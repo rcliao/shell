@@ -64,12 +64,24 @@ pass `--chat` only to register a project for a DIFFERENT chat.
   their version is auto-committed separately before yours (look for
   `human-edit(local):` in history) — never overwrite it silently without
   reading first.
-- **The doc has a size budget (24 KB).** It is a working page, not a log: replace
-  stale content instead of appending under it. `doc-write` REFUSES a write that
-  leaves the doc over budget and larger than before, and names the biggest
-  sections. The fix is to consolidate — keep decisions and current facts, cut
-  superseded drafts, revision logs and resolved to-dos (git history keeps
-  them). A write that shrinks the doc is always accepted.
+- **The doc has a size budget (24 KB), and its log has its own (8 KB).** It is
+  a working page, not a log: replace stale content instead of appending under
+  it. `doc-write` REFUSES a write that leaves the doc (or the `更新紀錄`
+  section) over budget and larger than before, and says which. A write that
+  shrinks it is always accepted.
+- **The headings have roles — keep them, consolidate by role:**
+  - `目標` / `限制` — what the project is for. Never cut these to save space.
+  - `決定` — dated one-line decisions ("2026-09-01 booked the ryokan, not the
+    hotel"). The project's memory. **Never cut.** When something gets decided
+    in chat or in a log entry, write it here. Add the heading (after `限制`)
+    if an older doc lacks it.
+  - `現況` / `選項` — the CURRENT state and the options still open. Delete
+    options that lost and status that is no longer true; do not keep both
+    versions.
+  - `待決定` — open questions that need a human. One line each; remove a line
+    the moment it is answered (and record the answer under `決定`).
+  - `更新紀錄` — recent dated entries in full; fold older ones into ONE dated
+    summary line. Git history keeps the detail.
 - Projects created without `--doc-path` get a managed doc automatically
   (`projects/<slug>/doc.md` in your workspace, its own git repo, template
   sections 目標/限制/現況/選項/待決定/更新紀錄). Pass `--doc-path` only to

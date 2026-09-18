@@ -357,7 +357,8 @@ Five units, each shippable alone, in this order:
    目標/限制 protected; 現況/選項 current state, prunable; 待決定 = "needs
    you" (feeds unit 4); 更新紀錄 capped. New heading **決定** — dated one-line
    decisions, the project's shared memory, never cut by consolidation.
-   `CheckBudget` gains a per-section cap for 更新紀錄 (4 KB) with the same
+   `CheckBudget` gains a per-section cap for 更新紀錄 (8 KB — a daily-briefing
+   doc logs ~1.2 KB a day, so this holds about a week) with the same
    asymmetry as the doc budget: over the cap AND larger than before →
    refused, naming the section; shrinking always accepted. Enforcement only —
    the refusal message proved sufficient, so no new prompt text.
