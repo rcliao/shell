@@ -264,7 +264,11 @@ must be shared with the Notion integration first (page ••• menu → Connec
 			defer st.Close()
 
 			// Same token contract as the daemon: the configured secret, handed
-			// to the client through the env var it reads.
+			// to the client through the env var it reads. The store is opened
+			// here because only the daemon opens it at startup — without this
+			// a CLI run sees no secrets at all and reports Notion as
+			// unconfigured.
+			config.OpenSecretStore(cfg.Secrets)
 			tokenName := cfg.Notion.TokenSecret
 			if tokenName == "" {
 				tokenName = "NOTION_TOKEN"
