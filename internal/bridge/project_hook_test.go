@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,11 +21,11 @@ func newProjectHookBridge(t *testing.T) (*Bridge, *store.Store) {
 
 func TestProjectsBlockEmptyWhenNoProjects(t *testing.T) {
 	b, _ := newProjectHookBridge(t)
-	if got := b.buildProjectsBlock(42); got != "" {
+	if got := b.buildProjectsBlock(42, 0); got != "" {
 		t.Errorf("expected zero bytes for a chat with no projects, got %q", got)
 	}
 	// The phantom system chat never gets a block.
-	if got := b.buildProjectsBlock(0); got != "" {
+	if got := b.buildProjectsBlock(0, 0); got != "" {
 		t.Errorf("expected zero bytes for chat 0, got %q", got)
 	}
 }
@@ -47,7 +48,7 @@ func TestProjectsBlockListsActiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	block := b.buildProjectsBlock(42)
+	block := b.buildProjectsBlock(42, 0)
 	if !strings.HasPrefix(block, "[Projects]\n") {
 		t.Fatalf("block must start with the [Projects] header, got %q", block)
 	}
@@ -77,11 +78,83 @@ func TestProjectsBlockTruncatesInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	block := b.buildProjectsBlock(42)
+	block := b.buildProjectsBlock(42, 0)
 	if strings.Contains(block, long) {
 		t.Error("instructions should be truncated")
 	}
 	if !strings.Contains(block, strings.Repeat("計", projectInstructionsMax)+"…") {
 		t.Errorf("expected %d-rune excerpt with ellipsis, got %q", projectInstructionsMax, block)
+	}
+}
+
+// In a project's own thread the turn sees THAT project — with its decisions
+// and open questions — not the chat-wide list. The thread id decides; nothing
+// is classified.
+func TestProjectsBlockScopedToOwnThread(t *testing.T) {
+	b, st := newProjectHookBridge(t)
+	ws := t.TempDir()
+	b.workspaceDir = ws
+
+	mk := func(title string, thread int64, docPath string) {
+		t.Helper()
+		if _, err := st.CreateProject(store.Project{
+			Title: title, ChatID: -100200300, MessageThreadID: thread,
+			ExportKind: "notion", ExportRef: "ref-" + title, DocPath: docPath,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("Japan Trip", 7, "projects/japan-trip/doc.md")
+	mk("Housing", 9, "workspace/projects/housing/doc.md") // legacy prefix
+	mk("Loose Idea", 0, "")
+
+	doc := "# Japan Trip\n\n## 目標\n\nsee snow\n\n## 決定\n\n- 2026-09-01 ryokan, not hotel\n\n## 現況\n\nlong status that must NOT be quoted\n\n## 待決定\n\n- which week in February?\n\n## 更新紀錄\n\n- noise\n"
+	if err := os.MkdirAll(filepath.Join(ws, "projects", "japan-trip"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "projects", "japan-trip", "doc.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	scoped := b.buildProjectsBlock(-100200300, 7)
+	if !strings.HasPrefix(scoped, "[Project] ") {
+		t.Fatalf("own thread must get the scoped block, got %q", scoped)
+	}
+	for _, want := range []string{"japan-trip — Japan Trip", "notion:ref-Japan Trip", "ryokan, not hotel", "which week in February?", "housing", "loose-idea"} {
+		if !strings.Contains(scoped, want) {
+			t.Errorf("scoped block missing %q:\n%s", want, scoped)
+		}
+	}
+	for _, not := range []string{"must NOT be quoted", "noise", "see snow", "ref-Housing"} {
+		if strings.Contains(scoped, not) {
+			t.Errorf("scoped block leaked %q:\n%s", not, scoped)
+		}
+	}
+
+	// A doc the bridge cannot read still scopes — just without quotes.
+	if got := b.buildProjectsBlock(-100200300, 9); !strings.HasPrefix(got, "[Project] ") || !strings.Contains(got, "housing — Housing") {
+		t.Errorf("thread 9 must scope to housing even with no doc on disk: %q", got)
+	}
+	// The general thread, and a thread no project owns, keep the full list.
+	for _, thread := range []int64{0, 555} {
+		list := b.buildProjectsBlock(-100200300, thread)
+		if !strings.HasPrefix(list, "[Projects]\n") || strings.Count(list, "\n- ")+1 < 3 {
+			t.Errorf("thread %d must get the chat-wide list: %q", thread, list)
+		}
+	}
+	// Two projects claiming one thread is ambiguous: list, never a guess.
+	mk("Squatter", 7, "")
+	if got := b.buildProjectsBlock(-100200300, 7); !strings.HasPrefix(got, "[Projects]\n") {
+		t.Errorf("ambiguous thread must fall back to the list: %q", got)
+	}
+}
+
+func TestReadProjectDocRefusesEscapes(t *testing.T) {
+	b, _ := newProjectHookBridge(t)
+	b.workspaceDir = t.TempDir()
+	for _, p := range []string{"../../etc/passwd", "/etc/passwd", "workspace/../../x"} {
+		if got := b.readProjectDoc(p); got != "" {
+			t.Errorf("readProjectDoc(%q) read outside the workspace", p)
+		}
 	}
 }

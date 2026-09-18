@@ -456,10 +456,18 @@ and replies in the thread.
 | Page edit | reconciled into the doc as a human-edit commit | counts as human activity; block list re-read |
 | Bound with | `project create` (skill) | `shell project adopt <slug> <url>` |
 
+**Focus: what a turn sees.** In a project's own thread — a group forum topic
+whose id is the project's `message_thread_id` — the turn gets a scoped
+`[Project]` block: that project alone, plus the 決定 (decisions) and 待決定
+(open questions) sections quoted from its doc. The thread id decides; nothing
+is classified. Anywhere else the turn gets the chat-wide `[Projects]` list.
+Two projects claiming one thread is ambiguous and falls back to the list.
+
 **Rules the write and poll paths enforce.**
-- *Doc budget (24 KB).* The research prompt states size vs budget; `doc-write`
-  refuses an agent write that is over budget **and** larger than the doc it
-  replaces. Shrinking is always accepted; human edits are never refused.
+- *Doc budget (24 KB) and log cap (8 KB).* The research prompt states size vs
+  budget; `doc-write` refuses an agent write that leaves the doc, or its
+  更新紀錄 section, over budget **and** larger than before. Shrinking is always
+  accepted; human edits are never refused. 決定 is never cut.
 - *Poll backoff.* A project with human activity, research, or creation in the
   last 7 days is swept every 30-minute tick; a quiet one every 6 hours
   (`notion_polled_at`, written without touching `updated_at`).
