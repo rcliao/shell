@@ -275,6 +275,12 @@ func parseEvents(scanner lineSource, stdin io.Writer, emit EventFunc, obs turnOb
 	// inserts "\n\n" so the pre-tool and post-tool prose don't get glued
 	// together with no whitespace.
 	var pendingSeparator bool
+	// Text is also kept as SEGMENTS split at tool_use boundaries, so the
+	// bridge can tell a pre-tool aside ("Let me check the schedule first")
+	// from the answer that follows the tool. allText stays the full
+	// concatenation; TextSegments is the same text, split.
+	var segments []string
+	var curSegment strings.Builder
 	appendText := func(s string) {
 		if s == "" {
 			return
@@ -284,9 +290,21 @@ func parseEvents(scanner lineSource, stdin io.Writer, emit EventFunc, obs turnOb
 			if onUpdate != nil {
 				onUpdate("\n\n")
 			}
+			if curSegment.Len() > 0 {
+				segments = append(segments, curSegment.String())
+				curSegment.Reset()
+			}
 		}
 		pendingSeparator = false
 		allText.WriteString(s)
+		curSegment.WriteString(s)
+	}
+	flushSegments := func() []string {
+		if curSegment.Len() > 0 {
+			segments = append(segments, curSegment.String())
+			curSegment.Reset()
+		}
+		return segments
 	}
 
 	for scanner.Scan() {
@@ -430,8 +448,12 @@ func parseEvents(scanner lineSource, stdin io.Writer, emit EventFunc, obs turnOb
 			// and fall back to event.Result only if nothing was accumulated.
 			if allText.Len() > 0 {
 				result.Text = allText.String()
+				result.TextSegments = flushSegments()
 			} else {
 				result.Text = event.Result
+				if event.Result != "" {
+					result.TextSegments = []string{event.Result}
+				}
 			}
 			if event.SessionID != "" {
 				result.SessionID = event.SessionID

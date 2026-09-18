@@ -1159,6 +1159,9 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	if archivedCount > 0 {
 		cleaned, note := extractMediaNote(result.Text)
 		result.Text = cleaned
+		for i, seg := range result.TextSegments {
+			result.TextSegments[i], _ = extractMediaNote(seg)
+		}
 		if note != "" && b.store != nil {
 			for _, img := range images {
 				if img.MediaID != 0 {
@@ -1224,7 +1227,11 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 // It parses all response directives (relay, heartbeat, memory, schedule, artifacts),
 // logs the exchange, and returns a typed AgentResponse with collected photos.
 func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID int64, userMsg string, isHeartbeat bool, result process.SendResult, source, turnModel, senderName string) AgentResponse {
-	response := strings.TrimSpace(result.Text)
+	// A person reads the answer, not the asides the model emitted before its
+	// tool calls (2.8% of replies 9/1–9/16 opened with "Let me check…" or a
+	// verbalised self-check). Journals keep the full text — see reply_text.go.
+	journal := isHeartbeat || IsSystemChat(chatID)
+	response := strings.TrimSpace(applyUserFacingText(chatID, journal, source, result.TextSegments, result.Text))
 
 	// Capture the deep-heartbeat journal BEFORE anything else can consume or
 	// discard the text. Deep beats are where the agent audits its own past
@@ -1295,9 +1302,18 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// Parse task delegation directives ([task to=...], [task-result id=...]).
 	response = b.parseTaskDirectives(chatID, response)
 
-	// If text is empty but tools were used, summarize what was done.
+	// If text is empty but tools were used, summarize what was done — for
+	// system turns only, where the summary lands in a journal. A person once
+	// received "✓ mcp__shell-bridge__shell_schedule ×2, Bash ×2" as the
+	// answer to "so who set it?" (9/14); interactive chats get the existing
+	// empty-reply handling instead (DM corrective retry, group silence).
 	if response == "" && len(result.ToolCalls) > 0 {
-		response = summarizeToolCalls(result.ToolCalls)
+		if journal {
+			response = summarizeToolCalls(result.ToolCalls)
+		} else {
+			slog.Info("reply: tools ran but no text; not sending tool summary to chat",
+				"chat_id", chatID, "source", source, "tools", summarizeToolCalls(result.ToolCalls))
+		}
 	}
 
 	// Collect photos, videos, and documents from artifact markers (skill output).

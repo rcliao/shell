@@ -44,7 +44,13 @@ type Usage struct {
 
 // SendResult contains the response text, session ID, and any binary artifacts.
 type SendResult struct {
-	Text         string
+	Text string
+	// TextSegments is Text split at tool_use boundaries, in order: every
+	// element before the last is prose the model emitted BEFORE a tool call
+	// (usually an aside like "Let me check the schedule first"); the last is
+	// what it said after its final tool call. Text == strings.Join(TextSegments,
+	// "\n\n"). Empty when the turn produced no text.
+	TextSegments []string
 	SessionID    string
 	Artifacts    []Artifact
 	ToolCalls    []ToolCall // tool calls observed during execution

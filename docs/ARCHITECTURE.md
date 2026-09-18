@@ -189,6 +189,20 @@ stdout (CLI → SDK):
     Agent subagent's <task-notification>); logged as a turn boundary
 ```
 
+The parser keeps every assistant text block (`SendResult.Text`) and the same
+text split at tool_use boundaries (`SendResult.TextSegments`). What a person
+receives is decided in the bridge (`reply_text.go`): a short segment (≤160
+bytes, and shorter than what follows it) that precedes a tool call is an
+aside — "Let me check the schedule first", or the agent reciting a self-check
+— and is dropped from replies bound for a real chat and logged; long pre-tool
+prose, a short answer followed by "Memory saved", and anything after the last
+tool call stay. Journal turns (heartbeats, anything on the system chat) keep
+the full narrative. The destination decides, not the sender: a prompt-mode
+schedule is system-initiated but replies into a real chat, so it is filtered.
+Before this (2026-09-17) 2.8% of replies opened with such an aside. A turn
+that used tools but produced no text is summarised ("✓ Bash ×2") only for
+journal turns; a real chat gets the normal empty-reply handling instead.
+
 Persistent processes (one per chat/thread) are read by a dedicated reader
 goroutine and a turn pump, never by the sender: a turn the CLI produces on
 its own between messages (a background subagent finishing after the agent
