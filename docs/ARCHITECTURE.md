@@ -48,6 +48,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **memory** | `internal/memory/` | Semantic memory via ghost library. Namespaces, profiles, exchange logging |
 | **planner** | `internal/planner/` | Plan execution: execute → test → review → decide (done/retry/blocked) |
 | **project** | `internal/project/` | First-class projects: per-project git doc, Notion render + block map, comment/edit ingestion, adoption, doc budget |
+| **decide** | `internal/decide/` | Typed decisions from a decision model (TypeSafe Jev): choice + probabilities, 0–1 beliefs. Shadow router records answers per turn, never acts |
 | **scheduler** | `internal/scheduler/` | Cron/one-shot/heartbeat scheduler with quiet hours and noop suppression |
 | **skill** | `internal/skill/` | Skill registry: loads `~/.shell/skills/` and generates system prompt |
 | **search** | `internal/search/` | Web search cascade: Brave → Tavily → DuckDuckGo |
@@ -329,6 +330,19 @@ Auto-retry on resume failure: falls back to fresh session.
 | `~/.shell/allowlist.json` | Approved users |
 | `~/.shell/worktrees/` | Git worktree checkouts |
 | `~/.shell/skills/` | Installed skills |
+
+## Shadow Router
+
+When `TYPESAFE_API_KEY` is present, every user turn is also shown — after
+its context is built, on its own goroutine with a 5 s deadline, fail-open —
+to a decision model with a few typed questions: which active project is
+this about (choice over slugs + `none`), on peer-agent turns whether to reply
+at all, and whether the message holds an open question or a decision. The
+state sent is the message text (clipped to 2,000 runes) and where it was
+said; never the transcript or memory. Answers land in `router_decisions`
+beside the facts needed to score them (the project whose own thread this
+was, whether it was a peer turn). Nothing reads those rows on the turn path.
+Pass criteria and the verdict schedule: plan § P3.7.
 
 ## Progress Voice
 

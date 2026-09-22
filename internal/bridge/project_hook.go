@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"github.com/rcliao/shell/internal/decide"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -207,4 +208,30 @@ func projectRow(p store.Project) string {
 		sb.WriteString(instr)
 	}
 	return sb.String()
+}
+
+// observeRouterShadow hands the turn to the shadow router (P3.7). It builds
+// the project list from the same registry the [Projects] block uses, and
+// notes which project's own thread this is — the label a which_project
+// answer is later scored against. Fire and forget; a nil shadow is a no-op.
+func (b *Bridge) observeRouterShadow(chatID, threadID int64, userMsg string) {
+	if b.routerShadow == nil || b.store == nil || chatID == 0 {
+		return
+	}
+	t := decide.Turn{ChatID: chatID, ThreadID: threadID, Message: userMsg, ChatKind: "dm"}
+	if chatID < 0 {
+		t.ChatKind = "group"
+	}
+	if projects, err := b.store.ListProjects(chatID); err == nil {
+		for _, p := range projects {
+			if p.Status != "active" {
+				continue
+			}
+			t.Projects = append(t.Projects, decide.Project{Slug: p.Slug, Title: p.Title, Instructions: p.Instructions, ThreadID: p.MessageThreadID})
+			if threadID != 0 && p.MessageThreadID == threadID {
+				t.BoundProject = p.Slug
+			}
+		}
+	}
+	b.routerShadow.Observe(t)
 }
