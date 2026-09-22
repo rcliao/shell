@@ -643,6 +643,9 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			return nil, err
 		}
+		if workspaceDir != "" {
+			tgBot.SetProgressPhrasesPath(filepath.Join(workspaceDir, telegram.ProgressPhrasesFile))
+		}
 		bot = tgBot
 	}
 

@@ -330,6 +330,16 @@ Auto-retry on resume failure: falls back to fresh session.
 | `~/.shell/worktrees/` | Git worktree checkouts |
 | `~/.shell/skills/` | Installed skills |
 
+## Progress Voice
+
+While a turn runs, the placeholder message ticks every 2 s. Its wording comes
+from `<workspace>/progress-phrases.json`, a file each agent owns and may
+rewrite in its own voice (the environment prompt says so). The handler loads
+it with an mtime check every 30 s, validates each phrase to one short plain
+line, and falls back to built-in defaults per slot. Tool names map to
+families (search / browse / memory / file / shell / default) so the screen
+never shows a raw tool name.
+
 ## Reaction System
 
 Emoji reactions on Telegram messages route to actions via `config.reaction_map`:

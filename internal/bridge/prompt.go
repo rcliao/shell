@@ -59,6 +59,9 @@ func (b *Bridge) environmentPrompt() string {
 		sb.WriteString("Notes, helper scripts, drafts, and experiments belong here; it survives restarts and rotations. ")
 		sb.WriteString("Prefer it over /tmp for anything you may want again. ")
 		sb.WriteString("For multi-day projects (trips, watches, plans), keep a notes file here: read it before re-deriving state, update it when things change — it's cheaper and more faithful than reconstructing from conversation memory.\n")
+		sb.WriteString("- **Your progress voice:** `" + b.workspaceDir + "/progress-phrases.json` — the short lines people see while you work (\"Thinking...\", \"Searching the web...\"). ")
+		sb.WriteString("It is yours: JSON with lists `thinking`, `long` (20 s+), `very_long` (60 s+) and `tools.{search,browse,memory,file,shell,default}`, up to 12 one-line phrases each (≤60 chars, plain text, no markdown). ")
+		sb.WriteString("Write them in your own voice and the family's language, and rewrite them every couple of weeks so they stay fresh. Invalid entries fall back to defaults.\n")
 	}
 	if len(b.skillDirs) > 0 {
 		sb.WriteString("- **Skill roots:** ")

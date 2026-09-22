@@ -1526,15 +1526,15 @@ func TestSplitMessage_LongCJKRuneSafe(t *testing.T) {
 func TestThinkingMessageLongWait(t *testing.T) {
 	// Early ticks rotate normal phrases; past ~20s and ~60s they switch to
 	// honest long-wait reassurance so a slow turn never reads as dead (V2-H13).
-	early := thinkingMessage(3)
+	early := newProgressVoice("").thinkingMessage(3)
 	if !strings.ContainsAny(early, "Thinking Reasoning Working Processing Analyzing") {
 		t.Errorf("early tick should show a normal phrase, got %q", early)
 	}
-	mid := thinkingMessage(12) // ~24s
+	mid := newProgressVoice("").thinkingMessage(12) // ~24s
 	if !strings.Contains(mid, "Still working") {
 		t.Errorf("tick 12 should show long-wait reassurance, got %q", mid)
 	}
-	long := thinkingMessage(35) // ~70s
+	long := newProgressVoice("").thinkingMessage(35) // ~70s
 	if !strings.Contains(long, "taking a while") {
 		t.Errorf("tick 35 should show extended-wait reassurance, got %q", long)
 	}
