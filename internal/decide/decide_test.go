@@ -53,7 +53,7 @@ func TestJevErrors(t *testing.T) {
 	if !errors.As(err, &ae) || ae.Status != 429 || !ae.Retryable {
 		t.Errorf("want retryable 429 APIError, got %v", err)
 	}
-	if _, err := (&Jev{key: func() string { return "" }}).Ask(context.Background(), "s", nil); err == nil {
+	if _, err := NewJev(func() string { return "" }).Ask(context.Background(), "s", nil); err == nil {
 		t.Error("no key must be an error, not a request")
 	}
 }
@@ -186,5 +186,18 @@ func TestShadowNeverBlocksAndRecordsFailures(t *testing.T) {
 	rows := waitRows(t, rec)
 	if rows[0].Error == "" || !strings.Contains(rows[0].Error, "deadline") {
 		t.Errorf("a timed-out ask must be recorded as an error row: %+v", rows[0])
+	}
+}
+
+func TestJevRedactsKeyFromErrorBodies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`{"error":"invalid key sk-verysecret"}`))
+	}))
+	defer srv.Close()
+	j := &Jev{httpc: srv.Client(), url: srv.URL, key: func() string { return "sk-verysecret" }}
+	_, err := j.Ask(context.Background(), "s", map[string]Question{"q": {Type: "noul", Instructions: "x"}})
+	if err == nil || strings.Contains(err.Error(), "verysecret") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("key leaked into the error: %v", err)
 	}
 }

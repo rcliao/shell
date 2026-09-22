@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -76,15 +77,18 @@ type Jev struct {
 	key   func() string
 }
 
-// NewJev reads the key from the environment at call time, so a key added
-// to .env after start is picked up on the next restart without a rebuild.
-func NewJev() *Jev {
-	return &Jev{
-		httpc: &http.Client{Timeout: 10 * time.Second},
-		url:   jevURL,
-		key:   func() string { return os.Getenv(jevKeyEnv) },
+// NewJev takes the key resolver the daemon uses for every other secret
+// (the encrypted store, then the environment), so the key lives where the
+// Notion and Telegram tokens live. Resolved at call time, never cached.
+func NewJev(key func() string) *Jev {
+	if key == nil {
+		key = func() string { return os.Getenv(jevKeyEnv) }
 	}
+	return &Jev{httpc: &http.Client{Timeout: 10 * time.Second}, url: jevURL, key: key}
 }
+
+// KeyName is the secret / environment variable the key is read from.
+const KeyName = jevKeyEnv
 
 func (j *Jev) Enabled() bool { return j.key() != "" }
 
@@ -135,7 +139,10 @@ func (j *Jev) Ask(ctx context.Context, state any, questions map[string]Question)
 		return Result{}, fmt.Errorf("jev: read: %w", err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return Result{}, &APIError{Status: resp.StatusCode, Body: string(raw),
+		// The body is a RESPONSE, but some APIs echo the credential back in
+		// an auth error; it ends up in a log line and a DB row, so scrub it.
+		body := strings.ReplaceAll(string(raw), j.key(), "[redacted]")
+		return Result{}, &APIError{Status: resp.StatusCode, Body: body,
 			Retryable: resp.StatusCode == 429 || resp.StatusCode == 529}
 	}
 	var out struct {

@@ -41,7 +41,6 @@ import (
 const drainTimeout = 15 * time.Minute
 
 func main() {
-	loadDotEnv()
 	var verbose bool
 
 	rootCmd := &cobra.Command{

@@ -86,7 +86,11 @@ func (s *Shadow) Observe(t Turn) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 		defer cancel()
+		started := time.Now()
 		res, err := s.decider.Ask(ctx, s.state(t), questions)
+		if err != nil {
+			res.Latency = time.Since(started) // a timeout is a 5 s answer, not a 0 ms one
+		}
 		for id, q := range questions {
 			row := Row{ChatID: t.ChatID, ThreadID: t.ThreadID, MsgID: t.MsgID, Question: id,
 				BoundProject: t.BoundProject, PeerTurn: peer, Model: res.Model,

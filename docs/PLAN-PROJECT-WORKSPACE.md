@@ -427,8 +427,11 @@ general thread; noop suppressing the Opus turn) is its own later change.
 *Constraints.* Decision 5 stands: a router scopes context and tags replies;
 it never writes a doc. Every user message goes to a third party with no
 published retention terms — the owner accepted this for the experiment. The
-key lives in `.env` / `~/.shell/.env`, never in config or the DB, never
-logged. Ghost (reflect, memory relationships) is out of scope here.
+key lives in the encrypted secret store (`shell-secrets set TYPESAFE_API_KEY`),
+like the Notion and Telegram tokens — never in config, the DB or a log; an
+error body that echoes it is scrubbed before it is recorded. Only real user
+turns and peer relays are observed; heartbeats, prewarm and scheduler turns
+have no ground truth and are skipped. Ghost (reflect, memory relationships) is out of scope here.
 
 *Progress voice.* The placeholder already ticks every 2 s ("Running Bash...");
 the wait is not silent, it is generic. Each agent gets a phrase file in its

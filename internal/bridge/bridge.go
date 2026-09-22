@@ -906,7 +906,12 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		wg.Wait()
 	}
 	step("context_fanout")
-	b.observeRouterShadow(chatID, threadID, userMsg)
+	if isA2A || (!isHeartbeat && !isSystemSender(senderName) && !strings.HasPrefix(userMsg, "[")) {
+		// Real user turns and peer relays only: heartbeats, prewarm pings,
+		// scheduler prompts and other synthetic turns have no ground truth
+		// and would only cost money and pollute the rates.
+		b.observeRouterShadow(chatID, threadID, userMsg)
+	}
 	// V2-H33: per-block context sizes — the data for the Channel B diet.
 	// ~4 chars/token; these blocks are the fresh (uncached) prefill the API
 	// pays on every turn before the first token.

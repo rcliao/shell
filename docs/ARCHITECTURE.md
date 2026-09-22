@@ -333,7 +333,9 @@ Auto-retry on resume failure: falls back to fresh session.
 
 ## Shadow Router
 
-When `TYPESAFE_API_KEY` is present, every user turn is also shown — after
+When the `TYPESAFE_API_KEY` secret resolves (secret store, then
+environment), every real user turn and peer relay — not heartbeats,
+prewarm or scheduler turns — is also shown — after
 its context is built, on its own goroutine with a 5 s deadline, fail-open —
 to a decision model with a few typed questions: which active project is
 this about (choice over slugs + `none`), on peer-agent turns whether to reply
