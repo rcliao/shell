@@ -194,12 +194,17 @@ type NotionClient struct {
 	spacing  time.Duration
 }
 
-// NewNotionClient builds the production client.
-func NewNotionClient() *NotionClient {
+// NewNotionClient builds the production client. token is resolved at call
+// time (the daemon passes cfg.Secret, store then environment); nil means
+// the environment variable alone.
+func NewNotionClient(token func() string) *NotionClient {
+	if token == nil {
+		token = func() string { return os.Getenv(notionTokenEnv) }
+	}
 	return &NotionClient{
 		httpc:   &http.Client{Timeout: 30 * time.Second},
 		baseURL: notionBaseURL,
-		token:   func() string { return os.Getenv(notionTokenEnv) },
+		token:   token,
 		spacing: notionMinSpacing,
 	}
 }

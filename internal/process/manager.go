@@ -350,14 +350,10 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	cmd.WaitDelay = sigtermGrace
 
 	env := m.childEnv()
-	if len(m.env) > 0 {
-		for _, e := range env {
-			for k := range m.env {
-				if strings.HasPrefix(e, k+"=") {
-					slog.Info("claude env override", "var", e)
-				}
-			}
-		}
+	// Log the NAMES of overrides, never the values: a passthrough secret
+	// listed in claude.env would otherwise land in daemon.log.
+	for k := range m.env {
+		slog.Info("claude env override", "var", k)
 	}
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
 	if req.MessageThreadID != 0 {
@@ -580,6 +576,9 @@ func countPDFPages(path string) int {
 }
 
 // filterEnv returns env with the named variable removed.
+// ChildEnv exposes the child-env policy to other spawners (the planner).
+func (m *Manager) ChildEnv() []string { return m.childEnv() }
+
 // childEnv builds the environment a Claude CLI child starts with: the
 // daemon's own environment minus everything a child must not see, plus the
 // configured overrides and the secret passthrough allowlist.

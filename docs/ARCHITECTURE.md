@@ -535,8 +535,11 @@ token into the Notion MCP server's env only, the Jev key to the decider.
 A Claude CLI child never inherits them. `process.Manager.childEnv` strips
 every store-managed name, every configured reference and anything ending in
 `_BOT_TOKEN` from the child environment, then adds `secrets.passthrough`
-(default: the keys skill binaries read — `GEMINI_API_KEY`,
-`BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`) with their values. Exported
+(default: what skill scripts read — `GEMINI_API_KEY`, `BRAVE_SEARCH_API_KEY`,
+`TAVILY_API_KEY`, and `NOTION_TOKEN`, since the notion skill is a Bash
+script) with their values. The planner's subprocesses use the same policy.
+The lists are computed at daemon start; `claude.env` names bypass stripping
+by operator choice. Exported
 variables would otherwise survive every in-place restart, so stripping is
 active on each spawn rather than a one-time omission. `shell secrets doctor`
 reports each reference's source and the child-env policy without printing a

@@ -44,15 +44,22 @@ dir 0700 / file 0600, refused if looser), decrypts `secrets.enc` into
 memory, and resolves each configured reference — `telegram.token_env`,
 `notion.token_secret`, the Jev key — store first, then environment (the
 fallback keeps the migration reversible). It hands each value to its
-consumer: the Telegram client in-process; the Notion token into the Notion
-MCP server's env only (as today); the Jev key to the decider's resolver.
+consumer: the Telegram client in-process; the Jev key to the decider's
+resolver; the Notion token to the project Notion client in-process (and to
+the Notion MCP server's env when that server is enabled — it is off today).
 Nothing is written into `os.Environ`.
 
 **Spawning a Claude CLI.** The process manager builds the child env from
 `os.Environ()` minus every name the store manages, plus the passthrough
-names with their values. Bot, Notion and Jev tokens never appear in a child
-env; `shell-search` and `shell-imagen` keep working because their keys pass
-through.
+names with their values. Bot tokens and the Jev key never appear in a child
+env. **`NOTION_TOKEN` does pass through** (review finding, 2026-09-23): the
+notion skill is a Bash script and the agent's only Notion consumer, so a
+secret a Bash skill needs is visible to the agent by construction; scoping
+it would only turn Notion off. The planner's subprocesses (claude runs,
+test and verify shells — Bash-capable) use the same policy. The policy is
+computed once at daemon start: a secret `set` afterwards is neither
+stripped nor passed through until a restart. Names listed in `claude.env`
+are an operator opt-in and bypass stripping.
 
 **Operator.** `shell-secrets set NAME --stdin` writes v2. `shell-secrets
 doctor` prints: identity present and permissions OK; store version;

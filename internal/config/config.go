@@ -112,8 +112,13 @@ type SecretsConfig struct {
 	Passthrough []string `json:"passthrough"`
 }
 
-// DefaultSecretPassthrough is what skill binaries under skills/ read today.
-var DefaultSecretPassthrough = []string{"GEMINI_API_KEY", "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY"}
+// DefaultSecretPassthrough is what skill scripts and binaries under skills/
+// read from their environment today. NOTION_TOKEN is here because the
+// notion skill is a Bash script and the only Notion consumer the agent has
+// (the Notion MCP server is off); a secret a Bash skill needs is, by
+// construction, visible to the agent. Scoping applies to everything else:
+// bot tokens and the Jev key never reach a child.
+var DefaultSecretPassthrough = []string{"GEMINI_API_KEY", "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "NOTION_TOKEN"}
 
 var globalSecretStore secrets.Store
 

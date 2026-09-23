@@ -31,16 +31,16 @@ func newSecretsCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			problems := 0
 
-			fmt.Fprintf(out, "store: enabled=%t", cfg.Secrets.Enabled)
+			fmt.Fprintf(out, "store: enabled=%t\n", cfg.Secrets.Enabled)
 			if cfg.Secrets.Enabled {
 				config.OpenSecretStore(cfg.Secrets)
 				defer config.CloseSecretStore()
 				if config.SecretStoreOpen() {
-					fmt.Fprintf(out, "  open, %d managed name(s)\n", len(config.ManagedSecretNames()))
+					fmt.Fprintf(out, "  ✓ open, %d managed name(s)\n", len(config.ManagedSecretNames()))
 				} else {
 					problems++
 					_, err := secrets.NewStore(cfg.Secrets.StorePath)
-					fmt.Fprintf(out, "  NOT open: %v\n", err)
+					fmt.Fprintf(out, "  ✗ not open: %v\n", err)
 					if errors.Is(err, secrets.ErrV1Store) {
 						fmt.Fprintln(out, "  → run `shell-secrets migrate --from-v1` in a Terminal window (see shell-secrets doctor)")
 					}

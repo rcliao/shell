@@ -278,7 +278,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		"mcpServers": mcpServers,
 	}
 	if mcpData, err := json.MarshalIndent(mcpConfig, "", "  "); err == nil {
-		os.WriteFile(mcpConfigPath, mcpData, 0644)
+		os.WriteFile(mcpConfigPath, mcpData, 0600) // carries the Notion token when that server is enabled
 	}
 
 	// Generate per-agent Claude settings with agent-scoped hooks.
@@ -288,7 +288,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	if agentNS != "" {
 		if settings := generateAgentSettings(agentNS, cfg.Memory.DBPath, cfg.Memory.GhostEnv); settings != nil {
 			if data, err := json.MarshalIndent(settings, "", "  "); err == nil {
-				os.WriteFile(agentSettingsPath, data, 0644)
+				os.WriteFile(agentSettingsPath, data, 0600)
 				slog.Info("agent settings generated", "path", agentSettingsPath, "ns", agentNS)
 			}
 		}
@@ -442,6 +442,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			MaxRetries:           cfg.Planner.MaxRetries,
 			Timeout:              cfg.Planner.Timeout, // 0 → planner defaults to 30m
 			AutoApproveThreshold: cfg.Planner.AutoApproveThreshold,
+			ChildEnv:             proc.ChildEnv,
 		})
 		slog.Info("planner initialized", "test_cmd", cfg.Planner.TestCmd, "max_retries", cfg.Planner.MaxRetries)
 	}
@@ -1009,9 +1010,13 @@ func New(cfg config.Config) (*Daemon, error) {
 	if sched != nil {
 		// ONE Notion client shared by the renderer, the poller, and the
 		// comment consumer, so every Notion call serializes under the same
-		// global pacing. It reads NOTION_TOKEN from the daemon environment
-		// (secret export above) at call time; unconfigured = WARN + no-op.
-		notionClient := project.NewNotionClient()
+		// global pacing. The token resolves through cfg.Secret (store, then
+		// environment) at call time; unconfigured = WARN + no-op.
+		notionTokenName := cfg.Notion.TokenSecret
+		if notionTokenName == "" {
+			notionTokenName = "NOTION_TOKEN"
+		}
+		notionClient := project.NewNotionClient(func() string { return cfg.Secret(notionTokenName) })
 		wireProjectEvents(sched, projectResearchDeps{
 			store:        st,
 			workspaceDir: workspaceDir,
