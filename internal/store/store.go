@@ -797,6 +797,9 @@ func (s *Store) migrate() error {
 	// ALTER for DBs created from the earlier schema (duplicate-column error on
 	// fresh DBs is expected and ignored). No index, so ordering is safe.
 	s.db.Exec("ALTER TABLE projects ADD COLUMN notion_watermark TEXT NOT NULL DEFAULT ''")
+	// notion_polled_at (P3.5 poll backoff): same best-effort ALTER. Not in the
+	// CREATE above, so this line is what adds it on fresh DBs too.
+	s.db.Exec("ALTER TABLE projects ADD COLUMN notion_polled_at DATETIME")
 
 	// chat_pins is the pinned 📋 Projects home message per chat (P2) — see
 	// internal/store/chatpins.go. PK-only table: no separate index needed, and

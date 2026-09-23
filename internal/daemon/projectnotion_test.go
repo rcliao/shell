@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +27,8 @@ type pollFakeNotion struct {
 	children   []project.NotionBlockRef
 	replies    []string // "discussion|text" of every CreateComment
 	replyErr   error
+	listErr    error // returned by every ListComments call while set
+	listCalls  int
 }
 
 func (f *pollFakeNotion) Enabled() bool { return f.enabled }
@@ -44,6 +49,10 @@ func (f *pollFakeNotion) GetPageLastEdited(_ context.Context, _ string) (time.Ti
 	return f.lastEdited, nil
 }
 func (f *pollFakeNotion) ListComments(_ context.Context, id, _ string) ([]project.NotionComment, string, error) {
+	f.listCalls++
+	if f.listErr != nil {
+		return nil, "", f.listErr
+	}
 	return f.comments[id], "", nil
 }
 func (f *pollFakeNotion) CreateComment(_ context.Context, discussionID string, rich []project.NotionRichText) (string, error) {
@@ -457,5 +466,133 @@ func TestRegisterNotionPollScheduleIdempotent(t *testing.T) {
 	p, err := project.DecodeEventPayload(payload)
 	if err != nil || p.Event != project.EventNotionPoll {
 		t.Errorf("payload = %+v err=%v", p, err)
+	}
+}
+
+func TestNotionPollDue(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	ago := func(d time.Duration) *time.Time { t := now.Add(-d); return &t }
+	old := now.Add(-60 * 24 * time.Hour)
+
+	cases := []struct {
+		name string
+		p    store.Project
+		want bool
+	}{
+		{"never polled", store.Project{CreatedAt: old}, true},
+		{"quiet, polled 1h ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Hour)}, false},
+		{"quiet, polled 6h ago", store.Project{CreatedAt: old, NotionPolledAt: ago(6 * time.Hour)}, true},
+		{"human active 2d ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Minute), LastHumanActivityAt: ago(48 * time.Hour)}, true},
+		{"researched 3d ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Minute), LastResearchAt: ago(72 * time.Hour)}, true},
+		{"researched 8d ago", store.Project{CreatedAt: old, NotionPolledAt: ago(time.Hour), LastResearchAt: ago(8 * 24 * time.Hour)}, false},
+		{"new project", store.Project{CreatedAt: now.Add(-time.Hour), NotionPolledAt: ago(time.Minute)}, true},
+	}
+	for _, c := range cases {
+		if got := notionPollDue(&c.p, now); got != c.want {
+			t.Errorf("%s: due = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// An adopted (human-made) page is watch-only: comments flow exactly as for a
+// rendered page, but a page edit must NEVER enqueue a reconcile — that path
+// ends in a re-render, which would erase blocks the renderer cannot express.
+func TestNotionPollAdoptedPageIsWatchOnly(t *testing.T) {
+	st, _, fake, deps := notionFixture(t)
+	fake.children = []project.NotionBlockRef{{ID: "tbl-1"}, {ID: "todo-1"}}
+	adopted, _, err := project.AdoptPage(context.Background(), fake, "page-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateProjectFields("demo", store.ProjectFieldUpdate{BlockMap: &adopted}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline poll, then a human edits the page AND adds a block AND comments on it.
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+	fake.lastEdited = fake.lastEdited.Add(time.Hour)
+	fake.children = append(fake.children, project.NotionBlockRef{ID: "new-1"})
+	fake.comments["todo-1"] = []project.NotionComment{
+		{ID: "c1", DiscussionID: "d1", ParentID: "todo-1", Plain: "add sunscreen", CreatedByID: "user-1", CreatedTime: fake.lastEdited},
+	}
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+
+	if events := queuedEvents(t, st, project.EventNotionPageEdited); len(events) != 0 {
+		t.Fatalf("adopted page enqueued a reconcile: %+v", events)
+	}
+	comments := queuedEvents(t, st, project.EventNotionCommentCreated)
+	if len(comments) != 1 || comments[0].DiscussionID != "d1" || comments[0].AnchorBlock != "todo-1" {
+		t.Fatalf("comment events = %+v, want the one on todo-1", comments)
+	}
+
+	p, _ := st.GetProjectBySlug("demo")
+	if p.LastHumanActivityAt == nil {
+		t.Error("an edit on an adopted page must count as human activity")
+	}
+	bm := project.ParseBlockMap(p.BlockMap)
+	if !bm.Adopted || !strings.Contains(p.BlockMap, "new-1") {
+		t.Errorf("adopted map was not refreshed with the new block: %s", p.BlockMap)
+	}
+
+	// Belt and braces: even a stray reconcile event is a no-op.
+	out, err := deps.runPageEditReconcile(context.Background(), project.EventPayload{Slug: "demo"})
+	if err != nil || !strings.Contains(out, "watch-only") {
+		t.Errorf("reconcile on adopted = %q, %v; want a watch-only skip", out, err)
+	}
+}
+
+// The backoff wiring in the sweep loop: a quiet project that was just polled
+// is deferred; a completed sweep is recorded; a FAILED sweep is not, so it
+// retries on the next tick instead of waiting out the quiet interval.
+func TestNotionPollBackoffWiring(t *testing.T) {
+	st, ws, fake, deps := notionFixture(t)
+	age := func() {
+		// A second connection: the store has no raw-SQL door, on purpose.
+		t.Helper()
+		db, err := sql.Open("sqlite", filepath.Join(filepath.Dir(ws), "shell.db")+"?_pragma=busy_timeout(5000)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`UPDATE projects SET created_at = datetime('now','-60 days')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	polledAt := func() *time.Time {
+		p, _ := st.GetProjectBySlug("demo")
+		return p.NotionPolledAt
+	}
+	age()
+
+	// A failing sweep leaves no poll record.
+	fake.listErr = errors.New("notion 502")
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+	if polledAt() != nil {
+		t.Fatal("a failed sweep was recorded as polled — it would not retry for 6h")
+	}
+
+	// A completed sweep is recorded...
+	fake.listErr = nil
+	if _, err := deps.handleProjectEvent(context.Background(), pollTask()); err != nil {
+		t.Fatal(err)
+	}
+	if polledAt() == nil {
+		t.Fatal("a completed sweep was not recorded")
+	}
+
+	// ...and the quiet project is then deferred: no Notion calls at all.
+	before := fake.listCalls
+	out, err := deps.handleProjectEvent(context.Background(), pollTask())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.listCalls != before || !strings.Contains(out, "polled 0 projects") {
+		t.Errorf("quiet project was swept again (list calls %d -> %d): %s", before, fake.listCalls, out)
 	}
 }

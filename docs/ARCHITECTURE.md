@@ -47,6 +47,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **daemon** | `internal/daemon/` | Initialization chain, PID file, signal handling, component wiring |
 | **memory** | `internal/memory/` | Semantic memory via ghost library. Namespaces, profiles, exchange logging |
 | **planner** | `internal/planner/` | Plan execution: execute → test → review → decide (done/retry/blocked) |
+| **project** | `internal/project/` | First-class projects: per-project git doc, Notion render + block map, comment/edit ingestion, adoption, doc budget |
 | **scheduler** | `internal/scheduler/` | Cron/one-shot/heartbeat scheduler with quiet hours and noop suppression |
 | **skill** | `internal/skill/` | Skill registry: loads `~/.shell/skills/` and generates system prompt |
 | **search** | `internal/search/` | Web search cascade: Brave → Tavily → DuckDuckGo |
@@ -418,11 +419,55 @@ Three schedule types:
 - **once** — fire-and-forget at a specific time
 - **heartbeat** — periodic check-in with enriched context
 
-Two modes:
+Three modes:
 - **notify** — plain message sent to chat
 - **prompt** — routed through Claude for reasoning
+- **event** — not bound to chat delivery: the fire enqueues its payload on the
+  task queue and is done; a consumer owns everything downstream (projects use
+  this for research passes and the Notion poll)
 
 1-minute tick loop checks `GetDueSchedules()` and fires matching entries.
+
+## Projects
+
+A **project** binds a living document, a chat (or forum topic), a research
+schedule and a memory tag into one named unit. Design, decisions and phases:
+`docs/PLAN-PROJECT-WORKSPACE.md`.
+
+**Who does what.** The family talks in Telegram. The agent owns the doc:
+it writes through the project skill (`doc-write` over RPC), each write is a
+commit in the project's own git repo (`workspace/projects/<slug>/`), and the
+commit hash is the receipt. A render task mirrors the new rev to a Notion
+page, touching only the sections whose hash changed (the `block_map` records
+section → block ids). A weekly **event** schedule fires one bounded research
+pass per project; the consumer runs the turn and delivers a ≤3-line delta to
+the project's chat. One shared poll job lists comments on every mapped block
+and turns each unanswered human thread into an event; the agent fixes the doc
+and replies in the thread.
+
+**Two kinds of Notion binding.**
+
+| | Rendered page | Adopted page |
+|---|---|---|
+| Made by | the renderer | a human |
+| `block_map` | sections → blocks, with hashes | `adopted: true`, top-level block ids |
+| Comments → events → in-thread reply | yes | yes |
+| Rendered / reconciled | yes | **never** — the renderer speaks only headings, bullets and paragraphs and would erase tables and checkboxes |
+| Page edit | reconciled into the doc as a human-edit commit | counts as human activity; block list re-read |
+| Bound with | `project create` (skill) | `shell project adopt <slug> <url>` |
+
+**Rules the write and poll paths enforce.**
+- *Doc budget (24 KB).* The research prompt states size vs budget; `doc-write`
+  refuses an agent write that is over budget **and** larger than the doc it
+  replaces. Shrinking is always accepted; human edits are never refused.
+- *Poll backoff.* A project with human activity, research, or creation in the
+  last 7 days is swept every 30-minute tick; a quiet one every 6 hours
+  (`notion_polled_at`, written without touching `updated_at`).
+- *Stagger.* Research schedules register at minute `10 + (id mod 5) × 10`,
+  never on the hour.
+- *Lifecycle.* `active | paused | archived`. Archiving is an owner action,
+  never automatic; it disables the research schedule and removes the project
+  from the poll set, the pinned list and the agent's [Project] block.
 
 ## Memory
 
@@ -495,3 +540,4 @@ Key operations:
 | `shell session list\|kill` | Session management |
 | `shell search "query"` | Web search from CLI |
 | `shell mcp` | MCP stdio server (spawned by Claude CLI) |
+| `shell project list\|show\|archive\|bind\|adopt` | Owner ops on the project registry (`--config` selects the agent) |

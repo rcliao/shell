@@ -3,6 +3,7 @@ package rpc
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,8 +56,9 @@ func TestProjectCreateRegistersResearchSchedule(t *testing.T) {
 	if !sc.Enabled || sc.Mode != scheduler.ModeEvent || sc.Type != "cron" {
 		t.Errorf("schedule = mode %q type %q enabled %t, want enabled event cron", sc.Mode, sc.Type, sc.Enabled)
 	}
-	if sc.Schedule != cadenceCrons["weekly"] {
-		t.Errorf("expr = %q, want %q", sc.Schedule, cadenceCrons["weekly"])
+	// First project in a fresh store is id 1 → the :20 slot.
+	if want := "20 9 * * 1"; sc.Schedule != want {
+		t.Errorf("expr = %q, want staggered %q", sc.Schedule, want)
 	}
 
 	// The envelope must parse as an event message carrying the project's binding.
@@ -155,5 +157,29 @@ func TestProjectMutationsRefreshHome(t *testing.T) {
 
 	if len(refreshed) != 2 || refreshed[0] != 42 || refreshed[1] != 42 {
 		t.Errorf("home refreshes = %v, want create + status for chat 42", refreshed)
+	}
+}
+
+func TestResearchCronStaggersOffTheHour(t *testing.T) {
+	cases := []struct {
+		cadence string
+		id      int64
+		want    string
+	}{
+		{"weekly", 3, "40 9 * * 1"},
+		{"weekly", 5, "10 9 * * 1"},
+		{"daily", 4, "50 9 * * *"},
+		{"monthly", 10, "10 9 1 * *"},
+		{"hourly", 1, ""},
+	}
+	for _, c := range cases {
+		if got := researchCron(c.cadence, c.id); got != c.want {
+			t.Errorf("researchCron(%q, %d) = %q, want %q", c.cadence, c.id, got, c.want)
+		}
+	}
+	for id := int64(0); id < 25; id++ {
+		if strings.HasPrefix(researchCron("weekly", id), "0 ") {
+			t.Errorf("project %d landed on :00", id)
+		}
 	}
 }

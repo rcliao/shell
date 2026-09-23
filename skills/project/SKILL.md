@@ -64,6 +64,12 @@ pass `--chat` only to register a project for a DIFFERENT chat.
   their version is auto-committed separately before yours (look for
   `human-edit(local):` in history) — never overwrite it silently without
   reading first.
+- **The doc has a size budget (24 KB).** It is a working page, not a log: replace
+  stale content instead of appending under it. `doc-write` REFUSES a write that
+  leaves the doc over budget and larger than before, and names the biggest
+  sections. The fix is to consolidate — keep decisions and current facts, cut
+  superseded drafts, revision logs and resolved to-dos (git history keeps
+  them). A write that shrinks the doc is always accepted.
 - Projects created without `--doc-path` get a managed doc automatically
   (`projects/<slug>/doc.md` in your workspace, its own git repo, template
   sections 目標/限制/現況/選項/待決定/更新紀錄). Pass `--doc-path` only to

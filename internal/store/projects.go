@@ -24,13 +24,14 @@ type Project struct {
 	ChatID          int64
 	MessageThreadID int64 // Telegram forum topic ID (0 = DM / main chat)
 
-	DocPath            string // workspace/projects/<slug>/doc.md
-	DocRev             string // last rendered commit
-	ExportKind         string // e.g. "notion"
-	ExportRef          string // external doc id (doc-ID amnesia fix)
-	BlockMap           string // JSON: section -> external block id
-	HandledDiscussions string // JSON array: comment threads already processed (see HandledDiscussion)
-	NotionWatermark    string // last seen Notion page last_edited_time (RFC3339); Wave D poll short-circuit
+	DocPath            string     // workspace/projects/<slug>/doc.md
+	DocRev             string     // last rendered commit
+	ExportKind         string     // e.g. "notion"
+	ExportRef          string     // external doc id (doc-ID amnesia fix)
+	BlockMap           string     // JSON: section -> external block id
+	HandledDiscussions string     // JSON array: comment threads already processed (see HandledDiscussion)
+	NotionWatermark    string     // last seen Notion page last_edited_time (RFC3339); Wave D poll short-circuit
+	NotionPolledAt     *time.Time // last completed comment sweep; quiet projects are polled less often (P3.5)
 
 	Instructions string
 	NotifyPolicy string // quiet | announce
@@ -128,12 +129,12 @@ func (s *Store) CreateProject(p Project) (*Project, error) {
 		  (slug, title, emoji, status, chat_id, message_thread_id,
 		   doc_path, doc_rev, export_kind, export_ref, block_map, handled_discussions,
 		   notion_watermark, instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
-		   topic_thread_ref, review_after, last_research_at, last_human_activity_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   topic_thread_ref, review_after, last_research_at, last_human_activity_at, notion_polled_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Slug, p.Title, p.Emoji, p.Status, p.ChatID, p.MessageThreadID,
 		p.DocPath, p.DocRev, p.ExportKind, p.ExportRef, p.BlockMap, p.HandledDiscussions,
 		p.NotionWatermark, p.Instructions, p.NotifyPolicy, p.Lang, p.GhostTag, p.ScheduleDedupKey,
-		p.TopicThreadRef, p.ReviewAfter, p.LastResearchAt, p.LastHumanActivityAt)
+		p.TopicThreadRef, p.ReviewAfter, p.LastResearchAt, p.LastHumanActivityAt, p.NotionPolledAt)
 	if err != nil {
 		return nil, err
 	}
@@ -143,18 +144,18 @@ func (s *Store) CreateProject(p Project) (*Project, error) {
 const projectColumns = `id, slug, title, emoji, status, chat_id, message_thread_id,
 	doc_path, doc_rev, export_kind, export_ref, block_map, handled_discussions,
 	notion_watermark, instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
-	topic_thread_ref, review_after, last_research_at, last_human_activity_at,
+	topic_thread_ref, review_after, last_research_at, last_human_activity_at, notion_polled_at,
 	created_at, updated_at`
 
 // scanProject scans one projects row from any row-shaped scanner.
 func scanProject(scan func(dest ...any) error) (*Project, error) {
 	var p Project
 	var topicRef sql.NullInt64
-	var reviewAfter, lastResearch, lastHuman sql.NullTime
+	var reviewAfter, lastResearch, lastHuman, polledAt sql.NullTime
 	err := scan(&p.ID, &p.Slug, &p.Title, &p.Emoji, &p.Status, &p.ChatID, &p.MessageThreadID,
 		&p.DocPath, &p.DocRev, &p.ExportKind, &p.ExportRef, &p.BlockMap, &p.HandledDiscussions,
 		&p.NotionWatermark, &p.Instructions, &p.NotifyPolicy, &p.Lang, &p.GhostTag, &p.ScheduleDedupKey,
-		&topicRef, &reviewAfter, &lastResearch, &lastHuman,
+		&topicRef, &reviewAfter, &lastResearch, &lastHuman, &polledAt,
 		&p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -170,6 +171,9 @@ func scanProject(scan func(dest ...any) error) (*Project, error) {
 	}
 	if lastHuman.Valid {
 		p.LastHumanActivityAt = &lastHuman.Time
+	}
+	if polledAt.Valid {
+		p.NotionPolledAt = &polledAt.Time
 	}
 	return &p, nil
 }
@@ -263,6 +267,15 @@ type ProjectFieldUpdate struct {
 	ReviewAfter         *time.Time
 	LastResearchAt      *time.Time
 	LastHumanActivityAt *time.Time
+}
+
+// MarkProjectPolled records a completed Notion comment sweep. Deliberately
+// NOT routed through UpdateProjectFields: that bumps updated_at, and a poll
+// is bookkeeping, not a change to the project — the home list and staleness
+// checks must not see a project as touched because we looked at it.
+func (s *Store) MarkProjectPolled(slug string, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE projects SET notion_polled_at = ? WHERE slug = ?`, at.UTC(), slug)
+	return err
 }
 
 // UpdateProjectFields applies the non-nil fields of u to the project row.

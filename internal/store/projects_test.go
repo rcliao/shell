@@ -294,3 +294,28 @@ func TestParseHandledDiscussionsLenient(t *testing.T) {
 		t.Errorf("mixed parse = %+v", mixed)
 	}
 }
+
+// A poll is bookkeeping: recording it must round-trip and must NOT make the
+// project look touched (updated_at feeds the home list and staleness).
+func TestMarkProjectPolledLeavesUpdatedAtAlone(t *testing.T) {
+	st, cleanup := newTestStore(t)
+	defer cleanup()
+	p, err := st.CreateProject(Project{Title: "Polled", ChatID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.NotionPolledAt != nil {
+		t.Fatalf("fresh project already polled: %v", p.NotionPolledAt)
+	}
+	at := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	if err := st.MarkProjectPolled(p.Slug, at); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetProjectBySlug(p.Slug)
+	if got.NotionPolledAt == nil || !got.NotionPolledAt.Equal(at) {
+		t.Errorf("notion_polled_at = %v, want %v", got.NotionPolledAt, at)
+	}
+	if !got.UpdatedAt.Equal(p.UpdatedAt) {
+		t.Errorf("a poll bumped updated_at: %v -> %v", p.UpdatedAt, got.UpdatedAt)
+	}
+}
