@@ -406,11 +406,17 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		mode = "notify"
 	}
 	switch mode {
-	case "notify", "prompt":
+	case "notify":
 		if req.ChatID == 0 {
-			writeError(w, http.StatusBadRequest, "chat_id and message are required")
+			writeError(w, http.StatusBadRequest, "chat_id is required: a notify has to land in a chat")
 			return
 		}
+	case "prompt":
+		// chat_id 0 is the system chat: the turn runs, nothing is delivered.
+		// That is what an agent wants for a reminder to ITSELF ("refresh my
+		// progress phrases in two weeks") — a workspace task with no reader.
+		// The daemon already treats a system-chat prompt this way; only this
+		// check stood in the way.
 	case scheduler.ModeEvent:
 		// An event schedule delivers to the task queue, not a chat, so a chat
 		// binding is optional (it lives in the payload when the consumer needs
