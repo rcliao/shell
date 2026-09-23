@@ -84,7 +84,17 @@ func newSecretsCmd() *cobra.Command {
 					fmt.Fprintf(out, "  – %-24s not set (skill using it will fail)\n", n)
 				}
 			}
-			stripped := append(config.ManagedSecretNames(), cfg.Telegram.TokenEnv, notion, decide.KeyName)
+			// What a child will NOT see: managed + referenced names, minus the
+			// passthrough (applied after stripping), deduplicated.
+			seen := map[string]bool{}
+			var stripped []string
+			for _, n := range append(config.ManagedSecretNames(), cfg.Telegram.TokenEnv, notion, decide.KeyName) {
+				if _, passes := pass[n]; passes || seen[n] || n == "" {
+					continue
+				}
+				seen[n] = true
+				stripped = append(stripped, n)
+			}
 			sort.Strings(stripped)
 			fmt.Fprintf(out, "stripped from child env: %v plus any *_BOT_TOKEN\n", stripped)
 
