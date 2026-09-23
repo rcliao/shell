@@ -41,6 +41,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: shell/go.mod
+      # The replaced sibling repos are checked out at their own main, so a
+      # dependency they add shows up here first. Say so by name instead of
+      # letting `go vet` fail with "updates to go.mod needed".
+      - name: go.mod is tidy
+        working-directory: shell
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || {
+            echo "::error::go.mod/go.sum are not tidy against the sibling repos — run 'go mod tidy' and commit."
+            exit 1
+          }
       - name: Vet
         working-directory: shell
         run: go vet ./...
