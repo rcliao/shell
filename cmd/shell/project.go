@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -273,9 +272,6 @@ must be shared with the Notion integration first (page ••• menu → Connec
 			if tokenName == "" {
 				tokenName = "NOTION_TOKEN"
 			}
-			if tok := cfg.Secret(tokenName); tok != "" {
-				os.Setenv("NOTION_TOKEN", tok)
-			}
 
 			p, err := st.GetProjectBySlug(slug)
 			if err != nil {
@@ -302,7 +298,7 @@ must be shared with the Notion integration first (page ••• menu → Connec
 			// Verify access and read the block list BEFORE writing anything.
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			blockMap, n, err := project.AdoptPage(ctx, project.NewNotionClient(), pageID)
+			blockMap, n, err := project.AdoptPage(ctx, project.NewNotionClient(func() string { return cfg.Secret(tokenName) }), pageID)
 			if err != nil {
 				return err
 			}

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -370,13 +369,7 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = sigtermGrace
 
-	env := filterEnv(os.Environ(), "CLAUDECODE")
-	for k := range m.env {
-		env = filterEnv(env, k)
-	}
-	for k, v := range m.env {
-		env = append(env, k+"="+v)
-	}
+	env := m.childEnv()
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
 	if req.MessageThreadID != 0 {
 		env = append(env, fmt.Sprintf("SHELL_MESSAGE_THREAD_ID=%d", req.MessageThreadID))

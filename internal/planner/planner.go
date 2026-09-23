@@ -30,7 +30,7 @@ const (
 type TaskResult struct {
 	Task              string
 	Verdict           Verdict
-	Summary           string   // review output or error message
+	Summary           string // review output or error message
 	Attempts          int
 	Diff              string   // git diff at time of failure
 	TestOutput        string   // test output at time of failure
@@ -40,7 +40,7 @@ type TaskResult struct {
 // ReviewPackage bundles everything the reviewer needs to make a verdict.
 type ReviewPackage struct {
 	Task         string
-	ExecSummary  string   // what the execute agent said it did (truncated to 2000 chars)
+	ExecSummary  string // what the execute agent said it did (truncated to 2000 chars)
 	Diff         string
 	ChangedFiles []string
 	TestsPassed  bool
@@ -66,6 +66,11 @@ type Config struct {
 	Timeout              time.Duration // per-claude-invocation timeout
 	AutoApproveThreshold int           // max diff lines to auto-approve without review
 	CriticalFlows        string        // injected by bridge from reviewer memory
+	// ChildEnv builds the environment for every subprocess the planner
+	// starts (claude invocations, test and verify shells). The daemon wires
+	// the process manager's policy in, so secrets stripped from chat
+	// children are stripped here too; nil falls back to the bare filter.
+	ChildEnv func() []string
 }
 
 // Planner orchestrates plan execution.
@@ -861,7 +866,7 @@ func (p *Planner) runVerifyCommands(ctx context.Context) (string, bool) {
 
 	cmd := exec.CommandContext(vCtx, "sh", "-c", p.cfg.VerifyInstructions)
 	cmd.Env = append(
-		filterEnv(os.Environ(), "CLAUDECODE"),
+		p.childEnv(),
 		"GIT_PAGER=cat",
 		"PAGER=cat",
 	)
@@ -947,9 +952,9 @@ func (p *Planner) monitorProgress(ctx context.Context) {
 // streamEvent represents a single NDJSON event from --output-format stream-json.
 type streamEvent struct {
 	Type    string          `json:"type"`
-	Name    string          `json:"name,omitempty"`    // tool_use: tool name
-	Input   json.RawMessage `json:"input,omitempty"`   // tool_use: tool input
-	Result  string          `json:"result,omitempty"`  // result: final text
+	Name    string          `json:"name,omitempty"`   // tool_use: tool name
+	Input   json.RawMessage `json:"input,omitempty"`  // tool_use: tool input
+	Result  string          `json:"result,omitempty"` // result: final text
 	IsError bool            `json:"is_error,omitempty"`
 }
 
@@ -983,7 +988,7 @@ func (p *Planner) runClaudeStreaming(ctx context.Context, prompt string, timeout
 
 	cmd := exec.CommandContext(procCtx, binary, args...)
 	cmd.Env = append(
-		filterEnv(os.Environ(), "CLAUDECODE"),
+		p.childEnv(),
 		"GIT_PAGER=cat",
 		"PAGER=cat",
 		"GIT_TERMINAL_PROMPT=0",
@@ -1236,7 +1241,7 @@ func (p *Planner) runClaudeWithTimeout(ctx context.Context, prompt string, timeo
 	// Disable pagers — git, less, and other tools will hang forever
 	// waiting for TTY input when spawned as Bash tool children.
 	cmd.Env = append(
-		filterEnv(os.Environ(), "CLAUDECODE"),
+		p.childEnv(),
 		"GIT_PAGER=cat",
 		"PAGER=cat",
 		"GIT_TERMINAL_PROMPT=0",
@@ -1308,6 +1313,14 @@ func (p *Planner) runClaudeWithTimeout(ctx context.Context, prompt string, timeo
 }
 
 // filterEnv returns env with the named variable removed.
+// childEnv is the base environment for planner subprocesses.
+func (p *Planner) childEnv() []string {
+	if p.cfg.ChildEnv != nil {
+		return p.cfg.ChildEnv()
+	}
+	return filterEnv(os.Environ(), "CLAUDECODE")
+}
+
 func filterEnv(env []string, name string) []string {
 	prefix := name + "="
 	filtered := make([]string, 0, len(env))

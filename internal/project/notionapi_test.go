@@ -256,7 +256,7 @@ func TestNotionErrorsAndConflictDetection(t *testing.T) {
 }
 
 func TestNotionClientDisabledWithoutToken(t *testing.T) {
-	c := NewNotionClient()
+	c := NewNotionClient(nil)
 	c.token = func() string { return "" }
 	if c.Enabled() {
 		t.Error("no token must report disabled")

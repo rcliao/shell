@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -99,11 +100,6 @@ func retryBusySend(chatID int64, sender string, run func() (bridge.AgentResponse
 func New(cfg config.Config) (*Daemon, error) {
 	// Open encrypted secret store (if enabled) before anything reads tokens.
 	config.OpenSecretStore(cfg.Secrets)
-
-	// Export all secrets into env so child processes (Claude → Bash → skill scripts) inherit them.
-	if n := config.ExportSecrets(); n > 0 {
-		slog.Info("secrets: exported to env", "count", n)
-	}
 
 	// Open store
 	st, err := store.Open(cfg.Store.DBPath)
@@ -282,7 +278,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		"mcpServers": mcpServers,
 	}
 	if mcpData, err := json.MarshalIndent(mcpConfig, "", "  "); err == nil {
-		os.WriteFile(mcpConfigPath, mcpData, 0644)
+		os.WriteFile(mcpConfigPath, mcpData, 0600) // carries the Notion token when that server is enabled
 	}
 
 	// Generate per-agent Claude settings with agent-scoped hooks.
@@ -292,13 +288,24 @@ func New(cfg config.Config) (*Daemon, error) {
 	if agentNS != "" {
 		if settings := generateAgentSettings(agentNS, cfg.Memory.DBPath, cfg.Memory.GhostEnv); settings != nil {
 			if data, err := json.MarshalIndent(settings, "", "  "); err == nil {
-				os.WriteFile(agentSettingsPath, data, 0644)
+				os.WriteFile(agentSettingsPath, data, 0600)
 				slog.Info("agent settings generated", "path", agentSettingsPath, "ns", agentNS)
 			}
 		}
 	}
 
 	// Create process manager
+	// Secrets reach the component that needs them, never the agent's shell:
+	// strip every store-managed name and every configured token reference
+	// from child environments; pass through only the skill-binary keys.
+	notionSecret := cfg.Notion.TokenSecret
+	if notionSecret == "" {
+		notionSecret = "NOTION_TOKEN"
+	}
+	stripEnv := append(config.ManagedSecretNames(), cfg.Telegram.TokenEnv, notionSecret, decide.KeyName)
+	passEnv := cfg.SecretPassthrough()
+	slog.Info("secrets: child env policy", "strip", len(stripEnv), "passthrough", sortedKeys(passEnv))
+
 	proc := process.NewManager(process.ManagerConfig{
 		Binary:          cfg.Claude.Binary,
 		Model:           cfg.Claude.Model,
@@ -309,6 +316,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		DisallowedTools: cfg.Claude.DisallowedTools,
 		ExtraArgs:       cfg.Claude.ExtraArgs,
 		Env:             cfg.Claude.Env,
+		StripEnv:        stripEnv,
+		PassEnv:         passEnv,
 		SettingSources:  cfg.Claude.SettingSources,
 		BridgeSockPath:  bridgeSockPath,
 		MCPConfigPath:   mcpConfigPath,
@@ -433,6 +442,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			MaxRetries:           cfg.Planner.MaxRetries,
 			Timeout:              cfg.Planner.Timeout, // 0 → planner defaults to 30m
 			AutoApproveThreshold: cfg.Planner.AutoApproveThreshold,
+			ChildEnv:             proc.ChildEnv,
 		})
 		slog.Info("planner initialized", "test_cmd", cfg.Planner.TestCmd, "max_retries", cfg.Planner.MaxRetries)
 	}
@@ -1000,9 +1010,13 @@ func New(cfg config.Config) (*Daemon, error) {
 	if sched != nil {
 		// ONE Notion client shared by the renderer, the poller, and the
 		// comment consumer, so every Notion call serializes under the same
-		// global pacing. It reads NOTION_TOKEN from the daemon environment
-		// (secret export above) at call time; unconfigured = WARN + no-op.
-		notionClient := project.NewNotionClient()
+		// global pacing. The token resolves through cfg.Secret (store, then
+		// environment) at call time; unconfigured = WARN + no-op.
+		notionTokenName := cfg.Notion.TokenSecret
+		if notionTokenName == "" {
+			notionTokenName = "NOTION_TOKEN"
+		}
+		notionClient := project.NewNotionClient(func() string { return cfg.Secret(notionTokenName) })
 		wireProjectEvents(sched, projectResearchDeps{
 			store:        st,
 			workspaceDir: workspaceDir,
@@ -1675,4 +1689,13 @@ func generateAgentSettings(agentNS, dbPath string, ghostEnv map[string]string) m
 			"deny": []string{"mcp__claude_ai_Notion__*"},
 		},
 	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

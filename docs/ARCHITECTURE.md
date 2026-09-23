@@ -522,6 +522,29 @@ Key operations:
 - `LogExchange()` — store conversation for future recall
 - `RunReflect()` — promote/decay/prune memories post-heartbeat
 
+## Secrets
+
+Design and evidence: `docs/DESIGN-SECRETS.md`. Secrets live in the
+`shell-secrets` store (age-encrypted file, local identity file, no OS
+keychain) and resolve through `config.Secret(name)`: store first, then the
+environment. Config refers to secrets by **name** (`telegram.token_env`,
+`notion.token_secret`); values are read at startup and handed to the
+component that needs them — the Telegram client in-process, the Notion
+token into the Notion MCP server's env only, the Jev key to the decider.
+
+A Claude CLI child never inherits them. `process.Manager.childEnv` strips
+every store-managed name, every configured reference and anything ending in
+`_BOT_TOKEN` from the child environment, then adds `secrets.passthrough`
+(default: what skill scripts read — `GEMINI_API_KEY`, `BRAVE_SEARCH_API_KEY`,
+`TAVILY_API_KEY`, and `NOTION_TOKEN`, since the notion skill is a Bash
+script) with their values. The planner's subprocesses use the same policy.
+The lists are computed at daemon start; `claude.env` names bypass stripping
+by operator choice. Exported
+variables would otherwise survive every in-place restart, so stripping is
+active on each spawn rather than a one-time omission. `shell secrets doctor`
+reports each reference's source and the child-env policy without printing a
+value; `shell-secrets doctor` covers the store itself.
+
 ## Configuration
 
 `~/.shell/config.json` — all features are opt-in via flags:

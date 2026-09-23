@@ -87,6 +87,8 @@ type Manager struct {
 	disallowedTools []string
 	extraArgs       []string
 	env             map[string]string
+	stripEnv        []string
+	passEnv         map[string]string
 	settingSources  []string
 	bridgeSockPath  string
 	mcpConfigPath   string
@@ -111,14 +113,20 @@ type ManagerConfig struct {
 	DisallowedTools []string
 	ExtraArgs       []string
 	Env             map[string]string // extra environment variables for Claude CLI subprocess
-	SettingSources  []string
-	BridgeSockPath  string
-	MCPConfigPath   string
-	SettingsPath    string // path to per-agent settings.json for --settings flag
-	AgentNS         string // ghost namespace for this agent (e.g. "agent:pikamini")
-	GhostDB         string // ghost database path for this agent
-	BotUsername     string // Telegram bot username (available as SHELL_BOT_USERNAME to skill scripts)
-	PermissionMode  string // --permission-mode value (default "bypassPermissions")
+	// StripEnv names variables that must never reach a Claude CLI child
+	// (the secret store's names, the configured token references). PassEnv
+	// is the allowlist that does reach children, with values. Applied by
+	// childEnv on every spawn.
+	StripEnv       []string
+	PassEnv        map[string]string
+	SettingSources []string
+	BridgeSockPath string
+	MCPConfigPath  string
+	SettingsPath   string // path to per-agent settings.json for --settings flag
+	AgentNS        string // ghost namespace for this agent (e.g. "agent:pikamini")
+	GhostDB        string // ghost database path for this agent
+	BotUsername    string // Telegram bot username (available as SHELL_BOT_USERNAME to skill scripts)
+	PermissionMode string // --permission-mode value (default "bypassPermissions")
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
@@ -146,6 +154,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		disallowedTools: cfg.DisallowedTools,
 		extraArgs:       cfg.ExtraArgs,
 		env:             cfg.Env,
+		stripEnv:        cfg.StripEnv,
+		passEnv:         cfg.PassEnv,
 		settingSources:  cfg.SettingSources,
 		bridgeSockPath:  cfg.BridgeSockPath,
 		mcpConfigPath:   cfg.MCPConfigPath,
@@ -339,21 +349,11 @@ func (m *Manager) runClaudeBidirectional(ctx context.Context, req AgentRequest, 
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = sigtermGrace
 
-	env := filterEnv(os.Environ(), "CLAUDECODE")
+	env := m.childEnv()
+	// Log the NAMES of overrides, never the values: a passthrough secret
+	// listed in claude.env would otherwise land in daemon.log.
 	for k := range m.env {
-		env = filterEnv(env, k)
-	}
-	for k, v := range m.env {
-		env = append(env, k+"="+v)
-	}
-	if len(m.env) > 0 {
-		for _, e := range env {
-			for k := range m.env {
-				if strings.HasPrefix(e, k+"=") {
-					slog.Info("claude env override", "var", e)
-				}
-			}
-		}
+		slog.Info("claude env override", "var", k)
 	}
 	env = append(env, fmt.Sprintf("SHELL_CHAT_ID=%d", req.ChatID))
 	if req.MessageThreadID != 0 {
@@ -576,6 +576,46 @@ func countPDFPages(path string) int {
 }
 
 // filterEnv returns env with the named variable removed.
+// ChildEnv exposes the child-env policy to other spawners (the planner).
+func (m *Manager) ChildEnv() []string { return m.childEnv() }
+
+// childEnv builds the environment a Claude CLI child starts with: the
+// daemon's own environment minus everything a child must not see, plus the
+// configured overrides and the secret passthrough allowlist.
+//
+// Why strip rather than just not export: exported secrets survive every
+// in-place restart (the daemon exec's itself with os.Environ()), and the
+// launch environment itself carries the bot tokens. Anything ending in
+// _BOT_TOKEN is stripped unconditionally — no skill needs a bot token, and
+// a prompt-injected `env` in a family chat must never print one.
+func (m *Manager) childEnv() []string {
+	env := filterEnv(os.Environ(), "CLAUDECODE")
+	for _, name := range m.stripEnv {
+		env = filterEnv(env, name)
+	}
+	kept := env[:0]
+	for _, e := range env {
+		if name, _, ok := strings.Cut(e, "="); ok && strings.HasSuffix(name, "_BOT_TOKEN") {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	env = kept
+	for k := range m.env {
+		env = filterEnv(env, k)
+	}
+	for k, v := range m.env {
+		env = append(env, k+"="+v)
+	}
+	for k := range m.passEnv {
+		env = filterEnv(env, k)
+	}
+	for k, v := range m.passEnv {
+		env = append(env, k+"="+v)
+	}
+	return env
+}
+
 func filterEnv(env []string, name string) []string {
 	prefix := name + "="
 	filtered := make([]string, 0, len(env))

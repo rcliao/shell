@@ -105,7 +105,20 @@ type TunnelConfig struct {
 type SecretsConfig struct {
 	Enabled   bool   `json:"enabled"`
 	StorePath string `json:"store_path"` // default: ~/.shell-secrets/secrets.enc
+	// Passthrough names the secrets a Claude CLI subprocess may see in its
+	// environment — the ones skill binaries read (search, image generation).
+	// Everything else the store manages, and every bot token, is stripped
+	// from child environments. nil = DefaultSecretPassthrough.
+	Passthrough []string `json:"passthrough"`
 }
+
+// DefaultSecretPassthrough is what skill scripts and binaries under skills/
+// read from their environment today. NOTION_TOKEN is here because the
+// notion skill is a Bash script and the only Notion consumer the agent has
+// (the Notion MCP server is off); a secret a Bash skill needs is, by
+// construction, visible to the agent. Scoping applies to everything else:
+// bot tokens and the Jev key never reach a child.
+var DefaultSecretPassthrough = []string{"GEMINI_API_KEY", "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "NOTION_TOKEN"}
 
 var globalSecretStore secrets.Store
 
@@ -631,31 +644,39 @@ func OpenSecretStore(cfg SecretsConfig) {
 	slog.Info("secrets: store opened", "path", cfg.StorePath)
 }
 
-// ExportSecrets exports all secrets from the secret store into environment
-// variables so child processes (e.g. skill scripts) inherit them.
-// Existing env vars are not overwritten.
-func ExportSecrets() int {
+// SecretStoreOpen reports whether the encrypted store is in use.
+func SecretStoreOpen() bool { return globalSecretStore != nil }
+
+// ManagedSecretNames lists the names the store holds (values never leave
+// the store here). The process manager strips these from every child
+// environment: a secret reaches the component that needs it, not the
+// agent's shell. Empty when no store is open.
+func ManagedSecretNames() []string {
 	if globalSecretStore == nil {
-		return 0
+		return nil
 	}
 	keys, err := globalSecretStore.List()
 	if err != nil {
-		slog.Warn("secrets: failed to list keys for export", "error", err)
-		return 0
+		slog.Warn("secrets: failed to list keys", "error", err)
+		return nil
 	}
-	exported := 0
-	for _, key := range keys {
-		if os.Getenv(key) != "" {
-			continue // don't overwrite existing env vars
-		}
-		val, err := globalSecretStore.Get(key)
-		if err != nil {
-			continue
-		}
-		os.Setenv(key, val)
-		exported++
+	return keys
+}
+
+// SecretPassthrough resolves the passthrough names to values for a child
+// environment. A name that resolves nowhere is simply absent.
+func (c Config) SecretPassthrough() map[string]string {
+	names := c.Secrets.Passthrough
+	if names == nil {
+		names = DefaultSecretPassthrough
 	}
-	return exported
+	out := map[string]string{}
+	for _, n := range names {
+		if v := c.Secret(n); v != "" {
+			out[n] = v
+		}
+	}
+	return out
 }
 
 // CloseSecretStore closes the secret store if open.
