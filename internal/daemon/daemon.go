@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -99,11 +100,6 @@ func retryBusySend(chatID int64, sender string, run func() (bridge.AgentResponse
 func New(cfg config.Config) (*Daemon, error) {
 	// Open encrypted secret store (if enabled) before anything reads tokens.
 	config.OpenSecretStore(cfg.Secrets)
-
-	// Export all secrets into env so child processes (Claude → Bash → skill scripts) inherit them.
-	if n := config.ExportSecrets(); n > 0 {
-		slog.Info("secrets: exported to env", "count", n)
-	}
 
 	// Open store
 	st, err := store.Open(cfg.Store.DBPath)
@@ -299,6 +295,17 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 
 	// Create process manager
+	// Secrets reach the component that needs them, never the agent's shell:
+	// strip every store-managed name and every configured token reference
+	// from child environments; pass through only the skill-binary keys.
+	notionSecret := cfg.Notion.TokenSecret
+	if notionSecret == "" {
+		notionSecret = "NOTION_TOKEN"
+	}
+	stripEnv := append(config.ManagedSecretNames(), cfg.Telegram.TokenEnv, notionSecret, decide.KeyName)
+	passEnv := cfg.SecretPassthrough()
+	slog.Info("secrets: child env policy", "strip", len(stripEnv), "passthrough", sortedKeys(passEnv))
+
 	proc := process.NewManager(process.ManagerConfig{
 		Binary:          cfg.Claude.Binary,
 		Model:           cfg.Claude.Model,
@@ -309,6 +316,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		DisallowedTools: cfg.Claude.DisallowedTools,
 		ExtraArgs:       cfg.Claude.ExtraArgs,
 		Env:             cfg.Claude.Env,
+		StripEnv:        stripEnv,
+		PassEnv:         passEnv,
 		SettingSources:  cfg.Claude.SettingSources,
 		BridgeSockPath:  bridgeSockPath,
 		MCPConfigPath:   mcpConfigPath,
@@ -1675,4 +1684,13 @@ func generateAgentSettings(agentNS, dbPath string, ghostEnv map[string]string) m
 			"deny": []string{"mcp__claude_ai_Notion__*"},
 		},
 	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
