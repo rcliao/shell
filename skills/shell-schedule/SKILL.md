@@ -33,6 +33,10 @@ failed, fired and was delivered.
 The chat is filled in from your environment; pass `chat_id` only to schedule
 for a DIFFERENT chat.
 
+A reminder to YOURSELF (a workspace task with no reader — "refresh my
+progress phrases", "tidy my notes") is `mode=prompt` with `chat_id: 0`: the
+turn runs and nothing is delivered to any chat. Notify mode cannot target 0.
+
 The Bash script below remains available and behaves identically — both write
 the same rows through the same endpoint.
 
