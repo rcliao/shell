@@ -394,6 +394,53 @@ refused and a trimmed one lands; a project created in the group gets its own
 topic and a turn there sees one project, not the list; a general-thread
 message about the trip is tagged; the pinned row shows a needs-you count.
 
+**P3.7 — Jev shadow router + progress voice (owner-approved 2026-09-22).**
+
+*Why.* Shell's per-turn LLM classifier (Haiku) was removed in July: 8.5 s
+p50 on the user path and a new orphan topic on 92–95% of calls. Keywords are
+free and instant but cannot tell one trip from another. TypeSafe's Jev is a
+decision model — state + typed questions in, a choice with calibrated
+probabilities out, no prose — that the agent-harness ecosystem converged on
+within a week of release for exactly the decisions Opus makes badly or
+expensively: should the agent reply, which workstream is this, what to keep.
+Smoke test 2026-09-22 on a synthetic Traditional Chinese message: correct
+project at p=0.93 / confidence 0.9, open-question noul 0.96, three questions
+answered in 531 ms for 547 input tokens.
+
+*Shadow first, act later.* One request per user turn, fired asynchronously
+after the turn's context is built, with a 5 s timeout, fail-open: it can
+never slow or block a turn. Nothing acts on the answer. Every answer is a
+row in `router_decisions` beside what actually happened, so the verdict is
+computed, not argued:
+
+| Question | Type | Ground truth | Pass |
+|---|---|---|---|
+| `which_project` — choice over active project slugs + `none` | Choice | messages in a bound forum thread (labelled by construction); 100 hand-labelled general-thread turns | accuracy ≥ 90% among answers above threshold; abstain ≤ 20% |
+| `should_reply` — on peer-agent turns in the group | Choice {reply, noop} | what Opus did that turn (reply sent vs `[noop]`) | agreement ≥ 90%; count the Opus turns it would have skipped |
+| `has_open_question`, `has_decision` | Noul | 待決定 / 決定 edits that followed | logged now, feeds unit 4b; no pass bar yet |
+
+Plus p50 latency < 500 ms and tokens per call recorded, so cost is computable
+when pricing appears. Thresholds 0.7 / 0.8 / 0.9 are all evaluated from the
+same rows. Verdict after ≥ 5 days of data. Gating (scoped block in the
+general thread; noop suppressing the Opus turn) is its own later change.
+
+*Constraints.* Decision 5 stands: a router scopes context and tags replies;
+it never writes a doc. Every user message goes to a third party with no
+published retention terms — the owner accepted this for the experiment. The
+key lives in the encrypted secret store (`shell-secrets set TYPESAFE_API_KEY`),
+like the Notion and Telegram tokens — never in config, the DB or a log; an
+error body that echoes it is scrubbed before it is recorded. Only real user
+turns and peer relays are observed; heartbeats, prewarm and scheduler turns
+have no ground truth and are skipped. Ghost (reflect, memory relationships) is out of scope here.
+
+*Progress voice.* The placeholder already ticks every 2 s ("Running Bash...");
+the wait is not silent, it is generic. Each agent gets a phrase file in its
+own workspace it may rewrite in its own voice (the environment prompt tells
+it so); the handler loads it with an mtime cache, validates it, and falls
+back to the defaults. Tool names map to families (search / browse / memory /
+file / shell) so a phrase can be about what is happening, never a raw
+`mcp__ghost__ghost_put`.
+
 **P4 — Consolidation + attribution (~1 wk).** Topic binding at create +
 `project_hook` routing + emoji reactions + disclosure tiers + correction
 flow (pinned override, revert-reapply repair, `human_correction` ledger) +

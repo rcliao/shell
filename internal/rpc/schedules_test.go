@@ -22,6 +22,20 @@ func newSchedTestServer(t *testing.T) (*Server, *store.Store) {
 	return &Server{store: st, timezone: "UTC"}, st
 }
 
+// postSchedule hits the single-schedule create/update route.
+func postSchedule(t *testing.T, s *Server, body map[string]any) (int, map[string]any) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/schedule", bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	s.handleSchedule(w, req)
+	var out map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return w.Code, out
+}
+
 func postSchedules(t *testing.T, s *Server, body map[string]any) (int, map[string]any) {
 	t.Helper()
 	b, _ := json.Marshal(body)
@@ -199,5 +213,32 @@ func TestListExcludesDisabledByDefault(t *testing.T) {
 	_, all := postSchedules(t, s, map[string]any{"action": "list", "all": true})
 	if got, _ := all["schedules"].([]any); len(got) != 2 {
 		t.Errorf("all=true should include disabled rows, got %d", len(got))
+	}
+}
+
+// A prompt-mode schedule may target the system chat (0): the turn runs and
+// nothing is delivered — an agent's reminder to itself. A notify to chat 0
+// would land nowhere and stays refused.
+func TestScheduleCreateAllowsSelfPromptNotSelfNotify(t *testing.T) {
+	s, st := newSchedTestServer(t)
+	when := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+
+	code, out := postSchedule(t, s, map[string]any{
+		"chat_id": 0, "mode": "prompt", "type": "once", "at": when,
+		"message": "refresh your progress phrases", "label": "self: refresh phrases",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("self prompt returned %d: %v", code, out)
+	}
+	scs, _ := st.ListSchedules(0)
+	if len(scs) != 1 || scs[0].ChatID != 0 || scs[0].Mode != "prompt" {
+		t.Errorf("stored schedule = %+v, want a prompt bound to chat 0", scs)
+	}
+
+	code, out = postSchedule(t, s, map[string]any{
+		"chat_id": 0, "mode": "notify", "type": "once", "at": when, "message": "hi",
+	})
+	if code != http.StatusBadRequest {
+		t.Errorf("notify to chat 0 returned %d, want 400: %v", code, out)
 	}
 }

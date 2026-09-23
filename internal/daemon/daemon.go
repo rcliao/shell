@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rcliao/shell/internal/decide"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -643,6 +644,9 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			return nil, err
 		}
+		if workspaceDir != "" {
+			tgBot.SetProgressPhrasesPath(filepath.Join(workspaceDir, telegram.ProgressPhrasesFile))
+		}
 		bot = tgBot
 	}
 
@@ -653,6 +657,13 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Pinned 📋 Projects home (P2): edited in place via chat_pins, refreshed
 	// on project create/status/doc-write (RPC callback below), on research
 	// turn completion (project.event consumer), and by /projects.
+	// Shadow router (P3.7): observes every user turn with a decision model,
+	// records, never acts. Silent when no TYPESAFE_API_KEY is present.
+	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
+		br.SetRouterShadow(decide.NewShadow(jev, st))
+		slog.Info("router shadow: enabled", "backend", "jev")
+	}
+
 	projectHome := project.NewHome(st, tgTransport)
 	projectHome.SetWorkspace(workspaceDir) // enables the ❓ needs-you count
 	br.SetProjectHome(projectHome)

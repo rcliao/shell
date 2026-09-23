@@ -434,3 +434,6 @@ func (b *Bot) reactionHandler(ctx context.Context, tgBot *bot.Bot, update *model
 	}
 	b.handler.HandleReaction(turnContext(ctx), tgBot, update.MessageReaction)
 }
+
+// SetProgressPhrasesPath forwards the agent's phrase file to the handler.
+func (b *Bot) SetProgressPhrasesPath(path string) { b.handler.SetProgressPhrasesPath(path) }

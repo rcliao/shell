@@ -481,6 +481,31 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_topic_decisions_chat_ts ON topic_decisions(chat_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_topic_decisions_topic ON topic_decisions(topic, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_topic_decisions_source ON topic_decisions(source, created_at DESC);
+
+	-- router_decisions (P3.7): one row per shadow-router question per turn,
+	-- recorded beside the facts the verdict needs (the bound project, whether
+	-- it was a peer-agent turn). Nothing reads these on the turn path.
+	CREATE TABLE IF NOT EXISTS router_decisions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		thread_id INTEGER NOT NULL DEFAULT 0,
+		msg_id INTEGER NOT NULL DEFAULT 0,
+		question TEXT NOT NULL,
+		candidates TEXT NOT NULL DEFAULT '',
+		choice TEXT NOT NULL DEFAULT '',
+		probabilities TEXT NOT NULL DEFAULT '',
+		confidence REAL NOT NULL DEFAULT 0,
+		noul REAL NOT NULL DEFAULT 0,
+		bound_project TEXT NOT NULL DEFAULT '',
+		peer_turn INTEGER NOT NULL DEFAULT 0,
+		latency_ms INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		error TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_router_decisions_q_ts ON router_decisions(question, created_at DESC);
 	`
 	if _, err := s.db.Exec(feedbackSchema); err != nil {
 		return err

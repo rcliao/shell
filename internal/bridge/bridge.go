@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"github.com/rcliao/shell/internal/decide"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -105,8 +106,9 @@ type Bridge struct {
 	// sqlite calls against guessed DB paths, cd-ing into the wrong repo to
 	// satisfy relative script paths, workspaces never used because never
 	// mentioned).
-	agentHomeDir string // per-agent config/data dir (shell.db, memory.db)
-	workspaceDir string // persistent agent scratch space
+	agentHomeDir string         // per-agent config/data dir (shell.db, memory.db)
+	workspaceDir string         // persistent agent scratch space
+	routerShadow *decide.Shadow // P3.7 shadow router; nil = off
 
 	// Agent identity prompt (prepended to system prompt)
 	agentIdentity     string
@@ -375,6 +377,11 @@ type ProjectHome interface {
 func (b *Bridge) SetProjectHome(h ProjectHome) {
 	b.projectHome = h
 }
+
+// SetRouterShadow enables the shadow router: every user turn is also
+// answered by a decision model, asynchronously, and recorded — never acted
+// on. Nil turns it off.
+func (b *Bridge) SetRouterShadow(sh *decide.Shadow) { b.routerShadow = sh }
 
 // SetPool enables multi-agent routing. When set, the bridge resolves
 // which Agent handles each chat via the pool instead of using proc directly.
@@ -899,6 +906,12 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		wg.Wait()
 	}
 	step("context_fanout")
+	if isA2A || (!isHeartbeat && !isSystemSender(senderName) && !strings.HasPrefix(userMsg, "[")) {
+		// Real user turns and peer relays only: heartbeats, prewarm pings,
+		// scheduler prompts and other synthetic turns have no ground truth
+		// and would only cost money and pollute the rates.
+		b.observeRouterShadow(chatID, threadID, userMsg)
+	}
 	// V2-H33: per-block context sizes — the data for the Channel B diet.
 	// ~4 chars/token; these blocks are the fresh (uncached) prefill the API
 	// pays on every turn before the first token.

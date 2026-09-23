@@ -30,45 +30,11 @@ const maxMessageLength = 4096
 // spinner frames for the thinking indicator.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// thinkingPhrases rotate to give the user a sense of progress.
-var thinkingPhrases = []string{
-	"Thinking",
-	"Reasoning",
-	"Working",
-	"Processing",
-	"Analyzing",
-}
+// Placeholder wording lives in progress.go (per-agent progress voice).
 
-// thinkingMessage returns a Claude Code-style animated status for the given
-// tick. The placeholder ticker runs every 2s, so tick doubles as elapsed
-// seconds/2. Past ~20s and ~60s the phrasing switches to honest long-wait
-// reassurance so a slow turn (large context on a heavier model, or a slow
-// tool) reads as "still working" rather than a dead "Analyzing" — the symptom
-// the owner reported for umbreon (V2-H13).
-// toolMessage renders what the agent is actually doing right now, for the
-// placeholder. Shown instead of thinkingMessage while a tool is running: a
-// turn that spends 40s on WebSearch reads as work rather than as a stall,
-// which is the complaint thinkingMessage was already trying to soften with
-// reassurance it had no evidence for.
-func toolMessage(tick int, tool string) string {
-	frame := spinnerFrames[tick%len(spinnerFrames)]
-	dots := strings.Repeat(".", (tick%3)+1)
-	return fmt.Sprintf("%s Running %s%s", frame, tool, dots)
-}
-
-func thinkingMessage(tick int) string {
-	frame := spinnerFrames[tick%len(spinnerFrames)]
-	dots := strings.Repeat(".", (tick%3)+1)
-	switch {
-	case tick >= 30: // ~60s+
-		return fmt.Sprintf("%s Still working — this one's taking a while, hang tight%s", frame, dots)
-	case tick >= 10: // ~20s+
-		return fmt.Sprintf("%s Still working (loading a lot of context)%s", frame, dots)
-	default:
-		phrase := thinkingPhrases[(tick/5)%len(thinkingPhrases)]
-		return fmt.Sprintf("%s %s%s", frame, phrase, dots)
-	}
-}
+// SetProgressPhrasesPath points the placeholder at an agent's own phrase
+// file; "" keeps the built-in wording.
+func (h *Handler) SetProgressPhrasesPath(path string) { h.voice = newProgressVoice(path) }
 
 // friendlyTurnError maps low-level turn failures (timeouts, cancellations) to a
 // short retryable message. A raw "context deadline exceeded" reads as a crash;
@@ -1091,6 +1057,7 @@ const peerBroadcastProbability = 0.15
 type Handler struct {
 	auth   *Auth
 	bridge *bridge.Bridge
+	voice  *progressVoice // placeholder wording, per agent (progress.go)
 
 	// Multi-agent group chat support
 	botUsername          string
@@ -1221,6 +1188,7 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 		peerAliases = append(peerAliases, strings.ToLower(a))
 	}
 	return &Handler{
+		voice: newProgressVoice(""),
 		auth:                 auth,
 		bridge:               br,
 		botUsername:          strings.ToLower(agentCfg.BotUsername),
@@ -2229,9 +2197,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 				toolMu.Lock()
 				running := activeTool
 				toolMu.Unlock()
-				text := thinkingMessage(tick)
+				text := h.voice.thinkingMessage(tick)
 				if running != "" {
-					text = toolMessage(tick, running)
+					text = h.voice.toolMessage(tick, running)
 				}
 				b.EditMessageText(ctx, &bot.EditMessageTextParams{
 					ChatID:    msg.Chat.ID,

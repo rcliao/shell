@@ -55,3 +55,6 @@ testdata/bench/conversations/
 .evolve/*-pikamini*.json
 .evolve/*-umbreonmini*.json
 .evolve/reviews/
+
+# local secrets (TYPESAFE_API_KEY etc.) — never commit
+.env
