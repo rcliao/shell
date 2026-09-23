@@ -2,6 +2,8 @@ package project
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -330,5 +332,73 @@ func TestRefreshEditCarriesButtons(t *testing.T) {
 	}
 	if tr.editButtons[0][0].URL != "https://notion.so/ffff1111222243338444555566667777" {
 		t.Errorf("edit button url = %q", tr.editButtons[0][0].URL)
+	}
+}
+
+func TestOpenQuestionsCountsOpenBulletsOnly(t *testing.T) {
+	doc := "# T\n\n## 現況\n\n- not a question\n\n## 待決定\n\nsome framing prose\n\n- which week in February?\n* ryokan or hotel?\n- [x] flights — booked\n- [ ] rail pass?\n-   \n  - a nested detail, not its own question\n\n## 更新紀錄\n\n- 2026-09-01 noise\n"
+	if got := OpenQuestions(doc); got != 3 {
+		t.Errorf("OpenQuestions = %d, want 3 (two bullets + one unchecked box)", got)
+	}
+	// The live shape: a numbered list where resolved items are struck through.
+	numbered := "# T\n\n## 待決定\n\n1. ⭐ **can it run into April?**\n2. budget range\n3. ~~which airport~~ → settled\n4) wait for the forecast\n10. tax\n2026 is not an item\n"
+	if got := OpenQuestions(numbered); got != 4 {
+		t.Errorf("OpenQuestions(numbered) = %d, want 4 (struck-through is resolved)", got)
+	}
+	if got := OpenQuestions("# T\n\n## 現況\n\n- x\n"); got != 0 {
+		t.Errorf("no 待決定 section must count 0, got %d", got)
+	}
+}
+
+func TestRenderHomeMarksProjectsThatNeedYou(t *testing.T) {
+	projects := []store.Project{
+		{Slug: "japan", Title: "Japan", Status: "active"},
+		{Slug: "quiet", Title: "Quiet", Status: "active"},
+		{Slug: "old", Title: "Old", Status: "archived"},
+	}
+	out := RenderHomeWithNeeds(projects, map[string]int{"japan": 2, "old": 5})
+	if !strings.Contains(out, "Japan") || !strings.Contains(out, "❓2") {
+		t.Errorf("project with open questions must be marked: %q", out)
+	}
+	if strings.Count(out, "❓") != 1 || strings.Contains(out, "Old") {
+		t.Errorf("only ACTIVE projects with questions get a marker: %q", out)
+	}
+	if RenderHome(projects) != RenderHomeWithNeeds(projects, nil) {
+		t.Error("RenderHome must be the no-needs rendering")
+	}
+}
+
+func TestOpenQuestionsOnMessyDocs(t *testing.T) {
+	// Two sections, the docs' own ▫️ bullet, "+", and a fence whose lines are
+	// neither headings nor questions.
+	doc := "# T\n\n## 待決定\n\n▫️ which week?\n+ budget?\n```\n## not a heading\n- not a question\n```\n- after the fence\n\n## 決定\n\n- 2026-09-01 decided, NOT a question\n\n## ❓ 待決定\n\n- second section counts too\n"
+	if got := OpenQuestions(doc); got != 4 {
+		t.Errorf("OpenQuestions = %d, want 4", got)
+	}
+}
+
+// Refresh path end to end: a real doc on disk → ❓ in the rendered list; and
+// no workspace → the old rendering, not a crash.
+func TestHomeNeedsReadsDocsFromDisk(t *testing.T) {
+	ws := t.TempDir()
+	dir := filepath.Join(ws, "legacy")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# P\n\n## 待決定\n\n1. a\n2. b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A --doc-path project: no managed repo, legacy "workspace/" prefix.
+	projects := []store.Project{{Slug: "legacy", Title: "Legacy", Status: "active", DocPath: "workspace/legacy/plan.md"},
+		{Slug: "escape", Title: "Escape", Status: "active", DocPath: "../../etc/passwd"}}
+
+	h := NewHome(nil, nil)
+	if got := h.needs(projects); got != nil {
+		t.Errorf("no workspace must mean no counts, got %v", got)
+	}
+	h.SetWorkspace(ws)
+	got := h.needs(projects)
+	if got["legacy"] != 2 || len(got) != 1 {
+		t.Errorf("needs = %v, want legacy:2 only", got)
 	}
 }

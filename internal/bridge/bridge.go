@@ -895,7 +895,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 			})
 		}
 		run("channel_b", func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, userMsg) })
-		run("projects", func() { projectsBlock = b.buildProjectsBlock(chatID) })
+		run("projects", func() { projectsBlock = b.buildProjectsBlock(chatID, threadID) })
 		wg.Wait()
 	}
 	step("context_fanout")

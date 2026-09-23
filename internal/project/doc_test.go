@@ -32,7 +32,7 @@ func TestScaffoldWriteReadRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"# Synthetic Project", "## 目標", "## 限制",
-		"keep the options table sorted", "## 現況", "## 選項", "## 待決定", "## 更新紀錄"} {
+		"keep the options table sorted", "## 決定", "## 現況", "## 選項", "## 待決定", "## 更新紀錄"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("scaffolded doc missing %q", want)
 		}

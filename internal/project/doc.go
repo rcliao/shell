@@ -80,8 +80,9 @@ func EnsureDocRepo(workspaceDir, slug string) (string, error) {
 // ScaffoldDoc writes the doc template and makes the initial commit, returning
 // its hash. A doc that already exists is left untouched — the current HEAD is
 // returned so create stays idempotent. Section headings match the plan's
-// template (goals/constraints/status/options/to-decide/log); instructions are
-// seeded under the constraints section.
+// template (goals/constraints/decisions/status/options/to-decide/log);
+// instructions are seeded under the constraints section. The headings carry
+// roles the budget and the skill text rely on — see budget.go.
 func ScaffoldDoc(dir, title, instructions string) (string, error) {
 	path := filepath.Join(dir, DocFile)
 	if _, err := os.Stat(path); err == nil {
@@ -94,10 +95,11 @@ func ScaffoldDoc(dir, title, instructions string) (string, error) {
 	if instructions != "" {
 		b.WriteString(instructions + "\n\n")
 	}
+	b.WriteString("## " + DecisionsSection + "\n\n")
 	b.WriteString("## 現況\n\n")
 	b.WriteString("## 選項\n\n")
 	b.WriteString("## 待決定\n\n")
-	b.WriteString("## 更新紀錄\n")
+	b.WriteString("## " + LogSection + "\n")
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		return "", fmt.Errorf("write doc: %w", err)
 	}
