@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rcliao/shell/internal/skill"
+	"github.com/rcliao/shell/internal/store"
 )
 
 func TestBuildSkillRetroBlock_NoRegistryReturnsEmpty(t *testing.T) {
@@ -64,7 +65,7 @@ func TestBuildSkillRetroBlock_FlagsStaleSkill(t *testing.T) {
 	reg := skill.NewRegistry(skills)
 	b := &Bridge{skills: reg}
 	out := b.buildSkillRetroBlock()
-	if !strings.Contains(out, "0 runs ever") {
+	if !strings.Contains(out, "0 runs") {
 		t.Error("expected 0-runs annotation")
 	}
 	if !strings.Contains(out, "stale") {
@@ -214,5 +215,33 @@ func TestBuildSkillRetroBlock_ShowsPlaygroundCandidates(t *testing.T) {
 	}
 	if !strings.Contains(out, "ready to graduate") {
 		t.Error("expected graduation hint for ready/SKILL.md")
+	}
+}
+
+// With a store, the retro reads real usage from the tool log: runs, failures,
+// hand-reads of SKILL.md, and which skills are shared (not the agent's to edit).
+func TestBuildSkillRetroBlock_UsesToolLogMeter(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.LogToolUses(42, 1, "interactive", []store.ToolUse{
+		{Name: "Bash", Detail: "command=~/.shell/agents/a/skills/diary/scripts/diary add"},
+		{Name: "Bash", Detail: "command=~/.shell/agents/a/skills/diary/scripts/diary add", Failed: true},
+		{Name: "Bash", Detail: "command=cat ~/.shell/agents/a/skills/diary/SKILL.md"},
+	})
+	own := &skill.Skill{Name: "diary", Description: "mine", Tier: skill.TierHot, Body: "b", Own: true}
+	shared := &skill.Skill{Name: "notion", Description: "owner's", Tier: skill.TierLazy, Body: "b"}
+	b := &Bridge{skills: skill.NewRegistry([]*skill.Skill{own, shared}), store: st}
+
+	out := b.buildSkillRetroBlock()
+	for _, want := range []string{"`diary` — 2 runs total", "50% success", "SKILL.md read 1×", "`notion` — (shared) 0 runs in 30 days", "real tool log", "committed automatically"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("retro missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "`diary` — (shared)") {
+		t.Error("an own skill must not be labelled shared")
 	}
 }

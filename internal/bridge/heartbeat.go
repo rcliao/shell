@@ -168,12 +168,14 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	// decides what (if anything) most deserves this beat; the context above
 	// is information, not a to-do list.
 	if isDeep {
-		// Skill inventory retro: NOT injected. Its usage meter (USAGE.jsonl)
-		// is only written by the run-skill wrapper, which the agent never
-		// uses — it invokes skill scripts by path. As of 2026-09-02 zero
-		// USAGE.jsonl files existed anywhere, every skill showed 0 runs, and
-		// every deep beat spent calls re-discovering that before ignoring the
-		// block. buildSkillRetroBlock stays for when the meter is real.
+		// Skill inventory retro: back as of 2026-09-23 on a real meter. It was
+		// off because its only meter (USAGE.jsonl) was written by a wrapper
+		// the agent never uses; usage now comes from tool_uses, which records
+		// every skill script call and SKILL.md read by path. This is where an
+		// agent authors, graduates, re-tiers and retires its own skills.
+		if retro := b.buildSkillRetroBlock(); retro != "" {
+			sb.WriteString(retro)
+		}
 		// Pin hygiene: importance decides what a budget-constrained retrieval
 		// keeps, but nothing maintains it, so it drifts out of line with
 		// consequence. Surface the cut and let the agent re-rank its own pins.

@@ -344,6 +344,17 @@ one that does not fit renders as a catalog line that says "hot, NOT loaded"
 and is logged at startup and on reload (`skills: hot skills over the prompt
 budget`). `status: draft` caps a skill to lazy until it graduates.
 
+**Self-authored skills.** Each deep heartbeat carries a skill retrospective
+(`bridge.buildSkillRetroBlock`): per skill, runs, failures, `SKILL.md` reads
+and last use over 30 days, from the `tool_uses` log (`store.SkillUsage`), the
+hot skills that are not loaded, and the agent's `playground/` drafts. The
+agent may draft into `skills/playground/<name>/` (never loaded), graduate a
+draft, change tiers or retire a skill. After every heartbeat the bridge
+commits any change under the agent's own skills dir to the git repo holding
+it (`~/.shell`), author = the agent, reloads skills, and sends one line with
+the revert command to `agent.owner_chat_id` (0 = commit silently).
+`USAGE.jsonl` changes alone never commit. No approval step: notify + revert.
+
 ## Shadow Router
 
 When the `TYPESAFE_API_KEY` secret resolves (secret store, then

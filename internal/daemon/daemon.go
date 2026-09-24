@@ -492,6 +492,11 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 	skillDirs = append(skillDirs, agentSkillsDir)
 	br.SetSkillDirs(skillDirs)
+	agentName := cfg.Agent.Name
+	if agentName == "" {
+		agentName = filepath.Base(filepath.Dir(agentSkillsDir))
+	}
+	br.SetOwnerChat(cfg.Agent.OwnerChatID, agentName)
 
 	// Environment facts for the system prompt: the per-agent home and a
 	// persistent workspace. Created here so the prompt never advertises a

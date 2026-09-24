@@ -107,6 +107,8 @@ type Bridge struct {
 	// satisfy relative script paths, workspaces never used because never
 	// mentioned).
 	agentHomeDir string         // per-agent config/data dir (shell.db, memory.db)
+	ownerChatID  int64          // where own-skill change notices go (0 = none)
+	agentName    string         // commit author / notice name for own-skill changes
 	workspaceDir string         // persistent agent scratch space
 	routerShadow *decide.Shadow // P3.7 shadow router; nil = off
 
@@ -1298,6 +1300,12 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// observation-only so the corpus can be studied before curation is designed.
 	if strings.HasPrefix(userMsg, deepHeartbeatPrefix) && b.store != nil {
 		b.captureReflection(ctx, chatID, response, result, turnModel)
+	}
+
+	// Self-authored skills: commit + announce any change the agent made to
+	// its own skills directory. Off the turn path.
+	if isHeartbeat {
+		go b.commitSkillChanges(context.WithoutCancel(ctx))
 	}
 
 	// Run memory maintenance during heartbeats.
