@@ -2332,7 +2332,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// Detach the turn from the poller context: during a drain-restart the
 	// poller ctx is cancelled to stop new updates, but in-flight turns must
 	// run to completion (the whole point of draining).
-	turnCtx := context.WithoutCancel(ctx)
+	turnCtx := bridge.WithTelegramMsgID(context.WithoutCancel(ctx), msg.ID)
 	resp, err := h.sendWithBusyRetry(turnCtx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onEvent)
 
 	// Stop the streaming edit goroutine and wait for it to finish.

@@ -41,7 +41,11 @@ func newSkillsCmd() *cobra.Command {
 				if only != "" && name != only {
 					continue
 				}
-				skillsReport(os.Stdout, name, loadConfigFrom(path), days)
+				cfg := loadConfigFrom(path)
+				if cfg.Agent.Name != "" {
+					name = cfg.Agent.Name // the bridge commits as this name
+				}
+				skillsReport(os.Stdout, name, cfg, days)
 			}
 			return nil
 		},

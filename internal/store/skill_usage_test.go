@@ -18,7 +18,8 @@ func TestSkillUsageFromToolLog(t *testing.T) {
 		{Name: "Bash", Detail: "command=cat ~/.shell/agents/pikamini/skills/meal-memo/SKILL.md"},
 		{Name: "Bash", Detail: "command=~/.shell/agents/pikamini/skills/meal-memo/scripts/memo add && cat ~/.shell/agents/pikamini/skills/meal-memo/SKILL.md"},
 		{Name: "Bash", Detail: "command=~/.shell/agents/pikamini/skills/playground/tidy/scripts/tidy"},
-		{Name: "Bash", Detail: "command=ls ~/.shell/skills/"}, // not a skill use
+		{Name: "Bash", Detail: "command=cat ~/.shell/skills/weather/v2/SKILL.md"}, // versioned: a read, not a run
+		{Name: "Bash", Detail: "command=ls ~/.shell/skills/"},                     // not a skill use
 	}
 	if err := st.LogToolUses(42, 1, "interactive", calls); err != nil {
 		t.Fatal(err)
@@ -36,8 +37,11 @@ func TestSkillUsageFromToolLog(t *testing.T) {
 	if p := u["playground/tidy"]; p.Runs != 1 {
 		t.Errorf("playground draft = %+v, want 1 run", p)
 	}
-	if len(u) != 3 {
-		t.Errorf("usage keys = %v, want exactly notion, meal-memo, playground/tidy", u)
+	if w := u["weather"]; w.Reads != 1 || w.Runs != 0 {
+		t.Errorf("weather = %+v, want 1 read of a versioned SKILL.md", w)
+	}
+	if len(u) != 4 {
+		t.Errorf("usage keys = %v, want exactly notion, meal-memo, playground/tidy, weather", u)
 	}
 	if u["notion"].Last.IsZero() {
 		t.Error("last use must be set")

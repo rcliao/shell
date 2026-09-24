@@ -11,14 +11,18 @@ import (
 )
 
 func TestSummarizeSkillChanges(t *testing.T) {
-	porcelain := "?? agents/a/skills/playground/trip/SKILL.md\n" +
-		" M agents/a/skills/meal-memo/SKILL.md\n" +
-		"?? agents/a/skills/meal-memo/scripts/x.sh\n" +
-		" D agents/a/skills/old/SKILL.md\n" +
-		" M agents/a/skills/diary/USAGE.jsonl\n" +
-		"?? agents/a/skills/run-skill.sh\n"
+	// -z records: NUL-terminated, unquoted; a rename carries its source next.
+	porcelain := strings.Join([]string{
+		"?? agents/a/skills/playground/trip/SKILL.md",
+		" M agents/a/skills/meal-memo/SKILL.md",
+		"?? agents/a/skills/meal-memo/scripts/x.sh",
+		" D agents/a/skills/old/SKILL.md",
+		"?? agents/a/skills/餐點/SKILL.md",
+		"R  agents/a/skills/.archive/gone/SKILL.md", "agents/a/skills/gone/SKILL.md",
+		"",
+	}, "\x00")
 	got := summarizeSkillChanges(porcelain, "agents/a/skills")
-	want := []string{"+playground/trip", "-old", "~meal-memo"}
+	want := []string{"+playground/trip", "+餐點", "-old", "~.archive/gone", "~meal-memo"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("summary = %v, want %v", got, want)
 	}
@@ -57,6 +61,7 @@ func TestCommitSkillChanges_CommitsAndNotifies(t *testing.T) {
 
 	// Bookkeeping only: no commit, no notice.
 	write("diary/USAGE.jsonl", "{}\n")
+	write("diary/scripts/__pycache__/x.cpython-312.pyc", "bytecode")
 	b.commitSkillChanges(context.Background())
 	if n := run("rev-list", "--count", "HEAD"); n != "1" {
 		t.Fatalf("usage log alone produced a commit (count %s)", n)

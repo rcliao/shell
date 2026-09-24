@@ -26,10 +26,11 @@ const retroStaleThreshold = 14 * 24 * time.Hour
 // saturate attention; the retro just gives ground truth (usage stats) and
 // an action menu, then gets out of the way.
 func (b *Bridge) buildSkillRetroBlock() string {
-	if b.skills == nil {
+	reg := b.skills.Load()
+	if reg == nil {
 		return ""
 	}
-	all := b.skills.All()
+	all := reg.All()
 	if len(all) == 0 {
 		return ""
 	}
@@ -85,7 +86,7 @@ func (b *Bridge) buildSkillRetroBlock() string {
 	sb.WriteString("\n---\n**[Skill Inventory Retro]**\n")
 	sb.WriteString(fmt.Sprintf("Hot budget: ~%d / %d tokens. Cap is load-bearing — graduate carefully.\n",
 		hotTokens, skill.HotTierBudget))
-	if d := b.skills.Demoted(); len(d) > 0 {
+	if d := reg.Demoted(); len(d) > 0 {
 		sb.WriteString(fmt.Sprintf("NOT loaded (over budget): %s — give your own hot skills a short `<!-- hot -->` … `<!-- /hot -->` rules section so the rules that must always hold fit.\n", strings.Join(d, ", ")))
 	}
 	sb.WriteString("Usage below is from your real tool log (last 30 days). Skills marked (shared) belong to the owner — change only your own.\n\n")
@@ -268,10 +269,11 @@ func pickPerAgentSkillsDir(skills []*skill.Skill) string {
 // survives session rotation and sits in Channel A across future generations
 // as an identity anchor: "these are the tools I've built for myself."
 func (b *Bridge) buildSkillInventoryDigest() string {
-	if b.skills == nil {
+	reg := b.skills.Load()
+	if reg == nil {
 		return ""
 	}
-	all := b.skills.All()
+	all := reg.All()
 	if len(all) == 0 {
 		return ""
 	}

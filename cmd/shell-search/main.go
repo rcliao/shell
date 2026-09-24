@@ -74,5 +74,7 @@ func reorderFlags(args []string, valued map[string]bool) []string {
 		}
 		rest = append(rest, a)
 	}
-	return append(flags, rest...)
+	// "--" so a query word that starts with "-" ("-5 weather") is text,
+	// not an unknown flag.
+	return append(append(flags, "--"), rest...)
 }

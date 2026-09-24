@@ -98,8 +98,10 @@ type Bridge struct {
 	pmMgr *pm.Manager // nil if disabled
 
 	// Skills
-	skills    *skill.Registry // nil if disabled
-	skillDirs []string        // directories to scan on reload
+	// skills is swapped by ReloadSkills — from RPC, /skills reload and the
+	// post-heartbeat skill commit — while turns read it; load it once per use.
+	skills    atomic.Pointer[skill.Registry] // nil if disabled
+	skillDirs []string                       // directories to scan on reload
 
 	// Environment facts rendered into the system prompt so agents stop
 	// re-deriving infra layout by trial and error (observed: repeated failed
@@ -170,7 +172,7 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 	if reactionMap == nil {
 		reactionMap = config.DefaultReactionMap()
 	}
-	return &Bridge{
+	b := &Bridge{
 		proc:                    proc,
 		store:                   store,
 		memory:                  mem,
@@ -181,13 +183,14 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		reactionMap:             reactionMap,
 		tunnelMgr:               tunnelMgr,
 		pmMgr:                   pmMgr,
-		skills:                  skills,
 		planRuns:                make(map[int64]*planRun),
 		reviewCache:             make(map[int64][]memory.ReviewEntry),
 		systemCancel:            make(map[process.SessionKey]context.CancelFunc),
 		identityChecked:         make(map[int64]bool),
 		consolidationCandidates: make(map[int64]string),
 	}
+	b.skills.Store(skills)
+	return b
 }
 
 // SetClaudeConfig sets the Claude config for per-task model routing.
@@ -402,7 +405,7 @@ func (b *Bridge) resolveAgent(chatID int64) process.Agent {
 
 // GetSkillRegistry returns the current skill registry.
 func (b *Bridge) GetSkillRegistry() *skill.Registry {
-	return b.skills
+	return b.skills.Load()
 }
 
 // SetSkillDirs sets the directories to scan when reloading skills.
@@ -437,13 +440,14 @@ func (b *Bridge) ReloadSkills() (int, error) {
 	}
 
 	if len(allSkills) == 0 {
-		b.skills = nil
+		b.skills.Store(nil)
 		return 0, nil
 	}
 
-	b.skills = skill.NewRegistry(allSkills)
+	reg := skill.NewRegistry(allSkills)
+	b.skills.Store(reg)
 	slog.Info("skills reloaded", "count", len(allSkills))
-	if d := b.skills.Demoted(); len(d) > 0 {
+	if d := reg.Demoted(); len(d) > 0 {
 		slog.Warn("skills: hot skills over the prompt budget, rendered as catalog lines only", "demoted", d, "budget_tokens", skill.HotTierBudget)
 	}
 	// The skills catalog is part of the static system prompt — a reload changes
@@ -916,7 +920,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		}
 		if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
 			run("transcript", func() {
-				thread, err := b.transcript.RecentThread(chatID, threadID, b.transcriptBudget)
+				thread, err := b.transcript.RecentThread(chatID, threadID, b.agentBotUsername, telegramMsgIDFrom(ctx), b.transcriptBudget)
 				if err != nil {
 					slog.Warn("failed to fetch transcript", "error", err)
 					return
@@ -1527,4 +1531,18 @@ func (b *Bridge) CleanupStaleSessions(idleDuration time.Duration) error {
 		slog.Info("cleaned up stale session", "chat_id", r.ChatID, "thread_id", r.ThreadID)
 	}
 	return nil
+}
+
+type telegramMsgIDKey struct{}
+
+// WithTelegramMsgID tags a turn's context with the Telegram message it
+// answers, so the transcript block can leave that message out (it is the
+// prompt itself; the handler records it before the turn runs).
+func WithTelegramMsgID(ctx context.Context, id int) context.Context {
+	return context.WithValue(ctx, telegramMsgIDKey{}, id)
+}
+
+func telegramMsgIDFrom(ctx context.Context) int {
+	id, _ := ctx.Value(telegramMsgIDKey{}).(int)
+	return id
 }

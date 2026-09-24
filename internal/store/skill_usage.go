@@ -19,9 +19,10 @@ type SkillUse struct {
 	Runs7    int       // runs in the last 7 days
 }
 
-// skillPathRE finds "/skills/<name>/" followed by scripts/, SKILL.md or a
-// version dir; playground drafts are reported as "playground/<name>".
-var skillPathRE = regexp.MustCompile(`/skills/(playground/)?([a-z0-9][a-z0-9_-]*)/(scripts/|SKILL\.md|v[0-9]+/)`)
+// skillPathRE finds "/skills/<name>/" followed by scripts/ or SKILL.md,
+// optionally inside a version dir (vN/); playground drafts are reported as
+// "playground/<name>".
+var skillPathRE = regexp.MustCompile(`/skills/(playground/)?([a-z0-9][a-z0-9_-]*)/(?:v[0-9]+/)?(scripts/|SKILL\.md)`)
 
 // SkillUsage returns usage per skill name since a cutoff.
 func (s *Store) SkillUsage(since time.Time) (map[string]SkillUse, error) {

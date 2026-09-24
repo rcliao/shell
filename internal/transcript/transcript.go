@@ -121,7 +121,15 @@ func migrate(db *sql.DB) error {
 	}
 	// thread_id arrived after the table shipped: best-effort ALTER (a
 	// duplicate-column error on an already-migrated DB is expected).
-	db.Exec(`ALTER TABLE messages ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`)
+	// Rows written before the column existed have no known thread; mark them
+	// -1 so they never read as the General thread (0) — that would feed every
+	// thread's old peer text into General, the leak the column exists to stop.
+	// Only the process whose ALTER succeeds runs the UPDATE.
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`); err == nil {
+		if _, err := db.Exec(`UPDATE messages SET thread_id = -1`); err != nil {
+			return fmt.Errorf("mark pre-thread rows: %w", err)
+		}
+	}
 	// Both daemons record every human group message; the second insert of
 	// the same Telegram message must be a no-op, not a duplicate line.
 	_, err = db.Exec(`
@@ -185,13 +193,19 @@ func scanNewestFirst(rows *sql.Rows) ([]Entry, error) {
 // to an approximate token budget from the newest end. A thread's context is
 // what was said in it — another thread's conversation (and any coordination
 // in it) does not belong in this one's answers.
-func (s *Store) RecentThread(chatID, threadID int64, tokenBudget int) ([]Entry, error) {
+func (s *Store) RecentThread(chatID, threadID int64, self string, currentMsgID int, tokenBudget int) ([]Entry, error) {
+	// Self and the message being answered are excluded here, before the
+	// budget, not in FormatTranscript: the session already holds both, and a
+	// few long own replies would otherwise spend the budget and push the
+	// humans and the peer out of the block.
 	rows, err := s.db.Query(`
 		SELECT `+entryColumns+`
 		FROM messages
 		WHERE chat_id = ? AND thread_id = ?
+		  AND NOT (sender_type = 'agent' AND lower(agent_username) = lower(?))
+		  AND NOT (sender_type = 'human' AND ? > 0 AND telegram_msg_id = ?)
 		ORDER BY timestamp DESC, id DESC
-		LIMIT 200`, chatID, threadID)
+		LIMIT 200`, chatID, threadID, self, currentMsgID, currentMsgID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +225,7 @@ func (s *Store) OwnElsewhere(chatID, threadID int64, agentUsername string, limit
 	rows, err := s.db.Query(`
 		SELECT `+entryColumns+`
 		FROM messages
-		WHERE chat_id = ? AND thread_id != ? AND sender_type = 'agent'
+		WHERE chat_id = ? AND thread_id != ? AND thread_id >= 0 AND sender_type = 'agent'
 		  AND lower(agent_username) = lower(?) AND timestamp >= ?
 		ORDER BY timestamp DESC, id DESC
 		LIMIT ?`, chatID, threadID, agentUsername, since, limit)
@@ -228,12 +242,11 @@ func trimToBudget(entries []Entry, tokenBudget int) []Entry {
 	if tokenBudget <= 0 {
 		return entries
 	}
-	charBudget := tokenBudget * 4
 	total := 0
 	start := len(entries)
 	for i := len(entries) - 1; i >= 0; i-- {
-		cost := len(entries[i].SenderName) + len(entries[i].Text) + 16
-		if total+cost > charBudget {
+		cost := estimateTokens(entries[i].SenderName+entries[i].Text) + 4
+		if total+cost > tokenBudget {
 			break
 		}
 		total += cost
@@ -351,4 +364,18 @@ func timeLabel(e Entry) string {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// estimateTokens: ASCII ≈ 4 chars per token, any other rune ≈ 1 token — the
+// same rule as skill.EstimateTokens. Bytes/4 undercounted Chinese ~3×.
+func estimateTokens(s string) int {
+	ascii, other := 0, 0
+	for _, r := range s {
+		if r < 0x80 {
+			ascii++
+		} else {
+			other++
+		}
+	}
+	return (ascii+3)/4 + other
 }

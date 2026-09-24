@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,7 +117,7 @@ func TestHumanMessageRecordedOnce(t *testing.T) {
 		s.Record(Entry{ChatID: -100200300, ThreadID: 7, Timestamp: at, SenderType: "agent",
 			AgentUsername: "a_bot", SenderName: "a_bot", Text: "same text twice is two replies"})
 	}
-	got, _ := s.RecentThread(-100200300, 7, 0)
+	got, _ := s.RecentThread(-100200300, 7, "", 0, 0)
 	humans, agents := 0, 0
 	for _, e := range got {
 		if e.SenderType == "human" {
@@ -145,7 +146,7 @@ func TestRecentThreadIsScoped(t *testing.T) {
 	add(9, "peer_bot", "Could you cancel #173?", time.Second)
 	add(0, "dad", "general chat", 2*time.Second)
 
-	got, err := s.RecentThread(1, 7, 0)
+	got, err := s.RecentThread(1, 7, "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +176,7 @@ func TestOwnElsewhereAndFormat(t *testing.T) {
 	}
 
 	s.Record(Entry{ChatID: 1, ThreadID: 0, Timestamp: now, SenderType: "human", SenderName: "mom", Text: "merge what you gave me"})
-	thread, _ := s.RecentThread(1, 0, 0)
+	thread, _ := s.RecentThread(1, 0, "me_bot", 0, 0)
 	block := FormatTranscript(thread, own, "me_bot")
 	for _, want := range []string{"merge what you gave me", "OTHER threads", "thread 2479", "Oscar's"} {
 		if !strings.Contains(block, want) {
@@ -192,6 +193,73 @@ func TestOwnElsewhereAndFormat(t *testing.T) {
 	}
 	if FormatTranscript(nil, nil, "me_bot") != "" {
 		t.Error("nothing to show must render nothing")
+	}
+}
+
+// The agent's own replies and the message being answered are left out
+// BEFORE the budget: long own replies must not push people out.
+func TestRecentThreadBudgetSpentOnOthers(t *testing.T) {
+	s := tempStore(t)
+	now := time.Now()
+	s.Record(Entry{ChatID: 1, ThreadID: 7, TelegramMsgID: 10, Timestamp: now.Add(-3 * time.Minute),
+		SenderType: "human", SenderName: "mom", Text: "earlier question"})
+	for i := range 5 {
+		s.Record(Entry{ChatID: 1, ThreadID: 7, Timestamp: now.Add(time.Duration(i-120) * time.Second),
+			SenderType: "agent", AgentUsername: "me_bot", SenderName: "me_bot", Text: strings.Repeat("長", 400)})
+	}
+	s.Record(Entry{ChatID: 1, ThreadID: 7, TelegramMsgID: 11, Timestamp: now,
+		SenderType: "human", SenderName: "mom", Text: "the message being answered"})
+
+	got, err := s.RecentThread(1, 7, "ME_BOT", 11, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Text != "earlier question" {
+		t.Fatalf("got %+v, want only the earlier human message", got)
+	}
+}
+
+// Rows from before thread_id existed have no known thread: they must not
+// read as General (0), or General would get every topic's old peer text.
+func TestPreThreadRowsAreQuarantined(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+		telegram_msg_id INTEGER NOT NULL DEFAULT 0, timestamp DATETIME NOT NULL DEFAULT (datetime('now')),
+		sender_type TEXT NOT NULL DEFAULT 'human', sender_name TEXT NOT NULL DEFAULT '',
+		agent_username TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '',
+		reply_to_msg_id INTEGER NOT NULL DEFAULT 0);
+		INSERT INTO messages (chat_id, timestamp, sender_type, sender_name, agent_username, text)
+		VALUES (1, datetime('now'), 'agent', 'peer_bot', 'peer_bot', 'old text from some topic'),
+		       (1, datetime('now'), 'agent', 'me_bot', 'me_bot', 'my old reply somewhere');`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got, _ := s.RecentThread(1, 0, "me_bot", 0, 0); len(got) != 0 {
+		t.Fatalf("General got pre-thread rows: %+v", got)
+	}
+	if got, _ := s.OwnElsewhere(1, 0, "me_bot", 3, time.Now().Add(-48*time.Hour)); len(got) != 0 {
+		t.Fatalf("own-elsewhere got a pre-thread row: %+v", got)
+	}
+	// Reopening (the other daemon, a restart) must not re-mark new rows.
+	s.Record(Entry{ChatID: 1, ThreadID: 0, Timestamp: time.Now(), SenderType: "human", SenderName: "mom", Text: "new"})
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if got, _ := s2.RecentThread(1, 0, "me_bot", 0, 0); len(got) != 1 {
+		t.Fatalf("after reopen General = %+v, want the one new row", got)
 	}
 }
 

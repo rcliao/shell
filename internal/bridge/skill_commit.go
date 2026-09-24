@@ -88,7 +88,8 @@ func commitDir(ctx context.Context, dir, author string) (string, []string, error
 	if rel == "" {
 		rel = "."
 	}
-	out, err := git(ctx, root, "status", "--porcelain", "--untracked-files=all", "--", rel)
+	spec := skillPathspec(rel)
+	out, err := git(ctx, root, append([]string{"-c", "core.quotePath=false", "status", "--porcelain", "-z", "--untracked-files=all", "--"}, spec...)...)
 	if err != nil {
 		return "", nil, err
 	}
@@ -96,40 +97,60 @@ func commitDir(ctx context.Context, dir, author string) (string, []string, error
 	if len(summary) == 0 {
 		return "", nil, nil
 	}
-	if _, err := git(ctx, root, "add", "-A", "--", rel); err != nil {
+	if _, err := git(ctx, root, append([]string{"add", "-A", "--"}, spec...)...); err != nil {
 		return "", nil, err
 	}
 	if author == "" {
 		author = "agent"
 	}
 	msg := fmt.Sprintf("skills(%s): %s", author, strings.Join(summary, ", "))
-	if _, err := git(ctx, root, "-c", "user.name="+author, "-c", "user.email="+author+"@shell.local",
-		"commit", "-q", "-m", msg, "--", rel); err != nil {
+	// Pathspec on commit = --only: files staged elsewhere in the repo (the
+	// owner's own work in ~/.shell) are never swept into the agent's commit.
+	if _, err := git(ctx, root, append([]string{"-c", "user.name=" + author, "-c", "user.email=" + author + "@shell.local",
+		"commit", "-q", "-m", msg, "--"}, spec...)...); err != nil {
 		return "", nil, err
 	}
 	sha, err := git(ctx, root, "rev-parse", "--short", "HEAD")
 	return strings.TrimSpace(sha), summary, err
 }
 
-// summarizeSkillChanges turns `git status --porcelain` lines under rel into
-// one entry per skill: "+name" added, "-name" removed, "~name" changed.
-// Usage logs and the run-skill wrapper are bookkeeping, not authoring.
-func summarizeSkillChanges(porcelain, rel string) []string {
+// skillNoise is bookkeeping a skill's own scripts write next to it —
+// usage logs, bytecode, caches. Never authoring; never committed.
+var skillNoise = []string{"**/USAGE.jsonl", "**/__pycache__/**", "**/*.pyc", "**/.DS_Store", "**/node_modules/**", "**/.cache/**", "run-skill*/**", "run-skill*"}
+
+// skillPathspec is the agent's skills dir minus the noise.
+func skillPathspec(rel string) []string {
+	spec := []string{rel}
+	for _, n := range skillNoise {
+		spec = append(spec, ":(exclude,glob)"+filepath.ToSlash(filepath.Join(rel, n)))
+	}
+	return spec
+}
+
+// summarizeSkillChanges turns `git status --porcelain -z` records under rel
+// into one entry per skill: "+name" added, "-name" removed, "~name" changed.
+// playground/ and .archive/ entries are named with their skill.
+func summarizeSkillChanges(porcelainZ, rel string) []string {
 	kinds := map[string]string{}
-	for _, line := range strings.Split(strings.TrimRight(porcelain, "\n"), "\n") {
-		if len(line) < 4 {
+	recs := strings.Split(porcelainZ, "\x00")
+	for i := 0; i < len(recs); i++ {
+		rec := recs[i]
+		if len(rec) < 4 {
 			continue
 		}
-		code, path := line[:2], strings.Trim(strings.TrimSpace(line[3:]), `"`)
-		if i := strings.Index(path, " -> "); i >= 0 {
-			path = path[i+4:]
+		code, path := rec[:2], rec[3:]
+		if code[0] == 'R' || code[0] == 'C' {
+			i++ // -z puts a rename's source path in the next record
 		}
 		p := strings.TrimPrefix(filepath.ToSlash(path), filepath.ToSlash(rel)+"/")
-		if strings.HasSuffix(p, "USAGE.jsonl") || strings.HasPrefix(p, "run-skill") || strings.HasPrefix(p, ".") {
-			continue
+		if rel == "." {
+			p = filepath.ToSlash(path)
 		}
 		parts := strings.Split(p, "/")
 		name := parts[0]
+		if strings.HasPrefix(name, ".") && name != ".archive" {
+			continue
+		}
 		if (name == "playground" || name == ".archive") && len(parts) > 1 {
 			name += "/" + parts[1]
 		}
