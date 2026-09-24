@@ -98,8 +98,10 @@ type Bridge struct {
 	pmMgr *pm.Manager // nil if disabled
 
 	// Skills
-	skills    *skill.Registry // nil if disabled
-	skillDirs []string        // directories to scan on reload
+	// skills is swapped by ReloadSkills — from RPC, /skills reload and the
+	// post-heartbeat skill commit — while turns read it; load it once per use.
+	skills    atomic.Pointer[skill.Registry] // nil if disabled
+	skillDirs []string                       // directories to scan on reload
 
 	// Environment facts rendered into the system prompt so agents stop
 	// re-deriving infra layout by trial and error (observed: repeated failed
@@ -107,6 +109,8 @@ type Bridge struct {
 	// satisfy relative script paths, workspaces never used because never
 	// mentioned).
 	agentHomeDir string         // per-agent config/data dir (shell.db, memory.db)
+	ownerChatID  int64          // where own-skill change notices go (0 = none)
+	agentName    string         // commit author / notice name for own-skill changes
 	workspaceDir string         // persistent agent scratch space
 	routerShadow *decide.Shadow // P3.7 shadow router; nil = off
 
@@ -168,7 +172,7 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 	if reactionMap == nil {
 		reactionMap = config.DefaultReactionMap()
 	}
-	return &Bridge{
+	b := &Bridge{
 		proc:                    proc,
 		store:                   store,
 		memory:                  mem,
@@ -179,13 +183,14 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		reactionMap:             reactionMap,
 		tunnelMgr:               tunnelMgr,
 		pmMgr:                   pmMgr,
-		skills:                  skills,
 		planRuns:                make(map[int64]*planRun),
 		reviewCache:             make(map[int64][]memory.ReviewEntry),
 		systemCancel:            make(map[process.SessionKey]context.CancelFunc),
 		identityChecked:         make(map[int64]bool),
 		consolidationCandidates: make(map[int64]string),
 	}
+	b.skills.Store(skills)
+	return b
 }
 
 // SetClaudeConfig sets the Claude config for per-task model routing.
@@ -400,7 +405,7 @@ func (b *Bridge) resolveAgent(chatID int64) process.Agent {
 
 // GetSkillRegistry returns the current skill registry.
 func (b *Bridge) GetSkillRegistry() *skill.Registry {
-	return b.skills
+	return b.skills.Load()
 }
 
 // SetSkillDirs sets the directories to scan when reloading skills.
@@ -423,21 +428,28 @@ func (b *Bridge) ReloadSkills() (int, error) {
 	}
 
 	var allSkills []*skill.Skill
-	for _, dir := range b.skillDirs {
+	for i, dir := range b.skillDirs {
 		s, err := skill.LoadDir(dir)
 		if err != nil {
 			continue
+		}
+		if i == len(b.skillDirs)-1 { // the agent's own skills dir is always last
+			s = skill.MarkOwn(s)
 		}
 		allSkills = append(allSkills, s...)
 	}
 
 	if len(allSkills) == 0 {
-		b.skills = nil
+		b.skills.Store(nil)
 		return 0, nil
 	}
 
-	b.skills = skill.NewRegistry(allSkills)
+	reg := skill.NewRegistry(allSkills)
+	b.skills.Store(reg)
 	slog.Info("skills reloaded", "count", len(allSkills))
+	if d := reg.Demoted(); len(d) > 0 {
+		slog.Warn("skills: hot skills over the prompt budget, rendered as catalog lines only", "demoted", d, "budget_tokens", skill.HotTierBudget)
+	}
 	// The skills catalog is part of the static system prompt — a reload changes
 	// it, so flag active sessions to rotate onto the new prompt.
 	b.ReconcilePromptFingerprint()
@@ -522,6 +534,34 @@ func (b *Bridge) RecordTranscript(e transcript.Entry) {
 	if err := b.transcript.Record(e); err != nil {
 		slog.Warn("failed to record transcript entry", "error", err)
 	}
+}
+
+// A turn sees its own replies from other threads of the same group for this
+// long, at most this many: enough to carry "what I found an hour ago in the
+// trip thread" into the general thread, not a second transcript.
+const (
+	ownElsewhereLimit  = 3
+	ownElsewhereWindow = 24 * time.Hour
+)
+
+// RecordHumanMessage records a family member's group message in the shared
+// transcript, whether or not this agent will answer it. Both daemons call
+// this for every group message; the store keeps one row per Telegram
+// message. Recording is observation after the fact — it never makes an
+// agent wait for, or coordinate with, the other before answering.
+func (b *Bridge) RecordHumanMessage(chatID, threadID int64, telegramMsgID int, at time.Time, sender, text string) {
+	if b.transcript == nil || text == "" {
+		return
+	}
+	b.RecordTranscript(transcript.Entry{
+		ChatID:        chatID,
+		ThreadID:      threadID,
+		TelegramMsgID: telegramMsgID,
+		Timestamp:     at,
+		SenderType:    "human",
+		SenderName:    sender,
+		Text:          text,
+	})
 }
 
 // groupAgentPrompt returns system prompt guidance for multi-agent group conversations.
@@ -880,11 +920,16 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		}
 		if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
 			run("transcript", func() {
-				if entries, err := b.transcript.RecentByTokenBudget(chatID, b.transcriptBudget); err != nil {
+				thread, err := b.transcript.RecentThread(chatID, threadID, b.agentBotUsername, telegramMsgIDFrom(ctx), b.transcriptBudget)
+				if err != nil {
 					slog.Warn("failed to fetch transcript", "error", err)
-				} else {
-					transcriptBlock = transcript.FormatTranscript(entries, b.agentBotUsername)
+					return
 				}
+				own, err := b.transcript.OwnElsewhere(chatID, threadID, b.agentBotUsername, ownElsewhereLimit, time.Now().Add(-ownElsewhereWindow))
+				if err != nil {
+					slog.Warn("failed to fetch own replies from other threads", "error", err)
+				}
+				transcriptBlock = transcript.FormatTranscript(thread, own, b.agentBotUsername)
 			})
 		}
 		if b.taskStore != nil && !isSystemSender(senderName) {
@@ -1261,6 +1306,12 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		b.captureReflection(ctx, chatID, response, result, turnModel)
 	}
 
+	// Self-authored skills: commit + announce any change the agent made to
+	// its own skills directory. Off the turn path.
+	if isHeartbeat {
+		go b.commitSkillChanges(context.WithoutCancel(ctx))
+	}
+
 	// Run memory maintenance during heartbeats.
 	if isHeartbeat && b.memory != nil {
 		// Run reflect cycle after heartbeat to promote/decay/prune/dedup memories.
@@ -1356,6 +1407,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	if b.transcript != nil && response != "" {
 		b.RecordTranscript(transcript.Entry{
 			ChatID:        chatID,
+			ThreadID:      threadID,
 			Timestamp:     time.Now(),
 			SenderType:    "agent",
 			SenderName:    b.agentBotUsername,
@@ -1479,4 +1531,18 @@ func (b *Bridge) CleanupStaleSessions(idleDuration time.Duration) error {
 		slog.Info("cleaned up stale session", "chat_id", r.ChatID, "thread_id", r.ThreadID)
 	}
 	return nil
+}
+
+type telegramMsgIDKey struct{}
+
+// WithTelegramMsgID tags a turn's context with the Telegram message it
+// answers, so the transcript block can leave that message out (it is the
+// prompt itself; the handler records it before the turn runs).
+func WithTelegramMsgID(ctx context.Context, id int) context.Context {
+	return context.WithValue(ctx, telegramMsgIDKey{}, id)
+}
+
+func telegramMsgIDFrom(ctx context.Context) int {
+	id, _ := ctx.Value(telegramMsgIDKey{}).(int)
+	return id
 }

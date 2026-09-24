@@ -4,10 +4,27 @@ description: Project registry — create, list, and look up first-class projects
 usage: ~/.shell/skills/project/scripts/project create --title "..." [--emoji E --export-ref ID --doc-path PATH --instructions "..." --lang L]
 allowed-tools: Bash
 tier: hot
-status: draft
 ---
 
 # Project registry
+
+<!-- hot -->
+Script: `~/.shell/skills/project/scripts/project` (absolute path). Your
+`[Projects]` block lists this chat's projects with their doc ids — use them;
+never re-derive an id.
+- **No receipt, no claim.** `create` prints `Project <slug> created`;
+  `doc-write` prints `Doc <slug> committed: rev <hash>`. Without that line
+  nothing was saved — say so and retry. Never invent a rev.
+- `doc-write` replaces the whole doc: `doc-read` first, edit, write it all.
+- The doc is a working page (24 KB budget, 8 KB for `更新紀錄`): replace stale
+  content instead of appending. A refused write names the section to cut;
+  shrinking is always accepted.
+- Heading roles: `目標`/`限制` keep · `決定` dated one-line decisions, never
+  cut · `現況`/`選項` current state only · `待決定` open questions, remove
+  when answered (record the answer in `決定`) · `更新紀錄` recent entries,
+  older folded into one line.
+- Managed docs mirror to Notion by themselves — never edit that page by hand.
+<!-- /hot -->
 
 A **project** is a named unit of multi-week research work (trip planning,
 housing search): one slug binding the living document, the chat, scheduled

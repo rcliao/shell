@@ -13,10 +13,11 @@ import (
 
 // skillsSystemPrompt returns the skills listing and bridge operation rules.
 func (b *Bridge) skillsSystemPrompt() string {
-	if b.skills == nil {
+	reg := b.skills.Load()
+	if reg == nil {
 		return ""
 	}
-	prompt := b.skills.CatalogPrompt()
+	prompt := reg.CatalogPrompt()
 	// Bridge-level facts only. Tool- and skill-specific guidance (pm/tunnel
 	// usage, scheduling via shell-schedule, CronCreate volatility) lives in
 	// the tool descriptions and SKILL.md files — single source of truth per
@@ -37,7 +38,8 @@ func (b *Bridge) skillsSystemPrompt() string {
 // skillOverrides returns true if a skill with the given name is loaded,
 // meaning the built-in directive should be suppressed in favor of the skill.
 func (b *Bridge) skillOverrides(name string) bool {
-	return b.skills != nil && b.skills.Has(name)
+	reg := b.skills.Load()
+	return reg != nil && reg.Has(name)
 }
 
 // environmentPrompt states the agent's real filesystem layout. Before this

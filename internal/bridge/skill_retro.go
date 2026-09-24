@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"fmt"
+	"github.com/rcliao/shell/internal/store"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,10 +26,11 @@ const retroStaleThreshold = 14 * 24 * time.Hour
 // saturate attention; the retro just gives ground truth (usage stats) and
 // an action menu, then gets out of the way.
 func (b *Bridge) buildSkillRetroBlock() string {
-	if b.skills == nil {
+	reg := b.skills.Load()
+	if reg == nil {
 		return ""
 	}
-	all := b.skills.All()
+	all := reg.All()
 	if len(all) == 0 {
 		return ""
 	}
@@ -52,20 +55,22 @@ func (b *Bridge) buildSkillRetroBlock() string {
 		stats skill.UsageStats
 		stale bool
 	}
+	usage := b.skillUsage()
 	var hotRows, lazyRows []row
 	for _, s := range hot {
-		st, _ := skill.Rollup(s)
+		st := statsFor(s, usage)
 		hotRows = append(hotRows, row{s: s, stats: st, stale: isStale(st)})
 	}
 	for _, s := range lazy {
-		st, _ := skill.Rollup(s)
+		st := statsFor(s, usage)
 		lazyRows = append(lazyRows, row{s: s, stats: st, stale: isStale(st)})
 	}
 
-	// Hot budget used — honest count so the agent can see the slack.
+	// Hot budget used — honest count so the agent can see the slack. Counted
+	// as rendered (a marked rules section, not the whole body).
 	hotTokens := 0
 	for _, r := range hotRows {
-		hotTokens += skill.EstimateTokens(renderFullSkillInline(r.s))
+		hotTokens += skill.HotTokens(r.s)
 	}
 
 	var playgroundNotes []string
@@ -79,8 +84,12 @@ func (b *Bridge) buildSkillRetroBlock() string {
 
 	var sb strings.Builder
 	sb.WriteString("\n---\n**[Skill Inventory Retro]**\n")
-	sb.WriteString(fmt.Sprintf("Hot budget: ~%d / %d tokens. Cap is load-bearing — graduate carefully.\n\n",
+	sb.WriteString(fmt.Sprintf("Hot budget: ~%d / %d tokens. Cap is load-bearing — graduate carefully.\n",
 		hotTokens, skill.HotTierBudget))
+	if d := reg.Demoted(); len(d) > 0 {
+		sb.WriteString(fmt.Sprintf("NOT loaded (over budget): %s — give your own hot skills a short `<!-- hot -->` … `<!-- /hot -->` rules section so the rules that must always hold fit.\n", strings.Join(d, ", ")))
+	}
+	sb.WriteString("Usage below is from your real tool log (last 30 days). Skills marked (shared) belong to the owner — change only your own.\n\n")
 
 	sb.WriteString("Hot skills (full body in system prompt):\n")
 	if len(hotRows) == 0 {
@@ -124,11 +133,37 @@ func (b *Bridge) buildSkillRetroBlock() string {
 	}
 	sb.WriteString("Action menu — for each skill, consider: **keep / promote-to-hot / demote-to-lazy / retire / graduate-from-playground / author-new**.\n")
 	sb.WriteString("- Promotions/demotions: edit the skill's `tier:` frontmatter field (or move playground -> skills/<name>/v1/).\n")
-	sb.WriteString("- Retire: move `skills/<name>/` to `skills/.archive/`. USAGE.jsonl history stays intact.\n")
+	sb.WriteString("- Retire: move `skills/<name>/` to `skills/.archive/`.\n- Every change to your skills directory is committed automatically and the owner is told in one line (with the revert command) — no approval step, so be deliberate.\n")
 	sb.WriteString("- New version: create `skills/<name>/v2/SKILL.md`, leave ACTIVE on v1 until v2 proves out.\n")
-	sb.WriteString("- Base decisions on USAGE.jsonl stats (shown above), NOT on how clever the skill sounds — productivity theater wastes the hot budget.\n")
+	sb.WriteString("- Base decisions on the usage stats above, NOT on how clever the skill sounds — productivity theater wastes the hot budget. A skill whose SKILL.md you keep re-reading is one whose rules belong in a `<!-- hot -->` section.\n")
 	sb.WriteString("- If you make a significant change, ghost_put a brief rationale memory tagged `skill:<name>` so the **why** is preserved alongside the what. (Your skills catalog is part of every session's system prompt — no pin needed for tools to survive rotation.)\n")
 	return sb.String()
+}
+
+// skillUsage is the tool-log meter for the last 30 days; nil without a store.
+func (b *Bridge) skillUsage() map[string]store.SkillUse {
+	if b.store == nil {
+		return nil
+	}
+	u, err := b.store.SkillUsage(time.Now().Add(-30 * 24 * time.Hour))
+	if err != nil {
+		slog.Warn("skill retro: usage query failed", "error", err)
+		return nil
+	}
+	return u
+}
+
+// statsFor prefers the tool-log meter; USAGE.jsonl (the old wrapper log) is
+// the fallback when there is no store.
+func statsFor(s *skill.Skill, usage map[string]store.SkillUse) skill.UsageStats {
+	if usage == nil {
+		st, _ := skill.Rollup(s)
+		st.Own = s.Own
+		return st
+	}
+	u := usage[s.Name]
+	return skill.UsageStats{Name: s.Name, Version: s.Version, Runs: u.Runs, Successes: u.Runs - u.Failures,
+		Failures: u.Failures, LastRun: u.Last, Invocations7: u.Runs7, Reads: u.Reads, Own: s.Own}
 }
 
 func isStale(st skill.UsageStats) bool {
@@ -152,14 +187,20 @@ func writeSkillRow(sb *strings.Builder, s *skill.Skill, st skill.UsageStats, sta
 		sb.WriteString(s.Version)
 	}
 	sb.WriteString("` — ")
+	if !st.Own {
+		sb.WriteString("(shared) ")
+	}
 	if st.Runs == 0 {
-		sb.WriteString("0 runs ever")
+		sb.WriteString("0 runs in 30 days")
 	} else {
 		okRate := 100 * st.Successes / st.Runs
 		sb.WriteString(fmt.Sprintf("%d runs total (%d in last 7d), %d%% success", st.Runs, st.Invocations7, okRate))
 		if st.AvgDuration > 0 {
 			sb.WriteString(fmt.Sprintf(", avg %dms", st.AvgDuration.Milliseconds()))
 		}
+	}
+	if st.Reads > 0 {
+		sb.WriteString(fmt.Sprintf(", SKILL.md read %d×", st.Reads))
 	}
 	if stale {
 		if isHot {
@@ -228,10 +269,11 @@ func pickPerAgentSkillsDir(skills []*skill.Skill) string {
 // survives session rotation and sits in Channel A across future generations
 // as an identity anchor: "these are the tools I've built for myself."
 func (b *Bridge) buildSkillInventoryDigest() string {
-	if b.skills == nil {
+	reg := b.skills.Load()
+	if reg == nil {
 		return ""
 	}
-	all := b.skills.All()
+	all := reg.All()
 	if len(all) == 0 {
 		return ""
 	}

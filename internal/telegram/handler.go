@@ -1883,6 +1883,13 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// Group chat @mention filtering and broadcast probability.
 	isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
 	senderIsPeerBot := false
+	if isGroup && !msg.From.IsBot {
+		// Record what a person said BEFORE deciding whether to answer: a
+		// message addressed to the other agent (a correction, a decision) is
+		// still something this agent has observed in the group.
+		h.bridge.RecordHumanMessage(msg.Chat.ID, threadID, msg.ID, time.Unix(int64(msg.Date), 0),
+			h.senderLabel(msg.From), transcriptText(msg))
+	}
 	if isGroup {
 		// Use caption as text source for mention parsing if text is empty (photo/sticker messages).
 		mentionText := text
@@ -2325,7 +2332,7 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 	// Detach the turn from the poller context: during a drain-restart the
 	// poller ctx is cancelled to stop new updates, but in-flight turns must
 	// run to completion (the whole point of draining).
-	turnCtx := context.WithoutCancel(ctx)
+	turnCtx := bridge.WithTelegramMsgID(context.WithoutCancel(ctx), msg.ID)
 	resp, err := h.sendWithBusyRetry(turnCtx, msg.Chat.ID, threadID, text, senderName, images, pdfs, onEvent)
 
 	// Stop the streaming edit goroutine and wait for it to finish.
@@ -3100,3 +3107,24 @@ func (h *Handler) sendWithBusyRetry(ctx context.Context, chatID, threadID int64,
 	}
 	return resp, err
 }
+
+// transcriptText is what a group message contributes to the shared
+// transcript: its text, else its caption, else a short marker for media.
+func transcriptText(msg *models.Message) string {
+	if t := strings.TrimSpace(msg.Text); t != "" {
+		return t
+	}
+	caption := strings.TrimSpace(msg.Caption)
+	switch {
+	case len(msg.Photo) > 0:
+		return strings.TrimSpace("(photo) " + caption)
+	case msg.Sticker != nil:
+		return "(sticker " + msg.Sticker.Emoji + ")"
+	case msg.Document != nil:
+		return strings.TrimSpace("(file) " + caption)
+	case msg.Voice != nil:
+		return "(voice message)"
+	}
+	return caption
+}
+

@@ -1,20 +1,26 @@
 ---
 name: web-search
-description: Search the web using Brave/Tavily APIs — includes the location/place verification contract
+description: Place/hours verification contract for web research; prefer built-in WebSearch — this script adds freshness filters when a Brave/Tavily key exists
 usage: ~/.shell/skills/web-search/scripts/web-search "<query>" [-n N] [-f pd|pw|pm|py]
 allowed-tools: Bash
 ---
 
 # Web Search
 
-Search the web and get formatted results.
+**Default: use the built-in `WebSearch` tool** (and `WebFetch` to read a page).
+It needs no key and is the reliable path.
+
+Use this script only when you need what it adds — a freshness filter (`-f`)
+and each result's age — which requires a Brave or Tavily key. Without one it
+falls back to DuckDuckGo, which often refuses automated requests. When that
+happens the script prints **`SEARCH UNAVAILABLE`** and exits non-zero: that
+means the search did not run, NOT that nothing exists. Switch to `WebSearch`;
+never answer "I searched and found nothing" from it.
 
 ## Usage
 
 ```bash
-~/.shell/skills/web-search/scripts/web-search <query>
-~/.shell/skills/web-search/scripts/web-search -n 10 <query>
-~/.shell/skills/web-search/scripts/web-search -f pw <query>
+~/.shell/skills/web-search/scripts/web-search "<query>" -n 10 -f pw
 ```
 
 ## Options

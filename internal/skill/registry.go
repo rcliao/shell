@@ -9,19 +9,54 @@ import (
 // Token budgets for the 3-tier catalog.
 // Core skills are always full body (no budget). Hot and lazy each get a cap;
 // over-budget skills at the hot tier are auto-demoted to lazy for this render.
+//
+// The hot budget used to be 1,000 tokens for ALL hot skills together, packed
+// alphabetically — with five hot skills totalling ~5,900 tokens only the
+// first (google) ever loaded, and the rest, including the agent's own
+// meal-memo rules, were dropped without a log line. A hot skill now
+// contributes only its `<!-- hot -->` rules section when it has one.
 const (
-	HotTierBudget  = 1000 // tokens — full bodies pre-loaded in system prompt
+	HotTierBudget  = 3000 // tokens — hot rules sections pre-loaded in system prompt
 	LazyTierBudget = 1000 // tokens — one-liner catalog entries
 )
 
-// EstimateTokens is a cheap approximation used for budget math.
-// Uses the chars/4 heuristic — good enough for budget gating; the retro loop
-// can decide to cut skills long before the actual tokenizer disagrees.
+// HotStart and HotEnd delimit the part of a SKILL.md body that must always be
+// in the prompt (the rules that have to hold without the agent reading the
+// file). Everything else stays on disk behind a pointer.
+const (
+	HotStart = "<!-- hot -->"
+	HotEnd   = "<!-- /hot -->"
+)
+
+// EstimateTokens is a cheap approximation used for budget math: ASCII at
+// ~4 characters per token, any other rune (CJK, emoji) at ~1 token each.
+// Byte length/4 undercounted Chinese three-fold per character.
 func EstimateTokens(s string) int {
 	if s == "" {
 		return 0
 	}
-	return (len(s) + 3) / 4
+	ascii, other := 0, 0
+	for _, r := range s {
+		if r < 128 {
+			ascii++
+		} else {
+			other++
+		}
+	}
+	return (ascii+3)/4 + other
+}
+
+// hotSection returns the marked always-loaded section of a body, if any.
+func hotSection(body string) (string, bool) {
+	i := strings.Index(body, HotStart)
+	if i < 0 {
+		return "", false
+	}
+	rest := body[i+len(HotStart):]
+	if j := strings.Index(rest, HotEnd); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.TrimSpace(rest), true
 }
 
 // Registry holds loaded skills and provides merged configuration.
@@ -130,20 +165,13 @@ func (r *Registry) CatalogPrompt() string {
 		}
 	}
 	sort.Slice(core, func(i, j int) bool { return core[i].Name < core[j].Name })
-	sort.Slice(hot, func(i, j int) bool { return hot[i].Name < hot[j].Name })
 	sort.Slice(lazy, func(i, j int) bool { return lazy[i].Name < lazy[j].Name })
 
-	// Pack hot tier against budget; demote overflow into lazy.
-	var hotFitted []*Skill
-	hotUsed := 0
-	for _, s := range hot {
-		cost := EstimateTokens(renderHotBody(s))
-		if hotUsed+cost > HotTierBudget {
-			lazy = append(lazy, s) // demote — catalog entry still visible
-			continue
-		}
-		hotFitted = append(hotFitted, s)
-		hotUsed += cost
+	hotFitted, demoted := packHot(hot)
+	demotedSet := map[string]bool{}
+	for _, s := range demoted {
+		demotedSet[s.Name] = true
+		lazy = append(lazy, s) // demote — catalog entry still visible, and says so
 	}
 	// Re-sort lazy after any demotions.
 	sort.Slice(lazy, func(i, j int) bool { return lazy[i].Name < lazy[j].Name })
@@ -169,7 +197,7 @@ func (r *Registry) CatalogPrompt() string {
 	if len(hotFitted) > 0 {
 		sb.WriteString("### Hot skills\n\n")
 		for _, s := range hotFitted {
-			sb.WriteString(renderFullSkill(s))
+			sb.WriteString(renderHotBody(s))
 		}
 	}
 
@@ -180,6 +208,9 @@ func (r *Registry) CatalogPrompt() string {
 		shown := 0
 		for _, s := range lazy {
 			line := renderLazyLine(s)
+			if demotedSet[s.Name] {
+				line = strings.Replace(line, "**: ", "** (hot, NOT loaded — over the prompt budget; read its SKILL.md before using it): ", 1)
+			}
 			cost := EstimateTokens(line)
 			if lazyUsed+cost > LazyTierBudget {
 				sb.WriteString(fmt.Sprintf("- _(%d more skills — see `%s` directory)_\n", len(lazy)-shown, skillRootHint(s)))
@@ -222,11 +253,58 @@ func renderFullSkill(s *Skill) string {
 	return sb.String()
 }
 
-// renderHotBody returns the same text as renderFullSkill; separated so the
-// budget check and the actual render can diverge later (e.g. add truncation
-// markers) without drift.
+// renderHotBody is what a hot skill costs and contributes: its marked rules
+// section plus a pointer to the full file, or the whole body when unmarked.
 func renderHotBody(s *Skill) string {
-	return renderFullSkill(s)
+	sec, ok := hotSection(s.Body)
+	if !ok {
+		return renderFullSkill(s)
+	}
+	cp := *s
+	cp.Body = sec + "\n\n_Full instructions: `" + s.Dir + "/SKILL.md` — read it when the rules above are not enough._"
+	return renderFullSkill(&cp)
+}
+
+// packHot fits hot skills into HotTierBudget: the agent's own skills first
+// (its specialization), then shared ones, each group by name — deterministic,
+// so the prompt stays cache-stable. Returns what fits and what was demoted.
+func packHot(hot []*Skill) (fitted, demoted []*Skill) {
+	sorted := append([]*Skill(nil), hot...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Own != sorted[j].Own {
+			return sorted[i].Own
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
+	used := 0
+	for _, s := range sorted {
+		cost := EstimateTokens(renderHotBody(s))
+		if used+cost > HotTierBudget {
+			demoted = append(demoted, s)
+			continue
+		}
+		fitted = append(fitted, s)
+		used += cost
+	}
+	return fitted, demoted
+}
+
+// Demoted reports hot skills that do not fit the budget and will render as
+// catalog lines instead — the silent failure this used to be. Names with
+// their estimated cost, e.g. "meal-memo (2228 tokens)".
+func (r *Registry) Demoted() []string {
+	var hot []*Skill
+	for _, s := range r.skills {
+		if s.Tier == TierHot {
+			hot = append(hot, s)
+		}
+	}
+	_, demoted := packHot(hot)
+	out := make([]string, 0, len(demoted))
+	for _, s := range demoted {
+		out = append(out, fmt.Sprintf("%s (%d tokens)", s.Name, EstimateTokens(renderHotBody(s))))
+	}
+	return out
 }
 
 // renderLazyLine emits a single compact catalog entry plus the on-disk path
@@ -314,3 +392,6 @@ func (r *Registry) Has(name string) bool {
 	_, ok := r.byName[name]
 	return ok
 }
+
+// HotTokens is what a hot skill costs against HotTierBudget as rendered.
+func HotTokens(s *Skill) int { return EstimateTokens(renderHotBody(s)) }

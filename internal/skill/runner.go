@@ -135,6 +135,8 @@ type UsageStats struct {
 	LastRun      time.Time
 	AvgDuration  time.Duration
 	Invocations7 int // runs in the last 7 days
+	Reads        int // reads of the SKILL.md itself (tool log) — often a sign its rules are not in the prompt
+	Own          bool
 }
 
 // ReadUsage parses usageLogPath (NDJSON) into UsageRecord slice. Missing file

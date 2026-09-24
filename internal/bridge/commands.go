@@ -254,15 +254,16 @@ func (b *Bridge) Skills(ctx context.Context, chatID int64, args string) (string,
 
 	default:
 		// List current skills.
-		if b.skills == nil {
+		reg := b.skills.Load()
+		if reg == nil {
 			return "No skills loaded.", nil
 		}
 		var sb strings.Builder
 		sb.WriteString("## Skills\n\n")
-		for _, s := range b.skills.All() {
+		for _, s := range reg.All() {
 			sb.WriteString(fmt.Sprintf("- **%s** — %s (`%s`)\n", s.Name, s.Description, s.Dir))
 		}
-		sb.WriteString(fmt.Sprintf("\n%d skills loaded. Use `/skills reload` to hot-reload.", len(b.skills.All())))
+		sb.WriteString(fmt.Sprintf("\n%d skills loaded. Use `/skills reload` to hot-reload.", len(reg.All())))
 		return sb.String(), nil
 	}
 }

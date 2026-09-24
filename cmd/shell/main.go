@@ -1579,7 +1579,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, mediaCmd, latencyCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd(), newProjectCmd(), newSecretsCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, mediaCmd, latencyCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd(), newProjectCmd(), newSecretsCmd(), newSkillsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -1779,7 +1779,7 @@ func loadSkillRegistryFromConfig(cfg config.Config) *skill.Registry {
 	if cfg.Daemon.PIDFile != "" {
 		agentDir := filepath.Join(filepath.Dir(cfg.Daemon.PIDFile), "skills")
 		if s, err := skill.LoadDir(agentDir); err == nil {
-			all = append(all, s...)
+			all = append(all, skill.MarkOwn(s)...) // own skills pack first, as in the daemon
 		}
 	}
 

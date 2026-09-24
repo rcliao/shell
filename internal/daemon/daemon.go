@@ -156,7 +156,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 
 		if s, err := skill.LoadDir(agentSkillsDir); err == nil {
-			allSkills = append(allSkills, s...)
+			allSkills = append(allSkills, skill.MarkOwn(s)...)
 			if len(s) > 0 {
 				slog.Info("agent skills loaded", "dir", agentSkillsDir, "count", len(s))
 			}
@@ -165,6 +165,9 @@ func New(cfg config.Config) (*Daemon, error) {
 		if len(allSkills) > 0 {
 			skillRegistry = skill.NewRegistry(allSkills)
 			slog.Info("skills loaded", "count", len(allSkills))
+			if d := skillRegistry.Demoted(); len(d) > 0 {
+				slog.Warn("skills: hot skills over the prompt budget, rendered as catalog lines only", "demoted", d, "budget_tokens", skill.HotTierBudget)
+			}
 		}
 	}
 
@@ -489,6 +492,11 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 	skillDirs = append(skillDirs, agentSkillsDir)
 	br.SetSkillDirs(skillDirs)
+	agentName := cfg.Agent.Name
+	if agentName == "" {
+		agentName = filepath.Base(filepath.Dir(agentSkillsDir))
+	}
+	br.SetOwnerChat(cfg.Agent.OwnerChatID, agentName)
 
 	// Environment facts for the system prompt: the per-agent home and a
 	// persistent workspace. Created here so the prompt never advertises a

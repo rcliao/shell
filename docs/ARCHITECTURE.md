@@ -331,6 +331,33 @@ Auto-retry on resume failure: falls back to fresh session.
 | `~/.shell/worktrees/` | Git worktree checkouts |
 | `~/.shell/skills/` | Installed skills |
 
+## Skills in the prompt
+
+Skills are `SKILL.md` files in `~/.shell/skills/` (shared, installed from
+`skills/`) and `~/.shell/agents/<agent>/skills/` (the agent's own). Tiers:
+`core` (always full), `hot` (pre-loaded), `lazy` (one catalog line; the
+agent reads the file on demand). A hot skill contributes only its
+`<!-- hot -->` … `<!-- /hot -->` rules section when it has one, plus a
+pointer to the full file. Hot skills are packed into `skill.HotTierBudget`
+(3,000 tokens, estimated per rune class) with the agent's own skills first;
+one that does not fit renders as a catalog line that says "hot, NOT loaded"
+and is logged at startup and on reload (`skills: hot skills over the prompt
+budget`). `status: draft` caps a skill to lazy until it graduates.
+
+**Self-authored skills.** Each deep heartbeat carries a skill retrospective
+(`bridge.buildSkillRetroBlock`): per skill, runs, failures, `SKILL.md` reads
+and last use over 30 days, from the `tool_uses` log (`store.SkillUsage`), the
+hot skills that are not loaded, and the agent's `playground/` drafts. The
+agent may draft into `skills/playground/<name>/` (never loaded), graduate a
+draft, change tiers or retire a skill. After every heartbeat the bridge
+commits any change under the agent's own skills dir to the git repo holding
+it (`~/.shell`), author = the agent, reloads skills, and sends one line with
+the revert command to `agent.owner_chat_id` (0 = commit silently).
+`USAGE.jsonl` changes alone never commit. No approval step: notify + revert.
+`shell skills report [--days N] [--agent A]` shows, per agent, each skill's
+owner, tier, whether it reaches the prompt, real usage, playground drafts and
+the agent's self-authored commit count.
+
 ## Shadow Router
 
 When the `TYPESAFE_API_KEY` secret resolves (secret store, then

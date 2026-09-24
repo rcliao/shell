@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rcliao/shell/internal/skill"
+	"github.com/rcliao/shell/internal/store"
 )
 
 func TestBuildSkillRetroBlock_NoRegistryReturnsEmpty(t *testing.T) {
@@ -19,7 +20,7 @@ func TestBuildSkillRetroBlock_NoRegistryReturnsEmpty(t *testing.T) {
 
 func TestBuildSkillRetroBlock_EmptyRegistryReturnsEmpty(t *testing.T) {
 	reg := skill.NewRegistry(nil)
-	b := &Bridge{skills: reg}
+	b := skillBridge(reg)
 	if got := b.buildSkillRetroBlock(); got != "" {
 		t.Errorf("expected empty for empty registry, got %q", got)
 	}
@@ -34,7 +35,7 @@ func TestBuildSkillRetroBlock_ShowsHotAndLazy(t *testing.T) {
 		{Name: "core-one", Description: "platform core", Tier: skill.TierCore, Body: "body"},
 	}
 	reg := skill.NewRegistry(skills)
-	b := &Bridge{skills: reg}
+	b := skillBridge(reg)
 
 	out := b.buildSkillRetroBlock()
 	if !strings.Contains(out, "Skill Inventory Retro") {
@@ -62,9 +63,9 @@ func TestBuildSkillRetroBlock_FlagsStaleSkill(t *testing.T) {
 		{Name: "ghost-skill", Description: "never run", Tier: skill.TierHot, Body: "body"},
 	}
 	reg := skill.NewRegistry(skills)
-	b := &Bridge{skills: reg}
+	b := skillBridge(reg)
 	out := b.buildSkillRetroBlock()
-	if !strings.Contains(out, "0 runs ever") {
+	if !strings.Contains(out, "0 runs") {
 		t.Error("expected 0-runs annotation")
 	}
 	if !strings.Contains(out, "stale") {
@@ -87,7 +88,7 @@ func TestBuildSkillRetroBlock_ShowsUsageStats(t *testing.T) {
 		{Name: "measured", Description: "has history", Tier: skill.TierHot, Body: "body", Dir: skillDir},
 	}
 	reg := skill.NewRegistry(skills)
-	b := &Bridge{skills: reg}
+	b := skillBridge(reg)
 	out := b.buildSkillRetroBlock()
 	if !strings.Contains(out, "1 runs total") {
 		t.Errorf("expected '1 runs total' in output, got: %s", out)
@@ -105,7 +106,7 @@ func TestBuildSkillInventoryDigest_Empty(t *testing.T) {
 	if got := b.buildSkillInventoryDigest(); got != "" {
 		t.Errorf("expected empty for no registry, got %q", got)
 	}
-	b.skills = skill.NewRegistry(nil)
+	b.skills.Store(skill.NewRegistry(nil))
 	if got := b.buildSkillInventoryDigest(); got != "" {
 		t.Errorf("expected empty for empty registry, got %q", got)
 	}
@@ -115,7 +116,7 @@ func TestBuildSkillInventoryDigest_OnlyCoreReturnsEmpty(t *testing.T) {
 	skills := []*skill.Skill{
 		{Name: "shell-remember", Description: "platform", Tier: skill.TierCore},
 	}
-	b := &Bridge{skills: skill.NewRegistry(skills)}
+	b := skillBridge(skill.NewRegistry(skills))
 	if got := b.buildSkillInventoryDigest(); got != "" {
 		t.Errorf("core-only should yield empty digest (nothing agent-authored), got %q", got)
 	}
@@ -127,7 +128,7 @@ func TestBuildSkillInventoryDigest_ListsHotAndLazy(t *testing.T) {
 		{Name: "dairy-tally", Version: "v2", Description: "tally dairy points", Tier: skill.TierHot},
 		{Name: "flonase-log", Description: "log doses", Tier: skill.TierLazy},
 	}
-	b := &Bridge{skills: skill.NewRegistry(skills)}
+	b := skillBridge(skill.NewRegistry(skills))
 	out := b.buildSkillInventoryDigest()
 
 	if strings.Contains(out, "core-thing") {
@@ -165,7 +166,7 @@ func TestBuildSkillInventoryDigest_IncludesUsageStats(t *testing.T) {
 	skills := []*skill.Skill{
 		{Name: "logged", Description: "runs often", Tier: skill.TierHot, Dir: skillDir},
 	}
-	b := &Bridge{skills: skill.NewRegistry(skills)}
+	b := skillBridge(skill.NewRegistry(skills))
 	out := b.buildSkillInventoryDigest()
 	// "2r/100%" is the compact form used in the digest.
 	if !strings.Contains(out, "2r/100%") {
@@ -178,7 +179,7 @@ func TestBuildSkillInventoryDigest_TruncatesLongDescription(t *testing.T) {
 	skills := []*skill.Skill{
 		{Name: "wordy", Description: long, Tier: skill.TierHot},
 	}
-	b := &Bridge{skills: skill.NewRegistry(skills)}
+	b := skillBridge(skill.NewRegistry(skills))
 	out := b.buildSkillInventoryDigest()
 	if !strings.Contains(out, "...") {
 		t.Error("expected truncation marker for long description")
@@ -204,7 +205,7 @@ func TestBuildSkillRetroBlock_ShowsPlaygroundCandidates(t *testing.T) {
 		{Name: "real", Description: "anchor", Tier: skill.TierLazy, Dir: realSkill, SkillRoot: realSkill},
 	}
 	reg := skill.NewRegistry(skills)
-	b := &Bridge{skills: reg}
+	b := skillBridge(reg)
 	out := b.buildSkillRetroBlock()
 	if !strings.Contains(out, "ready") {
 		t.Error("playground candidate 'ready' missing")
@@ -215,4 +216,39 @@ func TestBuildSkillRetroBlock_ShowsPlaygroundCandidates(t *testing.T) {
 	if !strings.Contains(out, "ready to graduate") {
 		t.Error("expected graduation hint for ready/SKILL.md")
 	}
+}
+
+// With a store, the retro reads real usage from the tool log: runs, failures,
+// hand-reads of SKILL.md, and which skills are shared (not the agent's to edit).
+func TestBuildSkillRetroBlock_UsesToolLogMeter(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.LogToolUses(42, 1, "interactive", []store.ToolUse{
+		{Name: "Bash", Detail: "command=~/.shell/agents/a/skills/diary/scripts/diary add"},
+		{Name: "Bash", Detail: "command=~/.shell/agents/a/skills/diary/scripts/diary add", Failed: true},
+		{Name: "Bash", Detail: "command=cat ~/.shell/agents/a/skills/diary/SKILL.md"},
+	})
+	own := &skill.Skill{Name: "diary", Description: "mine", Tier: skill.TierHot, Body: "b", Own: true}
+	shared := &skill.Skill{Name: "notion", Description: "owner's", Tier: skill.TierLazy, Body: "b"}
+	b := skillBridge(skill.NewRegistry([]*skill.Skill{own, shared}))
+	b.store = st
+
+	out := b.buildSkillRetroBlock()
+	for _, want := range []string{"`diary` — 2 runs total", "50% success", "SKILL.md read 1×", "`notion` — (shared) 0 runs in 30 days", "real tool log", "committed automatically"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("retro missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "`diary` — (shared)") {
+		t.Error("an own skill must not be labelled shared")
+	}
+}
+
+func skillBridge(reg *skill.Registry) *Bridge {
+	b := &Bridge{}
+	b.skills.Store(reg)
+	return b
 }

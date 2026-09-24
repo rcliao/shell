@@ -62,6 +62,10 @@ type AgentIdentity struct {
 	TranscriptPath       string   `json:"transcript_path"`       // path to shared transcript DB (default: ~/.shell/shared/transcript.db)
 	TranscriptBudget     int      `json:"transcript_budget"`     // token budget for shared transcript injection (default: 2000)
 	Skills               []string `json:"skills"`                // declared capabilities for task delegation (e.g. "code-review", "research")
+	// OwnerChatID is where the agent's own skill changes are announced (one
+	// line with the revert command). 0 = no notices; changes are still
+	// committed.
+	OwnerChatID int64 `json:"owner_chat_id"`
 	// A2AMaxDepth caps consecutive agent→agent hops in one chain before both
 	// must yield to a human. 0 = default (a2aDefaultMaxDepth). Raise it for
 	// conversations the agents are meant to carry alone — a multi-item sync
