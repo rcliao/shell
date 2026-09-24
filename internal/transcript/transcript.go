@@ -28,7 +28,8 @@ type Entry struct {
 	SenderName    string // display name (e.g. an owner nickname or "pikamini")
 	AgentUsername string // bot username for agent messages, empty for humans
 	Text          string
-	ReplyToMsgID  int // 0 if not a reply
+	ReplyToMsgID  int   // 0 if not a reply
+	ThreadID      int64 // Telegram forum topic; 0 = general thread (and all rows before threads were recorded)
 }
 
 // Task is a delegated unit of work between agents (A2A-inspired).
@@ -115,15 +116,28 @@ func migrate(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_tasks_chat_status ON tasks(chat_id, status);
 		CREATE INDEX IF NOT EXISTS idx_tasks_to_agent ON tasks(to_agent, status);
 	`)
+	if err != nil {
+		return err
+	}
+	// thread_id arrived after the table shipped: best-effort ALTER (a
+	// duplicate-column error on an already-migrated DB is expected).
+	db.Exec(`ALTER TABLE messages ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`)
+	// Both daemons record every human group message; the second insert of
+	// the same Telegram message must be a no-op, not a duplicate line.
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_messages_chat_thread_ts ON messages(chat_id, thread_id, timestamp);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_human_once
+			ON messages(chat_id, telegram_msg_id) WHERE sender_type = 'human' AND telegram_msg_id > 0;
+	`)
 	return err
 }
 
 // Record writes a message to the shared transcript.
 func (s *Store) Record(e Entry) error {
 	_, err := s.db.Exec(`
-		INSERT INTO messages (chat_id, telegram_msg_id, timestamp, sender_type, sender_name, agent_username, text, reply_to_msg_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ChatID, e.TelegramMsgID, e.Timestamp, e.SenderType, e.SenderName, e.AgentUsername, e.Text, e.ReplyToMsgID,
+		INSERT OR IGNORE INTO messages (chat_id, telegram_msg_id, timestamp, sender_type, sender_name, agent_username, text, reply_to_msg_id, thread_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ChatID, e.TelegramMsgID, e.Timestamp, e.SenderType, e.SenderName, e.AgentUsername, e.Text, e.ReplyToMsgID, e.ThreadID,
 	)
 	return err
 }
@@ -132,7 +146,7 @@ func (s *Store) Record(e Entry) error {
 // limited by count. Use this for building transcript context.
 func (s *Store) Recent(chatID int64, limit int) ([]Entry, error) {
 	rows, err := s.db.Query(`
-		SELECT id, chat_id, telegram_msg_id, timestamp, sender_type, sender_name, agent_username, text, reply_to_msg_id
+		SELECT `+entryColumns+`
 		FROM messages
 		WHERE chat_id = ?
 		ORDER BY timestamp DESC, id DESC
@@ -142,19 +156,90 @@ func (s *Store) Recent(chatID int64, limit int) ([]Entry, error) {
 	}
 	defer rows.Close()
 
+	return scanNewestFirst(rows)
+}
+
+const entryColumns = `id, chat_id, telegram_msg_id, timestamp, sender_type, sender_name, agent_username, text, reply_to_msg_id, thread_id`
+
+// scanNewestFirst reads rows selected newest-first and returns them
+// oldest-first, the order a transcript is read in.
+func scanNewestFirst(rows *sql.Rows) ([]Entry, error) {
 	var entries []Entry
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.ID, &e.ChatID, &e.TelegramMsgID, &e.Timestamp, &e.SenderType, &e.SenderName, &e.AgentUsername, &e.Text, &e.ReplyToMsgID); err != nil {
+		if err := rows.Scan(&e.ID, &e.ChatID, &e.TelegramMsgID, &e.Timestamp, &e.SenderType, &e.SenderName, &e.AgentUsername, &e.Text, &e.ReplyToMsgID, &e.ThreadID); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
 	}
-	// Reverse to oldest-first.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
 		entries[i], entries[j] = entries[j], entries[i]
 	}
 	return entries, nil
+}
+
+// RecentThread returns the recent messages of ONE thread of a chat, trimmed
+// to an approximate token budget from the newest end. A thread's context is
+// what was said in it — another thread's conversation (and any coordination
+// in it) does not belong in this one's answers.
+func (s *Store) RecentThread(chatID, threadID int64, tokenBudget int) ([]Entry, error) {
+	rows, err := s.db.Query(`
+		SELECT `+entryColumns+`
+		FROM messages
+		WHERE chat_id = ? AND thread_id = ?
+		ORDER BY timestamp DESC, id DESC
+		LIMIT 200`, chatID, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries, err := scanNewestFirst(rows)
+	if err != nil {
+		return nil, err
+	}
+	return trimToBudget(entries, tokenBudget), nil
+}
+
+// OwnElsewhere returns an agent's own most recent replies in OTHER threads
+// of the chat since a cutoff. The session for this thread does not contain
+// them, so without this an agent "forgets" what it found an hour ago in
+// another topic.
+func (s *Store) OwnElsewhere(chatID, threadID int64, agentUsername string, limit int, since time.Time) ([]Entry, error) {
+	rows, err := s.db.Query(`
+		SELECT `+entryColumns+`
+		FROM messages
+		WHERE chat_id = ? AND thread_id != ? AND sender_type = 'agent'
+		  AND lower(agent_username) = lower(?) AND timestamp >= ?
+		ORDER BY timestamp DESC, id DESC
+		LIMIT ?`, chatID, threadID, agentUsername, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNewestFirst(rows)
+}
+
+// trimToBudget keeps the newest entries that fit ~tokenBudget (4 chars per
+// token), preserving order. tokenBudget <= 0 keeps everything.
+func trimToBudget(entries []Entry, tokenBudget int) []Entry {
+	if tokenBudget <= 0 {
+		return entries
+	}
+	charBudget := tokenBudget * 4
+	total := 0
+	start := len(entries)
+	for i := len(entries) - 1; i >= 0; i-- {
+		cost := len(entries[i].SenderName) + len(entries[i].Text) + 16
+		if total+cost > charBudget {
+			break
+		}
+		total += cost
+		start = i
+	}
+	return entries[start:]
 }
 
 // RecentByTokenBudget returns recent messages up to an approximate token budget.
@@ -192,40 +277,78 @@ func (s *Store) RecentByTokenBudget(chatID int64, tokenBudget int) ([]Entry, err
 
 // --- Formatting ---
 
-// FormatTranscript renders entries as a readable transcript block for injection
-// into the agent's context. selfUsername is this agent's bot username (excluded
-// from the transcript since the agent already sees its own messages in session).
-func FormatTranscript(entries []Entry, selfUsername string) string {
-	if len(entries) == 0 {
-		return ""
-	}
+// FormatTranscript renders the transcript block for a turn: every message
+// in this thread from anyone but the agent itself (its own replies here are
+// already in its session), then — separately labelled — its own recent
+// replies from other threads. Each line carries its local time when known,
+// so an old line reads as old.
+func FormatTranscript(thread, ownElsewhere []Entry, selfUsername string) string {
 	selfLower := strings.ToLower(selfUsername)
 	var sb strings.Builder
-	sb.WriteString("\n[Group conversation transcript — recent messages from other participants]\n")
 	included := 0
-	for _, e := range entries {
-		// Skip own messages — agent already has these in session history.
+	for _, e := range thread {
 		if e.SenderType == "agent" && strings.ToLower(e.AgentUsername) == selfLower {
 			continue
 		}
-		name := e.SenderName
-		if name == "" {
-			name = e.AgentUsername
+		if included == 0 {
+			sb.WriteString("\n[Group conversation in this thread — recent messages from others]\n")
 		}
-		fmt.Fprintf(&sb, "[%s]: %s\n", name, e.Text)
+		fmt.Fprintf(&sb, "[%s]: %s\n", lineLabel(e), e.Text)
 		included++
+	}
+	if included > 0 {
+		sb.WriteString("[End transcript]\n")
+	}
+	if len(ownElsewhere) > 0 {
+		sb.WriteString("\n[Your own recent replies in OTHER threads of this group — for reference; this thread's question comes first]\n")
+		for _, e := range ownElsewhere {
+			text := e.Text
+			if r := []rune(text); len(r) > ownElsewhereMaxRunes {
+				text = string(r[:ownElsewhereMaxRunes]) + "…"
+			}
+			fmt.Fprintf(&sb, "[%s, thread %d]: %s\n", timeLabel(e), e.ThreadID, text)
+		}
+		sb.WriteString("[End]\n")
+		included += len(ownElsewhere)
 	}
 	if included == 0 {
 		return ""
 	}
-	sb.WriteString("[End transcript]\n")
 	return sb.String()
 }
 
-// Deprecated: FormatPendingTasks and FormatRecentTasks moved to taskstore.go
-// as FormatPendingTasksForAgent and FormatTaskActivity.
+// ownElsewhereMaxRunes bounds each quoted own reply from another thread.
+const ownElsewhereMaxRunes = 600
 
-// Close closes the database connection.
+func lineLabel(e Entry) string {
+	name := e.SenderName
+	if name == "" {
+		name = e.AgentUsername
+	}
+	if t := timeLabel(e); t != "" {
+		return t + " " + name
+	}
+	return name
+}
+
+// timeLabel is "15:04" for today, "Mon 15:04" within a week, "Jan 2" older;
+// "" when unknown.
+func timeLabel(e Entry) string {
+	if e.Timestamp.IsZero() {
+		return ""
+	}
+	t := e.Timestamp.Local()
+	now := time.Now()
+	switch {
+	case t.YearDay() == now.YearDay() && t.Year() == now.Year():
+		return t.Format("15:04")
+	case now.Sub(t) < 7*24*time.Hour:
+		return t.Format("Mon 15:04")
+	default:
+		return t.Format("Jan 2")
+	}
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }

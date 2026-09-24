@@ -524,6 +524,34 @@ func (b *Bridge) RecordTranscript(e transcript.Entry) {
 	}
 }
 
+// A turn sees its own replies from other threads of the same group for this
+// long, at most this many: enough to carry "what I found an hour ago in the
+// trip thread" into the general thread, not a second transcript.
+const (
+	ownElsewhereLimit  = 3
+	ownElsewhereWindow = 24 * time.Hour
+)
+
+// RecordHumanMessage records a family member's group message in the shared
+// transcript, whether or not this agent will answer it. Both daemons call
+// this for every group message; the store keeps one row per Telegram
+// message. Recording is observation after the fact — it never makes an
+// agent wait for, or coordinate with, the other before answering.
+func (b *Bridge) RecordHumanMessage(chatID, threadID int64, telegramMsgID int, at time.Time, sender, text string) {
+	if b.transcript == nil || text == "" {
+		return
+	}
+	b.RecordTranscript(transcript.Entry{
+		ChatID:        chatID,
+		ThreadID:      threadID,
+		TelegramMsgID: telegramMsgID,
+		Timestamp:     at,
+		SenderType:    "human",
+		SenderName:    sender,
+		Text:          text,
+	})
+}
+
 // groupAgentPrompt returns system prompt guidance for multi-agent group conversations.
 func (b *Bridge) groupAgentPrompt() string {
 	var sb strings.Builder
@@ -880,11 +908,16 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		}
 		if b.transcript != nil && b.transcriptBudget > 0 && !isSystemSender(senderName) {
 			run("transcript", func() {
-				if entries, err := b.transcript.RecentByTokenBudget(chatID, b.transcriptBudget); err != nil {
+				thread, err := b.transcript.RecentThread(chatID, threadID, b.transcriptBudget)
+				if err != nil {
 					slog.Warn("failed to fetch transcript", "error", err)
-				} else {
-					transcriptBlock = transcript.FormatTranscript(entries, b.agentBotUsername)
+					return
 				}
+				own, err := b.transcript.OwnElsewhere(chatID, threadID, b.agentBotUsername, ownElsewhereLimit, time.Now().Add(-ownElsewhereWindow))
+				if err != nil {
+					slog.Warn("failed to fetch own replies from other threads", "error", err)
+				}
+				transcriptBlock = transcript.FormatTranscript(thread, own, b.agentBotUsername)
 			})
 		}
 		if b.taskStore != nil && !isSystemSender(senderName) {
@@ -1356,6 +1389,7 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	if b.transcript != nil && response != "" {
 		b.RecordTranscript(transcript.Entry{
 			ChatID:        chatID,
+			ThreadID:      threadID,
 			Timestamp:     time.Now(),
 			SenderType:    "agent",
 			SenderName:    b.agentBotUsername,

@@ -89,7 +89,7 @@ func TestFormatTranscriptSkipsSelf(t *testing.T) {
 		{SenderType: "agent", AgentUsername: "umbreon_bot", SenderName: "umbreon", Text: "hey all"},
 	}
 
-	result := FormatTranscript(entries, "pikamini_bot")
+	result := FormatTranscript(entries, nil, "pikamini_bot")
 	if !strings.Contains(result, "[alice]: hi") {
 		t.Error("expected alice's message")
 	}
@@ -98,6 +98,100 @@ func TestFormatTranscriptSkipsSelf(t *testing.T) {
 	}
 	if !strings.Contains(result, "[umbreon]: hey all") {
 		t.Error("expected umbreon's message")
+	}
+}
+
+// Both daemons record every human group message; the store must keep one.
+// An agent reply has no Telegram id (0) and is never deduplicated.
+func TestHumanMessageRecordedOnce(t *testing.T) {
+	s := tempStore(t)
+	at := time.Now()
+	for range 2 { // pikamini and umbreonmini both see the same message
+		if err := s.Record(Entry{ChatID: -100200300, ThreadID: 7, TelegramMsgID: 555, Timestamp: at,
+			SenderType: "human", SenderName: "mom", Text: "which week?"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		s.Record(Entry{ChatID: -100200300, ThreadID: 7, Timestamp: at, SenderType: "agent",
+			AgentUsername: "a_bot", SenderName: "a_bot", Text: "same text twice is two replies"})
+	}
+	got, _ := s.RecentThread(-100200300, 7, 0)
+	humans, agents := 0, 0
+	for _, e := range got {
+		if e.SenderType == "human" {
+			humans++
+		} else {
+			agents++
+		}
+	}
+	if humans != 1 || agents != 2 {
+		t.Fatalf("humans=%d agents=%d, want 1 and 2", humans, agents)
+	}
+	if got[0].ThreadID != 7 || got[0].TelegramMsgID != 555 {
+		t.Errorf("thread/msg id not round-tripped: %+v", got[0])
+	}
+}
+
+// A turn in thread 7 must not see thread 9's conversation — that is how a
+// note about a reminder in one topic ended an answer in another.
+func TestRecentThreadIsScoped(t *testing.T) {
+	s := tempStore(t)
+	now := time.Now()
+	add := func(thread int64, name, text string, d time.Duration) {
+		s.Record(Entry{ChatID: 1, ThreadID: thread, Timestamp: now.Add(d), SenderType: "human", SenderName: name, Text: text})
+	}
+	add(7, "mom", "IPA是什麼", 0)
+	add(9, "peer_bot", "Could you cancel #173?", time.Second)
+	add(0, "dad", "general chat", 2*time.Second)
+
+	got, err := s.RecentThread(1, 7, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Text != "IPA是什麼" {
+		t.Fatalf("thread 7 = %+v, want only its own message", got)
+	}
+}
+
+func TestOwnElsewhereAndFormat(t *testing.T) {
+	s := tempStore(t)
+	now := time.Now()
+	rec := func(thread int64, user, text string, ago time.Duration) {
+		s.Record(Entry{ChatID: 1, ThreadID: thread, Timestamp: now.Add(-ago), SenderType: "agent",
+			AgentUsername: user, SenderName: user, Text: text})
+	}
+	rec(2479, "me_bot", "Oscar's: Tue–Thu 11:30–21:00", time.Hour)
+	rec(2479, "peer_bot", "peer text from another thread", 50*time.Minute)
+	rec(0, "me_bot", "reply in this very thread", 10*time.Minute)
+	rec(11879, "me_bot", "too old to matter", 30*time.Hour)
+
+	own, err := s.OwnElsewhere(1, 0, "ME_BOT", 3, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 1 || own[0].ThreadID != 2479 {
+		t.Fatalf("own elsewhere = %+v, want only the Oscar reply from thread 2479", own)
+	}
+
+	s.Record(Entry{ChatID: 1, ThreadID: 0, Timestamp: now, SenderType: "human", SenderName: "mom", Text: "merge what you gave me"})
+	thread, _ := s.RecentThread(1, 0, 0)
+	block := FormatTranscript(thread, own, "me_bot")
+	for _, want := range []string{"merge what you gave me", "OTHER threads", "thread 2479", "Oscar's"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("block missing %q:\n%s", want, block)
+		}
+	}
+	for _, not := range []string{"reply in this very thread", "peer text from another thread", "too old"} {
+		if strings.Contains(block, not) {
+			t.Errorf("block must not contain %q:\n%s", not, block)
+		}
+	}
+	if !strings.Contains(block, now.Local().Format("15:04")+" mom") {
+		t.Errorf("thread lines should carry their local time:\n%s", block)
+	}
+	if FormatTranscript(nil, nil, "me_bot") != "" {
+		t.Error("nothing to show must render nothing")
 	}
 }
 
