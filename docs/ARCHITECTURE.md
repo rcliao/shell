@@ -339,7 +339,7 @@ Skills are `SKILL.md` files in `~/.shell/skills/` (shared, installed from
 agent reads the file on demand). A hot skill contributes only its
 `<!-- hot -->` … `<!-- /hot -->` rules section when it has one, plus a
 pointer to the full file. Hot skills are packed into `skill.HotTierBudget`
-(3,000 tokens, estimated per rune class) with the agent's own skills first;
+(3,200 tokens, estimated per rune class) with the agent's own skills first;
 one that does not fit renders as a catalog line that says "hot, NOT loaded"
 and is logged at startup and on reload (`skills: hot skills over the prompt
 budget`). `status: draft` caps a skill to lazy until it graduates.
