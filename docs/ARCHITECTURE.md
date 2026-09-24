@@ -354,6 +354,9 @@ commits any change under the agent's own skills dir to the git repo holding
 it (`~/.shell`), author = the agent, reloads skills, and sends one line with
 the revert command to `agent.owner_chat_id` (0 = commit silently).
 `USAGE.jsonl` changes alone never commit. No approval step: notify + revert.
+`shell skills report [--days N] [--agent A]` shows, per agent, each skill's
+owner, tier, whether it reaches the prompt, real usage, playground drafts and
+the agent's self-authored commit count.
 
 ## Shadow Router
 
