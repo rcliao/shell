@@ -16,7 +16,7 @@ import (
 // meal-memo rules, were dropped without a log line. A hot skill now
 // contributes only its `<!-- hot -->` rules section when it has one.
 const (
-	HotTierBudget  = 3000 // tokens — hot rules sections pre-loaded in system prompt
+	HotTierBudget  = 3200 // tokens — hot rules sections pre-loaded in system prompt
 	LazyTierBudget = 1000 // tokens — one-liner catalog entries
 )
 
