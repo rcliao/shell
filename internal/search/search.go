@@ -2,6 +2,7 @@
 package search
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -238,9 +239,11 @@ func searchDDGR(ctx context.Context, opts Options) (*Response, error) {
 	args = append(args, opts.Query)
 
 	cmd := execCommand(ctx, "ddgr", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("ddgr failed: %w", err)
+		return nil, fmt.Errorf("ddgr failed: %w: %s", err, firstLine(stderr.String()))
 	}
 
 	var raw []struct {
@@ -252,6 +255,16 @@ func searchDDGR(ctx context.Context, opts Options) (*Response, error) {
 		return nil, fmt.Errorf("parsing ddgr output: %w", err)
 	}
 
+	// ddgr reports a refused request (DuckDuckGo's anti-bot HTTP 202, a
+	// sandbox network deny) on stderr, prints "[]" and exits 0. That is not
+	// "nothing on the web" — it is "the search did not run", and an agent
+	// told "No results" answers from memory instead.
+	if len(raw) == 0 {
+		if msg := strings.TrimSpace(stderr.String()); strings.Contains(msg, "[ERROR]") || strings.Contains(strings.ToLower(msg), "error") {
+			return nil, fmt.Errorf("DuckDuckGo refused the request: %s", firstLine(msg))
+		}
+	}
+
 	sr := &Response{Query: opts.Query, Provider: "ddgr"}
 	for _, r := range raw {
 		sr.Results = append(sr.Results, Result{
@@ -261,4 +274,15 @@ func searchDDGR(ctx context.Context, opts Options) (*Response, error) {
 		})
 	}
 	return sr, nil
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
 }
