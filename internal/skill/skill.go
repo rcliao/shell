@@ -28,6 +28,7 @@ type Skill struct {
 	Dir          string   // directory containing the loaded SKILL.md (version dir when versioned)
 	SkillRoot    string   // parent dir of the skill (contains ACTIVE and vN/); equals Dir for flat
 	ScriptsDir   string   // path to scripts/ subdirectory (empty if none)
+	Own          bool     // authored by this agent (loaded from its own skills dir) — packed first
 }
 
 // Load reads and parses a SKILL.md file into a Skill.
@@ -268,4 +269,13 @@ func parseFrontmatter(content string) (name, description, usage string, allowedT
 	}
 
 	return name, description, usage, allowedTools, core, tier, body, nil
+}
+
+// MarkOwn flags skills loaded from an agent's own skills directory. Own
+// skills are the agent's specialization, so they claim the hot budget first.
+func MarkOwn(skills []*Skill) []*Skill {
+	for _, s := range skills {
+		s.Own = true
+	}
+	return skills
 }

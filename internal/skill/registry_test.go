@@ -203,3 +203,56 @@ func TestEstimateTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestEstimateTokensCountsCJKPerRune(t *testing.T) {
+	// 4 CJK runes = 12 bytes: bytes/4 said 3, reality is ~4+.
+	if got := EstimateTokens("健康紀錄"); got != 4 {
+		t.Errorf("EstimateTokens(CJK) = %d, want 4", got)
+	}
+	if got := EstimateTokens("ab健康"); got != 3 { // (2+3)/4=1 + 2
+		t.Errorf("EstimateTokens(mixed) = %d, want 3", got)
+	}
+}
+
+func hotSkill(name, body string, own bool) *Skill {
+	return &Skill{Name: name, Description: name + " desc", Tier: TierHot, Body: body, Dir: "/skills/" + name, Own: own}
+}
+
+// A marked rules section is what loads; the rest stays behind a pointer.
+func TestHotSectionIsWhatLoads(t *testing.T) {
+	body := "intro prose\n<!-- hot -->\n- never show grade emojis\n- use create-row for a new day\n<!-- /hot -->\n" + strings.Repeat("long reference text ", 400)
+	r := NewRegistry([]*Skill{hotSkill("meal-memo", body, true)})
+	out := r.CatalogPrompt()
+	for _, want := range []string{"never show grade emojis", "use create-row", "/skills/meal-memo/SKILL.md", "### Hot skills"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("catalog missing %q", want)
+		}
+	}
+	if strings.Contains(out, "long reference text") || strings.Contains(out, "intro prose") {
+		t.Error("only the marked section may load")
+	}
+	if len(r.Demoted()) != 0 {
+		t.Errorf("a small rules section must fit: %v", r.Demoted())
+	}
+}
+
+// The agent's own skills claim the budget before shared ones, and a skill
+// that does not fit is reported and labelled — never silently dropped.
+func TestPackHotOwnFirstAndDemotionIsVisible(t *testing.T) {
+	big := strings.Repeat("x", (HotTierBudget-200)*4) // fills most of the budget
+	shared := hotSkill("aaa-shared", big, false)      // sorts first by name
+	own := hotSkill("zzz-own", big, true)
+	r := NewRegistry([]*Skill{shared, own})
+
+	d := r.Demoted()
+	if len(d) != 1 || !strings.HasPrefix(d[0], "aaa-shared") {
+		t.Fatalf("Demoted = %v, want the shared skill (own skills pack first)", d)
+	}
+	out := r.CatalogPrompt()
+	if !strings.Contains(out, "**aaa-shared** (hot, NOT loaded") {
+		t.Errorf("a demoted hot skill must say so in its catalog line:\n%s", out)
+	}
+	if !strings.Contains(out, "### zzz-own") {
+		t.Error("the own skill must be in the hot tier")
+	}
+}

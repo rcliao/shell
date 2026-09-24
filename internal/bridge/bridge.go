@@ -423,10 +423,13 @@ func (b *Bridge) ReloadSkills() (int, error) {
 	}
 
 	var allSkills []*skill.Skill
-	for _, dir := range b.skillDirs {
+	for i, dir := range b.skillDirs {
 		s, err := skill.LoadDir(dir)
 		if err != nil {
 			continue
+		}
+		if i == len(b.skillDirs)-1 { // the agent's own skills dir is always last
+			s = skill.MarkOwn(s)
 		}
 		allSkills = append(allSkills, s...)
 	}
@@ -438,6 +441,9 @@ func (b *Bridge) ReloadSkills() (int, error) {
 
 	b.skills = skill.NewRegistry(allSkills)
 	slog.Info("skills reloaded", "count", len(allSkills))
+	if d := b.skills.Demoted(); len(d) > 0 {
+		slog.Warn("skills: hot skills over the prompt budget, rendered as catalog lines only", "demoted", d, "budget_tokens", skill.HotTierBudget)
+	}
 	// The skills catalog is part of the static system prompt — a reload changes
 	// it, so flag active sessions to rotate onto the new prompt.
 	b.ReconcilePromptFingerprint()
