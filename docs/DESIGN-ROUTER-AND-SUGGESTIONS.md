@@ -145,7 +145,8 @@ heartbeat that already reflects on each chat does this; no new job is added.
      for how the two of them work together), the evidence it rests on, and one
      concrete change.
 3. Each suggestion is delivered to its audience in their language, one message,
-   with accept / decline buttons.
+   with an accept / decline action: buttons where the channel has them, a
+   plain reply ("yes" / "no") anywhere else, including the CLI.
 4. The answer is stored on the suggestion (`source_kind=stated`). The next
    review shows the agent what was accepted, declined or done. That is how it
    learns what this human values.
@@ -199,7 +200,7 @@ in shadow; suggestions start with the owner.
 | R2 | Per-lane model and effort | owner only | Cost per turn down with no quality complaints |
 | R3 | Visible lanes through a channel adapter (Telegram topics first): agent offers, human accepts | per offer | Owner decides |
 | R4 | Lanes in the family DM, then the group | yes | Owner decides after R1/R2 numbers |
-| S0 | Close the loop, owner only: weekly review turn, suggestions with a lifecycle, and a message to the owner with buttons; schedule OwnerEval; log reactions as feedback | owner only | The owner finds at least 1 in 3 suggestions worth accepting |
+| S0 | Close the loop, owner only: weekly review turn, suggestions with a lifecycle, and a message to the owner with an accept / decline action; schedule OwnerEval; log reactions as feedback | owner only | The owner finds at least 1 in 3 suggestions worth accepting |
 | S1 | Family chat deep reflection: group by lane, retro each group, at most one collaboration suggestion into the chat, in its language | yes | Accept rate, and no complaint about noise |
 
 S0 can start at once and does not depend on R0. The weekly check #182
@@ -210,7 +211,7 @@ or is retired.
 - R0 is measured with `shell route report`.
 - A lane move re-runs in the right session (test).
 - In R1, the same message sent twice in two lanes gets different project blocks.
-- S0 delivers a suggestion with buttons, and a decision lands on the suggestion
+- S0 delivers a suggestion (tested from the CLI first), and a decision lands on the suggestion
   and shows up in the next review's evidence pack.
 
 ## Decisions (owner, 2026-09-25)
