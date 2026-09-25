@@ -1091,7 +1091,9 @@ func New(cfg config.Config) (*Daemon, error) {
 				}
 				return resp.Text, nil
 			},
-			notify: func(chatID int64, text string) { tgTransport.Notify(chatID, 0, text) },
+			// NotifyButtons (no buttons) because it returns the send error;
+			// Notify swallows it.
+			notify: func(chatID int64, text string) error { return tgTransport.NotifyButtons(chatID, 0, text, nil) },
 		})
 		if cfg.Scheduler.Enabled {
 			registerReviewSchedule(st, cfg.Review.ReviewCron(), cfg.Scheduler.Timezone,

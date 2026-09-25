@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
 )
@@ -43,7 +46,7 @@ func TestReviewRunsTurnAndDeliversCappedSuggestions(t *testing.T) {
 			}
 			return "Trimmed my meal-memo rules.", nil
 		},
-		notify: func(chatID int64, text string) { sentTo, sent = chatID, text },
+		notify: func(chatID int64, text string) error { sentTo, sent = chatID, text; return nil },
 	}
 	res, err := d.handle(context.Background(), scheduler.LeasedTask{})
 	if err != nil {
@@ -70,11 +73,43 @@ func TestReviewRunsTurnAndDeliversCappedSuggestions(t *testing.T) {
 	}
 }
 
+// A failed send must leave suggestions proposed (the next review delivers
+// them), and a failed or partially-run turn must not be retried by the queue.
+func TestReviewFailuresNeverReplayTheTurn(t *testing.T) {
+	st := openReviewStore(t)
+	d := reviewDeps{store: st, agentName: "a", ownerChatID: 42,
+		runTurn: func(context.Context, string) (string, error) {
+			st.CreateSuggestion(store.Suggestion{Title: "t", Change: "c"})
+			return "summary", nil
+		},
+		notify: func(int64, string) error { return errors.New("bot blocked") },
+	}
+	res, err := d.handle(context.Background(), scheduler.LeasedTask{})
+	if err != nil || !strings.Contains(res, "delivery failed") {
+		t.Fatalf("send failure: res=%q err=%v (must not return an error: the turn ran)", res, err)
+	}
+	if p, _ := st.ListSuggestions([]string{store.SuggestionProposed}, 0); len(p) != 1 {
+		t.Errorf("after a failed send the suggestion must stay proposed, got %d proposed", len(p))
+	}
+
+	d.runTurn = func(context.Context, string) (string, error) { return "", errors.New("process killed") }
+	if res, err := d.handle(context.Background(), scheduler.LeasedTask{}); err != nil || !strings.Contains(res, "failed") {
+		t.Errorf("a turn that ran and failed: res=%q err=%v, want recorded, not retried", res, err)
+	}
+
+	d.runTurn = func(context.Context, string) (string, error) {
+		return "", fmt.Errorf("wrapped: %w", process.ErrSessionBusy)
+	}
+	if _, err := d.handle(context.Background(), scheduler.LeasedTask{}); err == nil {
+		t.Error("session busy means the turn never started: it must be retried")
+	}
+}
+
 func TestReviewSkipsWithoutOwner(t *testing.T) {
 	st := openReviewStore(t)
 	ran := false
 	d := reviewDeps{store: st, runTurn: func(context.Context, string) (string, error) { ran = true; return "", nil },
-		notify: func(int64, string) {}}
+		notify: func(int64, string) error { return nil }}
 	if res, err := d.handle(context.Background(), scheduler.LeasedTask{}); err != nil || ran || !strings.Contains(res, "no owner") {
 		t.Fatalf("res=%q err=%v ran=%v", res, err, ran)
 	}

@@ -3,12 +3,14 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
 )
@@ -29,9 +31,12 @@ const (
 	reviewWindow = 7 * 24 * time.Hour
 	// reviewMaxAsks caps suggestions delivered from one review.
 	reviewMaxAsks = 3
-	// reviewSender marks the turn as a system turn (no router shadow, no
-	// transcript), like other scheduler turns.
+	// reviewSender marks the turn as a system turn: "scheduler" is one of
+	// the bridge's system senders, so no router shadow and no transcript.
 	reviewSender = "scheduler"
+	// reviewTurnTimeout bounds the turn well inside the queue lease (job
+	// timeout + 10m), so a slow turn can never be reclaimed and run twice.
+	reviewTurnTimeout = 20 * time.Minute
 )
 
 // reviewDeps carries what the review needs; the funcs are stubbed in tests.
@@ -45,8 +50,8 @@ type reviewDeps struct {
 	proposals func(ctx context.Context) []string
 	// runTurn runs the review prompt as a system turn and returns the reply.
 	runTurn func(ctx context.Context, prompt string) (string, error)
-	// notify delivers text to a chat.
-	notify func(chatID int64, text string)
+	// notify delivers text to a chat and reports whether it was sent.
+	notify func(chatID int64, text string) error
 }
 
 // reviewScheduleMessage is the event-mode schedule envelope.
@@ -119,13 +124,24 @@ func (d reviewDeps) handle(ctx context.Context, _ scheduler.LeasedTask) (string,
 	}
 	started := time.Now().UTC()
 	prompt := reviewPrompt(d.agentName, d.evidence(ctx, started.Add(-reviewWindow), started))
-	reply, err := d.runTurn(ctx, prompt)
+	turnCtx, cancel := context.WithTimeout(ctx, reviewTurnTimeout)
+	defer cancel()
+	reply, err := d.runTurn(turnCtx, prompt)
 	if err != nil {
-		return "", fmt.Errorf("review turn: %w", err)
+		// Retry only when the turn never started. A turn that ran may have
+		// changed skills and filed suggestions; running it again would
+		// repeat both (the queue's rule: never fail a fire that ran).
+		if errors.Is(err, process.ErrSessionBusy) {
+			return "", fmt.Errorf("review turn: %w", err)
+		}
+		slog.Warn("review: turn failed", "agent", d.agentName, "error", err)
+		// Whatever it filed stays proposed and goes out with the next review.
+		return "review failed after the turn started: " + err.Error(), nil
 	}
 	n, err := d.deliver(reply)
 	if err != nil {
-		return "", err
+		slog.Warn("review: delivery failed", "agent", d.agentName, "error", err)
+		return "review ran; delivery failed (suggestions stay proposed): " + err.Error(), nil
 	}
 	return fmt.Sprintf("review done: %d suggestion(s) delivered", n), nil
 }
@@ -264,7 +280,14 @@ func (d reviewDeps) deliver(summary string) (int, error) {
 	if len(ids) > 0 {
 		sb.WriteString("\nReply here, e.g. “accept 12” or “decline 12 because …”.")
 	}
-	d.notify(d.ownerChatID, sb.String())
+	if len(ids) == 0 && strings.TrimSpace(summary) == "" {
+		return 0, nil // nothing to say; no bare header
+	}
+	// Delivered means the owner can see it: mark only after a send that
+	// reported success, so a failed send leaves them for the next review.
+	if err := d.notify(d.ownerChatID, sb.String()); err != nil {
+		return 0, fmt.Errorf("send to owner: %w", err)
+	}
 	if err := d.store.MarkSuggestionsDelivered(ids); err != nil {
 		return 0, err
 	}
