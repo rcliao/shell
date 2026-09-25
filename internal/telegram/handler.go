@@ -1652,6 +1652,10 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 	if mm, err := h.bridge.GetMessageMapByBotMsg(chatID, reaction.MessageID); err == nil && mm != nil {
 		// Fetching the session gets us the thread_id the exchange belongs to.
 		threadID = h.bridge.SessionThreadID(chatID, mm.SessionID)
+		// Feedback only for reactions to THIS agent's replies: in a group
+		// Telegram also delivers reactions family members put on each
+		// other's messages, which say nothing about the agent.
+		h.bridge.LogReaction(chatID, threadID, reaction.MessageID, emoji)
 	}
 
 	// Regenerate is handled specially: stream the new response into the

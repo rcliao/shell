@@ -50,6 +50,18 @@ func (b *Bridge) GetMessageMapByBotMsg(chatID int64, botMessageID int) (*store.M
 // that owns the given session row, or 0 if the session doesn't exist.
 // Used by reactions to route replies back to the same topic as the original
 // exchange — Telegram's MessageReactionUpdated doesn't carry thread_id.
+// LogReaction records a human reaction as a feedback signal (S0). Reactions
+// are also commands (go, stop, regenerate, remember); this keeps what the
+// human felt about a reply, whatever the reaction then does. Best-effort.
+func (b *Bridge) LogReaction(chatID, threadID int64, botMessageID int, emoji string) {
+	if b.store == nil {
+		return
+	}
+	if err := b.store.LogFeedback(chatID, threadID, int64(botMessageID), "reaction", emoji); err != nil {
+		slog.Warn("feedback: reaction log failed", "chat_id", chatID, "error", err)
+	}
+}
+
 func (b *Bridge) SessionThreadID(chatID int64, sessionID int64) int64 {
 	return b.store.SessionThreadID(sessionID)
 }

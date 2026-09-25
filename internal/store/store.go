@@ -729,6 +729,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// suggestions + feedback_events — see internal/store/suggestions.go.
+	if _, err := s.db.Exec(suggestionsSchema); err != nil {
+		return err
+	}
+
 	if _, err := s.db.Exec(jobRunsSchema); err != nil {
 		return err
 	}

@@ -19,6 +19,7 @@ import (
 
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
+	"github.com/rcliao/shell/internal/bench"
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/memory"
@@ -773,6 +774,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		// doc repos live under <workspace>/projects/<slug>/.
 		WorkspaceDir:       workspaceDir,
 		ProjectHomeRefresh: projectHome.Refresh,
+		OwnerChatID:        cfg.Agent.OwnerChatID,
 	})
 
 	// Initialize scheduler if enabled.
@@ -1055,6 +1057,47 @@ func New(cfg config.Config) (*Daemon, error) {
 		// runs — without it the cron would sit inert.
 		if cfg.Scheduler.Enabled {
 			registerNotionPollSchedule(st, cfg.Scheduler.Timezone)
+		}
+
+		// Weekly review (S0): suggestions to the owner. Handler always
+		// registered (an unregistered kind fails at lease time); the
+		// schedule is enabled only with an owner chat to deliver to.
+		reviewAgent := cfg.Agent.Name
+		if reviewAgent == "" {
+			reviewAgent = filepath.Base(filepath.Dir(cfg.Daemon.PIDFile))
+		}
+		wireReview(sched, reviewDeps{
+			store:       st,
+			agentName:   reviewAgent,
+			ownerChatID: cfg.Agent.OwnerChatID,
+			ownerEval: func(since, until time.Time) string {
+				r, err := bench.OwnerEval(cfg.Store.DBPath, reviewAgent, since, until)
+				if err != nil {
+					return ""
+				}
+				return bench.FormatOwnerEval(r)
+			},
+			proposals: func(ctx context.Context) []string {
+				if mem == nil {
+					return nil
+				}
+				h, _ := mem.NamespaceHeadlines(ctx, "loop:proposals", 40, 110)
+				return h
+			},
+			runTurn: func(ctx context.Context, prompt string) (string, error) {
+				resp, err := syntheticTurn(ctx, br, 0, 0, prompt, reviewSender)
+				if err != nil {
+					return "", err
+				}
+				return resp.Text, nil
+			},
+			// NotifyButtons (no buttons) because it returns the send error;
+			// Notify swallows it.
+			notify: func(chatID int64, text string) error { return tgTransport.NotifyButtons(chatID, 0, text, nil) },
+		})
+		if cfg.Scheduler.Enabled {
+			registerReviewSchedule(st, cfg.Review.ReviewCron(), cfg.Scheduler.Timezone,
+				!cfg.Review.Disabled && cfg.Agent.OwnerChatID != 0)
 		}
 	}
 

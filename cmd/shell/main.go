@@ -1579,7 +1579,7 @@ rebuilt system prompt. See docs/SESSION-LIFECYCLE.md.`,
 		"Dry-run render Channel A (system prompt) and Channel B (per-turn prefix) for this chat")
 
 	sessionCmd.AddCommand(sessionListCmd, sessionKillCmd, sessionRotateCmd, sessionInspectCmd)
-	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, mediaCmd, latencyCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd(), newProjectCmd(), newSecretsCmd(), newSkillsCmd())
+	rootCmd.AddCommand(initCmd, daemonCmd, sendCmd, statusCmd, writeHygieneCmd, recallHygieneCmd, lessonActionsCmd, jobRunsCmd, reflectionsCmd, tasksCmd, chatCmd, mediaCmd, latencyCmd, schedulesCmd, evalCmd, contextCmd, toolUsageCmd, a2aCmd, sessionCmd, restartCmd, stopCmd, searchCmd, pairingCmd, mcpCmd, newMultiCmd(), newProjectCmd(), newSecretsCmd(), newSkillsCmd(), newSuggestionsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
