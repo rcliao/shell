@@ -370,7 +370,9 @@ at all, and whether the message holds an open question or a decision. The
 state sent is the message text (clipped to 2,000 runes) and where it was
 said; never the transcript or memory. Answers land in `router_decisions`
 beside the facts needed to score them (the project whose own thread this
-was, whether it was a peer turn). Nothing reads those rows on the turn path.
+was, whether it was a peer turn, and the Telegram message id so each answer
+can be checked against the words it judged). Nothing reads those rows on the
+turn path.
 Pass criteria and the verdict schedule: plan § P3.7.
 
 ## Progress Voice

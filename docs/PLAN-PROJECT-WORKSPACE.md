@@ -417,7 +417,7 @@ computed, not argued:
 |---|---|---|---|
 | `which_project` — choice over active project slugs + `none` | Choice | messages in a bound forum thread (labelled by construction); 100 hand-labelled general-thread turns | accuracy ≥ 90% among answers above threshold; abstain ≤ 20% |
 | `should_reply` — on peer-agent turns in the group | Choice {reply, noop} | what Opus did that turn (reply sent vs `[noop]`) | agreement ≥ 90%; count the Opus turns it would have skipped |
-| `has_open_question`, `has_decision` | Noul | 待決定 / 決定 edits that followed | logged now, feeds unit 4b; no pass bar yet |
+| `has_open_question`, `has_decision_v2` (v1 `has_decision` until 2026-09-25: fired on meal logs) | Noul | 待決定 / 決定 edits that followed | logged now, feeds unit 4b; no pass bar yet |
 
 Plus p50 latency < 500 ms and tokens per call recorded, so cost is computable
 when pricing appears. Thresholds 0.7 / 0.8 / 0.9 are all evaluated from the
