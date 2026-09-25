@@ -76,6 +76,9 @@ without being asked. That is the move from reactive to proactive.
 - Should events that no one has subscribed to be kept (so an agent can discover
   a need later) or dropped?
 
+**Routing.** An event is just another message for the router in
+`docs/DESIGN-ROUTER-AND-SUGGESTIONS.md`, which puts it in a project lane.
+
 **First step.** Finish TASKS.md step 3 far enough to handle an event kind. Then
 add one producer, a Gmail poll of the owner's own inbox only, with one subscription that
 the agent writes itself. Measure how many events it triages to a turn and what it
@@ -109,7 +112,11 @@ they are never recorded. The other agent then misses them after the fact.
 **First step.** Record in `processAlbum` and in the command path, using the same
 `RecordHumanMessage` call.
 
-### 5. Graduate the decision model out of shadow
+### 5. Graduate the decision model out of shadow — in design
+
+Folded into `docs/DESIGN-ROUTER-AND-SUGGESTIONS.md` (step R0 merges the Jev,
+tier and topic shadows into one router). Kept here for the history.
+
 
 **Why.** Jev has run in shadow mode since P3.7, and the verdict is due around
 2026-09-28. The owner agreed Jev should help curate ghost memory (reflect, link
@@ -145,6 +152,12 @@ From `~/.shell/evolve-reviews/response-quality-review-2026-09-23.md`:
   encrypted store.
 
 ## Picked up
+
+- 2026-09-25, **in design**: a first-class message router (one chat split into
+  project lanes, with a model per lane), and agents suggesting improvements to
+  themselves and to how they work with a human. See
+  `docs/DESIGN-ROUTER-AND-SUGGESTIONS.md` (inspired by Meta's Muse). Waiting on
+  the owner's answers to its open questions.
 
 - 2026-09-23: shared context, search honesty, skills that load, self-authoring
   loop, and `shell skills report`. See `docs/DESIGN-CONTEXT-AND-SKILLS.md`
