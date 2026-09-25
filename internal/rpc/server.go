@@ -67,6 +67,7 @@ type Server struct {
 	// projectHomeRefresh nudges the pinned 📋 Projects message for a chat
 	// after create/status/doc-write. Nil when the daemon runs without it.
 	projectHomeRefresh func(chatID int64)
+	ownerChatID        int64
 }
 
 // KillSessionFunc terminates the live CLI subprocess for a chat (all threads
@@ -101,6 +102,9 @@ type Config struct {
 	WorkspaceDir string
 	// ProjectHomeRefresh refreshes the pinned 📋 Projects message for a chat.
 	ProjectHomeRefresh func(chatID int64)
+	// OwnerChatID is the owner's DM (agent.owner_chat_id). Suggestion
+	// decisions are accepted only from that chat. 0 disables decide.
+	OwnerChatID int64
 }
 
 // handleContext serves the live system-prompt manifest (GET /context?chat_id=N&full=1).
@@ -150,6 +154,7 @@ func New(cfg Config) *Server {
 		workspaceDir:    cfg.WorkspaceDir,
 
 		projectHomeRefresh: cfg.ProjectHomeRefresh,
+		ownerChatID:        cfg.OwnerChatID,
 	}
 }
 
@@ -216,6 +221,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /task", s.handleTask)
 	mux.HandleFunc("POST /queue", s.handleQueue)
 	mux.HandleFunc("POST /project", s.handleProject)
+	mux.HandleFunc("POST /suggestion", s.handleSuggestion)
 	mux.HandleFunc("POST /skills-reload", s.handleSkillsReload)
 	mux.HandleFunc("POST /skills-load", s.handleSkillsLoad)
 	mux.HandleFunc("POST /heartbeat-log", s.handleHeartbeatLog)

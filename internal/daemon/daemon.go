@@ -773,6 +773,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		// doc repos live under <workspace>/projects/<slug>/.
 		WorkspaceDir:       workspaceDir,
 		ProjectHomeRefresh: projectHome.Refresh,
+		OwnerChatID:        cfg.Agent.OwnerChatID,
 	})
 
 	// Initialize scheduler if enabled.

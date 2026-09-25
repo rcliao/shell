@@ -250,7 +250,9 @@ delivered.
 because …"). The owner-DM agent records the answer with
 `shell_suggestion(action=decide)`. The RPC accepts `decide` only when the call
 comes from the owner's chat, so an agent cannot accept its own suggestion from
-a system turn. The CLI `shell suggestions decide` works as well, so every step
+a system turn. This guards against mistakes, not against a determined
+agent: an agent with Bash could call the socket itself. Agents here are
+collaborators, not adversaries, so a mistake guard is the right level. The CLI `shell suggestions decide` works as well, so every step
 can be tested without Telegram.
 
 **Reactions** are also logged to `feedback_events`, including the command

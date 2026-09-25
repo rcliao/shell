@@ -42,6 +42,13 @@ current chat, which is the safe default. Sending somewhere else needs both
 chat_id and cross_chat=true, so a message never leaves this conversation by
 accident.
 
+shell_suggestion — the suggestion loop with your owner. In your weekly
+review, file each change you want a human to make with action=create (title,
+the evidence it rests on, one concrete change); it reaches the owner when the
+review ends. In the owner's chat, when the owner answers one ("accept 12",
+"decline 12 because …"), record it with action=decide in their words.
+action=list shows what is open and what was decided.
+
 shell_pm — start, stop, list and inspect background processes.
 CRITICAL: NEVER run long-running processes (servers, watchers) directly via
 Bash — they die with the turn. Always use shell_pm.
@@ -248,6 +255,52 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"id":      p.ID,
 			"chat_id": p.ChatID,
 			"all":     p.All,
+		})
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		return textResult(jsonText(result)), nil
+	})
+
+	// shell_suggestion — the agent side of the suggestion loop (S0). Filing
+	// is a tool call, not text in a reply: the call is the proof it happened.
+	server.AddTool(&gomcp.Tool{
+		Name: "shell_suggestion",
+		Description: "File, list, withdraw or record decisions on suggestions to your owner. " +
+			"action=create needs title, evidence (what you saw) and change (one concrete change). " +
+			"action=list shows open and accepted suggestions (all=true for every one). " +
+			"action=decide id=N status=accepted|declined|done note=… records the OWNER's answer, and only works in the owner's chat. " +
+			"action=withdraw id=N takes back your own open suggestion.",
+		InputSchema: schema([]string{}, map[string]map[string]any{
+			"action":   prop("string", "create (default), list, decide, withdraw"),
+			"id":       prop("integer", "Suggestion id — decide, withdraw"),
+			"title":    prop("string", "Short title (create)"),
+			"evidence": prop("string", "What you observed that makes this worth changing (create)"),
+			"change":   prop("string", "The one concrete change you are asking for (create)"),
+			"status":   prop("string", "decide: accepted, declined or done"),
+			"note":     prop("string", "The owner's reason, in their words (decide), or yours (withdraw)"),
+			"all":      prop("boolean", "list: include decided suggestions"),
+		}),
+	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		var p struct {
+			Action   string `json:"action"`
+			ID       int64  `json:"id"`
+			Title    string `json:"title"`
+			Evidence string `json:"evidence"`
+			Change   string `json:"change"`
+			Status   string `json:"status"`
+			Note     string `json:"note"`
+			All      bool   `json:"all"`
+		}
+		if err := unmarshalArgs(req, &p); err != nil {
+			return errResult(err.Error()), nil
+		}
+		if p.Action == "" {
+			p.Action = "create"
+		}
+		result, err := client.call(ctx, "/suggestion", map[string]any{
+			"action": p.Action, "chat_id": currentChatID(), "id": p.ID, "title": p.Title,
+			"evidence": p.Evidence, "change": p.Change, "status": p.Status, "note": p.Note, "all": p.All,
 		})
 		if err != nil {
 			return errResult(err.Error()), nil
