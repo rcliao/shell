@@ -955,7 +955,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		// Real user turns and peer relays only: heartbeats, prewarm pings,
 		// scheduler prompts and other synthetic turns have no ground truth
 		// and would only cost money and pollute the rates.
-		b.observeRouterShadow(chatID, threadID, userMsg)
+		b.observeRouterShadow(chatID, threadID, int64(telegramMsgIDFrom(ctx)), userMsg)
 	}
 	// V2-H33: per-block context sizes — the data for the Channel B diet.
 	// ~4 chars/token; these blocks are the fresh (uncached) prefill the API
