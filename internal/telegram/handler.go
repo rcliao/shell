@@ -1653,6 +1653,7 @@ func (h *Handler) HandleReaction(ctx context.Context, b *bot.Bot, reaction *mode
 		// Fetching the session gets us the thread_id the exchange belongs to.
 		threadID = h.bridge.SessionThreadID(chatID, mm.SessionID)
 	}
+	h.bridge.LogReaction(chatID, threadID, reaction.MessageID, emoji)
 
 	// Regenerate is handled specially: stream the new response into the
 	// existing bot message instead of sending a separate reply.

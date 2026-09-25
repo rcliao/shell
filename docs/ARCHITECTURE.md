@@ -358,6 +358,34 @@ the revert command to `agent.owner_chat_id` (0 = commit silently).
 owner, tier, whether it reaches the prompt, real usage, playground drafts and
 the agent's self-authored commit count.
 
+## Weekly review and suggestions
+
+Once a week (`review.cron`, default Wednesday 10:30), each agent that has
+`agent.owner_chat_id` set runs a review. It is an `agent.review` event on the
+durable queue (`internal/daemon/review.go`), with a schedule registered by
+dedup key `agent:review`.
+
+The daemon builds an evidence pack for the agent's last 7 days:
+- OwnerEval counts.
+- Reactions, which are logged to `feedback_events` whatever command they also
+  trigger.
+- Skill usage.
+- The agent's suggestions: open ones, and ones decided this week together with
+  the owner's words.
+- Its older `loop:proposals` headlines.
+- Its last reflections.
+
+It then runs one system turn. The agent changes what it can itself and files
+at most three suggestions with the `shell_suggestion` tool (a table in its
+`shell.db`). The daemon sends the owner the agent's summary and the new
+suggestions.
+
+The owner answers in plain words in their DM. That chat's agent records the
+answer with `shell_suggestion(action=decide)`, which is refused from any other
+chat. The owner can also use `shell suggestions decide`. `shell suggestions
+review-now` runs the review on the next tick. Design:
+`docs/DESIGN-ROUTER-AND-SUGGESTIONS.md` (S0).
+
 ## Shadow Router
 
 When the `TYPESAFE_API_KEY` secret resolves (secret store, then

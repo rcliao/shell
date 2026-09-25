@@ -29,6 +29,27 @@ type Config struct {
 	Agent     AgentIdentity   `json:"agent"`
 	Agents    AgentsConfig    `json:"agents"`
 	Notion    NotionConfig    `json:"notion"`
+	Review    ReviewConfig    `json:"review"`
+}
+
+// ReviewConfig drives the weekly review (docs/DESIGN-ROUTER-AND-SUGGESTIONS.md,
+// S0): the agent reviews its week, changes what it can itself, and files at
+// most three suggestions for the owner. It runs only when agent.owner_chat_id
+// is set.
+type ReviewConfig struct {
+	// Disabled turns the weekly review off. Off-by-flag rather than
+	// on-by-flag: the owner chat is the real switch.
+	Disabled bool `json:"disabled"`
+	// Cron is the cadence, in scheduler.timezone. Default Wednesday 10:30.
+	Cron string `json:"cron"`
+}
+
+// ReviewCron returns the configured cadence or the default.
+func (r ReviewConfig) ReviewCron() string {
+	if r.Cron != "" {
+		return r.Cron
+	}
+	return "30 10 * * 3"
 }
 
 // NotionConfig wires the official Notion MCP server (@notionhq/notion-mcp-server)

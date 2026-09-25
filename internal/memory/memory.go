@@ -2460,3 +2460,24 @@ func (m *Memory) PinAudit(ctx context.Context, chatID int64) (entries []PinnedEn
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Importance > entries[j].Importance })
 	return entries, budget / 2, nil
 }
+
+// NamespaceHeadlines returns the first line of each live memory in a
+// namespace, newest first, clipped to maxRunes — a table of contents, not
+// the content. The weekly review uses it to show an agent the proposals it
+// filed into loop:proposals, which until now only the developer loop read.
+func (m *Memory) NamespaceHeadlines(ctx context.Context, ns string, limit, maxRunes int) ([]string, error) {
+	mems, err := m.store.List(ctx, agentmemory.ListParams{NS: ns, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(mems))
+	for _, mem := range mems {
+		line := strings.TrimSpace(strings.SplitN(mem.Content, "\n", 2)[0])
+		line = strings.TrimPrefix(line, "observed: ")
+		if r := []rune(line); len(r) > maxRunes {
+			line = string(r[:maxRunes]) + "…"
+		}
+		out = append(out, line)
+	}
+	return out, nil
+}
