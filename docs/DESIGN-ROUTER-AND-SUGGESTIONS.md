@@ -1,7 +1,7 @@
 # Design: one router that splits a chat into lanes, and agents that suggest how to work better
 
-Status: **proposal, 2026-09-25**. Nothing is built. Answers to the owner
-questions at the end decide the first phase.
+Status: **accepted direction, 2026-09-25**. Nothing is built yet. The owner
+answered the open questions on the same day; see "Decisions" at the end.
 
 Inspired by Meta's Muse (launched 2026-09-08). Muse has one main chat,
 side chats that the user creates by hand, and a Goals view derived from past
@@ -32,6 +32,12 @@ evidence from what it did.
   decides *where a message belongs for this agent*. It never decides *which
   agent answers*, and it never waits for the other agent. `should_reply` stays
   shadow-only.
+- **Not tied to any channel.** Lanes, routing and suggestions live in the
+  bridge. A channel such as Telegram, the CLI (`shell chat`), or later email
+  events only delivers messages and renders replies. Nothing in the router or
+  the lane model may depend on Telegram. A channel *may* show lanes (for
+  example as Telegram topics), but that is an optional adapter feature, and
+  every step must be testable from the CLI without Telegram.
 - Decisions move into the agent (owner direction, 2026-09-23). The router
   proposes a lane, and the agent can move a message to another lane or create a
   new one. A human only confirms things other people will see, such as a new
@@ -85,15 +91,16 @@ visible project threads.
 | Session keying | `(chat, thread)` becomes `(chat, thread, lane)`. The default lane is `general`, so existing sessions keep working unchanged. |
 | Lanes | A lane is a project slug, a topic id, or `general`. A project can declare `model` / `effort`. |
 | Agent tool `lane` | `lane(action=move\|new\|list)`. The agent re-files the current message, or opens a lane. Every move is a label for the router. |
-| Visible topics (optional) | When a lane becomes a project, the agent may offer to open a real Telegram topic (`createForumTopic`, in a DM or a group where the bot is admin) and bind it. The human says yes or no. |
+| Channel adapters | A small interface: `DeliverReply(lane, …)`, plus an optional `ShowLane(lane)`. The CLI adapter ignores lanes. The Telegram adapter can map a lane to a forum topic (possible in DMs since Bot API 9.4), but only after the agent offers and the human accepts. |
 | `internal/bridge` review | A cadenced **collaboration review** per agent. It builds an evidence pack and runs one agent turn with a fixed output contract. |
 | Suggestions | The ghost namespace `loop:proposals` gains a status lifecycle and an audience. Delivery goes to the right human. Outcomes are fed back to the agent. |
 | Feedback signals | Reactions are also logged as feedback (👎, 🔄 and "stop" count as negative). OwnerEval is scheduled per agent. |
 
 ## Data flow
 
-**A human sends a message in a chat.**
-1. The handler records it (as it does today). The agent's router receives the
+**A message arrives on any channel (Telegram, CLI, later events).**
+1. The channel adapter hands the bridge a channel-neutral message: chat,
+   thread, sender, text, message id. The handler records it, as it does today. The agent's router receives the
    message plus the chat's recent lanes, active projects and the lane of the
    previous message.
 2. The router answers with a lane and a confidence.
@@ -103,7 +110,8 @@ visible project threads.
    - A confident new lane starts or resumes that lane's session.
 3. The turn runs in the lane's session with that lane's project block and
    model.
-4. The reply goes to the same chat and thread; the human sees nothing change.
+4. The reply goes back through the same adapter, to the same chat and
+   thread. The human sees nothing change.
 5. If the agent decides the message belongs elsewhere, it calls `lane(move)`.
    That turn is re-run in the right lane, or the agent simply notes it for the
    next message (to be decided in P1). The move is logged as a label.
@@ -113,7 +121,19 @@ same new subject. The agent may call `lane(new)`, and later, when it looks
 durable, offer to make it a project and, optionally, a visible topic. The
 agent decides to offer, and the human decides on anything visible.
 
-**A review is due (weekly, per agent).**
+**The family chat's deep reflection (collaboration suggestions).** The deep
+heartbeat that already reflects on each chat does this; no new job is added.
+1. It groups the chat's recent messages by lane, so the week reads as a few
+   threads of work rather than one long log. Each group gets a short retro:
+   what was asked, what the agent did, where it was corrected or nudged, and
+   what stayed open.
+2. From those retros, the agent may make **at most one** suggestion to the
+   chat about how the family and the agent could work better together (for
+   example: "meal logs could go under the health project; want me to keep them
+   there?"). It is written in the chat's language and goes into that chat.
+3. The family's answer is recorded on the suggestion, like an owner's answer.
+
+**A review is due (weekly, per agent: the owner-facing part).**
 1. The harness assembles an evidence pack for the agent's week. It contains
    OwnerEval counts, reactions, lane moves (routing mistakes), skill usage, open
    and resolved suggestions with their outcomes, and the reflections journal.
@@ -141,8 +161,9 @@ agent decides to offer, and the human decides on anything visible.
   created_at`.
 - `sessions`: add `lane TEXT NOT NULL DEFAULT 'general'`. The unique key becomes
   `(chat_id, message_thread_id, lane)`.
-- `projects`: add `model`, `effort` and `visible_thread` (whether shell created
-  the topic).
+- `projects`: add `model`, `effort` and `channel_ref` (an optional
+  adapter-specific place the lane is shown, such as a Telegram topic id; empty
+  means invisible).
 - Suggestions in the ghost namespace `loop:proposals`: add fields `status`
   (proposed / accepted / declined / done / withdrawn), `audience`,
   `evidence` (refs), `decided_by`, `decided_at` and `outcome_note`.
@@ -174,12 +195,12 @@ in shadow; suggestions start with the owner.
 | # | Step | Visible to family? | Pass bar before the next step |
 |---|---|---|---|
 | R0 | One `Router` in shadow: merge the three shadows, log `route_decisions`, labels from project writes and the agent's own `lane` calls (tool available, no effect yet) | no | 2 weeks; agreement with labels ≥ 85%, and churn below one lane change per 5 messages |
-| R1 | Lanes on for the **owner's DM only**: session per lane, sticky rule, `lane` tool live | owner only | Owner judges answers no worse; context per turn shrinks |
+| R1 | Lanes on for a **CLI test chat** (`shell chat --chat <test id>`), then the **owner's DM**: session per lane, sticky rule, `lane` tool live | owner only | Replayed CLI conversations route as labelled; the owner judges DM answers no worse; context per turn shrinks |
 | R2 | Per-lane model and effort | owner only | Cost per turn down with no quality complaints |
-| R3 | Visible topics: agent offers, human accepts | per offer | Owner decides |
+| R3 | Visible lanes through a channel adapter (Telegram topics first): agent offers, human accepts | per offer | Owner decides |
 | R4 | Lanes in the family DM, then the group | yes | Owner decides after R1/R2 numbers |
 | S0 | Close the loop, owner only: weekly review turn, suggestions with a lifecycle, and a message to the owner with buttons; schedule OwnerEval; log reactions as feedback | owner only | The owner finds at least 1 in 3 suggestions worth accepting |
-| S1 | Collaboration suggestions to the person the agent works with (for example the family DM user), in their language, at most 1 per week, opt-in | per person, opt-in | Accept rate, and no complaint about noise |
+| S1 | Family chat deep reflection: group by lane, retro each group, at most one collaboration suggestion into the chat, in its language | yes | Accept rate, and no complaint about noise |
 
 S0 can start at once and does not depend on R0. The weekly check #182
 (Pika reporting on both agents) either becomes the owner digest of S0
@@ -192,21 +213,35 @@ or is retired.
 - S0 delivers a suggestion with buttons, and a decision lands on the suggestion
   and shows up in the next review's evidence pack.
 
-## Open questions for the owner
+## Decisions (owner, 2026-09-25)
 
-1. **Invisible lanes vs visible topics.** Invisible first (recommended). The
-   user changes nothing, and it works in groups where the bot is not an admin.
-   Visible topics come later, only when the agent offers and the person
-   accepts. Or visible from the start?
-2. **Who receives collaboration suggestions?** The owner only (S0), or also the
-   family member the agent works with (S1, opt-in, one a week at most)?
-3. **Router backend.** Decide from R0 numbers. Jev looks good so far on
-   project choice and open questions, with a thin sample. Haiku is the
-   fallback. Is a hosted third-party decider acceptable for *routing
-   family messages*, when today it only sees them in shadow?
-4. **The topic classifier's future.** Retire it once the router covers it, or
-   keep its summaries and commitments? One agent's own proposal calls the
-   commitments list noise.
+1. **Visible lanes are fine, but do not design around Telegram.** Start
+   invisible. Telegram is one more source of incoming messages; the CLI is
+   another and is the first test path. Visible lanes are an optional channel
+   adapter feature (R3).
+2. **Collaboration suggestions go into the family chat's deep reflection.**
+   Group the messages, run a retro per group, and make a suggestion (S1).
+   Owner-facing harness suggestions stay in the weekly review (S0).
+3. **Router backend:** keep measuring Jev. If routing evaluates well (R0 pass
+   bar), Jev may route family messages too.
+4. **Retire the topic classifier**, then look for more to simplify (below).
+
+## Simplify after R0
+
+The router makes these redundant. Each is removed only after R0 shows the
+router covers it; each removal has its own PR.
+
+| Remove | Why it goes | Data |
+|---|---|---|
+| Topic classifier (`internal/topic`, the prompt.go hook, topic_hook.go summaries and commitments) | Replaced by lanes. Keyword-only, 79–86% "general", keyed per chat not thread; one agent called its commitments list noise | `topic_threads`, `topic_decisions`, `conversations` drift columns, ghost `loop:topics` (kept read-only until the lane history covers the same period) |
+| `topic_turn_log`, `LogTopicTurn` | Never written | table |
+| Tier router shadow (`tier_router.go`) | Merged into `Route.ModelTier` | `tier_decisions` |
+| Jev shadow as a separate path (`observeRouterShadow`) | Becomes the router's Jev backend | `router_decisions` stays read-only for the verdict |
+| `model_routing.topic_classifier` config, `topic_keyword_only` | No classifier left | config keys |
+| Reflections journal as a separate table | Folded into the review's evidence pack, if every entry stays `[noop]` | `reflections` |
+
+After those, look again at the per-turn blocks (`[Continuing:]`, `[Topic:]`,
+`[Projects]`, `[Project]`). The goal is one lane block per turn.
 
 ## Evidence
 
