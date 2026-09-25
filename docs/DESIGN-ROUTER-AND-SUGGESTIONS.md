@@ -214,6 +214,62 @@ or is retired.
 - S0 delivers a suggestion (tested from the CLI first), and a decision lands on the suggestion
   and shows up in the next review's evidence pack.
 
+## S0 build spec (2026-09-25)
+
+S0 is the first step, and nothing in it depends on the router.
+
+**Trigger.** A weekly event-mode schedule, registered idempotently at startup
+(dedup key `agent:review`), enqueues an `agent.review` task on the existing
+durable queue. It runs only when `agent.owner_chat_id` is set. The cadence is
+`review.cron`, default Wednesday 10:30 in the agent's time zone.
+
+**Evidence pack.** Built by the bridge for the last 7 days:
+- OwnerEval dimensions, computed from this agent's `shell.db`.
+- Reactions from `feedback_events`, counted by emoji.
+- Skill usage (`store.SkillUsage`).
+- This agent's suggestions: open ones, and the ones decided in the window
+  together with the owner's notes.
+- Open proposals in ghost `loop:proposals` (titles only).
+- The last three reflections.
+
+**The turn.** One system turn (chat 0) with the pack and a contract:
+- **Do.** Make the changes that are within your power now.
+- **Ask.** File at most 3 suggestions with `shell_suggestion(action=create)`.
+  Each one cites evidence from the pack and names one concrete change. Do not
+  re-ask a declined suggestion without new evidence.
+- **Reply.** A 3–6 line summary of what you did.
+
+Suggestions are filed through a tool, never parsed out of the reply text. As
+with `task_complete`, the filing is proof that it happened.
+
+**Delivery.** After the turn, the harness sends the owner one message: the
+summary, then each new suggestion with its id. The suggestions are marked
+delivered.
+
+**Decisions.** The owner answers in plain words ("accept 12", "decline 12
+because …"). The owner-DM agent records the answer with
+`shell_suggestion(action=decide)`. The RPC accepts `decide` only when the call
+comes from the owner's chat, so an agent cannot accept its own suggestion from
+a system turn. The CLI `shell suggestions decide` works as well, so every step
+can be tested without Telegram.
+
+**Reactions** are also logged to `feedback_events`, including the command
+emoji (👍 go, 👎 stop, 🔄 regenerate).
+
+**Data.**
+- `suggestions(id, created_at, source, audience, title, evidence, change,
+  status proposed|delivered|accepted|declined|done|withdrawn, delivered_at,
+  decided_at, decided_by, note)`, in each agent's `shell.db`. It is a table
+  rather than ghost fields: a lifecycle needs exact status queries, and ghost
+  stays the memory, not the ledger.
+- `feedback_events(chat_id, thread_id, msg_id, kind, value, created_at)`.
+
+**Interfaces.**
+- RPC `POST /suggestion` (`create|list|decide`).
+- MCP tool `shell_suggestion`.
+- CLI `shell suggestions [list|decide <id> accept|decline|done [--note]|review-now]`.
+- Config `review.enabled` (default on) and `review.cron`.
+
 ## Decisions (owner, 2026-09-25)
 
 1. **Visible lanes are fine, but do not design around Telegram.** Start
