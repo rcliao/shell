@@ -127,7 +127,7 @@ func TestShadowAsksTheRightQuestionsAndRecords(t *testing.T) {
 	rec := &memRecorder{done: make(chan struct{}), want: 4}
 	sh := NewShadow(d, rec)
 	msg := "[Umbreon (your fellow agent) said this in the group — reply if you have something genuinely useful to add or a part of the task to take; otherwise [noop]]\n我們二月去京都要住哪？"
-	sh.Observe(Turn{ChatID: -100200300, ThreadID: 7, ChatKind: "group", Message: msg, BoundProject: "japan",
+	sh.Observe(Turn{ChatID: -100200300, ThreadID: 7, MsgID: 555, ChatKind: "group", Message: msg, BoundProject: "japan",
 		Projects: []Project{{Slug: "japan", Title: "Japan 2027", Instructions: "spring trip"}, {Slug: "health", Title: "Health log"}}})
 
 	rows := waitRows(t, rec)
@@ -135,7 +135,7 @@ func TestShadowAsksTheRightQuestionsAndRecords(t *testing.T) {
 	for _, r := range rows {
 		byQ[r.Question] = r
 	}
-	for _, q := range []string{"which_project", "should_reply", "has_open_question", "has_decision"} {
+	for _, q := range []string{"which_project", "should_reply", "has_open_question", "has_decision_v2"} {
 		if _, ok := byQ[q]; !ok {
 			t.Errorf("missing row for %q", q)
 		}
@@ -143,6 +143,9 @@ func TestShadowAsksTheRightQuestionsAndRecords(t *testing.T) {
 	wp := byQ["which_project"]
 	if !strings.Contains(wp.Candidates, `"japan"`) || !strings.Contains(wp.Candidates, `"none"`) || wp.BoundProject != "japan" || !wp.PeerTurn {
 		t.Errorf("which_project row = %+v", wp)
+	}
+	if wp.MsgID != 555 {
+		t.Errorf("msg id not recorded: %+v", wp)
 	}
 	if wp.Choice != "none" || wp.Model != "fake" || wp.InputTokens != 10 || wp.Error != "" {
 		t.Errorf("answer not recorded: %+v", wp)

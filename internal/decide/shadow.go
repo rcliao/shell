@@ -167,8 +167,12 @@ func (s *Shadow) questions(t Turn) (map[string]Question, bool) {
 	}
 	q["has_open_question"] = Question{Type: "noul",
 		Instructions: "The message asks a question or raises a choice that still needs a human decision."}
-	q["has_decision"] = Question{Type: "noul",
-		Instructions: "The message states a decision that has been made (a choice settled, a booking done, a plan fixed)."}
+	// v2 (2026-09-25): v1 ("states a decision that has been made") fired on
+	// meal logs — 5 of its 6 hits in the first 1.5 days were "I ate X". A
+	// new key, so the verdict never mixes the two wordings.
+	q["has_decision_v2"] = Question{Type: "noul",
+		Instructions: "The message settles a choice between options or commits to a plan: an option picked, a booking confirmed, a date or plan fixed. " +
+			"Reporting or logging what already happened (meals eaten, activities done, a status update) is NOT a decision, and neither is a question."}
 	return q, peer
 }
 

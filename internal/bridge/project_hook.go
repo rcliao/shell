@@ -213,12 +213,14 @@ func projectRow(p store.Project) string {
 // observeRouterShadow hands the turn to the shadow router (P3.7). It builds
 // the project list from the same registry the [Projects] block uses, and
 // notes which project's own thread this is — the label a which_project
-// answer is later scored against. Fire and forget; a nil shadow is a no-op.
-func (b *Bridge) observeRouterShadow(chatID, threadID int64, userMsg string) {
+// answer is later scored against. msgID is the Telegram message (0 when the
+// turn has none, e.g. a peer relay), so a row can be audited against the
+// words it judged. Fire and forget; a nil shadow is a no-op.
+func (b *Bridge) observeRouterShadow(chatID, threadID, msgID int64, userMsg string) {
 	if b.routerShadow == nil || b.store == nil || chatID == 0 {
 		return
 	}
-	t := decide.Turn{ChatID: chatID, ThreadID: threadID, Message: userMsg, ChatKind: "dm"}
+	t := decide.Turn{ChatID: chatID, ThreadID: threadID, MsgID: msgID, Message: userMsg, ChatKind: "dm"}
 	if chatID < 0 {
 		t.ChatKind = "group"
 	}
