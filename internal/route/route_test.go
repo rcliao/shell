@@ -16,7 +16,8 @@ func TestDecideSticky(t *testing.T) {
 		lane   string
 		sticky bool
 	}{
-		{"", Choice{Lane: "japan", Confidence: 0.3}, "japan", false},          // no previous lane
+		{"", Choice{Lane: "japan", Confidence: 0.3}, "general", true},         // no lane yet: an unsure guess stays general
+		{"", Choice{Lane: "japan", Confidence: 0.8}, "japan", false},          // no lane yet: a sure one opens the lane
 		{"japan", Choice{Lane: "general", Confidence: 0.4}, "japan", true},    // unsure switch stays
 		{"japan", Choice{Lane: "general", Confidence: 0.9}, "general", false}, // sure switch moves
 		{"japan", Choice{Lane: "japan", Confidence: 0.1}, "japan", false},     // same lane is not sticky
