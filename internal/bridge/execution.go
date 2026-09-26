@@ -21,6 +21,11 @@ const (
 // research and comment turns.
 const ProjectTurnSender = "project-research"
 
+// ReviewTurnSender marks the weekly review turn (S0): a system turn (no
+// router shadow, no transcript) whose reply is delivered to the owner, so
+// it gets the user-facing text filter instead of the journal's full text.
+const ReviewTurnSender = "review"
+
 // ExecutionProfile is the resolved per-turn execution decision: which model, at
 // what reasoning effort, and whether the turn runs as an isolated one-shot
 // (ephemeral, fresh spawn) or on the chat's persistent session. It exists so the
