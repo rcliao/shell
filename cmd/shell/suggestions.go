@@ -84,21 +84,26 @@ func newSuggestionsCmd() *cobra.Command {
 	}
 	decide.Flags().StringVar(&note, "note", "", "the reason, in your words — the agent sees it next review")
 
+	var chatRetro bool
 	reviewNow := &cobra.Command{
 		Use:   "review-now",
-		Short: "Run the agent's weekly review on the daemon's next scheduler tick",
+		Short: "Run the agent's weekly review (or, with --chat-retro, its chat retros) on the next scheduler tick",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			st, err := store.Open(loadConfigFrom(configFlag).Store.DBPath)
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			sc, err := st.FindScheduleByDedupKey("agent:review")
+			key := "agent:review"
+			if chatRetro {
+				key = "agent:chat-retro"
+			}
+			sc, err := st.FindScheduleByDedupKey(key)
 			if err != nil {
 				return err
 			}
 			if sc == nil || !sc.Enabled {
-				return fmt.Errorf("no live review schedule — set agent.owner_chat_id and restart the daemon")
+				return fmt.Errorf("no live %s schedule — set agent.owner_chat_id (review) or review.chat_retro_chats (chat retro) and restart the daemon", key)
 			}
 			now := time.Now().UTC()
 			if err := st.UpdateScheduleNextRun(sc.ID, now, now); err != nil {
@@ -108,6 +113,7 @@ func newSuggestionsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	reviewNow.Flags().BoolVar(&chatRetro, "chat-retro", false, "trigger the weekly chat retro instead (review.chat_retro_chats)")
 	cmd.AddCommand(decide, reviewNow)
 	return cmd
 }
