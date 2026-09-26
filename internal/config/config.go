@@ -30,6 +30,33 @@ type Config struct {
 	Agents    AgentsConfig    `json:"agents"`
 	Notion    NotionConfig    `json:"notion"`
 	Review    ReviewConfig    `json:"review"`
+	Route     RouteConfig     `json:"route"`
+}
+
+// RouteConfig tunes the message router (docs/DESIGN-ROUTER-AND-SUGGESTIONS.md,
+// R0: shadow only).
+type RouteConfig struct {
+	// StickyThreshold: below this confidence a switch away from the thread's
+	// previous lane stays in the previous lane. 0 = default 0.6.
+	StickyThreshold float64 `json:"sticky_threshold"`
+	// JudgeModel labels messages for scoring (shell route judge). Default Opus.
+	JudgeModel string `json:"judge_model"`
+}
+
+// Judge returns the judge model or the default.
+func (r RouteConfig) Judge() string {
+	if r.JudgeModel != "" {
+		return r.JudgeModel
+	}
+	return "claude-opus-5-5"
+}
+
+// Sticky returns the sticky threshold or the default.
+func (r RouteConfig) Sticky() float64 {
+	if r.StickyThreshold > 0 {
+		return r.StickyThreshold
+	}
+	return 0.6
 }
 
 // ReviewConfig drives the weekly review (docs/DESIGN-ROUTER-AND-SUGGESTIONS.md,

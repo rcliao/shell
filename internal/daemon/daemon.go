@@ -678,6 +678,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	// turn completion (project.event consumer), and by /projects.
 	// Shadow router (P3.7): observes every user turn with a decision model,
 	// records, never acts. Silent when no TYPESAFE_API_KEY is present.
+	br.SetRouteStickyThreshold(cfg.Route.Sticky())
 	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
 		br.SetRouterShadow(decide.NewShadow(jev, st))
 		slog.Info("router shadow: enabled", "backend", "jev")

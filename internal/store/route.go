@@ -219,3 +219,17 @@ func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
 	}
 	return out, rows.Err()
 }
+
+// LastUserText returns the latest real user message in a chat thread — the
+// message an agent is answering when it labels "this" message.
+func (s *Store) LastUserText(chatID, threadID int64) (string, error) {
+	var text string
+	err := s.db.QueryRow(`SELECT m.content FROM messages m JOIN sessions s ON s.id = m.session_id
+		WHERE s.chat_id = ? AND s.message_thread_id = ? AND m.role = 'user'
+		  AND substr(ltrim(m.content), 1, 1) != '['
+		ORDER BY m.id DESC LIMIT 1`, chatID, threadID).Scan(&text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return text, err
+}

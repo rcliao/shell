@@ -3,6 +3,7 @@ package route
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/rcliao/shell/internal/decide"
@@ -71,5 +72,26 @@ func TestJevAsksTheShadowQuestion(t *testing.T) {
 	want := decide.WhichProjectQuestion([]decide.Project{{Slug: "health", Title: "Health log"}})
 	if !reflect.DeepEqual(f.got["which_project"], want) {
 		t.Errorf("replay must ask exactly the live question:\n got %+v\nwant %+v", f.got["which_project"], want)
+	}
+}
+
+func TestJudgePromptAndParse(t *testing.T) {
+	cands := []Candidate{{Lane: "japan", Title: "日本行程", Desc: "spring trip\nplanning"}}
+	p := JudgePrompt(cands, []JudgeItem{{N: 1, Text: "機票訂了嗎"}, {N: 2, Text: "那飯店呢"}})
+	for _, want := range []string{"- general:", "- japan: 日本行程 — spring trip planning", "1. [", "2. [", "ONLY a JSON array"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+	out := "Here you go:\n```json\n[{\"n\":1,\"lane\":\"japan\",\"sure\":true},{\"n\":2,\"lane\":\"hotels\",\"sure\":true},{\"n\":3,\"lane\":\"general\",\"sure\":false}]\n```"
+	got, err := ParseJudge(out, cands)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Lane != "japan" || got[1].N != 3 || got[1].Sure {
+		t.Errorf("parsed = %+v (an unknown lane must be dropped)", got)
+	}
+	if _, err := ParseJudge("no array here", cands); err == nil {
+		t.Error("output without an array must be an error")
 	}
 }

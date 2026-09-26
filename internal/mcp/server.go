@@ -49,6 +49,12 @@ review ends. In the owner's chat, when the owner answers one ("accept 12",
 "decline 12 because …"), record it with action=decide in their words.
 action=list shows what is open and what was decided.
 
+shell_lane — when the message you are answering clearly belongs to one of this
+chat's projects, or clearly to none ("general"), and that differs from how
+the conversation was framed to you, say so with shell_lane(lane=…). It only
+measures the message router; nothing about your turn changes. Most turns
+need no call.
+
 shell_pm — start, stop, list and inspect background processes.
 CRITICAL: NEVER run long-running processes (servers, watchers) directly via
 Bash — they die with the turn. Always use shell_pm.
@@ -301,6 +307,33 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 		result, err := client.call(ctx, "/suggestion", map[string]any{
 			"action": p.Action, "chat_id": currentChatID(), "id": p.ID, "title": p.Title,
 			"evidence": p.Evidence, "change": p.Change, "status": p.Status, "note": p.Note, "all": p.All,
+		})
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		return textResult(jsonText(result)), nil
+	})
+
+	// shell_lane — the agent's label for the message it is answering (R0).
+	server.AddTool(&gomcp.Tool{
+		Name: "shell_lane",
+		Description: "Label which lane the message you are answering belongs to: one of this chat's active project slugs, or general. " +
+			"Only measures the message router; your turn is not changed. Use it when the right lane is clear and differs from how the message was framed.",
+		InputSchema: schema([]string{"lane"}, map[string]map[string]any{
+			"lane": prop("string", "A project slug of this chat, or general"),
+			"note": prop("string", "Optional: why"),
+		}),
+	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		var p struct {
+			Lane string `json:"lane"`
+			Note string `json:"note"`
+		}
+		if err := unmarshalArgs(req, &p); err != nil {
+			return errResult(err.Error()), nil
+		}
+		thread, _ := strconv.ParseInt(os.Getenv("SHELL_MESSAGE_THREAD_ID"), 10, 64)
+		result, err := client.call(ctx, "/lane", map[string]any{
+			"chat_id": currentChatID(), "thread_id": thread, "lane": p.Lane, "note": p.Note,
 		})
 		if err != nil {
 			return errResult(err.Error()), nil
