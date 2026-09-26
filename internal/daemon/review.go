@@ -220,6 +220,8 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 		section("Your older proposals in loop:proposals — NOT in front of the owner; nobody has read them", "- "+strings.Join(p, "\n- "))
 	}
 
+	section("How your messages were routed to project lanes", d.laneEvidence(since))
+
 	if refl, err := d.store.ListReflections(3); err == nil {
 		var lines []string
 		for _, r := range refl {
@@ -234,6 +236,61 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 	return sb.String()
 }
 
+// laneEvidence summarizes the week's acted-on routing: messages per lane,
+// how often a thread switched lanes, how often an unsure switch was held,
+// and every message the agent itself labelled differently with shell_lane —
+// its routing mistakes, which it can fix by sharpening a project's
+// instructions (project set-instructions).
+func (d reviewDeps) laneEvidence(since time.Time) string {
+	rows, err := d.store.RouteDecisions("lane", since)
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	perLane := map[string]int{}
+	last := map[string]string{}
+	changes, transitions, sticky := 0, 0, 0
+	for _, r := range rows {
+		perLane[r.Lane]++
+		if r.Sticky {
+			sticky++
+		}
+		k := fmt.Sprintf("%d/%d", r.ChatID, r.ThreadID)
+		if prev, ok := last[k]; ok {
+			transitions++
+			if prev != r.Lane {
+				changes++
+			}
+		}
+		last[k] = r.Lane
+	}
+	var lanes []string
+	for l, n := range perLane {
+		lanes = append(lanes, fmt.Sprintf("%s ×%d", l, n))
+	}
+	sort.Strings(lanes)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "- %d messages routed: %s\n", len(rows), strings.Join(lanes, ", "))
+	fmt.Fprintf(&sb, "- lane switches within a thread: %d of %d; unsure switches held in place: %d\n", changes, transitions, sticky)
+	if mine, err := d.store.RouteLabelsBySource("agent", since); err == nil {
+		wrong := 0
+		for _, r := range rows {
+			if l, ok := mine[store.LabelKey(r.ChatID, r.ThreadID, r.TextHash)]; ok && l.Lane != r.Lane {
+				wrong++
+				if wrong <= 5 {
+					note := ""
+					if l.Note != "" {
+						note = " — your note: " + oneLine(l.Note)
+					}
+					fmt.Fprintf(&sb, "- %s: routed to %s, you labelled it %s%s\n", r.MsgAt.Local().Format("Mon 15:04"), r.Lane, l.Lane, note)
+				}
+			}
+		}
+		fmt.Fprintf(&sb, "- messages you re-labelled with shell_lane: %d, of which routed differently: %d\n", len(mine), wrong)
+	}
+	sb.WriteString("- the router decides from each project's instructions; `project set-instructions <slug> --instructions \"…\"` sharpens them\n")
+	return sb.String()
+}
+
 func reviewPrompt(agent, evidence string) string {
 	return fmt.Sprintf(`[Weekly review — %s]
 This is your weekly review, a system turn. Your final reply is sent to your
@@ -245,7 +302,9 @@ Do three things, in this order.
 
 1. DO — make the changes that are within your own power now: your own skills
    (they are committed and the owner is notified automatically), your memory,
-   your schedules. Only changes the evidence above supports.
+   your schedules, and your projects' instructions — the router reads them to
+   decide which messages belong to a project, so misrouted messages above are
+   yours to fix (project set-instructions). Only changes the evidence supports.
 
 2. ASK — file at most %d suggestions for changes only a human can make: how
    the harness, your tools or your setup should change, or how you and your

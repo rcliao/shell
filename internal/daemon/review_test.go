@@ -56,7 +56,7 @@ func TestReviewRunsTurnAndDeliversCappedSuggestions(t *testing.T) {
 		t.Errorf("result = %q", res)
 	}
 	for _, want := range []string{"factual_corrections: 2", "👎 ×1", "declined by owner", "too noisy", "history block duplicated", "at most 3",
-		"NOT in front of the owner", "sent to your\nowner verbatim", "No preamble, no headings"} {
+		"NOT in front of the owner", "sent to your\nowner verbatim", "No preamble, no headings", "project set-instructions"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
@@ -146,5 +146,27 @@ func TestRegisterReviewScheduleReconciles(t *testing.T) {
 	registerReviewSchedule(st, "0 9 * * 1", "UTC", false)
 	if live, all := count(); live != 0 || all != 2 {
 		t.Fatalf("after disable: live=%d all=%d, want 0/2 (no disabled pile-up)", live, all)
+	}
+}
+
+func TestReviewLaneEvidence(t *testing.T) {
+	st := openReviewStore(t)
+	now := time.Now()
+	for i, lane := range []string{"general", "trip", "trip", "general"} {
+		st.LogRouteDecision(store.RouteDecision{Source: "lane", ChatID: 42, MsgAt: now, TextHash: string(rune('a' + i)),
+			Backend: "jev-v2", Lane: lane, Sticky: i == 2})
+	}
+	// The agent said message "b" was general, not trip.
+	st.UpsertRouteLabel(store.RouteLabel{ChatID: 42, TextHash: "b", Lane: "general", Source: "agent", Note: "small talk"})
+	got := reviewDeps{store: st}.laneEvidence(now.Add(-time.Hour))
+	for _, want := range []string{"4 messages routed: general ×2, trip ×2", "switches within a thread: 2 of 3", "held in place: 1",
+		"routed to trip, you labelled it general — your note: small talk", "re-labelled with shell_lane: 1, of which routed differently: 1",
+		"project set-instructions"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lane evidence missing %q:\n%s", want, got)
+		}
+	}
+	if (reviewDeps{store: openReviewStore(t)}).laneEvidence(now.Add(-time.Hour)) != "" {
+		t.Error("no routing, no section body")
 	}
 }

@@ -144,6 +144,11 @@ revision turn in the project's chat session with the comment text. Contract:
 - `--export-ref <id>` — external doc id (export kind defaults to notion)
 - `--doc-path <path>` — canonical doc path, e.g. `workspace/projects/<slug>/doc.md`
 - `--instructions <text>` — standing guidance injected with the project row
+- `project set-instructions <slug> --instructions "<text>"` replaces them.
+  The message router also reads them to decide which messages belong to this
+  project. If your weekly review shows messages routed to the wrong project
+  (or missed), sharpen them, for example: "meal logs (早餐/午餐/晚餐 memo),
+  snacks, medication taken".
 - `--lang <code>` — the user's language for this project (e.g. `zh`, `en`)
 - `--cadence daily|weekly|monthly` — autonomous research cadence (default
   `weekly`). Create registers the schedule itself; on each fire the daemon

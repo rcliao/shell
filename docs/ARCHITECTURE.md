@@ -395,6 +395,8 @@ The daemon builds an evidence pack for the agent's last 7 days:
   the owner's words.
 - Its older `loop:proposals` headlines.
 - Its last reflections.
+- How its messages were routed to lanes, and the messages it re-labelled.
+  It can fix routing itself with `project set-instructions`.
 
 It then runs one system turn. The agent changes what it can itself and files
 at most three suggestions with the `shell_suggestion` tool (a table in its

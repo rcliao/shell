@@ -402,6 +402,12 @@ durable queue. It runs only when `agent.owner_chat_id` is set. The cadence is
   together with the owner's notes.
 - Open proposals in ghost `loop:proposals` (titles only).
 - The last three reflections.
+- How its messages were routed to lanes (added 2026-09-26): messages per lane,
+  lane switches, unsure switches held in place, and every message the agent
+  re-labelled with `shell_lane` that had been routed differently. The router
+  decides from each project's instructions, and the agent can sharpen them
+  itself with `project set-instructions`. That makes routing the agent's to
+  own.
 
 **The turn.** One system turn (chat 0) with the pack and a contract:
 - **Do.** Make the changes that are within your power now.
