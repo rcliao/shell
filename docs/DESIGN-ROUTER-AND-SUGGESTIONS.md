@@ -238,8 +238,9 @@ Detecting a new subject is deferred to R1.
 
 **The router.** `route.Decide` takes a backend's choice and its confidence,
 applies the sticky rule (below `route.sticky_threshold`, default 0.6, the
-message stays in the previous lane of the same chat and thread), and returns
-the route. There are two backends:
+message stays in the previous lane of the same chat and thread; a thread with
+no lane yet starts from `general`, so an unsure first message never opens a
+project lane), and returns the route. There are two backends:
 - **jev**: live, the shadow's existing `which_project` answer (no second
   call); in replay, the same question asked directly.
 - **keyword**: a local baseline that matches words from project titles and

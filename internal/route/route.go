@@ -47,12 +47,18 @@ type Backend interface {
 // Decide applies the sticky rule: a low-confidence switch away from the
 // previous lane of the same thread stays in the previous lane. Chat moves in
 // runs; flipping on every uncertain message would fragment the context.
+//
+// A thread with no lane yet starts from general: an unsure first message
+// must not open a project lane (live, a 0.13-confidence guess did).
 func Decide(prev string, c Choice, threshold float64) (lane string, sticky bool) {
 	lane = c.Lane
 	if lane == "" {
 		lane = General
 	}
-	if prev != "" && lane != prev && c.Confidence < threshold {
+	if prev == "" {
+		prev = General
+	}
+	if lane != prev && c.Confidence < threshold {
 		return prev, true
 	}
 	return lane, false
