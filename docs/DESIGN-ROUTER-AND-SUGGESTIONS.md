@@ -291,6 +291,29 @@ judge reads text from the agent's own `messages` table.
   message.
 - Config `route.sticky_threshold`, `route.judge_model`.
 
+### R0 first results (2026-09-25)
+
+Replay covers 14 days of one agent's messages: 373 routed, 352 labelled by
+the judge, 74 of them project messages.
+
+| backend | agree | always-general, same rows | project msgs found | project picks right | lane changes |
+|---|---|---|---|---|---|
+| jev (live question, v1) | 86% | 80% | 27% | 100% | 8% |
+| **jev-v2** (reworded) | **92%** | 80% | **62%** | 96% | 9% |
+| keyword | 80% | 80% | 0% | — | 0% |
+
+v1's instruction, "choose none unless clearly about one", made it precise but
+blind: it missed most meal logs sent to the meal and health log project. v2
+says what "belongs" means ("feeds or continues that project's work … even if
+it never names the project").
+
+Since then the live shadow asks both questions in the same call (no second
+request). v1 stays recorded for the 9/28 Jev verdict, and v2 feeds a
+`jev-v2` live backend.
+
+The other agent's 14 days had no project talk (274 of 274 labelled general),
+so there is nothing to score there yet.
+
 ## S0 build spec (2026-09-25)
 
 S0 is the first step, and nothing in it depends on the router.

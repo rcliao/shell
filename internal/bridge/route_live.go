@@ -30,8 +30,9 @@ func (b *Bridge) stickyThreshold() float64 {
 	return defaultStickyThreshold
 }
 
-// logLiveRoute is the decide.Shadow OnWhichProject hook.
-func (b *Bridge) logLiveRoute(t decide.Turn, choice string, confidence float64, latency time.Duration) {
+// logLiveRoute is the decide.Shadow OnWhichProject hook. The v1 answer logs
+// the jev backend plus the keyword baseline; the v2 answer logs jev-v2.
+func (b *Bridge) logLiveRoute(t decide.Turn, question, choice string, confidence float64, latency time.Duration) {
 	if b.store == nil {
 		return
 	}
@@ -48,6 +49,10 @@ func (b *Bridge) logLiveRoute(t decide.Turn, choice string, confidence float64, 
 			Confidence: c.Confidence, Lane: lane, Sticky: sticky, LatencyMS: c.Latency.Milliseconds()}); err != nil {
 			slog.Warn("route: decision log failed", "backend", backend, "error", err)
 		}
+	}
+	if question == "which_project_v2" {
+		record("jev-v2", route.Choice{Lane: route.LaneFromJev(choice), Confidence: confidence, Latency: latency})
+		return
 	}
 	record("jev", route.Choice{Lane: route.LaneFromJev(choice), Confidence: confidence, Latency: latency})
 	kw, _ := route.Keyword{}.Choose(context.Background(), route.Input{ChatKind: t.ChatKind, ThreadID: t.ThreadID,

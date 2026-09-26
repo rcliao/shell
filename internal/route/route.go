@@ -149,9 +149,18 @@ var stopwords = map[string]bool{"with": true, "from": true, "this": true, "that"
 // its answer is handed over (decide.Shadow.OnWhichProject). Replay does.
 type Jev struct {
 	D decide.Decider
+	// Variant selects a candidate question wording for replay ("" = the
+	// live question, "v2" = WhichProjectQuestionV2). The backend's name
+	// carries it, so the report scores variants side by side.
+	Variant string
 }
 
-func (Jev) Name() string { return "jev" }
+func (j Jev) Name() string {
+	if j.Variant != "" {
+		return "jev-" + j.Variant
+	}
+	return "jev"
+}
 
 func (j Jev) Choose(ctx context.Context, in Input) (Choice, error) {
 	projects := make([]decide.Project, 0, len(in.Candidates))
@@ -159,8 +168,12 @@ func (j Jev) Choose(ctx context.Context, in Input) (Choice, error) {
 		projects = append(projects, decide.Project{Slug: c.Lane, Title: c.Title, Instructions: c.Desc})
 	}
 	started := time.Now()
+	q := decide.WhichProjectQuestion(projects)
+	if j.Variant == "v2" {
+		q = decide.WhichProjectQuestionV2(projects)
+	}
 	res, err := j.D.Ask(ctx, decide.ShadowState(in.ChatKind, in.ThreadID, in.Text),
-		map[string]decide.Question{"which_project": decide.WhichProjectQuestion(projects)})
+		map[string]decide.Question{"which_project": q})
 	if err != nil {
 		return Choice{}, err
 	}
