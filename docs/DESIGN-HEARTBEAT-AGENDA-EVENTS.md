@@ -54,7 +54,8 @@ Out of scope:
 
 An empty agenda on a non-deep beat means no turn: the callback returns an
 empty (no-op) reply, so the scheduler's idle interval applies. Deep beats
-always run (reflection cadence), with the agenda included.
+(reflection cadence) and check-in beats (every 4th beat carries the agent's
+proactive "friendly check-in" hint) always run, with the agenda included.
 
 **An event arrives (once a producer exists).** A producer writes
 `{"source": "gmail", "kind": "email.received", "dedup_id": "<message id>",

@@ -851,7 +851,10 @@ func New(cfg config.Config) (*Daemon, error) {
 			// an empty reply is a noop, so the idle backoff applies. Deep
 			// beats keep their reflection cadence and carry the agenda too.
 			agenda := br.HeartbeatAgenda(ctx)
-			if agenda.Empty() && !strings.HasPrefix(msg, "[Heartbeat:deep]") {
+			// Deep beats (reflection) and check-in beats (the agent's own
+			// proactive outreach, every 4th) always run.
+			mustRun := strings.HasPrefix(msg, "[Heartbeat:deep]") || strings.Contains(msg, "[Check-in:")
+			if agenda.Empty() && !mustRun {
 				slog.Info("heartbeat: agenda empty, skipped", "chat_id", chatID)
 				br.HeartbeatSkipped(ctx, chatID) // housekeeping still runs
 				return "", nil
