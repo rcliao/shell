@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
@@ -31,9 +32,9 @@ const (
 	reviewWindow = 7 * 24 * time.Hour
 	// reviewMaxAsks caps suggestions delivered from one review.
 	reviewMaxAsks = 3
-	// reviewSender marks the turn as a system turn: "scheduler" is one of
-	// the bridge's system senders, so no router shadow and no transcript.
-	reviewSender = "scheduler"
+	// reviewSender: a system sender (no router shadow, no transcript) whose
+	// reply the bridge filters like user-facing text, since it reaches the owner.
+	reviewSender = bridge.ReviewTurnSender
 	// reviewTurnTimeout bounds the turn well inside the queue lease (job
 	// timeout + 10m), so a slow turn can never be reclaimed and run twice.
 	reviewTurnTimeout = 20 * time.Minute

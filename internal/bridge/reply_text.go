@@ -75,3 +75,10 @@ func applyUserFacingText(chatID int64, journal bool, source string, segments []s
 	}
 	return text
 }
+
+// isJournalTurn: a turn nobody reads as a reply keeps its full narrative
+// (heartbeats, and system-chat turns) — except the weekly review, whose reply
+// is delivered to the owner and so is filtered like any user-facing text.
+func isJournalTurn(isHeartbeat bool, chatID int64, sender string) bool {
+	return isHeartbeat || (IsSystemChat(chatID) && sender != ReviewTurnSender)
+}

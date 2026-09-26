@@ -1,6 +1,9 @@
 package bridge
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestUserFacingText(t *testing.T) {
 	cases := []struct {
@@ -91,5 +94,27 @@ func TestApplyUserFacingText_JournalKeepsFullText(t *testing.T) {
 		if got := applyUserFacingText(42, false, source, segs, full); got != "[noop] nothing due, nothing to send." {
 			t.Errorf("%s: got %q", source, got)
 		}
+	}
+}
+
+func TestReviewRepliesAreFilteredLikeUserText(t *testing.T) {
+	if !isJournalTurn(true, 42, "heartbeat") || !isJournalTurn(false, 0, "scheduler") {
+		t.Error("heartbeats and system-chat turns keep the journal's full text")
+	}
+	if isJournalTurn(false, 0, ReviewTurnSender) {
+		t.Error("the weekly review reaches the owner: it must be filtered")
+	}
+	if isJournalTurn(false, 42, "a family member") {
+		t.Error("a user turn is never a journal")
+	}
+	if !isSystemSender(ReviewTurnSender) {
+		t.Error("the review is still a system turn (no router shadow, no transcript)")
+	}
+	// The first live review's shape: a short pre-tool narration, then the summary.
+	segs := []string{"Filed. Now the DO step — reinforcing my own behavior.",
+		"Reinforced the message-length rule for myself and filed 3 suggestions that had never reached you; everything else is at goal."}
+	got := applyUserFacingText(0, isJournalTurn(false, 0, ReviewTurnSender), "scheduler", segs, strings.Join(segs, "\n\n"))
+	if strings.Contains(got, "Filed. Now the DO step") || !strings.Contains(got, "Reinforced") {
+		t.Errorf("review reply = %q", got)
 	}
 }

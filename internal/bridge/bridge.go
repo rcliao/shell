@@ -327,7 +327,7 @@ func IsSystemChat(chatID int64) bool {
 
 // isSystemSender returns true if the sender is a system process (heartbeat, scheduler).
 func isSystemSender(sender string) bool {
-	return sender == "heartbeat" || sender == "scheduler" || sender == "prewarm"
+	return sender == "heartbeat" || sender == "scheduler" || sender == "prewarm" || sender == ReviewTurnSender
 }
 
 // preemptSystemSession cancels any running system (heartbeat/scheduler) session for the key
@@ -1295,7 +1295,11 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// A person reads the answer, not the asides the model emitted before its
 	// tool calls (2.8% of replies 9/1–9/16 opened with "Let me check…" or a
 	// verbalised self-check). Journals keep the full text — see reply_text.go.
-	journal := isHeartbeat || IsSystemChat(chatID)
+	// The weekly review runs on the system chat but its reply is delivered
+	// to the owner, so it is filtered like any reply a person reads: the
+	// first reviews sent "Filed. Now the DO step…" and "Sandbox exit 7 —
+	// retrying…" verbatim.
+	journal := isJournalTurn(isHeartbeat, chatID, senderName)
 	response := strings.TrimSpace(applyUserFacingText(chatID, journal, source, result.TextSegments, result.Text))
 
 	// Capture the deep-heartbeat journal BEFORE anything else can consume or
