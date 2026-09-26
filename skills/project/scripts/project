@@ -112,6 +112,16 @@ for p in projects:
 " 2>/dev/null || echo "$RESP"
     ;;
 
+  set-instructions)
+    if [ -z "$SLUG" ]; then
+      echo "set-instructions requires a slug and --instructions" >&2
+      exit 1
+    fi
+    BODY=$(SLUG="$SLUG" INSTR="$INSTRUCTIONS" python3 -c "import json, os; print(json.dumps({'action': 'set-instructions', 'slug': os.environ['SLUG'], 'instructions': os.environ['INSTR']}))")
+    post "$BODY"
+    echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+    ;;
+
   get)
     if [ -z "$SLUG" ]; then
       echo "get requires a slug" >&2

@@ -357,3 +357,25 @@ func (s *Store) RecentOutsideSession(chatID, realThread, sessThread int64, limit
 	}
 	return out, rows.Err()
 }
+
+// RouteLabelsBySource returns one source's labels created since a cutoff,
+// keyed by LabelKey.
+func (s *Store) RouteLabelsBySource(source string, since time.Time) (map[string]RouteLabel, error) {
+	rows, err := s.db.Query(`SELECT chat_id, thread_id, text_hash, lane, source, sure, note FROM route_labels
+		WHERE source = ? AND created_at >= ?`, source, since.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]RouteLabel{}
+	for rows.Next() {
+		var l RouteLabel
+		var sure int
+		if err := rows.Scan(&l.ChatID, &l.ThreadID, &l.TextHash, &l.Lane, &l.Source, &sure, &l.Note); err != nil {
+			return nil, err
+		}
+		l.Sure = sure == 1
+		out[LabelKey(l.ChatID, l.ThreadID, l.TextHash)] = l
+	}
+	return out, rows.Err()
+}

@@ -123,9 +123,34 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		s.projectDocRead(w, req)
 	case "doc-write":
 		s.projectDocWrite(w, req)
+	case "set-instructions":
+		s.projectSetInstructions(w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, doc-read, or doc-write")
+		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, doc-read, doc-write, or set-instructions")
 	}
+}
+
+// projectSetInstructions replaces a project's standing instructions — also
+// the description the message router reads to decide which messages belong
+// to the project. An agent that sees its lanes misroute (weekly review) fixes
+// the description here itself.
+func (s *Server) projectSetInstructions(w http.ResponseWriter, req ProjectRequest) {
+	if req.Slug == "" {
+		writeError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+	p, err := s.store.GetProjectBySlug(req.Slug)
+	if err != nil || p == nil {
+		writeError(w, http.StatusNotFound, "no project "+req.Slug)
+		return
+	}
+	instr := strings.TrimSpace(req.Instructions)
+	if err := s.store.UpdateProjectFields(req.Slug, store.ProjectFieldUpdate{Instructions: &instr}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"slug": req.Slug, "instructions": instr,
+		"result": "Instructions updated. The router uses them from the next message."})
 }
 
 func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
