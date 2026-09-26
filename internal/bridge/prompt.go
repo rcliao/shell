@@ -270,25 +270,6 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessT
 		}
 	}
 
-	// Block 3b (cycle 66): topic classification.
-	// Cycle 71: uses rawUserMsg (not augmented msg) so classifier sees only
-	// the user's actual text, not transcript/task injections + [From: …]
-	// prefix which contain family-name tokens that bias classification.
-	// Cycle 145: captures the prior sticky-thread pointer BEFORE classify so
-	// we can render a "Continuing: <prior>" block alongside the fresh
-	// classification block. Both go into Channel B for one week so we can
-	// audit which one carries more weight in actual responses.
-	if chatID != 0 && b.topicClassifierEnabled() {
-		priorStickyThread, priorStickyConv := b.readPriorSticky(chatID)
-		result := b.classifyTurnTopic(ctx, chatID, rawUserMsg)
-		if block := b.renderStickyBlock(priorStickyThread, priorStickyConv, result.Topic.Name); block != "" {
-			blocks = append(blocks, block)
-		}
-		if block := b.renderTopicBlock(ctx, chatID, result); block != "" {
-			blocks = append(blocks, block)
-		}
-	}
-
 	if len(blocks) == 0 {
 		return ""
 	}

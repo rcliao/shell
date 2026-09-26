@@ -461,6 +461,20 @@ emoji (👍 go, 👎 stop, 🔄 regenerate).
 The router makes these redundant. Each is removed only after R0 shows the
 router covers it; each removal has its own PR.
 
+**Done on 2026-09-26, once lanes were live in every chat:**
+- The topic classifier is out of the turn path: no `[Continuing:]` or
+  `[Topic:]` blocks, no classification, and no thread-state writes after
+  replies.
+- The tier-router shadow is gone.
+
+The `topic_threads`, `topic_decisions` and `tier_decisions` tables and the
+`internal/topic` package stay: the history is read-only, and the bench tools
+still use them. `claude.topic_classifier` and `topic_keyword_only` are now
+ignored.
+
+Per-turn blocks before the change: about 2.9k characters (Pika) and 6.1k
+(Umbreon), averaged over 40 real turns.
+
 | Remove | Why it goes | Data |
 |---|---|---|
 | Topic classifier (`internal/topic`, the prompt.go hook, topic_hook.go summaries and commitments) | Replaced by lanes. Keyword-only, 79–86% "general", keyed per chat not thread; one agent called its commitments list noise | `topic_threads`, `topic_decisions`, `conversations` drift columns, ghost `loop:topics` (kept read-only until the lane history covers the same period) |

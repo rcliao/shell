@@ -20,7 +20,6 @@ import (
 	"github.com/rcliao/shell/internal/route"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
-	"github.com/rcliao/shell/internal/topic"
 	"github.com/rcliao/shell/internal/transcript"
 )
 
@@ -164,10 +163,6 @@ type Bridge struct {
 	// Kill switch: V2-H47 lesson-to-action block in deep heartbeats.
 	// false (default) = block included.
 	lessonToActionDisabled bool
-
-	// Topic classifier (cycle 66) — populated when claude.model_routing.
-	// topic_classifier is set in config. nil = disabled.
-	classifier *topic.HybridClassifier
 }
 
 func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
@@ -200,45 +195,11 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 }
 
 // SetClaudeConfig sets the Claude config for per-task model routing.
-// Also initializes the topic classifier when topic_classifier model is
-// configured and memory is available. Safe to call multiple times.
+// (The topic classifier it used to start was retired 2026-09-26: lanes route
+// messages to projects now — docs/DESIGN-ROUTER-AND-SUGGESTIONS.md,
+// "Simplify after R0". topic_classifier / topic_keyword_only are ignored.)
 func (b *Bridge) SetClaudeConfig(cfg config.ClaudeConfig) {
 	b.claudeCfg = cfg
-	b.initTopicClassifier()
-}
-
-// initTopicClassifier wires the hybrid classifier when both a model is
-// configured and ghost memory is available. Idempotent + defensive.
-func (b *Bridge) initTopicClassifier() {
-	if b.memory == nil {
-		return
-	}
-	model := b.claudeCfg.ResolveModel("topic_classifier")
-	if model == "" {
-		b.classifier = nil
-		return
-	}
-	// Per-chat registries are created on demand; the classifier holds a
-	// nil Registry and we attach the right one at classification time.
-	// To keep the cascade simple, we pass a no-op zero-chat registry here
-	// and override via per-classify regs at the call site if needed.
-	// For cycle 66, classifier is shared (chat-agnostic at the cascade
-	// level); upsert uses a per-chat registry in classifyTurnTopic.
-	// Cycle 117: bumped 10s → 12s. Production audit (cycle 105 subtypes)
-	// shows pikamini Haiku calls land in 8.2-9.6s when they succeed; the 10s
-	// ceiling clipped many of them. Umbreon's calls are slower still — 12s
-	// catches the slow tail without blowing up the user-facing latency
-	// (classifier runs blocking in injectPerTurnContext).
-	// Cycle 149 (V2-H1): topic_keyword_only removes the LLM tier — the
-	// cascade keeps cache→keyword and the sticky pointer keeps thread
-	// continuity. Cycle 148 bench + June production (is_new on 100% of LLM
-	// calls, 92-95% orphan topics, 8.5s p50 on the user path) showed the
-	// per-turn LLM call is a quality regression, not just a latency cost.
-	var cli topic.HaikuClient
-	if !b.claudeCfg.TopicKeywordOnly {
-		cli = topic.NewClaudeCLIHaiku(b.claudeCfg.Binary, model, 12*time.Second)
-	}
-	b.classifier = topic.NewHybrid(topic.NewRegistry(b.memory.Store(), 0), cli)
 }
 
 // SetHeartbeatInterval overrides the default heartbeat interval for auto-created heartbeats.
@@ -1431,13 +1392,6 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	// Strip any legacy directives Claude may have emitted.
 	response = stripDirectives(response)
 
-	// Cycle 68: topic thread state write-path — extract commitments and
-	// update rolling summary from this turn's response. Async-best-effort.
-	// NEVER blocks response delivery.
-	if !isHeartbeat {
-		go b.updateThreadStateFromResponse(context.Background(), chatID, userMsg, response)
-	}
-
 	// Parse task delegation directives ([task to=...], [task-result id=...]).
 	response = b.parseTaskDirectives(chatID, response)
 
@@ -1495,25 +1449,6 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	if len(result.ToolCalls) > 0 {
 		if err := b.store.LogToolUses(chatID, sessID, source, toolUseRows(result.ToolCalls)); err != nil {
 			slog.Warn("failed to log tool uses", "error", err)
-		}
-	}
-
-	// Shadow tier router (V2-H11 phase 2, log-only): predicted tier next to
-	// realized complexity. Runs post-response — zero user-facing latency.
-	{
-		td := classifyTier(userMsg, isHeartbeat, source)
-		rec := store.TierDecision{
-			ChatID: chatID, SessionID: sessID, Source: source,
-			PredictedTier: td.tier, Reason: td.reason,
-			MsgChars:  len([]rune(userMsg)),
-			ToolCalls: len(result.ToolCalls),
-		}
-		if result.Usage != nil {
-			rec.OutputTokens = result.Usage.OutputTokens
-			rec.CacheReadTokens = result.Usage.CacheReadInputTokens
-		}
-		if err := b.store.LogTierDecision(rec); err != nil {
-			slog.Warn("failed to log tier decision", "error", err)
 		}
 	}
 
