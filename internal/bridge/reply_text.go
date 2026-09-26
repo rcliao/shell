@@ -3,6 +3,7 @@ package bridge
 import (
 	"log/slog"
 	"strings"
+	"time"
 )
 
 // asideMaxBytes bounds what counts as a pre-tool ASIDE rather than content.
@@ -81,4 +82,19 @@ func applyUserFacingText(chatID int64, journal bool, source string, segments []s
 // is delivered to the owner and so is filtered like any user-facing text.
 func isJournalTurn(isHeartbeat bool, chatID int64, sender string) bool {
 	return isHeartbeat || (IsSystemChat(chatID) && sender != ReviewTurnSender)
+}
+
+// apiErrorRetryDelay is the pause before retrying a turn the API failed.
+var apiErrorRetryDelay = 5 * time.Second
+
+// apiErrorNotice replaces a raw CLI API error a person would otherwise read.
+// Bilingual: the family writes in Traditional Chinese, the owner in English.
+const apiErrorNotice = "⚠️ AI 服務暫時出錯，請稍後再傳一次。\n(The AI service had a temporary error — please send that again in a moment.)"
+
+// isCLIAPIError: the whole reply is the CLI's synthetic API-error message.
+// Only a short reply that starts with it counts, so an answer that merely
+// mentions an API error is never replaced.
+func isCLIAPIError(text string) bool {
+	t := strings.TrimSpace(text)
+	return strings.HasPrefix(t, "API Error:") && len(t) < 800
 }

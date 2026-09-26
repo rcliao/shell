@@ -1142,21 +1142,49 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	if pw := time.Since(preworkStart); pw > 2*time.Second {
 		slog.Info("turn: prework", "chat_id", chatID, "prework_ms", pw.Milliseconds(), "sender", senderName)
 	}
-	result, err := agent.SendEvents(ctx, process.AgentRequest{
-		ChatID:          chatID,
-		MessageThreadID: threadID,
-		SessionID:       claudeSessionID,
-		Text:            augmentedMsg,
-		Images:          imgAttachments,
-		PDFs:            pdfAttachments,
-		SystemPrompt:    systemPrompt,
-		Model:           profile.Model,
-		Ephemeral:       profile.Ephemeral,
-		Effort:          profile.Effort,
-		Timeout:         profile.Timeout,
-	}, emit)
+	send := func() (process.SendResult, error) {
+		return agent.SendEvents(ctx, process.AgentRequest{
+			ChatID:          chatID,
+			MessageThreadID: threadID,
+			SessionID:       claudeSessionID,
+			Text:            augmentedMsg,
+			Images:          imgAttachments,
+			PDFs:            pdfAttachments,
+			SystemPrompt:    systemPrompt,
+			Model:           profile.Model,
+			Ephemeral:       profile.Ephemeral,
+			Effort:          profile.Effort,
+			Timeout:         profile.Timeout,
+		}, emit)
+	}
+	result, err := send()
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
+	}
+	// The CLI reports an upstream API failure as a normal turn whose whole
+	// reply is "API Error: 500 …" (stop_reason end_turn). Those reached a
+	// family chat verbatim (2 in 30 days). Retry once; if it fails again, a
+	// person gets a short honest notice instead of the raw error. A journal
+	// keeps the raw text for the record.
+	if isCLIAPIError(result.Text) {
+		slog.Warn("turn: CLI API error as reply, retrying once", "chat_id", chatID, "error", head(result.Text, 120))
+		// Retry only a turn that did nothing: re-running one that already
+		// called tools could repeat a write.
+		retried := false
+		if len(result.ToolCalls) == 0 {
+			select {
+			case <-time.After(apiErrorRetryDelay):
+			case <-ctx.Done():
+			}
+			if retry, rerr := send(); rerr == nil && !isCLIAPIError(retry.Text) {
+				result, retried = retry, true
+			}
+		}
+		if !retried && !isJournalTurn(isHeartbeat, chatID, senderName) {
+			slog.Warn("turn: CLI API error persisted, sending notice", "chat_id", chatID)
+			result.Text = apiErrorNotice
+			result.TextSegments = []string{apiErrorNotice}
+		}
 	}
 	// How the turn ended, on every turn. Until this, "did that session end
 	// cleanly?" was unanswerable after the fact — a run cut short at a turn cap
