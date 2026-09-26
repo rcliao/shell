@@ -223,6 +223,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /project", s.handleProject)
 	mux.HandleFunc("POST /suggestion", s.handleSuggestion)
 	mux.HandleFunc("POST /lane", s.handleLane)
+	mux.HandleFunc("POST /event", s.handleEvent)
 	mux.HandleFunc("POST /skills-reload", s.handleSkillsReload)
 	mux.HandleFunc("POST /skills-load", s.handleSkillsLoad)
 	mux.HandleFunc("POST /heartbeat-log", s.handleHeartbeatLog)

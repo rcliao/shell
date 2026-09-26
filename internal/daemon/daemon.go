@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rcliao/shell/internal/decide"
+	"github.com/rcliao/shell/internal/event"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -680,6 +681,11 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Shadow router (P3.7): observes every user turn with a decision model,
 	// records, never acts. Silent when no TYPESAFE_API_KEY is present.
 	br.SetRouteStickyThreshold(cfg.Route.Sticky())
+	if cfg.Events.Spool && cfg.Daemon.PIDFile != "" {
+		spool := event.SpoolDir(filepath.Dir(cfg.Daemon.PIDFile))
+		br.SetEventsSpool(spool)
+		slog.Info("events: spool ingestion on", "dir", spool)
+	}
 	if lanes := cfg.Route.Lanes(); len(lanes) > 0 || cfg.Route.LanesAll() {
 		// R1: lanes pick the session in these chats only. Jev v2 is the
 		// router; without a key every message stays in general (safe).
@@ -840,10 +846,29 @@ func New(cfg config.Config) (*Daemon, error) {
 		sched = scheduler.New(adapter, onNotify, onPrompt, cfg.Scheduler.Timezone)
 		sched.SetQuietHours(cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd)
 		sched.SetHeartbeatPrompt(func(ctx context.Context, chatID int64, msg string) (string, error) {
+			// The agenda (docs/DESIGN-HEARTBEAT-AGENDA-EVENTS.md): what needs
+			// the agent now. Nothing, and not a deep beat: no turn at all —
+			// an empty reply is a noop, so the idle backoff applies. Deep
+			// beats keep their reflection cadence and carry the agenda too.
+			agenda := br.HeartbeatAgenda(ctx)
+			// Deep beats (reflection) and check-in beats (the agent's own
+			// proactive outreach, every 4th) always run.
+			mustRun := strings.HasPrefix(msg, "[Heartbeat:deep]") || strings.Contains(msg, "[Check-in:")
+			if agenda.Empty() && !mustRun {
+				slog.Info("heartbeat: agenda empty, skipped", "chat_id", chatID)
+				br.CommitAgenda(agenda)
+				br.HeartbeatSkipped(ctx, chatID) // housekeeping still runs
+				return "", nil
+			}
+			if block := agenda.Render(); block != "" {
+				msg += "\n\n" + block
+				slog.Info("heartbeat: agenda", "chat_id", chatID, "items", len(agenda.Items))
+			}
 			resp, err := br.HandleMessageStreaming(ctx, chatID, 0, msg, "heartbeat", nil, nil, nil)
 			if err != nil {
-				return "", err
+				return "", err // agenda not committed: the next beat sees it again
 			}
+			br.CommitAgenda(agenda)
 			if !bridge.IsSystemChat(chatID) {
 				for _, photo := range resp.Photos {
 					bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)

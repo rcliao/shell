@@ -200,6 +200,7 @@ func LabelKey(chatID, threadID int64, textHash string) string {
 
 // UserMessage is one real message a human sent this agent.
 type UserMessage struct {
+	ID       int64 // messages.id: global and strictly increasing
 	ChatID   int64
 	ThreadID int64
 	At       time.Time
@@ -214,10 +215,10 @@ type UserMessage struct {
 func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
 	// A lane session (R1) lives on a negative session thread; its messages
 	// belong to the real thread it was routed from.
-	rows, err := s.db.Query(`SELECT s.chat_id, COALESCE(ls.thread_id, s.message_thread_id), m.created_at, m.content
+	rows, err := s.db.Query(`SELECT m.id, s.chat_id, COALESCE(ls.thread_id, s.message_thread_id), m.created_at, m.content
 		FROM messages m JOIN sessions s ON s.id = m.session_id
 		LEFT JOIN lane_sessions ls ON ls.chat_id = s.chat_id AND ls.session_thread_id = s.message_thread_id
-		WHERE m.role = 'user' AND s.chat_id != 0 AND m.created_at >= ?
+		WHERE m.role = 'user' AND s.chat_id != 0 AND datetime(m.created_at) >= datetime(?)
 		  AND substr(ltrim(m.content), 1, 1) != '['
 		  AND m.content NOT IN (SELECT message FROM schedules)
 		ORDER BY m.created_at, m.id`, since.UTC())
@@ -228,7 +229,7 @@ func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
 	var out []UserMessage
 	for rows.Next() {
 		var m UserMessage
-		if err := rows.Scan(&m.ChatID, &m.ThreadID, &m.At, &m.Text); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.ThreadID, &m.At, &m.Text); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -337,7 +338,7 @@ func (s *Store) RecentOutsideSession(chatID, realThread, sessThread int64, limit
 		WHERE s.chat_id = ? AND s.message_thread_id != ?
 		  AND (s.message_thread_id = ? OR s.message_thread_id IN
 		       (SELECT session_thread_id FROM lane_sessions WHERE chat_id = ? AND thread_id = ?))
-		  AND m.role IN ('user', 'assistant') AND m.id > ? AND m.created_at >= ?
+		  AND m.role IN ('user', 'assistant') AND m.id > ? AND datetime(m.created_at) >= datetime(?)
 		  AND substr(ltrim(m.content), 1, 1) != '['
 		ORDER BY m.id DESC LIMIT ?`, chatID, sessThread, realThread, chatID, realThread, lastID, since, limit)
 	if err != nil {

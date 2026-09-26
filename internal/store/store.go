@@ -739,6 +739,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// events — external events for the heartbeat agenda (internal/store/events.go).
+	if _, err := s.db.Exec(eventsSchema); err != nil {
+		return err
+	}
+
 	if _, err := s.db.Exec(jobRunsSchema); err != nil {
 		return err
 	}

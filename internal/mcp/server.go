@@ -58,6 +58,10 @@ the conversation was framed to you, say so with shell_lane(lane=…). It only
 measures the message router; nothing about your turn changes. Most turns
 need no call.
 
+shell_event — external events (an email, a calendar change) that reached
+your heartbeat agenda. After acting on one, mark it done; if it needs
+nothing, mark it ignore. action=list shows the open ones.
+
 shell_pm — start, stop, list and inspect background processes.
 CRITICAL: NEVER run long-running processes (servers, watchers) directly via
 Bash — they die with the turn. Always use shell_pm.
@@ -314,6 +318,33 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"evidence": p.Evidence, "change": p.Change, "status": p.Status, "note": p.Note, "all": p.All,
 			"for_chat": p.ForChat,
 		})
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		return textResult(jsonText(result)), nil
+	})
+
+	// shell_event — mark external events handled (heartbeat agenda).
+	server.AddTool(&gomcp.Tool{
+		Name:        "shell_event",
+		Description: "External events from your heartbeat agenda. action=list shows open events; action=done id=N note=… after you acted on one; action=ignore id=N note=… when it needs nothing.",
+		InputSchema: schema([]string{}, map[string]map[string]any{
+			"action": prop("string", "list (default), done, ignore"),
+			"id":     prop("integer", "Event id (done, ignore)"),
+			"note":   prop("string", "What you did, or why it needs nothing"),
+			"all":    prop("boolean", "list: include done and ignored"),
+		}),
+	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		var p struct {
+			Action string `json:"action"`
+			ID     int64  `json:"id"`
+			Note   string `json:"note"`
+			All    bool   `json:"all"`
+		}
+		if err := unmarshalArgs(req, &p); err != nil {
+			return errResult(err.Error()), nil
+		}
+		result, err := client.call(ctx, "/event", map[string]any{"action": p.Action, "id": p.ID, "note": p.Note, "all": p.All})
 		if err != nil {
 			return errResult(err.Error()), nil
 		}

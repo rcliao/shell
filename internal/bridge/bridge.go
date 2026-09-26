@@ -114,6 +114,7 @@ type Bridge struct {
 	laneChats    map[int64]int64 // R1: chat → chat whose projects are its lanes (nil = lanes off)
 	laneRouter   route.Backend   // R1: synchronous lane router
 	lanesAll     bool            // R1: lanes on for every chat (own projects)
+	eventsSpool  string          // events spool dir; "" = ingestion off
 	laneTurnSess sync.Map        // R1: "chat/telegramMsgID" → session id that answered (message map)
 	agentName    string          // commit author / notice name for own-skill changes
 	workspaceDir string          // persistent agent scratch space
@@ -1341,37 +1342,8 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 		b.captureReflection(ctx, chatID, response, result, turnModel)
 	}
 
-	// Self-authored skills: commit + announce any change the agent made to
-	// its own skills directory. Off the turn path.
 	if isHeartbeat {
-		go b.commitSkillChanges(context.WithoutCancel(ctx))
-	}
-
-	// Run memory maintenance during heartbeats.
-	if isHeartbeat && b.memory != nil {
-		// Run reflect cycle after heartbeat to promote/decay/prune/dedup memories.
-		reflectResult := b.memory.RunReflect(ctx)
-		// Summarize old exchanges during heartbeat maintenance.
-		if n, err := b.memory.SummarizeExchanges(ctx, chatID); err != nil {
-			slog.Warn("exchange summarization failed", "error", err)
-		} else if n > 0 {
-			slog.Info("heartbeat summarized exchanges", "chat_id", chatID, "count", n)
-		}
-		// Stash consolidation + noise candidates for the NEXT heartbeat enrichment.
-		ns := b.memory.AgentNS(chatID)
-		if reflectResult != nil {
-			candidates := b.memory.ConsolidationCandidates(ctx, reflectResult, 3)
-			noise := b.memory.NoisyCandidates(ctx, ns, chatID, 5)
-			b.stashConsolidationCandidates(chatID, candidates+noise)
-		}
-		// Run health check and log hygiene outcome for trend tracking.
-		health := b.memory.HealthCheck(ctx, ns, chatID)
-		slog.Info("memory health", "noise_ratio", health.NoiseRatio,
-			"pinned", health.PinnedPresent, "diagnosis", health.Diagnosis,
-			"queries", health.QueriesTested, "avg_results", health.AvgResults)
-		if reflectResult != nil {
-			b.memory.LogHygieneOutcome(ctx, ns, reflectResult, health)
-		}
+		b.runHeartbeatMaintenance(ctx, chatID)
 	}
 
 	// A [noop] anywhere means the agent chose not to speak — drop the ENTIRE
