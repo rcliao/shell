@@ -26,18 +26,35 @@ func (b *Bridge) SetLanes(chats map[int64]int64, backend route.Backend) {
 	b.laneRouter = backend
 }
 
+// SetLanesAll turns lanes on for every chat (route.lane_chats {"*": …}),
+// each chat using its own projects; explicit entries still win.
+func (b *Bridge) SetLanesAll(all bool) { b.lanesAll = all }
+
 // laneForTurn routes one turn. ok is false when lanes are off for the chat;
 // otherwise it returns the session thread to use and the context block for
 // the lane ("" for general).
 func (b *Bridge) laneForTurn(ctx context.Context, chatID, threadID int64, text string) (sessThread int64, block string, ok bool) {
 	candChat, on := b.laneChats[chatID]
-	if !on || b.store == nil {
+	if !on && b.lanesAll {
+		candChat, on = chatID, true
+	}
+	if !on || b.store == nil || chatID == 0 {
 		return threadID, "", false
 	}
 	projects, err := b.store.ListProjects(candChat)
 	if err != nil {
 		slog.Warn("lanes: project list failed", "chat_id", chatID, "error", err)
 		return threadID, "", true
+	}
+	// A project's own forum topic already decides its context by thread
+	// (the scoped [Project] block): routing there could only move a message
+	// out of its own project. Leave bound topics exactly as they were.
+	if threadID != 0 {
+		for _, p := range projects {
+			if p.Status == "active" && p.MessageThreadID == threadID && candChat == chatID {
+				return threadID, "", false
+			}
+		}
 	}
 	var cands []route.Candidate
 	bySlug := map[string]store.Project{}

@@ -114,6 +114,7 @@ type Bridge struct {
 	routeSticky  float64         // R0 sticky-rule threshold (0 = default)
 	laneChats    map[int64]int64 // R1: chat → chat whose projects are its lanes (nil = lanes off)
 	laneRouter   route.Backend   // R1: synchronous lane router
+	lanesAll     bool            // R1: lanes on for every chat (own projects)
 	agentName    string          // commit author / notice name for own-skill changes
 	workspaceDir string          // persistent agent scratch space
 	routerShadow *decide.Shadow  // P3.7 shadow router; nil = off

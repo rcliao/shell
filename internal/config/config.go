@@ -47,7 +47,17 @@ type RouteConfig struct {
 	LaneChats map[string]int64 `json:"lane_chats"`
 }
 
-// Lanes parses LaneChats; entries with a bad key are skipped.
+// LanesAllChats is the LaneChats key that turns lanes on for every chat,
+// each with its own projects as its lanes.
+const LanesAllChats = "*"
+
+// LanesAll reports whether lanes are on for every chat.
+func (r RouteConfig) LanesAll() bool {
+	_, ok := r.LaneChats[LanesAllChats]
+	return ok
+}
+
+// Lanes parses LaneChats; entries with a bad key (and "*") are skipped.
 func (r RouteConfig) Lanes() map[int64]int64 {
 	out := map[int64]int64{}
 	for k, v := range r.LaneChats {

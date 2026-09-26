@@ -360,7 +360,8 @@ the agent's self-authored commit count.
 
 ### Lanes (R1)
 
-In a chat listed in `route.lane_chats` (off by default), each real turn is
+In a chat listed in `route.lane_chats` (off by default; `{"*": 0}` = every
+chat, except a project's own forum topic and the system chat), each real turn is
 routed **before** its session is chosen, by Jev with the v2 question and a
 1.5 s timeout; on a timeout or error the thread keeps its previous lane.
 - A **project lane** gets its own Claude session, on a negative "session
