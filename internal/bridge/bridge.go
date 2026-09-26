@@ -1432,10 +1432,15 @@ func (b *Bridge) processResponse(ctx context.Context, chatID, threadID, sessID i
 	}
 
 	// Record agent response in shared transcript for peer agent visibility.
-	if b.transcript != nil && response != "" {
+	// Only what the family actually saw. A warm-up, a heartbeat, the weekly
+	// review and anything in the system chat are said to no one. (A
+	// scheduled prompt in a real chat IS delivered, so it is recorded.) The
+	// thread is the real one: a lane's session thread is negative (R1).
+	if b.transcript != nil && response != "" && !isHeartbeat && !IsSystemChat(chatID) &&
+		senderName != "prewarm" && senderName != ReviewTurnSender {
 		b.RecordTranscript(transcript.Entry{
 			ChatID:        chatID,
-			ThreadID:      threadID,
+			ThreadID:      b.realThread(chatID, threadID),
 			Timestamp:     time.Now(),
 			SenderType:    "agent",
 			SenderName:    b.agentBotUsername,
