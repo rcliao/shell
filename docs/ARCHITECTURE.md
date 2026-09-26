@@ -379,6 +379,31 @@ missed from the thread's other sessions. The message map records the
 answering session, so reactions and regenerate follow the lane. `/new`
 resets the thread's lanes too.
 
+## Heartbeat agenda and external events
+
+Before each heartbeat the daemon builds an **agenda**
+(`bridge.HeartbeatAgenda`) from:
+- new real messages since the last beat, per chat (message-id watermark);
+- the agent's own schedules the scheduler auto-paused;
+- tools that failed 3+ times in 24 h;
+- active projects with an open 待決定 and no human activity for 3 days;
+- pending delegated tasks;
+- new **events**.
+
+An empty agenda on a non-deep beat takes no turn. The housekeeping still
+runs (the agent's skill commit, memory reflect), and the empty reply counts
+as a no-op, so the idle backoff applies. Otherwise the agenda is appended to
+the beat, and deep beats always run.
+
+Events are normalized and deduplicated in `events`, keyed by source and
+dedup id, with a one-line summary and a reference. With `events.spool` on
+(off by default), each heartbeat ingests
+`<agent dir>/events/inbox/*.json`, written by external producers such as a
+cron script, and moves each file to `done/` or `rejected/`. The agent marks
+events `done` or `ignored` with `shell_event`. `shell events list|inject`
+tests the path without a producer. Design:
+`docs/DESIGN-HEARTBEAT-AGENDA-EVENTS.md`.
+
 ## Weekly review and suggestions
 
 Once a week (`review.cron`, default Wednesday 10:30), each agent that has

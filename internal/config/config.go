@@ -31,6 +31,15 @@ type Config struct {
 	Notion    NotionConfig    `json:"notion"`
 	Review    ReviewConfig    `json:"review"`
 	Route     RouteConfig     `json:"route"`
+	Events    EventsConfig    `json:"events"`
+}
+
+// EventsConfig: external events as infrastructure
+// (docs/DESIGN-HEARTBEAT-AGENDA-EVENTS.md). Off by default.
+type EventsConfig struct {
+	// Spool turns on ingestion of <agent dir>/events/inbox/*.json at each
+	// heartbeat. Producers (cron scripts) write there.
+	Spool bool `json:"spool"`
 }
 
 // RouteConfig tunes the message router (docs/DESIGN-ROUTER-AND-SUGGESTIONS.md,
