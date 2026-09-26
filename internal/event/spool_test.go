@@ -4,11 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rcliao/shell/internal/store"
 )
 
 func TestIngestSpool(t *testing.T) {
+	settleTime = 0 // files in this test are complete when written
 	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -45,5 +47,24 @@ func TestIngestSpool(t *testing.T) {
 	}
 	if n, _ := IngestSpool(dir, st); n != 0 {
 		t.Error("a second pass finds nothing new")
+	}
+}
+
+func TestIngestSpoolWaitsForSettledFiles(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "inbox"), 0o755)
+	os.WriteFile(filepath.Join(dir, "inbox", "fresh.json"), []byte(`{"source":"s","kind":"k","dedup_id":"1","summary":"x"}`), 0o644)
+	settleTime = time.Hour
+	defer func() { settleTime = 2 * time.Second }()
+	if n, _ := IngestSpool(dir, st); n != 0 {
+		t.Error("a file that may still be being written must wait")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "inbox", "fresh.json")); err != nil {
+		t.Error("it stays in the inbox until settled")
 	}
 }

@@ -114,7 +114,6 @@ type Bridge struct {
 	laneChats    map[int64]int64 // R1: chat → chat whose projects are its lanes (nil = lanes off)
 	laneRouter   route.Backend   // R1: synchronous lane router
 	lanesAll     bool            // R1: lanes on for every chat (own projects)
-	agenda       agendaState     // heartbeat agenda window
 	eventsSpool  string          // events spool dir; "" = ingestion off
 	laneTurnSess sync.Map        // R1: "chat/telegramMsgID" → session id that answered (message map)
 	agentName    string          // commit author / notice name for own-skill changes

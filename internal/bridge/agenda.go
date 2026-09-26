@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rcliao/shell/internal/event"
@@ -25,8 +25,15 @@ type AgendaItem struct {
 	Text string
 }
 
-// Agenda is what a heartbeat is for.
-type Agenda struct{ Items []AgendaItem }
+// Agenda is what a heartbeat is for. It is built read-only; CommitAgenda
+// advances the conversation watermark and marks events seen, and the daemon
+// calls it only once the beat's turn succeeded (or the beat was skipped), so
+// a failed turn loses nothing.
+type Agenda struct {
+	Items     []AgendaItem
+	watermark int64   // highest message id counted in this agenda
+	eventIDs  []int64 // events shown in this agenda
+}
 
 // Empty: nothing needs the agent — the beat can be skipped.
 func (a Agenda) Empty() bool { return len(a.Items) == 0 }
@@ -44,22 +51,22 @@ func (a Agenda) Render() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// agendaWatermarkKey persists the conversation watermark (kv), so a daemon
+// restart does not shrink "since the last beat".
+const agendaWatermarkKey = "heartbeat_agenda:last_msg_id"
+
 const (
-	agendaFirstWindow   = time.Hour
+	// agendaFirstWindow is the look-back when there is no watermark yet: as
+	// long as the idle heartbeat interval, so nothing between beats is missed.
+	agendaFirstWindow   = 2 * time.Hour
+	agendaScanWindow    = 48 * time.Hour
+	agendaEventMaxAge   = 3 * 24 * time.Hour
 	agendaRepairWindow  = 3 * 24 * time.Hour
 	agendaToolWindow    = 24 * time.Hour
 	agendaToolFailures  = 3
 	agendaProjectStale  = 3 * 24 * time.Hour
 	agendaEventsPerBeat = 10
 )
-
-// agendaState remembers when the last agenda was built, so "new
-// conversation" means since the previous beat.
-type agendaState struct {
-	mu     sync.Mutex
-	last   time.Time
-	lastID int64 // highest message id already counted
-}
 
 // SetEventsSpool turns on ingestion of the agent's event spool (config
 // events.spool). "" = off: events can still be injected and are listed.
@@ -72,34 +79,33 @@ func (b *Bridge) HeartbeatAgenda(ctx context.Context) Agenda {
 		return a
 	}
 	now := time.Now()
-	b.agenda.mu.Lock()
-	since, lastID := b.agenda.last, b.agenda.lastID
-	b.agenda.last = now
-	b.agenda.mu.Unlock()
-	if since.IsZero() {
-		since = now.Add(-agendaFirstWindow)
+	var lastID int64
+	haveMark := false
+	if v, ok, err := b.store.GetKV(agendaWatermarkKey); err == nil && ok {
+		if n, perr := strconv.ParseInt(v, 10, 64); perr == nil {
+			lastID, haveMark = n, true
+		}
 	}
 
-	// 1. New conversation since the last beat, per chat. The cut-off is
-	// the last counted message id (timestamps have one-second resolution);
-	// the time bound, a second earlier, only limits the scan.
-	if msgs, err := b.store.UserMessagesSince(since.Add(-time.Second)); err == nil && len(msgs) > 0 {
+	// 1. New conversation since the last beat, per chat. The cut-off is the
+	// last counted message id (timestamps have one-second resolution).
+	// Without a watermark yet, the look-back is the idle interval.
+	scanFrom := now.Add(-agendaScanWindow)
+	if !haveMark {
+		scanFrom = now.Add(-agendaFirstWindow)
+	}
+	if msgs, err := b.store.UserMessagesSince(scanFrom); err == nil && len(msgs) > 0 {
 		per := map[int64]int{}
-		maxID := lastID
+		a.watermark = lastID
 		for _, m := range msgs {
 			if m.ID <= lastID {
 				continue
 			}
 			per[m.ChatID]++
-			if m.ID > maxID {
-				maxID = m.ID
+			if m.ID > a.watermark {
+				a.watermark = m.ID
 			}
 		}
-		b.agenda.mu.Lock()
-		if maxID > b.agenda.lastID {
-			b.agenda.lastID = maxID
-		}
-		b.agenda.mu.Unlock()
 		var chats []int64
 		for c := range per {
 			chats = append(chats, c)
@@ -107,7 +113,7 @@ func (b *Bridge) HeartbeatAgenda(ctx context.Context) Agenda {
 		sort.Slice(chats, func(i, j int) bool { return chats[i] < chats[j] })
 		for _, c := range chats {
 			a.Items = append(a.Items, AgendaItem{"conversation", fmt.Sprintf(
-				"chat %d: %d new message(s) since %s — anything you promised, or should follow up on?", c, per[c], since.Local().Format("15:04"))})
+				"chat %d: %d new message(s) since the last beat — anything you promised, or should follow up on?", c, per[c])})
 		}
 	}
 
@@ -166,19 +172,51 @@ func (b *Bridge) HeartbeatAgenda(ctx context.Context) Agenda {
 			slog.Info("events: ingested", "count", n)
 		}
 	}
-	if evs, err := b.store.ListEvents([]string{store.EventNew}, agendaEventsPerBeat); err == nil {
+	// Open events (new, or shown before and not yet marked done/ignored) stay
+	// on the agenda for up to 3 days, so a beat that failed or ended in a
+	// noop without a decision does not lose them.
+	if evs, err := b.store.ListEvents([]string{store.EventNew, store.EventSeen}, agendaEventsPerBeat); err == nil {
 		for i := len(evs) - 1; i >= 0; i-- { // oldest first
 			e := evs[i]
-			where := ""
+			if now.Sub(e.CreatedAt) > agendaEventMaxAge {
+				continue
+			}
+			where, again := "", ""
 			if e.ChatID != 0 {
 				where = fmt.Sprintf(" (for chat %d)", e.ChatID)
 			}
-			a.Items = append(a.Items, AgendaItem{"event", fmt.Sprintf("#%d %s/%s at %s%s: %s — act on it, or mark it with shell_event(done|ignore)",
-				e.ID, e.Source, e.Kind, e.OccurredAt.Local().Format("Mon 15:04"), where, e.Summary)})
-			_ = b.store.MarkEvent(e.ID, store.EventSeen, "")
+			if e.Status == store.EventSeen {
+				again = " [shown before, still open]"
+			}
+			a.Items = append(a.Items, AgendaItem{"event", fmt.Sprintf("#%d %s/%s at %s%s%s: %s — act on it, or mark it with shell_event(done|ignore)",
+				e.ID, e.Source, e.Kind, e.OccurredAt.Local().Format("Mon 15:04"), where, again, e.Summary)})
+			a.eventIDs = append(a.eventIDs, e.ID)
 		}
 	}
 	return a
+}
+
+// CommitAgenda records that a beat handled its agenda: the conversation
+// watermark advances and its events are marked seen. Call it only after the
+// beat's turn succeeded, or for a skipped beat.
+func (b *Bridge) CommitAgenda(a Agenda) {
+	if b.store == nil {
+		return
+	}
+	if a.watermark > 0 {
+		cur := int64(0)
+		if v, ok, err := b.store.GetKV(agendaWatermarkKey); err == nil && ok {
+			cur, _ = strconv.ParseInt(v, 10, 64)
+		}
+		if a.watermark > cur {
+			if err := b.store.SetKV(agendaWatermarkKey, strconv.FormatInt(a.watermark, 10)); err != nil {
+				slog.Warn("agenda: watermark save failed", "error", err)
+			}
+		}
+	}
+	for _, id := range a.eventIDs {
+		_ = b.store.MarkEvent(id, store.EventSeen, "")
+	}
 }
 
 func clipRunes(s string, n int) string {

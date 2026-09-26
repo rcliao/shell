@@ -36,8 +36,17 @@ func TestHeartbeatAgenda(t *testing.T) {
 	if !strings.Contains(a.Render(), "reply [noop]") {
 		t.Error("the agenda must tell the agent it may do nothing")
 	}
+	// Not committed (the turn failed): the next beat sees it again.
+	if again := b.HeartbeatAgenda(ctx); len(again.Items) != 1 {
+		t.Fatalf("an uncommitted agenda must be offered again, got %+v", again.Items)
+	}
+	b.CommitAgenda(a)
 	if a := b.HeartbeatAgenda(ctx); !a.Empty() {
-		t.Fatalf("the window advances: nothing new since the last beat, got %+v", a.Items)
+		t.Fatalf("after commit, nothing new since the last beat, got %+v", a.Items)
+	}
+	// A restart (fresh bridge, same store) keeps the watermark.
+	if a := (&Bridge{store: st}).HeartbeatAgenda(ctx); !a.Empty() {
+		t.Fatalf("the watermark must survive a restart, got %+v", a.Items)
 	}
 
 	// An auto-paused schedule, a tool failing repeatedly, a new event.
@@ -65,13 +74,24 @@ func TestHeartbeatAgenda(t *testing.T) {
 	if !strings.Contains(kinds["event"], "Flight confirmation") || !strings.Contains(kinds["event"], "shell_event") {
 		t.Errorf("event item = %q", kinds["event"])
 	}
+	b.CommitAgenda(a)
 	evs, _ := st.ListEvents(nil, 0)
 	if len(evs) != 1 || evs[0].ID != evID || evs[0].Status != store.EventSeen {
-		t.Errorf("a shown event is marked seen: %+v", evs)
+		t.Errorf("a committed event is marked seen: %+v", evs)
 	}
+	shownAgain := false
+	for _, it := range b.HeartbeatAgenda(ctx).Items {
+		if it.Kind == "event" && strings.Contains(it.Text, "shown before, still open") {
+			shownAgain = true
+		}
+	}
+	if !shownAgain {
+		t.Error("an event not yet marked done/ignored stays on the agenda")
+	}
+	st.MarkEvent(evID, store.EventDone, "handled")
 	for _, it := range b.HeartbeatAgenda(ctx).Items {
 		if it.Kind == "event" {
-			t.Error("a seen event is not shown again")
+			t.Error("a done event leaves the agenda")
 		}
 	}
 }

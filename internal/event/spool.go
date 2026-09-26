@@ -30,6 +30,9 @@ type File struct {
 	ChatID     int64  `json:"chat_id"`     // optional: the chat it concerns
 }
 
+// settleTime is how long a spool file must be unchanged before it is read.
+var settleTime = 2 * time.Second
+
 // maxSummaryRunes keeps an event a one-liner: detail is fetched, not stored.
 const maxSummaryRunes = 300
 
@@ -47,11 +50,17 @@ func IngestSpool(dir string, st *store.Store) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Only settled files: a producer should write <name>.tmp and rename it
+	// to <name>.json, but one that writes in place must not be read halfway.
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			names = append(names, e.Name())
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
 		}
+		if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < settleTime {
+			continue
+		}
+		names = append(names, e.Name())
 	}
 	sort.Strings(names)
 	added := 0

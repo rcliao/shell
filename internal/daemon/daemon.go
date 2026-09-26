@@ -856,6 +856,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			mustRun := strings.HasPrefix(msg, "[Heartbeat:deep]") || strings.Contains(msg, "[Check-in:")
 			if agenda.Empty() && !mustRun {
 				slog.Info("heartbeat: agenda empty, skipped", "chat_id", chatID)
+				br.CommitAgenda(agenda)
 				br.HeartbeatSkipped(ctx, chatID) // housekeeping still runs
 				return "", nil
 			}
@@ -865,8 +866,9 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 			resp, err := br.HandleMessageStreaming(ctx, chatID, 0, msg, "heartbeat", nil, nil, nil)
 			if err != nil {
-				return "", err
+				return "", err // agenda not committed: the next beat sees it again
 			}
+			br.CommitAgenda(agenda)
 			if !bridge.IsSystemChat(chatID) {
 				for _, photo := range resp.Photos {
 					bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)

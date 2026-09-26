@@ -50,14 +50,22 @@ Out of scope:
 4. **A project decision is waiting.** An active project whose doc has a
    non-empty 待決定 (to-decide) section and no human activity for 3 days.
 5. **Pending tasks** assigned to the agent.
-6. **Events.** New events (status `new`) are listed and marked `seen`.
+6. **Events.** Open events (`new`, or `seen` and not yet marked done or
+   ignored) are listed, for up to 3 days.
+
+The agenda is built read-only. The conversation watermark (a message id,
+kept in `kv` so restarts do not shrink it) and the `seen` marks are
+committed only after the beat's turn succeeds, or when the beat is
+skipped. A failed turn loses nothing.
 
 An empty agenda on a non-deep beat means no turn: the callback returns an
 empty (no-op) reply, so the scheduler's idle interval applies. Deep beats
 (reflection cadence) and check-in beats (every 4th beat carries the agent's
 proactive "friendly check-in" hint) always run, with the agenda included.
 
-**An event arrives (once a producer exists).** A producer writes
+**An event arrives (once a producer exists).** A producer writes (to
+`<name>.tmp`, then renames it to `<name>.json`; files younger than 2 s are
+left for the next pass)
 `{"source": "gmail", "kind": "email.received", "dedup_id": "<message id>",
 "summary": "one line", "ref": "<id or url>", "occurred_at": "RFC3339",
 "chat_id": 0}` into the spool. The next agenda ingests it (dedup by source
