@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/route"
 	"github.com/rcliao/shell/internal/store"
 )
@@ -67,5 +68,54 @@ func TestLaneForTurn(t *testing.T) {
 	rows, _ := st.RouteDecisions("lane", time.Now().Add(-time.Hour))
 	if len(rows) != 4 || rows[0].Lane != "trip" || rows[1].Lane != "general" || rows[3].Lane != "trip" {
 		t.Errorf("lane decisions = %+v", rows)
+	}
+}
+
+type threadRecorder struct {
+	*fakeTransport
+	threads []int64
+}
+
+func (r *threadRecorder) Notify(chatID, threadID int64, msg string) {
+	r.threads = append(r.threads, threadID)
+	r.fakeTransport.Notify(chatID, threadID, msg)
+}
+
+// A lane session's late follow-up (background work finishing after the
+// reply) must reach the REAL thread, never the lane's negative id.
+func TestLaneFollowUpGoesToRealThread(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	lane, err := st.LaneSessionThread(42, 7, "trip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveSession(42, lane, "claude-lane"); err != nil {
+		t.Fatal(err)
+	}
+	rec := &threadRecorder{fakeTransport: newFakeTransport()}
+	b := &Bridge{store: st, transport: rec}
+	b.HandleUnsolicitedTurn(process.SessionKey{ChatID: 42, ThreadID: lane}, process.SendResult{Text: "The hotel list is ready."})
+	if len(rec.threads) != 1 || rec.threads[0] != 7 {
+		t.Fatalf("follow-up sent to threads %v, want [7]", rec.threads)
+	}
+}
+
+// With lanes off the thread-bound project block is unchanged (byte-identical
+// prompt); the lane block has its own wording.
+func TestScopedProjectWordingUnchanged(t *testing.T) {
+	b := &Bridge{}
+	p := store.Project{Slug: "trip", Title: "Spring trip", Status: "active", MessageThreadID: 9}
+	other := store.Project{Slug: "health", Title: "Health", Status: "active"}
+	scoped := b.scopedProjectBlock([]store.Project{p, other}, 9)
+	if !strings.Contains(scoped, "(other active projects in this chat, not this thread: health)") {
+		t.Errorf("thread-bound block changed: %q", scoped)
+	}
+	if lane := b.laneProjectBlock(p, []store.Project{p, other}); !strings.Contains(lane, "routed to this project's lane") ||
+		!strings.Contains(lane, "(other active projects in this chat: health)") {
+		t.Errorf("lane block = %q", lane)
 	}
 }

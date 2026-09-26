@@ -49,8 +49,9 @@ func (b *Bridge) laneForTurn(ctx context.Context, chatID, threadID int64, text s
 	}
 	prev, _ := b.store.LastRouteLane("lane", laneBackendName(b.laneRouter), chatID, threadID)
 	choice := route.Choice{Lane: prev}
-	if choice.Lane == "" {
-		choice.Lane = route.General
+	if choice.Lane == "" || b.laneRouter == nil {
+		// No router (no key): everything is general, never a stuck lane.
+		choice = route.Choice{Lane: route.General, Confidence: 1}
 	}
 	if len(cands) > 0 && b.laneRouter != nil {
 		rctx, cancel := context.WithTimeout(ctx, laneRouteTimeout)
@@ -100,4 +101,13 @@ func chatKindOf(chatID int64) string {
 		return "group"
 	}
 	return "dm"
+}
+
+// realThread maps a lane's session thread back to the real thread (identity
+// for everything else, and when there is no store).
+func (b *Bridge) realThread(chatID, threadID int64) int64 {
+	if threadID >= 0 || b.store == nil {
+		return threadID
+	}
+	return b.store.RealThread(chatID, threadID)
 }

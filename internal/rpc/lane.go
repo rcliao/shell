@@ -37,7 +37,9 @@ func (s *Server) handleLane(w http.ResponseWriter, r *http.Request) {
 	}
 	valid := map[string]bool{"general": true}
 	var names []string
-	if ps, err := s.store.ListProjects(req.ChatID); err == nil {
+	// Any of this agent's active projects: a lane test chat borrows another
+	// chat's projects (route.lane_chats), so the current chat may own none.
+	if ps, err := s.store.ListProjects(0); err == nil {
 		for _, p := range ps {
 			if p.Status == "active" {
 				valid[p.Slug] = true

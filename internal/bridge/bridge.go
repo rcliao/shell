@@ -790,7 +790,8 @@ func (b *Bridge) runCompaction(ctx context.Context, chatID, threadID int64, tota
 
 	// Only the reactive path notifies the user — proactive runs silently.
 	if mode == "reactive" && b.transport != nil {
-		b.transport.Notify(chatID, threadID, "🗜 Compacting conversation...")
+		// threadID is the session's: a lane's is negative (R1) — tell the real thread.
+		b.transport.Notify(chatID, b.realThread(chatID, threadID), "🗜 Compacting conversation...")
 	}
 
 	_, err := agent.Send(ctx, process.AgentRequest{
@@ -968,7 +969,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 				}
 			})
 		}
-		run("channel_b", func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, userMsg) })
+		run("channel_b", func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, sessThread, userMsg) })
 		run("projects", func() {
 			if laneBlock != "" {
 				projectsBlock = laneBlock

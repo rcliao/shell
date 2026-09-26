@@ -90,7 +90,8 @@ func (b *Bridge) scopedProjectBlock(projects []store.Project, threadID int64) st
 	if own == nil {
 		return ""
 	}
-	return b.renderScopedProject(*own, others, "[Project] — this thread is this project's own topic; treat the conversation as being about it.")
+	return b.renderScopedProject(*own, others, "[Project] — this thread is this project's own topic; treat the conversation as being about it.",
+		"other active projects in this chat, not this thread")
 }
 
 // laneProjectBlock is the scoped block for a project lane (R1): the same
@@ -103,10 +104,11 @@ func (b *Bridge) laneProjectBlock(own store.Project, all []store.Project) string
 		}
 	}
 	return b.renderScopedProject(own, others,
-		"[Project] — this message was routed to this project's lane; this conversation (session) is about it.")
+		"[Project] — this message was routed to this project's lane; this conversation (session) is about it.",
+		"other active projects in this chat")
 }
 
-func (b *Bridge) renderScopedProject(own store.Project, others []string, header string) string {
+func (b *Bridge) renderScopedProject(own store.Project, others []string, header, othersLabel string) string {
 	var sb strings.Builder
 	sb.WriteString(header + "\n")
 	sb.WriteString(projectRow(own))
@@ -118,7 +120,7 @@ func (b *Bridge) renderScopedProject(own store.Project, others []string, header 
 		}
 	}
 	if len(others) > 0 {
-		sb.WriteString("\n(other active projects in this chat: " + strings.Join(others, ", ") + ")")
+		sb.WriteString("\n(" + othersLabel + ": " + strings.Join(others, ", ") + ")")
 	}
 	return sb.String()
 }

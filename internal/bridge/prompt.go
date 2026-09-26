@@ -174,7 +174,7 @@ func (b *Bridge) injectPerTurnContext(ctx context.Context, chatID, threadID int6
 // injectPerTurnContext; new callers that have the raw text use the Raw
 // variant for accurate classification.
 func (b *Bridge) injectPerTurnContextRaw(ctx context.Context, chatID, threadID int64, msg, rawUserMsg string) string {
-	blocks := b.buildPerTurnBlocks(ctx, chatID, threadID, rawUserMsg)
+	blocks := b.buildPerTurnBlocks(ctx, chatID, threadID, threadID, rawUserMsg)
 	if blocks == "" {
 		return msg
 	}
@@ -184,7 +184,10 @@ func (b *Bridge) injectPerTurnContextRaw(ctx context.Context, chatID, threadID i
 // buildPerTurnBlocks computes the Channel B block prefix independently of the
 // message body, so it can run concurrently with the other context producers
 // (V2-H37). Returns "" when no blocks apply.
-func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID int64, rawUserMsg string) string {
+// sessThread is the session's thread (a lane's negative id under R1, else
+// threadID): the session row's carry-forward, prefix hash and rotation flag
+// belong to it; media and anything user-visible use the real threadID.
+func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessThread int64, rawUserMsg string) string {
 	var blocks []string
 
 	// Block 1: current time (always on when scheduler is enabled).
@@ -201,7 +204,7 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID int64,
 
 	var sess *store.Session
 	if b.store != nil {
-		sess, _ = b.store.GetSession(chatID, threadID)
+		sess, _ = b.store.GetSession(chatID, sessThread)
 	}
 
 	// Block 2: carry-forward pack, only on the first turn after rotation.
@@ -209,7 +212,7 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID int64,
 	// a prior-generation summary exists. The pack rides the user message so
 	// the agent can acknowledge continuity without waiting on Channel A.
 	if sess != nil && sess.ProviderSessionID == "" {
-		if block := b.buildCarryForwardBlock(chatID, threadID, sess.Generation); block != "" {
+		if block := b.buildCarryForwardBlock(chatID, sessThread, sess.Generation); block != "" {
 			blocks = append(blocks, block)
 		}
 	}
@@ -223,7 +226,7 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID int64,
 		// "new since session start" and instantly blow the budget.
 		if sess.PrefixHash == "" && sess.ProviderSessionID != "" {
 			if _, hash := b.memory.PinnedSnapshot(ctx, chatID); hash != "" {
-				if err := b.store.SetPrefixHash(chatID, threadID, hash); err != nil {
+				if err := b.store.SetPrefixHash(chatID, sessThread, hash); err != nil {
 					slog.Warn("legacy prefix hash stamp failed", "chat_id", chatID, "error", err)
 				}
 			}
@@ -232,7 +235,7 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID int64,
 			switch {
 			case tokens > pinnedDeltaTokenBudget:
 				// Budget blown — don't inject; flag for rotation instead.
-				if err := b.store.SetRotatePending(chatID, threadID, "pinned_overflow"); err != nil {
+				if err := b.store.SetRotatePending(chatID, sessThread, "pinned_overflow"); err != nil {
 					slog.Warn("set rotate_pending failed", "chat_id", chatID, "error", err)
 				}
 				slog.Info("pinned delta over budget, flagging rotation",
