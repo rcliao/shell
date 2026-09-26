@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -116,10 +117,24 @@ func (b *Bot) Start(ctx context.Context) {
 		<-ctx.Done()
 		return
 	}
-	if err := b.session.Open(); err != nil {
-		slog.Error("discord: gateway connect failed — Discord is offline for this run", "error", err)
-		<-ctx.Done()
-		return
+	// discordgo reconnects on its own once connected, but not after a failed
+	// first Open — so a boot before the network is up would leave the family
+	// unanswered until a restart. Retry with backoff instead.
+	delay := 5 * time.Second
+	for {
+		err := b.session.Open()
+		if err == nil {
+			break
+		}
+		slog.Error("discord: gateway connect failed — retrying", "error", err, "in", delay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if delay < 5*time.Minute {
+			delay *= 2
+		}
 	}
 	<-ctx.Done()
 	if err := b.session.Close(); err != nil {
@@ -127,8 +142,11 @@ func (b *Bot) Start(ctx context.Context) {
 	}
 }
 
-// OnDiscord reports whether sends for this chat belong to Discord.
-func (b *Bot) OnDiscord(chatID int64) bool { return b.addr.OnDiscord(chatID) }
+// Routes reports whether sends for this conversation belong to Discord.
+func (b *Bot) Routes(chatID, threadID int64) bool {
+	_, ok := b.addr.Outbound(chatID, threadID)
+	return ok
+}
 
 // SetOutboundDedup installs the proactive-send dedup check.
 func (b *Bot) SetOutboundDedup(check func(chatID, threadID int64, text string) bool) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/discord"
 )
 
 // Outbound delivery, abstracted away from Telegram.
@@ -172,7 +173,8 @@ func tokenOwnedBy(cfg config.Config, token string, tokenOf func(config.Config) s
 // surface plus the one question routing needs.
 type discordOutbound interface {
 	outbound
-	OnDiscord(chatID int64) bool
+	// Routes reports whether a conversation is delivered on Discord.
+	Routes(chatID, threadID int64) bool
 }
 
 // routedOutbound sends each message on the platform its conversation lives
@@ -186,45 +188,56 @@ type routedOutbound struct {
 	discord  discordOutbound
 }
 
-func (r routedOutbound) pick(chatID int64) outbound {
-	if r.discord.OnDiscord(chatID) {
+// pick chooses by conversation: a thread can be linked on its own (a carried-
+// over forum topic) while its chat stays on Telegram.
+func (r routedOutbound) pick(chatID, threadID int64) outbound {
+	if r.discord.Routes(chatID, threadID) {
+		return r.discord
+	}
+	return r.telegram
+}
+
+// pickMsg chooses by message id for operations on an existing message (edit,
+// pin): the id says which platform sent it.
+func (r routedOutbound) pickMsg(messageID int) outbound {
+	if discord.IsMessageID(messageID) {
 		return r.discord
 	}
 	return r.telegram
 }
 
 func (r routedOutbound) SendText(chatID, threadID int64, text string) {
-	r.pick(chatID).SendText(chatID, threadID, text)
+	r.pick(chatID, threadID).SendText(chatID, threadID, text)
 }
 func (r routedOutbound) SendPhoto(chatID, threadID int64, data []byte, caption string) {
-	r.pick(chatID).SendPhoto(chatID, threadID, data, caption)
+	r.pick(chatID, threadID).SendPhoto(chatID, threadID, data, caption)
 }
 func (r routedOutbound) SendVideo(chatID, threadID int64, data []byte, caption string) {
-	r.pick(chatID).SendVideo(chatID, threadID, data, caption)
+	r.pick(chatID, threadID).SendVideo(chatID, threadID, data, caption)
 }
 func (r routedOutbound) SendDocument(chatID, threadID int64, path, caption string) error {
-	return r.pick(chatID).SendDocument(chatID, threadID, path, caption)
+	return r.pick(chatID, threadID).SendDocument(chatID, threadID, path, caption)
 }
 func (r routedOutbound) SendMessageID(chatID, threadID int64, text string) (int, error) {
-	return r.pick(chatID).SendMessageID(chatID, threadID, text)
+	return r.pick(chatID, threadID).SendMessageID(chatID, threadID, text)
 }
 func (r routedOutbound) EditMessage(chatID int64, messageID int, text string) error {
-	return r.pick(chatID).EditMessage(chatID, messageID, text)
+	return r.pickMsg(messageID).EditMessage(chatID, messageID, text)
 }
 func (r routedOutbound) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
-	return r.pick(chatID).SendTextButtons(chatID, threadID, text, buttons)
+	return r.pick(chatID, threadID).SendTextButtons(chatID, threadID, text, buttons)
 }
 func (r routedOutbound) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
-	return r.pick(chatID).SendMessageIDButtons(chatID, threadID, text, buttons)
+	return r.pick(chatID, threadID).SendMessageIDButtons(chatID, threadID, text, buttons)
 }
 func (r routedOutbound) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
-	return r.pick(chatID).EditMessageButtons(chatID, messageID, text, buttons)
+	return r.pickMsg(messageID).EditMessageButtons(chatID, messageID, text, buttons)
 }
 func (r routedOutbound) PinMessage(chatID int64, messageID int, silent bool) error {
-	return r.pick(chatID).PinMessage(chatID, messageID, silent)
+	return r.pickMsg(messageID).PinMessage(chatID, messageID, silent)
 }
 func (r routedOutbound) UnpinMessage(chatID int64, messageID int) error {
-	return r.pick(chatID).UnpinMessage(chatID, messageID)
+	return r.pickMsg(messageID).UnpinMessage(chatID, messageID)
 }
 func (r routedOutbound) SetOutboundDedup(check func(chatID, threadID int64, text string) bool) {
 	r.telegram.SetOutboundDedup(check)

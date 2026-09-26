@@ -3,6 +3,7 @@ package discord
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -86,5 +87,35 @@ func TestStreamViewShowsTail(t *testing.T) {
 	}
 	if streamView("short", 2000) != "short" {
 		t.Fatal("short text must pass through")
+	}
+}
+
+// Regression: a long first line after ``` used to become the "language" and
+// be re-prepended to every chunk, starving the budget until the loop never
+// advanced (hung) or sent ~100 messages.
+func TestSplitLongFenceLineTerminates(t *testing.T) {
+	inputs := []string{
+		"```" + strings.Repeat("x", 2100) + "\nmore\n```\n",
+		"```" + strings.Repeat("x", 5000) + "\nmore\n```\n",
+		"intro\n```" + strings.Repeat("x", 2500),
+		"```" + strings.Repeat("y", 1960) + "\n" + strings.Repeat("z\n", 200) + "```",
+	}
+	for i, in := range inputs {
+		done := make(chan []string, 1)
+		go func() { done <- splitMessage(in, 2000) }()
+		select {
+		case chunks := <-done:
+			total := utf8.RuneCountInString(in)
+			if max := total/1000 + 3; len(chunks) > max {
+				t.Errorf("input %d (%d chars): %d chunks, want ≤ %d", i, total, len(chunks), max)
+			}
+			for _, c := range chunks {
+				if utf8.RuneCountInString(c) > 2000 {
+					t.Errorf("input %d: chunk over the limit", i)
+				}
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("input %d: splitMessage did not terminate", i)
+		}
 	}
 }

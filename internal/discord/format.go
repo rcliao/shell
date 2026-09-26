@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -11,6 +12,9 @@ const maxMessageLen = 2000
 // fenceReserve is room kept free in each chunk for the fence lines added
 // when a split lands inside a code block.
 const fenceReserve = 24
+
+// fenceLangRe is what a code-fence language tag looks like: go, c++, shell-session.
+var fenceLangRe = regexp.MustCompile(`^[A-Za-z0-9_+#.-]{0,20}$`)
 
 // splitMessage cuts text into chunks of at most max characters.
 //
@@ -33,8 +37,14 @@ func splitMessage(text string, max int) []string {
 			break
 		}
 		budget -= fenceReserve
+		if budget < max/2 {
+			budget = max / 2 // never let the reopened fence starve a chunk
+		}
 		end := byteIndexOfRune(text, budget)
 		cut := bestCut(text[:end])
+		if cut == 0 {
+			cut = end // guaranteed progress
+		}
 		chunk, rest := text[:cut], text[cut:]
 
 		body := reopen + chunk
@@ -79,6 +89,12 @@ func openFence(s string) (lang string, open bool) {
 		lang = strings.TrimSpace(strings.TrimPrefix(t, "```"))
 		if strings.Contains(lang, "```") { // a one-line ```code``` span
 			open, lang = false, ""
+		}
+		if !fenceLangRe.MatchString(lang) {
+			// Only a real language tag is carried to the reopened fence. A
+			// long first line after ``` (code, not a tag) would otherwise be
+			// repeated at the top of every chunk.
+			lang = ""
 		}
 	}
 	return lang, open

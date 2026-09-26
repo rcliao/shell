@@ -11,6 +11,7 @@ type recordingOutbound struct {
 	headlessOutbound
 	texts   []int64
 	dedup   bool
+	edits   []int
 	discord map[int64]bool
 }
 
@@ -20,7 +21,11 @@ func (r *recordingOutbound) SendText(chatID, threadID int64, text string) {
 func (r *recordingOutbound) SetOutboundDedup(func(chatID, threadID int64, text string) bool) {
 	r.dedup = true
 }
-func (r *recordingOutbound) OnDiscord(chatID int64) bool { return r.discord[chatID] }
+func (r *recordingOutbound) Routes(chatID, threadID int64) bool { return r.discord[chatID] }
+func (r *recordingOutbound) EditMessage(chatID int64, messageID int, text string) error {
+	r.edits = append(r.edits, messageID)
+	return nil
+}
 
 func TestRoutedOutboundSendsEachChatOnItsPlatform(t *testing.T) {
 	tg := &recordingOutbound{}
@@ -54,5 +59,17 @@ func TestRoutedOutboundStartReturnsWhenBothStop(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not return after cancel")
+	}
+}
+
+func TestRoutedOutboundEditsFollowTheMessageID(t *testing.T) {
+	// An edit names only chat + message; the id says which platform sent it.
+	tg := &recordingOutbound{}
+	dc := &recordingOutbound{}
+	r := routedOutbound{telegram: tg, discord: dc}
+	r.EditMessage(-100200300, 4812, "telegram message")               // Telegram numbers from 1
+	r.EditMessage(-100200300, 400000000000000001, "discord message") // snowflake
+	if len(tg.edits) != 1 || tg.edits[0] != 4812 || len(dc.edits) != 1 {
+		t.Fatalf("telegram edits %v, discord edits %v", tg.edits, dc.edits)
 	}
 }

@@ -158,6 +158,12 @@ func (a *Addresses) OnDiscord(chatID int64) bool {
 	return ok
 }
 
+// IsMessageID reports whether a message id is a Discord one. Discord message
+// ids are snowflakes (≥ the floor); Telegram numbers messages per chat from 1.
+// Edits and pins carry only chat + message id, and this is what routes them —
+// it holds across restarts with no lookup table.
+func IsMessageID(id int) bool { return int64(id) >= snowflakeFloor }
+
 func derivedChat(channelID string, isDM bool) (int64, error) {
 	id, err := parseSnowflake(channelID)
 	if err != nil {

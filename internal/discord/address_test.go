@@ -129,3 +129,26 @@ func TestUsersAndCounts(t *testing.T) {
 		t.Fatalf("counts: chats=%d users=%d, want 3,1", chats, users)
 	}
 }
+
+func TestThreadLinkedWithoutItsChatRoutesToDiscord(t *testing.T) {
+	// A forum topic carried over on its own: its sends go to the thread while
+	// the rest of that Telegram group stays on Telegram.
+	a := NewAddresses(config.DiscordConfig{Chats: map[string]config.DiscordChatLink{
+		topicThread: {ChatID: -100200300, ThreadID: 5},
+	}})
+	if got, ok := a.Outbound(-100200300, 5); !ok || got.ChannelID != topicThread {
+		t.Fatalf("linked topic: got %q,%v", got.ChannelID, ok)
+	}
+	if _, ok := a.Outbound(-100200300, 0); ok {
+		t.Fatal("the unlinked main chat must stay on Telegram")
+	}
+	if _, ok := a.Outbound(-100200300, 6); ok {
+		t.Fatal("another unlinked topic must stay on Telegram")
+	}
+}
+
+func TestIsMessageID(t *testing.T) {
+	if IsMessageID(4812) || !IsMessageID(400000000000000001) {
+		t.Fatal("telegram ids are small, discord ids are snowflakes")
+	}
+}
