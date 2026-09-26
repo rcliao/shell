@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS route_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_route_decisions_key ON route_decisions(source, backend, chat_id, thread_id, id);
 
+CREATE TABLE IF NOT EXISTS lane_sessions (
+	chat_id           INTEGER NOT NULL,
+	thread_id         INTEGER NOT NULL DEFAULT 0,
+	lane              TEXT NOT NULL,
+	session_thread_id INTEGER NOT NULL,
+	created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(chat_id, thread_id, lane),
+	UNIQUE(chat_id, session_thread_id)
+);
+
 CREATE TABLE IF NOT EXISTS route_labels (
 	chat_id    INTEGER NOT NULL,
 	thread_id  INTEGER NOT NULL DEFAULT 0,
@@ -202,8 +212,11 @@ type UserMessage struct {
 // messages in the chat they fire in but were written by a schedule, not a
 // person (matched against every schedule's message text).
 func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
-	rows, err := s.db.Query(`SELECT s.chat_id, s.message_thread_id, m.created_at, m.content
+	// A lane session (R1) lives on a negative session thread; its messages
+	// belong to the real thread it was routed from.
+	rows, err := s.db.Query(`SELECT s.chat_id, COALESCE(ls.thread_id, s.message_thread_id), m.created_at, m.content
 		FROM messages m JOIN sessions s ON s.id = m.session_id
+		LEFT JOIN lane_sessions ls ON ls.chat_id = s.chat_id AND ls.session_thread_id = s.message_thread_id
 		WHERE m.role = 'user' AND s.chat_id != 0 AND m.created_at >= ?
 		  AND substr(ltrim(m.content), 1, 1) != '['
 		  AND m.content NOT IN (SELECT message FROM schedules)
@@ -237,4 +250,48 @@ func (s *Store) LastUserText(chatID, threadID int64) (string, error) {
 		return "", nil
 	}
 	return text, err
+}
+
+// LaneSessionThread returns the session thread id for a lane of a chat
+// thread (R1). The general lane is the real thread itself. Any other lane
+// gets a negative id, allocated once and stable after, so it can never
+// collide with a Telegram thread id and survives restarts.
+func (s *Store) LaneSessionThread(chatID, threadID int64, lane string) (int64, error) {
+	if lane == "" || lane == "general" {
+		return threadID, nil
+	}
+	var id int64
+	err := s.db.QueryRow(`SELECT session_thread_id FROM lane_sessions WHERE chat_id = ? AND thread_id = ? AND lane = ?`,
+		chatID, threadID, lane).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	// Allocate the next negative id for this chat in one statement, so two
+	// racing turns cannot pick the same id (UNIQUE(chat_id, session_thread_id)
+	// would refuse the second; OR IGNORE then re-reads the winner).
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO lane_sessions (chat_id, thread_id, lane, session_thread_id, created_at)
+		SELECT ?, ?, ?, MIN(-1, COALESCE(MIN(session_thread_id), 0) - 1), ? FROM lane_sessions WHERE chat_id = ?`,
+		chatID, threadID, lane, time.Now().UTC(), chatID); err != nil {
+		return 0, err
+	}
+	err = s.db.QueryRow(`SELECT session_thread_id FROM lane_sessions WHERE chat_id = ? AND thread_id = ? AND lane = ?`,
+		chatID, threadID, lane).Scan(&id)
+	return id, err
+}
+
+// RealThread maps a session thread back to the real thread: a lane session's
+// negative id to the thread it was routed from; any other id to itself.
+func (s *Store) RealThread(chatID, sessThread int64) int64 {
+	if sessThread >= 0 {
+		return sessThread
+	}
+	var t int64
+	if err := s.db.QueryRow(`SELECT thread_id FROM lane_sessions WHERE chat_id = ? AND session_thread_id = ?`,
+		chatID, sessThread).Scan(&t); err != nil {
+		return sessThread
+	}
+	return t
 }

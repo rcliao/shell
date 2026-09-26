@@ -314,6 +314,58 @@ request). v1 stays recorded for the 9/28 Jev verdict, and v2 feeds a
 The other agent's 14 days had no project talk (274 of 274 labelled general),
 so there is nothing to score there yet.
 
+## R1 build spec (2026-09-25)
+
+R1 lets a lane pick the session, behind a per-chat switch that is off
+everywhere by default.
+
+**Switch.** `route.lane_chats` maps a chat id to the chat whose active
+projects are its lanes, usually itself (`{"<owner DM>": <owner DM>}`). A
+test chat can borrow another chat's projects (`{"42": <owner DM>}`), so
+`shell chat --chat 42` exercises real lanes without touching a real
+conversation. Chats not listed behave exactly as before.
+
+**The session thread and the delivery thread.** The turn function now keeps
+two thread ids:
+- the **delivery thread**, the real Telegram thread: transcript, message map,
+  delivery, shadow routing, relays;
+- the **session thread**: the process key, session row, rotation, prefix
+  hash and compaction.
+
+With lanes off they are the same id. With lanes on, a lane other than
+`general` gets its own session thread, allocated in
+`lane_sessions(chat_id, thread_id, lane, session_thread_id)`. Allocated ids
+are negative, so they can never collide with a Telegram thread. The
+`general` lane keeps the real thread, so the existing conversation stays
+where it is.
+
+**Routing before the turn.** For a lane chat, the router runs synchronously
+before the session is resolved:
+- backend: Jev with the v2 question, 1.5 s timeout;
+- the sticky rule, using the previous lane from `route_decisions` with
+  `source = lane`;
+- on timeout or error, the previous lane (or `general`).
+
+Each decision is logged with `source = lane`, so what was acted on is
+measured separately from the shadow.
+
+**Context.** A project lane gets that project's scoped `[Project]` block,
+the one a thread-bound project already gets.
+
+**Out of scope for R1.**
+- Commands (`/new`, `/status`) and mid-turn message absorption act on the
+  delivery thread, i.e. the `general` lane.
+- Heartbeats list lane sessions as sessions of the chat.
+- Visible lanes (R3), and a model per lane (R2).
+
+**Verify.**
+- Unit tests: lane session allocation (stable, negative, per thread); the
+  synchronous router's timeout fallback; the lane project block.
+- Live, lanes on for test chat 42 only: `shell chat --chat 42` with a
+  project message, then a general one. Two different session rows are
+  created, the project turn carries the `[Project]` block, and the family
+  chats show no change.
+
 ## S0 build spec (2026-09-25)
 
 S0 is the first step, and nothing in it depends on the router.

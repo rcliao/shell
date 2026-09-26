@@ -30,6 +30,10 @@ func (b *Bridge) HandleUnsolicitedTurn(key process.SessionKey, result process.Se
 		slog.Warn("follow-up dropped: no session row", "chat_id", chatID, "thread_id", threadID, "error", err)
 		return
 	}
+	// The session key's thread is the SESSION's: a lane session (R1) has a
+	// negative one. Everything below talks to the chat or the transcript,
+	// so it uses the real thread.
+	threadID = b.realThread(chatID, threadID)
 	model := resolveExecutionProfile(b.claudeCfg, turnKind{chatID: chatID}).Model
 	if noopMarkerRe.MatchString(result.Text) {
 		// The agent chose silence after its background work (nothing worth

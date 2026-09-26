@@ -90,9 +90,28 @@ func (b *Bridge) scopedProjectBlock(projects []store.Project, threadID int64) st
 	if own == nil {
 		return ""
 	}
+	return b.renderScopedProject(*own, others, "[Project] — this thread is this project's own topic; treat the conversation as being about it.",
+		"other active projects in this chat, not this thread")
+}
+
+// laneProjectBlock is the scoped block for a project lane (R1): the same
+// shape a thread-bound project gets, framed as a lane of this chat.
+func (b *Bridge) laneProjectBlock(own store.Project, all []store.Project) string {
+	var others []string
+	for _, p := range all {
+		if p.Status == "active" && p.Slug != own.Slug {
+			others = append(others, p.Slug)
+		}
+	}
+	return b.renderScopedProject(own, others,
+		"[Project] — this message was routed to this project's lane; this conversation (session) is about it.",
+		"other active projects in this chat")
+}
+
+func (b *Bridge) renderScopedProject(own store.Project, others []string, header, othersLabel string) string {
 	var sb strings.Builder
-	sb.WriteString("[Project] — this thread is this project's own topic; treat the conversation as being about it.\n")
-	sb.WriteString(projectRow(*own))
+	sb.WriteString(header + "\n")
+	sb.WriteString(projectRow(own))
 	if doc := b.readProjectDoc(own.DocPath); doc != "" {
 		for _, h := range []string{docDecisionsHeading, docToDecideHeading} {
 			if body := docSection(doc, h); body != "" {
@@ -101,7 +120,7 @@ func (b *Bridge) scopedProjectBlock(projects []store.Project, threadID int64) st
 		}
 	}
 	if len(others) > 0 {
-		sb.WriteString("\n(other active projects in this chat, not this thread: " + strings.Join(others, ", ") + ")")
+		sb.WriteString("\n(" + othersLabel + ": " + strings.Join(others, ", ") + ")")
 	}
 	return sb.String()
 }

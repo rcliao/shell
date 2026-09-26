@@ -17,6 +17,7 @@ import (
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/route"
 	"github.com/rcliao/shell/internal/skill"
 	"github.com/rcliao/shell/internal/store"
 	"github.com/rcliao/shell/internal/topic"
@@ -108,12 +109,14 @@ type Bridge struct {
 	// sqlite calls against guessed DB paths, cd-ing into the wrong repo to
 	// satisfy relative script paths, workspaces never used because never
 	// mentioned).
-	agentHomeDir string         // per-agent config/data dir (shell.db, memory.db)
-	ownerChatID  int64          // where own-skill change notices go (0 = none)
-	routeSticky  float64        // R0 sticky-rule threshold (0 = default)
-	agentName    string         // commit author / notice name for own-skill changes
-	workspaceDir string         // persistent agent scratch space
-	routerShadow *decide.Shadow // P3.7 shadow router; nil = off
+	agentHomeDir string          // per-agent config/data dir (shell.db, memory.db)
+	ownerChatID  int64           // where own-skill change notices go (0 = none)
+	routeSticky  float64         // R0 sticky-rule threshold (0 = default)
+	laneChats    map[int64]int64 // R1: chat → chat whose projects are its lanes (nil = lanes off)
+	laneRouter   route.Backend   // R1: synchronous lane router
+	agentName    string          // commit author / notice name for own-skill changes
+	workspaceDir string          // persistent agent scratch space
+	routerShadow *decide.Shadow  // P3.7 shadow router; nil = off
 
 	// Agent identity prompt (prepended to system prompt)
 	agentIdentity     string
@@ -787,7 +790,8 @@ func (b *Bridge) runCompaction(ctx context.Context, chatID, threadID int64, tota
 
 	// Only the reactive path notifies the user — proactive runs silently.
 	if mode == "reactive" && b.transport != nil {
-		b.transport.Notify(chatID, threadID, "🗜 Compacting conversation...")
+		// threadID is the session's: a lane's is negative (R1) — tell the real thread.
+		b.transport.Notify(chatID, b.realThread(chatID, threadID), "🗜 Compacting conversation...")
 	}
 
 	_, err := agent.Send(ctx, process.AgentRequest{
@@ -870,8 +874,21 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 		}
 	}
 
+	// Lanes (R1): in a lane chat a real turn is routed before its session is
+	// chosen. sessThread is the session's thread; threadID stays the real
+	// one for delivery, transcript and message maps. Off → identical.
+	sessThread := threadID
+	var laneBlock string
+	// Real turns only: heartbeats and other synthetic prompts start with "[".
+	if !strings.HasPrefix(userMsg, "[") && !isA2A && !isSystemSender(senderName) {
+		if st, block, on := b.laneForTurn(ctx, chatID, threadID, userMsg); on {
+			sessThread, laneBlock = st, block
+			key = process.SessionKey{ChatID: chatID, ThreadID: sessThread}
+		}
+	}
+
 	step("plan_fable_a2a")
-	sess, err := b.ensureSession(ctx, chatID, threadID)
+	sess, err := b.ensureSession(ctx, chatID, sessThread)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
 	}
@@ -881,8 +898,8 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	// and the next Send will go fresh with a rebuilt Channel A. Reload the
 	// row so downstream code sees the post-rotation state.
 	step("ensure_session")
-	if b.maybeRotate(ctx, chatID, threadID) {
-		if fresh, rerr := b.store.GetSession(chatID, threadID); rerr == nil && fresh != nil {
+	if b.maybeRotate(ctx, chatID, sessThread) {
+		if fresh, rerr := b.store.GetSession(chatID, sessThread); rerr == nil && fresh != nil {
 			sess = fresh
 		}
 	}
@@ -952,8 +969,14 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 				}
 			})
 		}
-		run("channel_b", func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, userMsg) })
-		run("projects", func() { projectsBlock = b.buildProjectsBlock(chatID, threadID) })
+		run("channel_b", func() { channelBPrefix = b.buildPerTurnBlocks(ctx, chatID, threadID, sessThread, userMsg) })
+		run("projects", func() {
+			if laneBlock != "" {
+				projectsBlock = laneBlock
+			} else {
+				projectsBlock = b.buildProjectsBlock(chatID, threadID)
+			}
+		})
 		wg.Wait()
 	}
 	step("context_fanout")
@@ -1145,7 +1168,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	send := func() (process.SendResult, error) {
 		return agent.SendEvents(ctx, process.AgentRequest{
 			ChatID:          chatID,
-			MessageThreadID: threadID,
+			MessageThreadID: sessThread,
 			SessionID:       claudeSessionID,
 			Text:            augmentedMsg,
 			Images:          imgAttachments,
@@ -1205,7 +1228,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	if procSess != nil && !ephemeralTurn {
 		if result.SessionID != "" {
 			procSess.ProviderSessionID = result.SessionID
-			if err := b.store.SaveSession(chatID, threadID, result.SessionID); err != nil {
+			if err := b.store.SaveSession(chatID, sessThread, result.SessionID); err != nil {
 				slog.Warn("failed to update session ID in store", "error", err)
 			}
 		}
@@ -1218,7 +1241,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	// surface every pinned memory as "new" — defeating the purpose.
 	if isFreshSend && b.memory != nil && b.store != nil {
 		if _, hash := b.memory.PinnedSnapshot(ctx, chatID); hash != "" {
-			if err := b.store.SetPrefixHash(chatID, threadID, hash); err != nil {
+			if err := b.store.SetPrefixHash(chatID, sessThread, hash); err != nil {
 				slog.Warn("failed to stamp prefix hash", "chat_id", chatID, "error", err)
 			}
 		}
@@ -1287,7 +1310,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	// Conversational turns only — heartbeat/scheduler writes aren't user-facing
 	// "I saved it" claims.
 	if !isHeartbeat {
-		resp = b.verifyWriteHygiene(ctx, agent, chatID, threadID, sess.ID, userMsg, resp, result, source)
+		resp = b.verifyWriteHygiene(ctx, agent, chatID, sessThread, sess.ID, userMsg, resp, result, source)
 		// Runtime recall-grounding: did the answer to a "what did I log / how
 		// much so far" question come from a real read (a store query or the
 		// ghost context the bridge injected) — or from lossy chat memory?
@@ -1299,7 +1322,7 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	// belongs to the one-shot process, not the persistent session, so it must
 	// not drive the persistent session's rotate/compact decisions.
 	if !ephemeralTurn {
-		go b.compactSessionIfNeeded(ctx, chatID, threadID, result.Usage)
+		go b.compactSessionIfNeeded(ctx, chatID, sessThread, result.Usage)
 	}
 	if fableTurn && resp.Text != "" {
 		// Legibility for the experiment: make it obvious which reply was Fable.
