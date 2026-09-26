@@ -24,6 +24,10 @@ type ReactionContext struct {
 // SaveMessageMap persists a mapping between a user's Telegram message and the
 // bot's response message for the current session, including message content.
 func (b *Bridge) SaveMessageMap(chatID, threadID int64, userMessageID, botMessageID int, userMessage, botResponse string) error {
+	// A lane turn (R1) was answered by the lane's session, not the thread's.
+	if sid, ok := b.laneTurnSession(chatID, userMessageID); ok {
+		return b.store.SaveMessageMap(chatID, userMessageID, botMessageID, sid, userMessage, botResponse)
+	}
 	sess, err := b.store.GetSession(chatID, threadID)
 	if err != nil || sess == nil {
 		return err
@@ -63,7 +67,9 @@ func (b *Bridge) LogReaction(chatID, threadID int64, botMessageID int, emoji str
 }
 
 func (b *Bridge) SessionThreadID(chatID int64, sessionID int64) int64 {
-	return b.store.SessionThreadID(sessionID)
+	// A lane session's thread is negative (R1): reaction replies go to the
+	// real thread it belongs to.
+	return b.realThread(chatID, b.store.SessionThreadID(sessionID))
 }
 
 // HandleReaction processes an emoji reaction as a user action.

@@ -115,6 +115,7 @@ type Bridge struct {
 	laneChats    map[int64]int64 // R1: chat → chat whose projects are its lanes (nil = lanes off)
 	laneRouter   route.Backend   // R1: synchronous lane router
 	lanesAll     bool            // R1: lanes on for every chat (own projects)
+	laneTurnSess sync.Map        // R1: "chat/telegramMsgID" → session id that answered (message map)
 	agentName    string          // commit author / notice name for own-skill changes
 	workspaceDir string          // persistent agent scratch space
 	routerShadow *decide.Shadow  // P3.7 shadow router; nil = off
@@ -879,11 +880,16 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	// chosen. sessThread is the session's thread; threadID stays the real
 	// one for delivery, transcript and message maps. Off → identical.
 	sessThread := threadID
-	var laneBlock string
+	var laneBlock, laneRecent string
+	laneOn := false
 	// Real turns only: heartbeats and other synthetic prompts start with "[".
 	if !strings.HasPrefix(userMsg, "[") && !isA2A && !isSystemSender(senderName) {
 		if st, block, on := b.laneForTurn(ctx, chatID, threadID, userMsg); on {
-			sessThread, laneBlock = st, block
+			sessThread, laneBlock, laneOn = st, block, true
+			// Built NOW, before this turn's message is logged into the lane's
+			// session: the cutoff is the session's last message, and after
+			// the log that would be this very message (block always empty).
+			laneRecent = b.laneRecentBlock(chatID, threadID, sessThread)
 			key = process.SessionKey{ChatID: chatID, ThreadID: sessThread}
 		}
 	}
@@ -892,6 +898,9 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	sess, err := b.ensureSession(ctx, chatID, sessThread)
 	if err != nil {
 		return AgentResponse{}, fmt.Errorf("ensure session: %w", err)
+	}
+	if laneOn && sessThread != threadID {
+		b.noteLaneTurn(chatID, telegramMsgIDFrom(ctx), sess.ID)
 	}
 
 	// Check rotation triggers before doing anything else this turn. A true
@@ -976,6 +985,9 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 				projectsBlock = laneBlock
 			} else {
 				projectsBlock = b.buildProjectsBlock(chatID, threadID)
+			}
+			if laneRecent != "" {
+				projectsBlock = strings.TrimSpace(projectsBlock + "\n\n" + laneRecent)
 			}
 		})
 		wg.Wait()

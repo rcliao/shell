@@ -147,3 +147,86 @@ func TestLanesAllChatsAndBoundTopics(t *testing.T) {
 		t.Error("system chat must not route")
 	}
 }
+
+func TestLaneMessageMapAndReactionThread(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	lane, _ := st.LaneSessionThread(42, 7, "trip")
+	st.SaveSession(42, 7, "general")
+	st.SaveSession(42, lane, "lane")
+	laneSess, _ := st.GetSession(42, lane)
+	b := &Bridge{store: st}
+
+	b.noteLaneTurn(42, 555, laneSess.ID)
+	if err := b.SaveMessageMap(42, 7, 555, 900, "and the hotel?", "Booked."); err != nil {
+		t.Fatal(err)
+	}
+	mm, err := b.GetMessageMapByBotMsg(42, 900)
+	if err != nil || mm == nil || mm.SessionID != laneSess.ID {
+		t.Fatalf("message map = %+v, %v; want the lane's session", mm, err)
+	}
+	if th := b.SessionThreadID(42, mm.SessionID); th != 7 {
+		t.Errorf("reaction reply thread = %d, want the real thread 7", th)
+	}
+	// Every chunk of a long reply maps to the lane, not only the first.
+	b.SaveMessageMap(42, 7, 555, 902, "and the hotel?", "…chunk 2")
+	if mm3, _ := b.GetMessageMapByBotMsg(42, 902); mm3 == nil || mm3.SessionID != laneSess.ID {
+		t.Errorf("second chunk maps to %+v, want the lane's session", mm3)
+	}
+	// Without a noted lane turn, the thread's own session is used.
+	b.SaveMessageMap(42, 7, 556, 901, "hi", "hello")
+	if mm2, _ := b.GetMessageMapByBotMsg(42, 901); mm2 == nil || mm2.SessionID == laneSess.ID {
+		t.Errorf("a general turn must map to the thread's session: %+v", mm2)
+	}
+}
+
+func TestLaneRecentBlockFormat(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.SaveSession(42, 0, "general")
+	g, _ := st.GetSession(42, 0)
+	st.LogMessage(g.ID, "user", "we land at 3pm")
+	st.LogMessage(g.ID, "assistant", "noted, I will plan pickup")
+	lane, _ := st.LaneSessionThread(42, 0, "trip")
+	block := (&Bridge{store: st}).laneRecentBlock(42, 0, lane)
+	for _, want := range []string{"[Recent in this chat, outside this lane", " them]: we land at 3pm", " you]: noted"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("block missing %q:\n%s", want, block)
+		}
+	}
+	if (&Bridge{store: st}).laneRecentBlock(42, 0, 0) != "" {
+		t.Error("the general session missed nothing here")
+	}
+}
+
+// The live order: the turn's own message is logged into the lane session
+// right after the block is built. Built first, the block still carries what
+// the lane missed (the reviewer's repro of the always-empty block).
+func TestLaneRecentBlockBeforeOwnMessage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.SaveSession(42, 0, "general")
+	g, _ := st.GetSession(42, 0)
+	st.LogMessage(g.ID, "user", "we land at 3pm")
+	lane, _ := st.LaneSessionThread(42, 0, "trip")
+	st.SaveSession(42, lane, "lane")
+	ls, _ := st.GetSession(42, lane)
+	b := &Bridge{store: st}
+	block := b.laneRecentBlock(42, 0, lane) // what the turn function does before logging
+	st.LogMessage(ls.ID, "user", "book the hotel")
+	if !strings.Contains(block, "we land at 3pm") {
+		t.Fatalf("block built before the log must carry the general message: %q", block)
+	}
+	if after := b.laneRecentBlock(42, 0, lane); after != "" {
+		t.Errorf("after the lane speaks, nothing is missed: %q", after)
+	}
+}

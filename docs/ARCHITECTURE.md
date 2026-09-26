@@ -374,6 +374,11 @@ key, session row, rotation, prefix hash and compaction. The real thread is
 used for delivery, transcript, message maps and the shadow. Acted-on
 decisions are logged with `source = lane`.
 
+For continuity, a lane turn gets the thread's messages that its session
+missed from the thread's other sessions. The message map records the
+answering session, so reactions and regenerate follow the lane. `/new`
+resets the thread's lanes too.
+
 ## Weekly review and suggestions
 
 Once a week (`review.cron`, default Wednesday 10:30), each agent that has

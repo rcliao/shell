@@ -295,3 +295,65 @@ func (s *Store) RealThread(chatID, sessThread int64) int64 {
 	}
 	return t
 }
+
+// LaneThreadsOf returns the session threads of every lane allocated for a
+// real chat thread (R1).
+func (s *Store) LaneThreadsOf(chatID, threadID int64) ([]int64, error) {
+	rows, err := s.db.Query(`SELECT session_thread_id FROM lane_sessions WHERE chat_id = ? AND thread_id = ?`, chatID, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var t int64
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ThreadMessage is one message of a chat thread, from any of its sessions.
+type ThreadMessage struct {
+	Role string
+	At   time.Time
+	Text string
+}
+
+// RecentOutsideSession returns, oldest first, the latest messages of a real
+// thread that were said in its OTHER sessions (the general one and other
+// lanes) after this session's own last message — what a lane session missed.
+// A session with no messages yet looks back at most `fallback`.
+func (s *Store) RecentOutsideSession(chatID, realThread, sessThread int64, limit int, fallback time.Duration) ([]ThreadMessage, error) {
+	// Cut off by message id, not time: ids are global and strictly ordered,
+	// while created_at has one-second resolution.
+	since := time.Now().Add(-fallback).UTC()
+	var lastID int64
+	_ = s.db.QueryRow(`SELECT COALESCE(MAX(m.id), 0) FROM messages m JOIN sessions s ON s.id = m.session_id
+		WHERE s.chat_id = ? AND s.message_thread_id = ?`, chatID, sessThread).Scan(&lastID)
+	rows, err := s.db.Query(`SELECT m.role, m.created_at, m.content FROM messages m JOIN sessions s ON s.id = m.session_id
+		WHERE s.chat_id = ? AND s.message_thread_id != ?
+		  AND (s.message_thread_id = ? OR s.message_thread_id IN
+		       (SELECT session_thread_id FROM lane_sessions WHERE chat_id = ? AND thread_id = ?))
+		  AND m.role IN ('user', 'assistant') AND m.id > ? AND m.created_at >= ?
+		  AND substr(ltrim(m.content), 1, 1) != '['
+		ORDER BY m.id DESC LIMIT ?`, chatID, sessThread, realThread, chatID, realThread, lastID, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ThreadMessage
+	for rows.Next() {
+		var m ThreadMessage
+		if err := rows.Scan(&m.Role, &m.At, &m.Text); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
+}
