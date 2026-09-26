@@ -326,6 +326,13 @@ test chat can borrow another chat's projects (`{"42": <owner DM>}`), so
 `shell chat --chat 42` exercises real lanes without touching a real
 conversation. Chats not listed behave exactly as before.
 
+`{"*": 0}` turns lanes on for every chat, each using its own projects. This
+was the owner's call on 2026-09-26: "start with it all (especially group
+chat)". Two exceptions:
+- A project's own forum topic is not routed: the thread already decides its
+  context, and routing could only move a message out of its own project.
+- The system chat (0) is never routed.
+
 **The session thread and the delivery thread.** The turn function now keeps
 two thread ids:
 - the **delivery thread**, the real Telegram thread: transcript, message map,

@@ -680,7 +680,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Shadow router (P3.7): observes every user turn with a decision model,
 	// records, never acts. Silent when no TYPESAFE_API_KEY is present.
 	br.SetRouteStickyThreshold(cfg.Route.Sticky())
-	if lanes := cfg.Route.Lanes(); len(lanes) > 0 {
+	if lanes := cfg.Route.Lanes(); len(lanes) > 0 || cfg.Route.LanesAll() {
 		// R1: lanes pick the session in these chats only. Jev v2 is the
 		// router; without a key every message stays in general (safe).
 		var backend route.Backend
@@ -688,7 +688,8 @@ func New(cfg config.Config) (*Daemon, error) {
 			backend = route.Jev{D: jev, Variant: "v2"}
 		}
 		br.SetLanes(lanes, backend)
-		slog.Info("lanes: enabled", "chats", len(lanes), "router", backend != nil)
+		br.SetLanesAll(cfg.Route.LanesAll())
+		slog.Info("lanes: enabled", "chats", len(lanes), "all_chats", cfg.Route.LanesAll(), "router", backend != nil)
 	}
 	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
 		br.SetRouterShadow(decide.NewShadow(jev, st))

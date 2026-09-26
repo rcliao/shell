@@ -119,3 +119,31 @@ func TestScopedProjectWordingUnchanged(t *testing.T) {
 		t.Errorf("lane block = %q", lane)
 	}
 }
+
+func TestLanesAllChatsAndBoundTopics(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// A group with one project bound to its own topic (thread 11) and one not.
+	st.CreateProject(store.Project{Slug: "house", Title: "House hunt", Status: "active", ChatID: -100200300, MessageThreadID: 11})
+	st.CreateProject(store.Project{Slug: "trip", Title: "Trip", Status: "active", ChatID: -100200300})
+	b := &Bridge{store: st}
+	b.SetLanes(nil, &fakeLaneRouter{lane: "trip", conf: 0.9})
+	if _, _, on := b.laneForTurn(context.Background(), -100200300, 0, "flights?"); on {
+		t.Fatal("without lanes-all and no entry, lanes must be off")
+	}
+	b.SetLanesAll(true)
+	if th, block, on := b.laneForTurn(context.Background(), -100200300, 0, "flights?"); !on || th >= 0 || !strings.Contains(block, "trip") {
+		t.Errorf("lanes-all general thread: th=%d on=%v", th, on)
+	}
+	// The house project's own topic is untouched: the thread decides.
+	if th, block, on := b.laneForTurn(context.Background(), -100200300, 11, "any new listings?"); on || th != 11 || block != "" {
+		t.Errorf("bound topic: th=%d on=%v block=%q, want lanes off there", th, on, block)
+	}
+	// The system chat never routes.
+	if _, _, on := b.laneForTurn(context.Background(), 0, 0, "x"); on {
+		t.Error("system chat must not route")
+	}
+}
