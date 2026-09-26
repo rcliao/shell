@@ -169,12 +169,40 @@ func (b *Bridge) laneRecentBlock(chatID, realThread, sessThread int64) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// laneTurnTTL bounds how long a noted lane turn is kept: every chunk of a
+// long reply maps through it (so it is not consumed on first use), and a
+// turn that never produced a map row must not live forever.
+const laneTurnTTL = time.Hour
+
+type laneTurn struct {
+	sessionID int64
+	at        time.Time
+}
+
 // noteLaneTurn remembers which session answered a Telegram message, so the
-// message map (reactions, regenerate) points at the lane's session.
+// message map (reactions, regenerate) points at the lane's session for every
+// chunk of the reply. Old entries are swept here.
 func (b *Bridge) noteLaneTurn(chatID int64, msgID int, sessionID int64) {
-	if msgID != 0 {
-		b.laneTurnSess.Store(laneTurnKey(chatID, msgID), sessionID)
+	if msgID == 0 {
+		return
 	}
+	now := time.Now()
+	b.laneTurnSess.Range(func(k, v any) bool {
+		if now.Sub(v.(laneTurn).at) > laneTurnTTL {
+			b.laneTurnSess.Delete(k)
+		}
+		return true
+	})
+	b.laneTurnSess.Store(laneTurnKey(chatID, msgID), laneTurn{sessionID: sessionID, at: now})
+}
+
+// laneTurnSession returns the lane session that answered a message, if any.
+func (b *Bridge) laneTurnSession(chatID int64, msgID int) (int64, bool) {
+	v, ok := b.laneTurnSess.Load(laneTurnKey(chatID, msgID))
+	if !ok {
+		return 0, false
+	}
+	return v.(laneTurn).sessionID, true
 }
 
 func laneTurnKey(chatID int64, msgID int) string {

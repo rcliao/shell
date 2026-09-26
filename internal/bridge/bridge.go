@@ -880,12 +880,16 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	// chosen. sessThread is the session's thread; threadID stays the real
 	// one for delivery, transcript and message maps. Off → identical.
 	sessThread := threadID
-	var laneBlock string
+	var laneBlock, laneRecent string
 	laneOn := false
 	// Real turns only: heartbeats and other synthetic prompts start with "[".
 	if !strings.HasPrefix(userMsg, "[") && !isA2A && !isSystemSender(senderName) {
 		if st, block, on := b.laneForTurn(ctx, chatID, threadID, userMsg); on {
 			sessThread, laneBlock, laneOn = st, block, true
+			// Built NOW, before this turn's message is logged into the lane's
+			// session: the cutoff is the session's last message, and after
+			// the log that would be this very message (block always empty).
+			laneRecent = b.laneRecentBlock(chatID, threadID, sessThread)
 			key = process.SessionKey{ChatID: chatID, ThreadID: sessThread}
 		}
 	}
@@ -982,10 +986,8 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 			} else {
 				projectsBlock = b.buildProjectsBlock(chatID, threadID)
 			}
-			if laneOn {
-				if recent := b.laneRecentBlock(chatID, threadID, sessThread); recent != "" {
-					projectsBlock = strings.TrimSpace(projectsBlock + "\n\n" + recent)
-				}
+			if laneRecent != "" {
+				projectsBlock = strings.TrimSpace(projectsBlock + "\n\n" + laneRecent)
 			}
 		})
 		wg.Wait()

@@ -25,8 +25,8 @@ type ReactionContext struct {
 // bot's response message for the current session, including message content.
 func (b *Bridge) SaveMessageMap(chatID, threadID int64, userMessageID, botMessageID int, userMessage, botResponse string) error {
 	// A lane turn (R1) was answered by the lane's session, not the thread's.
-	if v, ok := b.laneTurnSess.LoadAndDelete(laneTurnKey(chatID, userMessageID)); ok {
-		return b.store.SaveMessageMap(chatID, userMessageID, botMessageID, v.(int64), userMessage, botResponse)
+	if sid, ok := b.laneTurnSession(chatID, userMessageID); ok {
+		return b.store.SaveMessageMap(chatID, userMessageID, botMessageID, sid, userMessage, botResponse)
 	}
 	sess, err := b.store.GetSession(chatID, threadID)
 	if err != nil || sess == nil {
