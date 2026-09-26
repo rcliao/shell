@@ -67,10 +67,11 @@ type Shadow struct {
 	decider  Decider
 	recorder Recorder
 	timeout  time.Duration
-	// OnWhichProject, when set, receives every successful which_project
-	// answer — the live input to the router (R0). Called on the shadow's
-	// goroutine after the rows are recorded.
-	OnWhichProject func(t Turn, choice string, confidence float64, latency time.Duration)
+	// OnWhichProject, when set, receives every successful lane answer — the
+	// live input to the router (R0) — with the question id (which_project,
+	// which_project_v2). Called on the shadow's goroutine after the rows are
+	// recorded.
+	OnWhichProject func(t Turn, question, choice string, confidence float64, latency time.Duration)
 }
 
 func NewShadow(d Decider, r Recorder) *Shadow {
@@ -121,8 +122,10 @@ func (s *Shadow) Observe(t Turn) {
 			}
 		}
 		if err == nil && s.OnWhichProject != nil {
-			if a, ok := res.Answers["which_project"]; ok && a.Choice != "" {
-				s.OnWhichProject(t, a.Choice, a.Confidence, res.Latency)
+			for _, qid := range []string{"which_project", "which_project_v2"} {
+				if a, ok := res.Answers[qid]; ok && a.Choice != "" {
+					s.OnWhichProject(t, qid, a.Choice, a.Confidence, res.Latency)
+				}
 			}
 		}
 		if err != nil {
@@ -154,6 +157,9 @@ func (s *Shadow) questions(t Turn) (map[string]Question, bool) {
 	q := map[string]Question{}
 	if len(t.Projects) > 0 {
 		q["which_project"] = WhichProjectQuestion(t.Projects)
+		// v2 rides in the same call (no second request): v1 stays recorded
+		// for the 9/28 verdict, v2 feeds the router's jev-v2 backend.
+		q["which_project_v2"] = WhichProjectQuestionV2(t.Projects)
 	}
 	peer := strings.Contains(t.Message[:min(len(t.Message), 200)], PeerTurnMarker)
 	if peer {
@@ -190,6 +196,20 @@ func WhichProjectQuestion(projects []Project) Question {
 	return Question{Type: "choice",
 		Instructions: "Which ongoing family project, if any, is this message about? Choose none unless the message is clearly about one of them.",
 		Criteria:     crit}
+}
+
+// WhichProjectQuestionV2 is a replay-only candidate wording. v1's "choose
+// none unless clearly about one" made the first 14-day replay precise but
+// blind: 100% of its project picks were right, yet it found only 28% of the
+// messages a judge filed under a project, mostly meal logs sent to a meal
+// and health log project. v2 says what "belongs" means. It is scored
+// offline first; the live shadow keeps v1 until a replay says otherwise.
+func WhichProjectQuestionV2(projects []Project) Question {
+	q := WhichProjectQuestion(projects)
+	q.Instructions = "Which of these ongoing projects does this message belong to? A message belongs to a project " +
+		"when it feeds or continues that project's work — an entry for a log, a detail for a plan, a follow-up to it — " +
+		"even if it never names the project. Choose none for conversation that serves no listed project."
+	return q
 }
 
 // ShadowState is the state the shadow sends for a message (exported for

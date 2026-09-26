@@ -95,3 +95,18 @@ func TestJudgePromptAndParse(t *testing.T) {
 		t.Error("output without an array must be an error")
 	}
 }
+
+func TestJevVariantNameAndQuestion(t *testing.T) {
+	f := &fakeDecider{}
+	j := Jev{D: f, Variant: "v2"}
+	if j.Name() != "jev-v2" {
+		t.Errorf("name = %q", j.Name())
+	}
+	j.Choose(context.Background(), Input{Text: "x", Candidates: []Candidate{{Lane: "health", Title: "h"}}})
+	if !strings.Contains(f.got["which_project"].Instructions, "belongs to a project") {
+		t.Errorf("v2 question not used: %q", f.got["which_project"].Instructions)
+	}
+	if _, ok := f.got["which_project"].Criteria["none"]; !ok {
+		t.Error("v2 keeps the same criteria")
+	}
+}
