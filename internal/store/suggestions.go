@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -227,4 +228,22 @@ func (s *Store) FeedbackCounts(kind string, since time.Time) (map[string]int, er
 		out[v] = n
 	}
 	return out, rows.Err()
+}
+
+// ChatAudience is the audience of a suggestion posted into a chat (S1).
+func ChatAudience(chatID int64) string { return "chat:" + strconv.FormatInt(chatID, 10) }
+
+// ProposedFor returns proposed (not yet delivered) suggestions for one
+// audience, oldest first.
+func (s *Store) ProposedFor(audience string) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE status = ? AND audience = ? ORDER BY id`, SuggestionProposed, audience)
+}
+
+// OpenChatSuggestions returns suggestions delivered to a chat and not yet
+// decided, at most maxAge old — the ones its turns should know are pending.
+func (s *Store) OpenChatSuggestions(chatID int64, maxAge time.Duration) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE status = ? AND audience = ? AND delivered_at >= ? ORDER BY id`,
+		SuggestionDelivered, ChatAudience(chatID), time.Now().Add(-maxAge).UTC())
 }

@@ -62,13 +62,19 @@ func reviewScheduleMessage() string {
 }
 
 // registerReviewSchedule keeps exactly one live review schedule matching the
-// config. Enabled rows are unique by dedup key, disabled ones are not, so an
-// upsert alone would pile up a disabled row per restart and would never
-// switch a live row off; the existing row is reconciled first.
+// config.
 func registerReviewSchedule(st *store.Store, cronExpr, timezone string, enabled bool) {
-	existing, err := st.FindScheduleByDedupKey(ReviewDedupKey)
+	registerWeeklyEvent(st, ReviewDedupKey, "weekly review: suggestions to the owner", reviewScheduleMessage(), cronExpr, timezone, enabled)
+}
+
+// registerWeeklyEvent keeps exactly one live event schedule per dedup key,
+// matching the config. Enabled rows are unique by dedup key, disabled ones
+// are not, so an upsert alone would pile up a disabled row per restart and
+// would never switch a live row off; the existing row is reconciled first.
+func registerWeeklyEvent(st *store.Store, dedupKey, label, message, cronExpr, timezone string, enabled bool) {
+	existing, err := st.FindScheduleByDedupKey(dedupKey)
 	if err != nil {
-		slog.Warn("review: schedule lookup failed", "error", err)
+		slog.Warn("schedule lookup failed", "dedup_key", dedupKey, "error", err)
 		return
 	}
 	if existing != nil && existing.Enabled {
@@ -76,17 +82,17 @@ func registerReviewSchedule(st *store.Store, cronExpr, timezone string, enabled 
 			return // already right
 		}
 		if err := st.DisableSchedule(existing.ID); err != nil {
-			slog.Warn("review: disabling old schedule failed", "schedule_id", existing.ID, "error", err)
+			slog.Warn("disabling old schedule failed", "dedup_key", dedupKey, "schedule_id", existing.ID, "error", err)
 			return
 		}
-		slog.Info("review: schedule disabled", "schedule_id", existing.ID, "reason", "config changed or review off")
+		slog.Info("schedule disabled", "dedup_key", dedupKey, "schedule_id", existing.ID, "reason", "config changed or off")
 	}
 	if !enabled {
 		return
 	}
 	cron, err := scheduler.ParseCron(cronExpr)
 	if err != nil {
-		slog.Warn("review: cron parse failed", "cron", cronExpr, "error", err)
+		slog.Warn("cron parse failed", "dedup_key", dedupKey, "cron", cronExpr, "error", err)
 		return
 	}
 	loc := time.UTC
@@ -96,22 +102,22 @@ func registerReviewSchedule(st *store.Store, cronExpr, timezone string, enabled 
 		}
 	}
 	id, created, err := st.UpsertScheduleByKey(&store.Schedule{
-		Label:     "weekly review: suggestions to the owner",
-		Message:   reviewScheduleMessage(),
+		Label:     label,
+		Message:   message,
 		Schedule:  cronExpr,
 		Timezone:  timezone,
 		Type:      "cron",
 		Mode:      scheduler.ModeEvent,
 		NextRunAt: cron.Next(time.Now().In(loc)).UTC(),
 		Enabled:   true,
-		DedupKey:  ReviewDedupKey,
+		DedupKey:  dedupKey,
 	})
 	if err != nil {
-		slog.Warn("review: schedule registration failed", "error", err)
+		slog.Warn("schedule registration failed", "dedup_key", dedupKey, "error", err)
 		return
 	}
 	if created {
-		slog.Info("review: schedule registered", "schedule_id", id, "cron", cronExpr)
+		slog.Info("schedule registered", "dedup_key", dedupKey, "schedule_id", id, "cron", cronExpr)
 	}
 }
 
@@ -327,7 +333,9 @@ Do three things, in this order.
 // deliver sends the owner the summary and every suggestion not yet
 // delivered (capped), then marks them delivered.
 func (d reviewDeps) deliver(summary string) (int, error) {
-	pending, err := d.store.ListSuggestions([]string{store.SuggestionProposed}, 50)
+	// Owner-addressed only: a chat retro's suggestion (S1) is posted into its
+	// chat, never to the owner's DM.
+	pending, err := d.store.ProposedFor("owner")
 	if err != nil {
 		return 0, err
 	}

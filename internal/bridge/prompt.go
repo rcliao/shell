@@ -270,11 +270,26 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessT
 		}
 	}
 
+	// S1: a suggestion posted into this chat and not yet answered. The
+	// people here may answer it at any turn; the agent records it.
+	if chatID != 0 && b.store != nil {
+		if open, err := b.store.OpenChatSuggestions(chatID, openChatSuggestionAge); err == nil {
+			for _, sg := range open {
+				blocks = append(blocks, fmt.Sprintf("[Open suggestion #%d to this chat (%s): %s — if someone here answers it, record their answer with shell_suggestion(action=decide, id=%d, status=accepted|declined, note=their words)]",
+					sg.ID, sg.DeliveredAt.Local().Format("Mon Jan 2"), sg.Title, sg.ID))
+			}
+		}
+	}
+
 	if len(blocks) == 0 {
 		return ""
 	}
 	return strings.Join(blocks, "\n")
 }
+
+// openChatSuggestionAge is how long an unanswered chat suggestion stays in
+// the chat's turns.
+const openChatSuggestionAge = 14 * 24 * time.Hour
 
 // buildCarryForwardBlock returns the "Previously in this chat" + relevant-
 // memory-pack block for the first turn of a new generation. Returns empty

@@ -230,3 +230,23 @@ func TestLaneRecentBlockBeforeOwnMessage(t *testing.T) {
 		t.Errorf("after the lane speaks, nothing is missed: %q", after)
 	}
 }
+
+// A suggestion posted into a chat stays visible to that chat's turns until
+// someone answers it, so the agent there can record the answer.
+func TestOpenChatSuggestionLine(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	id, _ := st.CreateSuggestion(store.Suggestion{Title: "要不要每週日做菜單？", Change: "x", Audience: store.ChatAudience(-100200300)})
+	st.MarkSuggestionsDelivered([]int64{id})
+	b := &Bridge{store: st}
+	got := b.buildPerTurnBlocks(context.Background(), -100200300, 0, 0, "好啊")
+	if !strings.Contains(got, "[Open suggestion #") || !strings.Contains(got, "要不要每週日做菜單？") || !strings.Contains(got, "action=decide") {
+		t.Errorf("per-turn blocks = %q", got)
+	}
+	if other := b.buildPerTurnBlocks(context.Background(), 42, 0, 0, "hi"); strings.Contains(other, "Open suggestion") {
+		t.Error("another chat must not see it")
+	}
+}

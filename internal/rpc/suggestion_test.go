@@ -63,3 +63,20 @@ func TestSuggestionDecideDisabledWithoutOwner(t *testing.T) {
 		t.Errorf("decide with no owner configured = %d, want 403", code)
 	}
 }
+
+func TestChatSuggestionDecidedOnlyInItsChat(t *testing.T) {
+	s, st := newProjectTestServer(t)
+	s.ownerChatID = 42
+	_, out := postSuggestion(t, s, map[string]any{"action": "create", "title": "t", "change": "c", "for_chat": -100200300})
+	id := out["id"]
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "decide", "chat_id": 42, "id": id, "status": "accepted"}); code != http.StatusForbidden {
+		t.Errorf("the owner's chat cannot decide a family chat's suggestion: %d", code)
+	}
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "decide", "chat_id": -100200300, "id": id, "status": "accepted", "note": "好"}); code != http.StatusOK {
+		t.Fatalf("its own chat must decide it: %d", code)
+	}
+	got, _ := st.GetSuggestion(int64(id.(float64)))
+	if got.DecidedBy != "chat" || got.Note != "好" || got.Audience != store.ChatAudience(-100200300) {
+		t.Errorf("stored = %+v", got)
+	}
+}

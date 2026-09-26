@@ -25,6 +25,8 @@ type SuggestionRequest struct {
 	Status   string `json:"status"` // decide: accepted | declined | done
 	Note     string `json:"note"`
 	All      bool   `json:"all"`
+	// ForChat files a suggestion addressed to a chat (S1) instead of the owner.
+	ForChat int64 `json:"for_chat"`
 }
 
 func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +45,11 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "title and change are required")
 			return
 		}
-		id, err := s.store.CreateSuggestion(store.Suggestion{Title: req.Title, Evidence: req.Evidence, Change: req.Change})
+		sg := store.Suggestion{Title: req.Title, Evidence: req.Evidence, Change: req.Change}
+		if req.ForChat != 0 {
+			sg.Audience = store.ChatAudience(req.ForChat)
+		}
+		id, err := s.store.CreateSuggestion(sg)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -64,19 +70,30 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"suggestions": list})
 
 	case "decide":
-		if s.ownerChatID == 0 || req.ChatID != s.ownerChatID {
-			writeError(w, http.StatusForbidden, "decisions are recorded only in the owner's chat, from the owner's own words")
-			return
-		}
 		if req.ID == 0 || req.Status == "" {
 			writeError(w, http.StatusBadRequest, "id and status are required")
+			return
+		}
+		// Owner suggestions are decided in the owner's chat; a chat's own
+		// suggestion (S1) in that chat, from the people it was posted to.
+		by := ""
+		if cur, err := s.store.GetSuggestion(req.ID); err == nil && cur != nil {
+			switch {
+			case cur.Audience == store.ChatAudience(req.ChatID) && req.ChatID != 0:
+				by = "chat"
+			case cur.Audience == "owner" && s.ownerChatID != 0 && req.ChatID == s.ownerChatID:
+				by = "owner"
+			}
+		}
+		if by == "" {
+			writeError(w, http.StatusForbidden, "a decision is recorded only where the suggestion was sent (the owner's chat, or the chat it was posted to), from the people there")
 			return
 		}
 		if req.Status == store.SuggestionWithdrawn {
 			writeError(w, http.StatusBadRequest, "use action=withdraw to withdraw your own suggestion")
 			return
 		}
-		if err := s.store.DecideSuggestion(req.ID, req.Status, "owner", req.Note); err != nil {
+		if err := s.store.DecideSuggestion(req.ID, req.Status, by, req.Note); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
