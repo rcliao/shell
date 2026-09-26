@@ -213,7 +213,10 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 		if len(p) > 12 {
 			p = append(p[:12], fmt.Sprintf("(and %d more)", len(p)-12))
 		}
-		section("Your older proposals (loop:proposals, never delivered to anyone)", "- "+strings.Join(p, "\n- "))
+		// Named bluntly: the first live review (2026-09-25) skipped filing
+		// because "my open proposals already cover it", but these were never
+		// in front of anyone.
+		section("Your older proposals in loop:proposals — NOT in front of the owner; nobody has read them", "- "+strings.Join(p, "\n- "))
 	}
 
 	if refl, err := d.store.ListReflections(3); err == nil {
@@ -232,8 +235,9 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 
 func reviewPrompt(agent, evidence string) string {
 	return fmt.Sprintf(`[Weekly review — %s]
-This is your weekly review, a system turn: nobody reads your reply except the
-owner summary below. Evidence about your past week:
+This is your weekly review, a system turn. Your final reply is sent to your
+owner verbatim, as the summary above your suggestions. Evidence about your
+past week:
 
 %s
 Do three things, in this order.
@@ -248,10 +252,16 @@ Do three things, in this order.
    a short title, the evidence (quote the numbers above), and ONE concrete
    change. Filing is the only way a suggestion exists; writing it in your reply
    does not file it. Do not re-file one the owner declined unless you have new
-   evidence, and say what is new. Filing nothing is a fine answer.
+   evidence, and say what is new.
+   Your older proposals above are NOT a backlog anyone is working: the owner
+   has never seen them. If one still matters, file it now as a suggestion
+   (it counts toward the limit). "Already covered by my proposals" is not a
+   reason to file nothing. Filing nothing is fine only when nothing matters.
 
-3. REPLY — 3 to 6 plain lines for the owner: what you changed yourself, and
-   in one line why each suggestion matters. No preamble.`, agent, evidence, reviewMaxAsks)
+3. REPLY — your whole reply goes to the owner as written, so it is ONLY
+   3 to 6 plain lines: what you changed yourself, and in one line why each
+   suggestion matters. No preamble, no headings, no "Do:"/"Ask:" labels, no
+   narration of this review.`, agent, evidence, reviewMaxAsks)
 }
 
 // deliver sends the owner the summary and every suggestion not yet
