@@ -341,6 +341,11 @@ func testBridgeWithMemory(t *testing.T) *Bridge {
 	t.Cleanup(func() { s.Close() })
 
 	memPath := filepath.Join(dir, "memory.db")
+	// No embedding model in bridge tests: they check what the bridge stores,
+	// not vector search, and the local (gomlx) embedder intermittently hung
+	// CI for 10 minutes (TestHandleReaction_Remember_WithContext, 2 of ~10
+	// runs, 2026-09-25/26).
+	t.Setenv("GHOST_EMBED_PROVIDER", "none")
 	mem, err := memory.New(memPath, 2000, nil, 500, nil, 3000, nil, nil)
 	if err != nil {
 		t.Fatalf("open memory: %v", err)

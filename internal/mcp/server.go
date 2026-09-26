@@ -46,7 +46,10 @@ shell_suggestion — the suggestion loop with your owner. In your weekly
 review, file each change you want a human to make with action=create (title,
 the evidence it rests on, one concrete change); it reaches the owner when the
 review ends. In the owner's chat, when the owner answers one ("accept 12",
-"decline 12 because …"), record it with action=decide in their words.
+"decline 12 because …"), record it with action=decide in their words. A
+chat retro files one for a chat with for_chat=<id>; when someone in that chat
+answers it (you will see an "[Open suggestion #N to this chat]" line), record
+it there the same way.
 action=list shows what is open and what was decided.
 
 shell_lane — when the message you are answering clearly belongs to one of this
@@ -286,6 +289,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"status":   prop("string", "decide: accepted, declined or done"),
 			"note":     prop("string", "The owner's reason, in their words (decide), or yours (withdraw)"),
 			"all":      prop("boolean", "list: include decided suggestions"),
+			"for_chat": prop("integer", "create: address the suggestion to this chat (weekly chat retro) instead of your owner"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		var p struct {
@@ -297,6 +301,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			Status   string `json:"status"`
 			Note     string `json:"note"`
 			All      bool   `json:"all"`
+			ForChat  int64  `json:"for_chat"`
 		}
 		if err := unmarshalArgs(req, &p); err != nil {
 			return errResult(err.Error()), nil
@@ -307,6 +312,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 		result, err := client.call(ctx, "/suggestion", map[string]any{
 			"action": p.Action, "chat_id": currentChatID(), "id": p.ID, "title": p.Title,
 			"evidence": p.Evidence, "change": p.Change, "status": p.Status, "note": p.Note, "all": p.All,
+			"for_chat": p.ForChat,
 		})
 		if err != nil {
 			return errResult(err.Error()), nil

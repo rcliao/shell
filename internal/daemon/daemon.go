@@ -1112,6 +1112,28 @@ func New(cfg config.Config) (*Daemon, error) {
 			registerReviewSchedule(st, cfg.Review.ReviewCron(), cfg.Scheduler.Timezone,
 				!cfg.Review.Disabled && cfg.Agent.OwnerChatID != 0)
 		}
+
+		// Weekly chat retro (S1): at most one suggestion posted into each
+		// configured chat.
+		wireChatRetro(sched, chatRetroDeps{
+			store:     st,
+			agentName: reviewAgent,
+			chats:     cfg.Review.ChatRetroChats,
+			runTurn: func(ctx context.Context, chatID int64, prompt string) (string, error) {
+				// One system session per chat: never share a session across
+				// chats, or one chat's week would shape another's suggestion.
+				resp, err := syntheticTurn(ctx, br, 0, chatRetroThread(chatID), prompt, reviewSender)
+				if err != nil {
+					return "", err
+				}
+				return resp.Text, nil
+			},
+			notify: func(chatID int64, text string) error { return tgTransport.NotifyButtons(chatID, 0, text, nil) },
+		})
+		if cfg.Scheduler.Enabled {
+			registerChatRetroSchedule(st, cfg.Review.ChatRetroCadence(), cfg.Scheduler.Timezone,
+				!cfg.Review.Disabled && len(cfg.Review.ChatRetroChats) > 0)
+		}
 	}
 
 	d := &Daemon{

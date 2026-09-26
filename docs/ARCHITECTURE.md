@@ -437,6 +437,20 @@ stored. `shell route report` scores each backend against the strongest label,
 next to the always-general baseline. Design:
 `docs/DESIGN-ROUTER-AND-SUGGESTIONS.md` (R0).
 
+### Weekly chat retro (S1)
+
+For each chat in `review.chat_retro_chats`, weekly (`review.chat_retro_cron`,
+default Sunday 19:30), there is an `agent.chat_retro` event. The agent reads
+its week in that chat, grouped by lane, in a system turn; its retro is never
+posted. It may file one suggestion `for_chat` (`audience = chat:<id>`),
+written in the chat's language. The harness posts it into the chat's main
+thread, and extras are withdrawn.
+
+While the suggestion is open, that chat's turns carry an
+`[Open suggestion #N …]` line. The agent records the family's answer with
+`shell_suggestion(decide)`, which is allowed in that chat, with
+`decided_by = chat`. The owner review delivers only `owner` suggestions.
+
 ## Shadow Router
 
 When the `TYPESAFE_API_KEY` secret resolves (secret store, then

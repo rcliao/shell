@@ -94,6 +94,19 @@ type ReviewConfig struct {
 	Disabled bool `json:"disabled"`
 	// Cron is the cadence, in scheduler.timezone. Default Wednesday 10:30.
 	Cron string `json:"cron"`
+	// ChatRetroChats are the chats that get a weekly retro ending in at most
+	// one suggestion posted into the chat (S1). Empty = off.
+	ChatRetroChats []int64 `json:"chat_retro_chats"`
+	// ChatRetroCron is the chat retro cadence. Default Sunday 19:30.
+	ChatRetroCron string `json:"chat_retro_cron"`
+}
+
+// ChatRetroCadence returns the chat retro cron or the default.
+func (r ReviewConfig) ChatRetroCadence() string {
+	if r.ChatRetroCron != "" {
+		return r.ChatRetroCron
+	}
+	return "30 19 * * 0"
 }
 
 // ReviewCron returns the configured cadence or the default.

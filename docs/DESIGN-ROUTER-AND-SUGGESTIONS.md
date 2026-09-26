@@ -449,6 +449,47 @@ emoji (👍 go, 👎 stop, 🔄 regenerate).
 - CLI `shell suggestions [list|decide <id> accept|decline|done [--note]|review-now]`.
 - Config `review.enabled` (default on) and `review.cron`.
 
+## S1 build spec (2026-09-26)
+
+**What it is.** A weekly retro for a family chat, which ends in at most one
+suggestion posted into that chat.
+
+**Trigger.** An `agent.chat_retro` event on the durable queue, scheduled
+weekly with dedup key `agent:chat-retro`. The cadence is `review.chat_retro_cron`
+(default Sunday 19:30), and it covers the chats in `review.chat_retro_chats`
+(empty means off).
+
+**The turn.** One system turn per chat, on the system chat, so the family
+chat's own session is not touched. Each chat's retro runs in **its own**
+system session (`chatRetroThread`), so one chat's week never shapes another's
+suggestion. The evidence is the chat's human messages
+from the last 7 days, grouped by the lane they were routed to (per lane: a
+count and the latest few messages, clipped), and the suggestions already
+open in that chat. The agent writes a short retro for itself, then either
+files nothing or files ONE suggestion with
+`shell_suggestion(action=create, for_chat=<id>)`. The suggestion is written
+in the chat's language, including how to answer it.
+
+**Delivery.** The harness posts that suggestion (title and change) into the
+chat's main thread and marks it delivered. The agent's retro text is never
+posted.
+
+Only a suggestion filed during this chat's own turn is posted. Strays and
+extras are withdrawn. A chat that already had a suggestion posted in the last
+6 days is skipped, so any re-run posts nothing twice. After one chat has run,
+a busy session on a later chat skips that chat for the week and does not
+fail the task.
+
+**Answers.** While a chat suggestion is open (delivered, undecided, at most
+14 days old), every turn in that chat carries one line:
+`[Open suggestion #N to this chat: …]`. When a family member answers it,
+the agent records the answer with `shell_suggestion(action=decide)`, which is
+allowed in the suggestion's own chat, and `decided_by` is set to `chat`. The
+outcome comes back to the agent in the next retro and review.
+
+**Audience.** `owner` (S0) or `chat:<id>` (S1). The owner review delivers
+only `owner` suggestions.
+
 ## Decisions (owner, 2026-09-25)
 
 1. **Visible lanes are fine, but do not design around Telegram.** Start
