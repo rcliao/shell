@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
 )
@@ -24,7 +26,7 @@ func TestChatRetroGroupsByLaneAndPostsOne(t *testing.T) {
 	var prompt string
 	var posted []string
 	d := chatRetroDeps{store: st, agentName: "a", chats: []int64{chat},
-		runTurn: func(_ context.Context, p string) (string, error) {
+		runTurn: func(_ context.Context, _ int64, p string) (string, error) {
 			prompt = p
 			st.CreateSuggestion(store.Suggestion{Title: "early", Change: "x", Audience: store.ChatAudience(chat)})
 			st.CreateSuggestion(store.Suggestion{Title: "要不要…", Change: "回覆 好 或 不用", Audience: store.ChatAudience(chat)})
@@ -60,7 +62,7 @@ func TestChatRetroSkipsQuietChats(t *testing.T) {
 	st := openReviewStore(t)
 	ran := false
 	d := chatRetroDeps{store: st, chats: []int64{42},
-		runTurn: func(context.Context, string) (string, error) { ran = true; return "", nil },
+		runTurn: func(context.Context, int64, string) (string, error) { ran = true; return "", nil },
 		notify:  func(int64, string) error { return nil }}
 	if res, err := d.handle(context.Background(), scheduler.LeasedTask{}); err != nil || ran || !strings.Contains(res, "no messages") {
 		t.Fatalf("res=%q err=%v ran=%v", res, err, ran)
@@ -78,5 +80,63 @@ func TestOwnerReviewIgnoresChatSuggestions(t *testing.T) {
 	d.handle(context.Background(), scheduler.LeasedTask{})
 	if strings.Contains(sent, "for the family") {
 		t.Errorf("owner DM got a chat suggestion: %q", sent)
+	}
+}
+
+// Chat 1 posts, chat 2 finds the session busy: the task must NOT fail (a
+// retry would re-run chat 1 and post into it twice).
+func TestChatRetroBusyAfterAPostDoesNotReplay(t *testing.T) {
+	st := openReviewStore(t)
+	for _, c := range []int64{-1, -2} {
+		st.SaveSession(c, 0, "c")
+		ss, _ := st.GetSession(c, 0)
+		st.LogMessage(ss.ID, "user", "hello")
+	}
+	calls := 0
+	d := chatRetroDeps{store: st, chats: []int64{-1, -2},
+		runTurn: func(context.Context, int64, string) (string, error) {
+			calls++
+			if calls == 2 {
+				return "", fmt.Errorf("wrapped: %w", process.ErrSessionBusy)
+			}
+			st.CreateSuggestion(store.Suggestion{Title: "t", Change: "c", Audience: store.ChatAudience(-1)})
+			return "", nil
+		},
+		notify: func(int64, string) error { return nil }}
+	res, err := d.handle(context.Background(), scheduler.LeasedTask{})
+	if err != nil || !strings.Contains(res, "skipped this week") {
+		t.Fatalf("res=%q err=%v: a busy second chat must not fail the task", res, err)
+	}
+}
+
+// A re-run of the task (queue retry, manual trigger) posts nothing twice, and
+// a suggestion filed for another chat is never posted here.
+func TestChatRetroIdempotentAndOwnTurnOnly(t *testing.T) {
+	st := openReviewStore(t)
+	st.SaveSession(-1, 0, "c")
+	ss, _ := st.GetSession(-1, 0)
+	st.LogMessage(ss.ID, "user", "hello")
+	stray, _ := st.CreateSuggestion(store.Suggestion{Title: "stray from another turn", Change: "x", Audience: store.ChatAudience(-1)})
+	time.Sleep(1100 * time.Millisecond) // the stray predates this run's turn
+	posts := 0
+	d := chatRetroDeps{store: st, chats: []int64{-1},
+		runTurn: func(_ context.Context, chatID int64, _ string) (string, error) {
+			if chatRetroThread(chatID) <= 0 {
+				t.Error("retro sessions must be positive, never a lane")
+			}
+			st.CreateSuggestion(store.Suggestion{Title: "mine", Change: "c", Audience: store.ChatAudience(-1)})
+			return "", nil
+		},
+		notify: func(int64, string) error { posts++; return nil }}
+	d.handle(context.Background(), scheduler.LeasedTask{})
+	d.handle(context.Background(), scheduler.LeasedTask{}) // re-run
+	if posts != 1 {
+		t.Fatalf("posted %d times, want exactly once", posts)
+	}
+	if s, _ := st.GetSuggestion(stray); s.Status != store.SuggestionWithdrawn {
+		t.Errorf("a stray filed outside this chat's turn must be withdrawn, got %s", s.Status)
+	}
+	if chatRetroThread(-100200300) == chatRetroThread(-100200301) {
+		t.Error("distinct chats need distinct retro sessions")
 	}
 }

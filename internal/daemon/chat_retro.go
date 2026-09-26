@@ -32,8 +32,24 @@ type chatRetroDeps struct {
 	store     *store.Store
 	agentName string
 	chats     []int64
-	runTurn   func(ctx context.Context, prompt string) (string, error)
-	notify    func(chatID int64, text string) error
+	// runTurn runs the retro for one chat. It must use a session of its own
+	// per chat (see chatRetroThread): a shared system session would carry one
+	// chat's messages into another chat's suggestion.
+	runTurn func(ctx context.Context, chatID int64, prompt string) (string, error)
+	notify  func(chatID int64, text string) error
+}
+
+// chatRetroSpacing: a chat that got a suggestion this recently is skipped —
+// the idempotence guard that makes any re-run of the task post nothing twice.
+const chatRetroSpacing = 6 * 24 * time.Hour
+
+// chatRetroThread is the system-chat thread a chat's retro runs on: one
+// session per chat, never shared across chats (and positive, so never a lane).
+func chatRetroThread(chatID int64) int64 {
+	if chatID < 0 {
+		chatID = -chatID
+	}
+	return 1_000_000_000 + chatID%1_000_000_000
 }
 
 func chatRetroScheduleMessage() string {
@@ -51,10 +67,16 @@ func wireChatRetro(sched *scheduler.Scheduler, deps chatRetroDeps) {
 
 func (d chatRetroDeps) handle(ctx context.Context, _ scheduler.LeasedTask) (string, error) {
 	var done []string
-	for _, chatID := range d.chats {
+	for i, chatID := range d.chats {
 		res, err := d.retroOne(ctx, chatID)
 		if err != nil {
-			return "", err // only a turn that never started (session busy) gets here
+			// Session busy: the turn never started. Retrying the whole task
+			// is safe only if no earlier chat ran — otherwise a retry would
+			// re-run (and re-post into) that chat. Skip this chat this week.
+			if i == 0 {
+				return "", err
+			}
+			res = "skipped this week: " + err.Error()
 		}
 		done = append(done, fmt.Sprintf("%d: %s", chatID, res))
 	}
@@ -62,6 +84,13 @@ func (d chatRetroDeps) handle(ctx context.Context, _ scheduler.LeasedTask) (stri
 }
 
 func (d chatRetroDeps) retroOne(ctx context.Context, chatID int64) (string, error) {
+	if recent, err := d.store.OpenChatSuggestions(chatID, chatRetroSpacing); err == nil && len(recent) > 0 {
+		return "skipped: a suggestion is already open this week", nil
+	}
+	if d.postedRecently(chatID) {
+		return "skipped: a suggestion was posted this week", nil
+	}
+	started := time.Now().UTC()
 	since := time.Now().Add(-reviewWindow)
 	evidence, n := d.evidence(chatID, since)
 	if n == 0 {
@@ -69,14 +98,30 @@ func (d chatRetroDeps) retroOne(ctx context.Context, chatID int64) (string, erro
 	}
 	turnCtx, cancel := context.WithTimeout(ctx, reviewTurnTimeout)
 	defer cancel()
-	if _, err := d.runTurn(turnCtx, chatRetroPrompt(d.agentName, chatID, evidence)); err != nil {
+	if _, err := d.runTurn(turnCtx, chatID, chatRetroPrompt(d.agentName, chatID, evidence)); err != nil {
 		if errors.Is(err, process.ErrSessionBusy) {
 			return "", fmt.Errorf("chat retro turn: %w", err)
 		}
 		slog.Warn("chat retro: turn failed", "chat_id", chatID, "error", err)
 		return "turn failed: " + err.Error(), nil // never replay a turn that ran
 	}
-	return d.deliver(chatID)
+	return d.deliver(chatID, started), nil
+}
+
+// postedRecently: any suggestion delivered to this chat within the spacing,
+// decided or not.
+func (d chatRetroDeps) postedRecently(chatID int64) bool {
+	all, err := d.store.ListSuggestions(nil, 100)
+	if err != nil {
+		return false
+	}
+	aud := store.ChatAudience(chatID)
+	for _, s := range all {
+		if s.Audience == aud && s.DeliveredAt != nil && time.Since(*s.DeliveredAt) < chatRetroSpacing {
+			return true
+		}
+	}
+	return false
 }
 
 // evidence: the chat's human messages this week, grouped by lane (from the
@@ -178,24 +223,38 @@ was routed to:
 3. Reply with one line: what you filed, or "nothing".`, agent, kind, chatID, evidence, chatID)
 }
 
-// deliver posts the chat's newest proposed suggestion into the chat (main
-// thread) and withdraws any extra: one per chat per retro.
-func (d chatRetroDeps) deliver(chatID int64) (string, error) {
+// deliver posts the newest suggestion this chat's turn filed (created since
+// `started`) into the chat's main thread. Anything else proposed for the chat
+// — extras from this turn, strays filed during another chat's turn — is
+// withdrawn: one suggestion per chat per week, and only from its own retro.
+// Never returns an error: the turn ran, and a retry must not re-run it.
+func (d chatRetroDeps) deliver(chatID int64, started time.Time) string {
 	pending, err := d.store.ProposedFor(store.ChatAudience(chatID))
-	if err != nil || len(pending) == 0 {
-		return "no suggestion", err
+	if err != nil {
+		slog.Warn("chat retro: pending lookup failed", "chat_id", chatID, "error", err)
+		return "no suggestion (lookup failed)"
 	}
-	s := pending[len(pending)-1]
-	for _, extra := range pending[:len(pending)-1] {
-		_ = d.store.DecideSuggestion(extra.ID, store.SuggestionWithdrawn, "harness", "one suggestion per chat per week")
+	var post *store.Suggestion
+	for i := range pending {
+		if !pending[i].CreatedAt.Before(started.Add(-time.Second)) {
+			post = &pending[i] // newest from this turn wins (oldest first order)
+		}
 	}
-	text := "💡 " + strings.TrimSpace(s.Title) + "\n" + strings.TrimSpace(s.Change)
+	for _, s := range pending {
+		if post == nil || s.ID != post.ID {
+			_ = d.store.DecideSuggestion(s.ID, store.SuggestionWithdrawn, "harness", "one suggestion per chat per week, from its own retro")
+		}
+	}
+	if post == nil {
+		return "no suggestion"
+	}
+	text := "💡 " + strings.TrimSpace(post.Title) + "\n" + strings.TrimSpace(post.Change)
 	if err := d.notify(chatID, text); err != nil {
 		slog.Warn("chat retro: delivery failed", "chat_id", chatID, "error", err)
-		return "delivery failed (stays proposed): " + err.Error(), nil
+		return "delivery failed (stays proposed): " + err.Error()
 	}
-	if err := d.store.MarkSuggestionsDelivered([]int64{s.ID}); err != nil {
-		return "", err
+	if err := d.store.MarkSuggestionsDelivered([]int64{post.ID}); err != nil {
+		slog.Warn("chat retro: mark delivered failed", "chat_id", chatID, "id", post.ID, "error", err)
 	}
-	return fmt.Sprintf("suggestion #%d posted", s.ID), nil
+	return fmt.Sprintf("suggestion #%d posted", post.ID)
 }

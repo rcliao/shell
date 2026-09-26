@@ -1119,8 +1119,10 @@ func New(cfg config.Config) (*Daemon, error) {
 			store:     st,
 			agentName: reviewAgent,
 			chats:     cfg.Review.ChatRetroChats,
-			runTurn: func(ctx context.Context, prompt string) (string, error) {
-				resp, err := syntheticTurn(ctx, br, 0, 0, prompt, reviewSender)
+			runTurn: func(ctx context.Context, chatID int64, prompt string) (string, error) {
+				// One system session per chat: never share a session across
+				// chats, or one chat's week would shape another's suggestion.
+				resp, err := syntheticTurn(ctx, br, 0, chatRetroThread(chatID), prompt, reviewSender)
 				if err != nil {
 					return "", err
 				}

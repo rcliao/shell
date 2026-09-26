@@ -460,7 +460,9 @@ weekly with dedup key `agent:chat-retro`. The cadence is `review.chat_retro_cron
 (empty means off).
 
 **The turn.** One system turn per chat, on the system chat, so the family
-chat's own session is not touched. The evidence is the chat's human messages
+chat's own session is not touched. Each chat's retro runs in **its own**
+system session (`chatRetroThread`), so one chat's week never shapes another's
+suggestion. The evidence is the chat's human messages
 from the last 7 days, grouped by the lane they were routed to (per lane: a
 count and the latest few messages, clipped), and the suggestions already
 open in that chat. The agent writes a short retro for itself, then either
@@ -471,6 +473,12 @@ in the chat's language, including how to answer it.
 **Delivery.** The harness posts that suggestion (title and change) into the
 chat's main thread and marks it delivered. The agent's retro text is never
 posted.
+
+Only a suggestion filed during this chat's own turn is posted. Strays and
+extras are withdrawn. A chat that already had a suggestion posted in the last
+6 days is skipped, so any re-run posts nothing twice. After one chat has run,
+a busy session on a later chat skips that chat for the week and does not
+fail the task.
 
 **Answers.** While a chat suggestion is open (delivered, undecided, at most
 14 days old), every turn in that chat carries one line:
