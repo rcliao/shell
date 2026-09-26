@@ -33,15 +33,15 @@ agent sees the outcome at its next review.
 
 | Agent #id | Suggestion | Where |
 |---|---|---|
-| pikamini #1 | Working notes written before tool calls leak into family replies. Deliver only the final message. This also fixes the review summaries, which carry lines like "Filed. Now the DO step…" | `internal/process/protocol.go` (prefers all text over the final result) |
-| pikamini #2 | The CLI's synthetic API-error messages are relayed to Telegram as normal replies. Detect them; retry or alert instead | bridge reply path |
-| pikamini #3 | ghost `Context()` tag filters are a hard AND, which silently narrows recall. Make tags a scoring boost | ghost repo (`ContextParams.Tags`) |
-| umbreonmini #1 | The save checker does not count `plantlog`, the Google skill's writes, or `project doc-write` as writes. 3 of 4 flagged "confabulations" were real saves, and every OwnerEval number built on that checker was inflated | `isPersistenceTool` (write verify / OwnerEval) |
-| umbreonmini #2 | `shell-remember`, `shell-relay` and `shell-task` fail silently when the sandbox blocks the bridge socket, yet count as successful writes. They should exit non-zero and say why | `skills/*/scripts` |
+| pikamini #1 — **done** (PR #31; family asides were already filtered since 9/17, this fixed the review summaries) | Working notes written before tool calls leak into family replies. Deliver only the final message. This also fixes the review summaries, which carry lines like "Filed. Now the DO step…" | `internal/process/protocol.go` (prefers all text over the final result) |
+| pikamini #2 — **done** (PR #33) | The CLI's synthetic API-error messages are relayed to Telegram as normal replies. Detect them; retry or alert instead | bridge reply path |
+| pikamini #3 — open: ghost repo, needs routing there | ghost `Context()` tag filters are a hard AND, which silently narrows recall. Make tags a scoring boost | ghost repo (`ContextParams.Tags`) |
+| umbreonmini #1 — **done** (PR #32) | The save checker does not count `plantlog`, the Google skill's writes, or `project doc-write` as writes. 3 of 4 flagged "confabulations" were real saves, and every OwnerEval number built on that checker was inflated | `isPersistenceTool` (write verify / OwnerEval) |
+| umbreonmini #2 — **done** (PR #32) | `shell-remember`, `shell-relay` and `shell-task` fail silently when the sandbox blocks the bridge socket, yet count as successful writes. They should exit non-zero and say why | `skills/*/scripts` |
 
-Suggested order: pikamini #1 first (family-facing, and it also cleans up
-review delivery), then umbreonmini #1 and #2 (they make the metrics true),
-then pikamini #2, then pikamini #3 (a separate repo).
+Status 2026-09-25: four of five shipped the same day, and each was marked
+done so the agent sees it at its next review. pikamini #3 is in the ghost
+repo.
 
 ## Ideas
 
