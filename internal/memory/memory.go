@@ -512,9 +512,13 @@ func (m *Memory) InjectContext(ctx context.Context, chatID int64, userMsg, sende
 		go func() {
 			defer wg.Done()
 			result, chatErr = m.store.Context(fetchCtx, agentmemory.ContextParams{
-				NS:            prof.AgentNS,
-				Query:         userMsg,
-				Tags:          []string{chatTag(chatID)},
+				NS:    prof.AgentNS,
+				Query: userMsg,
+				Tags:  []string{chatTag(chatID)},
+				// A hard filter: this fetch is the chat's own slice of the
+				// budget (the untagged cross fetch below covers the rest).
+				// ghost's default became a boost (ghost #135).
+				TagMode:       "filter",
 				Budget:        chatBudget,
 				Scope:         sessionScopeFor(chatID),
 				ForUser:       sender,
