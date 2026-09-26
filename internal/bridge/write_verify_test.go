@@ -303,3 +303,35 @@ func TestNotionScriptWriteClassification(t *testing.T) {
 		}
 	}
 }
+
+// Script writes the checker missed, and reads of the same tools that must
+// not count (synthetic commands; shapes from the tool log).
+func TestScriptWriteClassification(t *testing.T) {
+	writes := []string{
+		`P=~/.shell/agents/a/workspace/bin/plantlog; $P fern "2026-09-22 watered"`,
+		`~/.shell/agents/a/workspace/bin/plantlog fern "watered today"`,
+		`~/.shell/skills/project/scripts/project doc-write trip --file /tmp/d.md --attribution "x"`,
+		`~/.shell/skills/google/scripts/google docs replace DOCID old new`,
+		`~/.shell/skills/google/scripts/google sheets append SHEETID "a,b"`,
+		`gog calendar create --title x --json --no-input --force`,
+		`ls; ~/.shell/agents/a/workspace/bin/plantlog fern "watered"`,
+	}
+	reads := []string{
+		`~/.shell/agents/a/workspace/bin/plantlog list 2>&1 | head -40`,
+		`~/.shell/agents/a/workspace/bin/plantlog fern -n "x" 2>&1 | head -3`,
+		`~/.shell/skills/google/scripts/google docs cat DOCID > $TMPDIR/doc.txt`,
+		`~/.shell/skills/google/scripts/google docs list-tabs DOCID`,
+		`gog docs cat DOCID --json`,
+		`ls -l ~/.shell/agents/a/workspace/bin/`,
+	}
+	for _, cmd := range writes {
+		if !isPersistenceTool(process.ToolCall{Name: "Bash", Input: map[string]any{"command": cmd}}) {
+			t.Errorf("write not classified as persistence: %q", cmd)
+		}
+	}
+	for _, cmd := range reads {
+		if isPersistenceTool(process.ToolCall{Name: "Bash", Input: map[string]any{"command": cmd}}) {
+			t.Errorf("read falsely classified as persistence: %q", cmd)
+		}
+	}
+}

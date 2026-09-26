@@ -221,8 +221,16 @@ func isPersistenceTool(tc process.ToolCall) bool {
 		cmd = strings.ToLower(cmd)
 		if strings.Contains(cmd, "shell-remember") ||
 			strings.Contains(cmd, "ghost put") ||
-			strings.Contains(cmd, "gog docs") {
+			strings.Contains(cmd, "project doc-write") {
 			return true
+		}
+		// Script writes the checker used to miss (an agent's own review,
+		// 2026-09-25: 3 of 4 flagged "claimed a save with no write" were real
+		// plantlog writes). Reads of the same tools must not count.
+		for _, seg := range expandToolVars(shellSegments(cmd)) {
+			if isPlantlogWrite(seg) || isGoogleWrite(seg) {
+				return true
+			}
 		}
 		// The notion skill script: only WRITE subcommands are persistence
 		// (get-page / query-db are reads and must not verify a save claim).
@@ -233,6 +241,81 @@ func isPersistenceTool(tc process.ToolCall) bool {
 				strings.Contains(cmd, "curl")
 		}
 		return false
+	}
+	return false
+}
+
+// shellSegments splits a command line at ; && || | and newlines, so one
+// invocation's arguments are judged on their own.
+func shellSegments(cmd string) []string {
+	return strings.FieldsFunc(strings.NewReplacer("&&", ";", "||", ";", "|", ";", "\n", ";").Replace(cmd),
+		func(r rune) bool { return r == ';' })
+}
+
+// expandToolVars resolves the `P=…/plantlog; $P fern "…"` form agents use for
+// repeated calls: a segment starting with $P (or ${P}) is rewritten to the
+// path assigned to P earlier in the same command line.
+func expandToolVars(segs []string) []string {
+	vars := map[string]string{}
+	out := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		t := strings.TrimSpace(seg)
+		if eq := strings.Index(t, "="); eq > 0 && !strings.ContainsAny(t[:eq], " \t$") {
+			vars[t[:eq]] = strings.Trim(strings.TrimSpace(t[eq+1:]), `"'`)
+		}
+		for name, val := range vars {
+			for _, ref := range []string{"$" + name, "${" + name + "}"} {
+				if strings.HasPrefix(t, ref+" ") {
+					t = val + t[len(ref):]
+				}
+			}
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// isPlantlogWrite: `plantlog <plant> "<entry>"` writes; `plantlog list` and a
+// -n dry run do not.
+func isPlantlogWrite(seg string) bool {
+	i := strings.Index(seg, "plantlog")
+	if i < 0 {
+		return false
+	}
+	args := strings.Fields(seg[i+len("plantlog"):])
+	if len(args) == 0 || args[0] == "list" {
+		return false
+	}
+	for _, a := range args {
+		if a == "-n" || a == "--dry-run" {
+			return false
+		}
+	}
+	return true
+}
+
+// googleWriteVerbs are the google skill / gog subcommands that change a doc,
+// sheet or calendar. cat, list-tabs, get and the like are reads.
+var googleWriteVerbs = map[string][]string{
+	"docs":     {"write", "insert", "replace", "append", "update", "create"},
+	"sheets":   {"update", "append", "write", "create"},
+	"calendar": {"create", "update", "add"},
+}
+
+// isGoogleWrite: `…/skills/google/scripts/google <service> <verb>` or
+// `gog <service> <verb>` with a write verb. (The old rule counted every
+// `gog docs` call, reads included.)
+func isGoogleWrite(seg string) bool {
+	f := strings.Fields(seg)
+	for i, w := range f {
+		if !(strings.HasSuffix(w, "/google") || w == "gog") || i+2 >= len(f) {
+			continue
+		}
+		for _, v := range googleWriteVerbs[f[i+1]] {
+			if f[i+2] == v {
+				return true
+			}
+		}
 	}
 	return false
 }

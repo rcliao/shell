@@ -35,7 +35,15 @@ d = {
 print(json.dumps(d))
 ")
 
-RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$BODY")
+RESP=$(curl -s --unix-socket "$SOCK" "$URL" -X POST -H "Content-Type: application/json" -d "$BODY") || RESP=""
+# An unreachable socket (the agent's sandbox blocks it) returns nothing: say
+# so and fail, instead of falling through to the success line with nothing
+# saved. The non-zero exit marks the tool call failed, so the save checker
+# does not count it as a write.
+if [ -z "$RESP" ]; then
+  echo "bridge socket unreachable (sandbox?): $SOCK — nothing was done. Retry outside the sandbox." >&2
+  exit 2
+fi
 
 if echo "$RESP" | grep -q '"error"'; then
   echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || echo "$RESP"
