@@ -2,7 +2,9 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/rcliao/shell/internal/route"
@@ -127,4 +129,54 @@ func (b *Bridge) realThread(chatID, threadID int64) int64 {
 		return threadID
 	}
 	return b.store.RealThread(chatID, threadID)
+}
+
+const (
+	// laneRecentLimit and laneRecentWindow bound the "missed in other lanes"
+	// block: enough to carry a conversation across a lane switch, not a
+	// transcript.
+	laneRecentLimit  = 8
+	laneRecentWindow = 12 * time.Hour
+	laneRecentRunes  = 300
+)
+
+// laneRecentBlock is what this lane's session missed: the latest messages of
+// the same real thread said in its other sessions (the general one, other
+// lanes) since this session last spoke. A brand-new lane gets the thread's
+// last few messages; a lane switched back into gets what happened meanwhile.
+// "" when nothing was missed.
+func (b *Bridge) laneRecentBlock(chatID, realThread, sessThread int64) string {
+	if b.store == nil {
+		return ""
+	}
+	msgs, err := b.store.RecentOutsideSession(chatID, realThread, sessThread, laneRecentLimit, laneRecentWindow)
+	if err != nil || len(msgs) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("[Recent in this chat, outside this lane — oldest first; for continuity, not to be answered]\n")
+	for _, m := range msgs {
+		who := "them"
+		if m.Role == "assistant" {
+			who = "you"
+		}
+		t := []rune(strings.Join(strings.Fields(m.Text), " "))
+		if len(t) > laneRecentRunes {
+			t = append(t[:laneRecentRunes], '…')
+		}
+		fmt.Fprintf(&sb, "[%s %s]: %s\n", m.At.Local().Format("15:04"), who, string(t))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// noteLaneTurn remembers which session answered a Telegram message, so the
+// message map (reactions, regenerate) points at the lane's session.
+func (b *Bridge) noteLaneTurn(chatID int64, msgID int, sessionID int64) {
+	if msgID != 0 {
+		b.laneTurnSess.Store(laneTurnKey(chatID, msgID), sessionID)
+	}
+}
+
+func laneTurnKey(chatID int64, msgID int) string {
+	return fmt.Sprintf("%d/%d", chatID, msgID)
 }

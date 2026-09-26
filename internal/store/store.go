@@ -1287,13 +1287,22 @@ func (s *Store) DeleteExchangeMessages(sessionID int64, userMessage, botResponse
 // the session for that specific topic is deleted. Pass -1 to delete ALL
 // topic sessions for the chat (used by /new and DeleteSession CLI).
 func (s *Store) DeleteSession(chatID, threadID int64) error {
+	return s.deleteSessions(chatID, threadID, threadID < 0)
+}
+
+// DeleteSessionThread deletes exactly one thread's session. Unlike
+// DeleteSession, a negative id is NOT "all topics": lane sessions (R1) live
+// on negative session threads, and resetting one must never wipe the chat.
+func (s *Store) DeleteSessionThread(chatID, threadID int64) error {
+	return s.deleteSessions(chatID, threadID, false)
+}
+
+func (s *Store) deleteSessions(chatID, threadID int64, allTopics bool) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-
-	allTopics := threadID < 0
 
 	var sessionFilter string
 	var sessionArgs []any

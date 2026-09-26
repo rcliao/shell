@@ -87,6 +87,16 @@ func (b *Bridge) Reset(ctx context.Context, chatID, threadID int64) (string, err
 	if err := b.store.DeleteSession(chatID, threadID); err != nil {
 		slog.Warn("failed to delete session from store", "error", err)
 	}
+	// A fresh start covers this thread's lanes too (R1). Exact deletes only:
+	// DeleteSession treats a negative thread as "every topic".
+	if lanes, err := b.store.LaneThreadsOf(chatID, threadID); err == nil {
+		for _, lt := range lanes {
+			b.proc.Kill(process.SessionKey{ChatID: chatID, ThreadID: lt})
+			if err := b.store.DeleteSessionThread(chatID, lt); err != nil {
+				slog.Warn("failed to delete lane session", "chat_id", chatID, "session_thread", lt, "error", err)
+			}
+		}
+	}
 
 	_, err := b.ensureSession(ctx, chatID, threadID)
 	if err != nil {

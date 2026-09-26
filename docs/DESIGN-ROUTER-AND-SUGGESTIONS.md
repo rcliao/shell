@@ -360,9 +360,20 @@ measured separately from the shadow.
 **Context.** A project lane gets that project's scoped `[Project]` block,
 the one a thread-bound project already gets.
 
-**Out of scope for R1.**
-- Commands (`/new`, `/status`) and mid-turn message absorption act on the
-  delivery thread, i.e. the `general` lane.
+**Continuity and controls (added 2026-09-26, after the lanes went live).**
+- A lane turn gets a `[Recent in this chat, outside this lane]` block: the
+  thread's latest messages from its other sessions since this session's last
+  message (at most 8, within 12 h, cut off by message id). A new lane starts
+  with the thread's last few messages, and a lane switched back into gets what
+  happened meanwhile.
+- The message map records the session that answered, so reactions and
+  regenerate act on the lane's exchange, and reaction replies go to the real
+  thread.
+- `/new` also resets the thread's lane sessions, using an exact delete:
+  `DeleteSession` treats a negative thread as "every topic".
+
+**Still out of scope.**
+- `/status` shows the general session.
 - Heartbeats list lane sessions as sessions of the chat.
 - Visible lanes (R3), and a model per lane (R2).
 

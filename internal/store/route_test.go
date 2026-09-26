@@ -85,3 +85,55 @@ func TestLaneSessionThread(t *testing.T) {
 		t.Errorf("another chat allocates from -1, got %d", other)
 	}
 }
+
+func TestRecentOutsideSessionAndExactDelete(t *testing.T) {
+	s, done := newTestStore(t)
+	defer done()
+	sessID := func(thread int64) int64 {
+		if err := s.SaveSession(42, thread, "c"); err != nil {
+			t.Fatal(err)
+		}
+		ss, _ := s.GetSession(42, thread)
+		return ss.ID
+	}
+	lane, _ := s.LaneSessionThread(42, 0, "trip")
+	general, laneSess := sessID(0), sessID(lane)
+	other := sessID(5) // another real topic: never part of thread 0's context
+	s.LogMessage(general, "user", "we land at 3pm")
+	s.LogMessage(general, "assistant", "noted")
+	s.LogMessage(general, "user", "[Heartbeat] synthetic")
+	s.LogMessage(other, "user", "unrelated topic")
+
+	got, err := s.RecentOutsideSession(42, 0, lane, 8, 12*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Text != "we land at 3pm" || got[1].Role != "assistant" {
+		t.Fatalf("fresh lane sees = %+v, want the two general messages in order", got)
+	}
+	// After the lane speaks, only what happened since counts.
+	s.LogMessage(laneSess, "user", "book the hotel")
+	if got, _ := s.RecentOutsideSession(42, 0, lane, 8, 12*time.Hour); len(got) != 0 {
+		t.Fatalf("nothing new outside the lane, got %+v", got)
+	}
+	// The general session sees the lane's message.
+	if got, _ := s.RecentOutsideSession(42, 0, 0, 8, 12*time.Hour); len(got) != 1 || got[0].Text != "book the hotel" {
+		t.Fatalf("general sees = %+v", got)
+	}
+
+	// Exact delete of a lane session leaves every other topic alone.
+	if err := s.DeleteSessionThread(42, lane); err != nil {
+		t.Fatal(err)
+	}
+	if ss, _ := s.GetSession(42, lane); ss != nil {
+		t.Error("lane session must be gone")
+	}
+	for _, th := range []int64{0, 5} {
+		if ss, _ := s.GetSession(42, th); ss == nil {
+			t.Errorf("thread %d session must survive a lane reset", th)
+		}
+	}
+	if lt, _ := s.LaneThreadsOf(42, 0); len(lt) != 1 || lt[0] != lane {
+		t.Errorf("lane threads = %v", lt)
+	}
+}
