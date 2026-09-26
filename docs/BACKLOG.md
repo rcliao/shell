@@ -103,27 +103,43 @@ add one producer, a Gmail poll of the owner's own inbox only, with one subscript
 the agent writes itself. Measure how many events it triages to a turn and what it
 does with them.
 
-### 2. Heartbeats that know when to skip
+### 2. Heartbeats that know when to skip — measured, decision open
 
-**Why.** A heartbeat that finds nothing still costs a full turn. On 2026-09-23 at
-21:49, Pika's regular heartbeat cost $0.29 and sent nothing. When events exist
-(idea 1), the heartbeat can back off. Most "check if anything needs attention"
-work becomes "attention arrives as an event".
+Measured 2026-09-26, over 7 days per agent. About 80% of heartbeats end in
+`[noop]` (55 of 66 for one agent, 50 of 65 for the other), and heartbeats cost
+about $28 per agent per week. Cache warm-ups cost more ($36 and $26) and
+roughly quadruple on deploy days: about $2 a day normally, $8–9 on days with
+several restarts, since every restart re-warms each active session, lane
+sessions included.
 
-**First step.** Measure over 7 days, per agent: heartbeats, how many sent nothing,
-and their cost. Decide after that.
+Options:
+- Skip a heartbeat when nothing happened since the last one (no new
+  messages in active chats, nothing due).
+- Let the agent pick its own heartbeat cadence (the autonomy direction).
+- Batch deploys.
 
-### 3. Know who wrote each memory
+Skipping changes how proactive the agents are, so it is the owner's call.
 
-**Why.** Idea 1 and the weekly check both read the ghost `source_kind` split
-(stated / self / observed) as a sign of independence. The largest group is
-*unset*: over the 7 days to 2026-09-23 that was 317 for Pika and 198 for Umbreon.
-Nobody has confirmed which writer produces those rows.
+### 3. Know who wrote each memory — traced
 
-**First step.** Trace the unset rows to the code path that writes them. Then either
-set `source_kind` there, or exclude that path from the independence signal.
+Traced 2026-09-26:
+- Most "unset" rows were not the agents' own. The development assistant's
+  `agent:claude-code` memories are stored in the same `memory.db` files
+  (242 and 175 rows). The weekly check (#182) now counts only each agent's own
+  namespace.
+- The agents' own unset rows are their daily briefing entries (written
+  with `ghost_put` and no source: the agent's choice) and harness exchange
+  summaries. The summaries come through ghost's consolidate, which drops
+  `source_kind`; that is a **ghost-repo fix**.
+- Open question: should the development assistant's memories live in the
+  agents' memory files at all? Retrieval is namespace-isolated, so nothing
+  leaks into their prompts, but it muddies every count.
 
 ### 4. The shared transcript records everything a person says
+
+Related fix shipped 2026-09-26 (PR #43): warm-ups, heartbeats, the review and
+the system chat no longer reach the shared transcript.
+
 
 **Why.** Photo albums (`processAlbum`) and bot commands bypass `HandleMessage`, so
 they are never recorded. The other agent then misses them after the fact.
