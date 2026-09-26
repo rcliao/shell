@@ -197,13 +197,16 @@ type UserMessage struct {
 }
 
 // UserMessagesSince returns the agent's real user messages since a cutoff,
-// oldest first: chat 0 (the system chat) and synthetic turns (text starting
-// with "[") are left out. Used by route replay and the judge.
+// oldest first. Left out: chat 0 (the system chat), synthetic turns (text
+// starting with "["), and scheduled prompts, which are logged as user
+// messages in the chat they fire in but were written by a schedule, not a
+// person (matched against every schedule's message text).
 func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
 	rows, err := s.db.Query(`SELECT s.chat_id, s.message_thread_id, m.created_at, m.content
 		FROM messages m JOIN sessions s ON s.id = m.session_id
 		WHERE m.role = 'user' AND s.chat_id != 0 AND m.created_at >= ?
 		  AND substr(ltrim(m.content), 1, 1) != '['
+		  AND m.content NOT IN (SELECT message FROM schedules)
 		ORDER BY m.created_at, m.id`, since.UTC())
 	if err != nil {
 		return nil, err
@@ -220,13 +223,15 @@ func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
 	return out, rows.Err()
 }
 
-// LastUserText returns the latest real user message in a chat thread — the
-// message an agent is answering when it labels "this" message.
+// LastUserText returns the latest user-role message in a chat thread — the
+// message an agent is answering when it labels "this" message. It is NOT
+// filtered: skipping a synthetic turn (a relayed peer message, "[…") would
+// silently attach the label to an older human message; callers refuse
+// synthetic text instead.
 func (s *Store) LastUserText(chatID, threadID int64) (string, error) {
 	var text string
 	err := s.db.QueryRow(`SELECT m.content FROM messages m JOIN sessions s ON s.id = m.session_id
 		WHERE s.chat_id = ? AND s.message_thread_id = ? AND m.role = 'user'
-		  AND substr(ltrim(m.content), 1, 1) != '['
 		ORDER BY m.id DESC LIMIT 1`, chatID, threadID).Scan(&text)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil

@@ -262,8 +262,12 @@ starting with `[`) are excluded. Rows are logged with `source = replay`.
 - sticky share;
 - latency.
 
-The pass bar is compared against the baseline: a router must beat
-"always general" on non-general messages, not only on overall agreement.
+The pass bar is compared against the baseline: agreement ≥ 85% **and**
+above the always-general score on the same labelled rows, with lane changes
+under 20%. "Beats the baseline on project messages" cannot fail (the
+baseline finds none), so recall and precision on project messages are
+reported, not gated. The baseline is computed per backend, because a backend
+that errored scores fewer rows.
 
 **Deviations from the plan.**
 - The tier router stays separate until R2 (it is about models, not lanes).

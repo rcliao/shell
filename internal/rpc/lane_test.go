@@ -48,4 +48,13 @@ func TestLaneLabelsTheCurrentMessage(t *testing.T) {
 	if code := post(map[string]any{"chat_id": 0, "lane": "general"}); code != http.StatusBadRequest {
 		t.Errorf("system chat = %d, want 400", code)
 	}
+	// A relayed peer turn is the message being answered: refuse, never fall
+	// back to the older human message.
+	st.LogMessage(sess.ID, "user", "[Bot (your fellow agent) said this in the group — …]\nhi")
+	if code := post(map[string]any{"chat_id": 42, "lane": "general"}); code != http.StatusBadRequest {
+		t.Errorf("peer turn = %d, want 400", code)
+	}
+	if best, _ := st.BestRouteLabels(); len(best) != 1 {
+		t.Errorf("a refused label must not land anywhere: %v", best)
+	}
 }

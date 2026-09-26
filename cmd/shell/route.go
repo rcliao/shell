@@ -45,9 +45,14 @@ func newRouteCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
+			config.OpenSecretStore(cfg.Secrets)
 			backends := []route.Backend{route.Keyword{}}
-			if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() && !noJev {
-				backends = append(backends, route.Jev{D: jev})
+			if !noJev {
+				if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
+					backends = append(backends, route.Jev{D: jev})
+				} else {
+					fmt.Fprintf(os.Stderr, "jev skipped: %s not found in the secret store or environment\n", decide.KeyName)
+				}
 			}
 			return runReplay(cmd.Context(), st, backends, cfg.Route.Sticky(), days)
 		},
@@ -311,25 +316,18 @@ func runRouteReport(st *store.Store, source string, days, sample int) error {
 	sort.Strings(names)
 	fmt.Printf("Route report — source=%s, last %d days. Labels by source: %v\n\n", source, days, srcCount)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "BACKEND\tROWS\tAGREE\tPROJECT MSGS FOUND\tPROJECT PICKS RIGHT\tLANE CHANGES\tSTICKY\tP50 MS")
-	var baseline *backendScore
+	fmt.Fprintln(tw, "BACKEND\tROWS\tAGREE\tALWAYS-GENERAL ON SAME ROWS\tPROJECT MSGS FOUND\tPROJECT PICKS RIGHT\tLANE CHANGES\tSTICKY\tP50 MS")
 	for _, n := range names {
 		s := scores[n]
-		if baseline == nil || s.labelled > baseline.labelled {
-			baseline = s
-		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", n, s.rows, pct(s.correct, s.labelled),
-			pct(s.nonGeneralHit, s.nonGeneral), pct(s.predProjectHit, s.predProject),
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n, s.rows, pct(s.correct, s.labelled),
+			pct(s.generalLabels, s.labelled), pct(s.nonGeneralHit, s.nonGeneral), pct(s.predProjectHit, s.predProject),
 			pct(s.changes, s.transitions), pct(s.stickyRows, s.rows), p50(s.latencies))
 	}
-	if baseline != nil {
-		fmt.Fprintf(tw, "always-general\t—\t%s\t%s\t—\t0%%\t—\t—\n",
-			pct(baseline.generalLabels, baseline.labelled), pct(0, baseline.nonGeneral))
-	}
 	tw.Flush()
-	fmt.Println("\nAGREE = lane matches the best label. PROJECT MSGS FOUND = recall on messages labelled as a project;")
-	fmt.Println("the always-general baseline scores 0 there, so that column is the one a router has to win.")
-	fmt.Println("Pass bar (design, R0): ≥85% agreement AND beats the baseline on project messages; lane changes < 20%.")
+	fmt.Println("\nAGREE = lane matches the best label. ALWAYS-GENERAL = what a router that never picks a project")
+	fmt.Println("scores on the SAME labelled rows (per backend: a backend that errored has fewer rows).")
+	fmt.Println("PROJECT MSGS FOUND = recall on project-labelled messages; PROJECT PICKS RIGHT = precision.")
+	fmt.Println("Pass bar (design, R0): AGREE ≥ 85% AND above its own always-general; lane changes < 20%.")
 
 	if sample > 0 {
 		printRouteSample(st, rows, labels, days, sample)

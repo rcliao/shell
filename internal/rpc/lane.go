@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/rcliao/shell/internal/store"
 )
@@ -51,6 +52,10 @@ func (s *Server) handleLane(w http.ResponseWriter, r *http.Request) {
 	text, err := s.store.LastUserText(req.ChatID, req.ThreadID)
 	if err != nil || text == "" {
 		writeError(w, http.StatusNotFound, "no user message to label in this conversation")
+		return
+	}
+	if strings.HasPrefix(strings.TrimSpace(text), "[") {
+		writeError(w, http.StatusBadRequest, "the message you are answering is not from a person (a relayed or scheduled turn); only human messages are labelled")
 		return
 	}
 	if err := s.store.UpsertRouteLabel(store.RouteLabel{ChatID: req.ChatID, ThreadID: req.ThreadID,
