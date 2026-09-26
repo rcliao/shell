@@ -55,7 +55,8 @@ func TestReviewRunsTurnAndDeliversCappedSuggestions(t *testing.T) {
 	if !strings.Contains(res, "3 suggestion") {
 		t.Errorf("result = %q", res)
 	}
-	for _, want := range []string{"factual_corrections: 2", "👎 ×1", "declined by owner", "too noisy", "history block duplicated", "at most 3"} {
+	for _, want := range []string{"factual_corrections: 2", "👎 ×1", "declined by owner", "too noisy", "history block duplicated", "at most 3",
+		"NOT in front of the owner", "sent to your\nowner verbatim", "No preamble, no headings"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
