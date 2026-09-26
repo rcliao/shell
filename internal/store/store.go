@@ -734,6 +734,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// route_decisions + route_labels — see internal/store/route.go (R0).
+	if _, err := s.db.Exec(routeSchema); err != nil {
+		return err
+	}
+
 	if _, err := s.db.Exec(jobRunsSchema); err != nil {
 		return err
 	}

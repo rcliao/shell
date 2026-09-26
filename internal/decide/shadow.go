@@ -67,6 +67,10 @@ type Shadow struct {
 	decider  Decider
 	recorder Recorder
 	timeout  time.Duration
+	// OnWhichProject, when set, receives every successful which_project
+	// answer — the live input to the router (R0). Called on the shadow's
+	// goroutine after the rows are recorded.
+	OnWhichProject func(t Turn, choice string, confidence float64, latency time.Duration)
 }
 
 func NewShadow(d Decider, r Recorder) *Shadow {
@@ -116,6 +120,11 @@ func (s *Shadow) Observe(t Turn) {
 				slog.Warn("router shadow: record failed", "question", id, "error", rerr)
 			}
 		}
+		if err == nil && s.OnWhichProject != nil {
+			if a, ok := res.Answers["which_project"]; ok && a.Choice != "" {
+				s.OnWhichProject(t, a.Choice, a.Confidence, res.Latency)
+			}
+		}
 		if err != nil {
 			slog.Warn("router shadow: ask failed", "chat_id", t.ChatID, "error", err)
 		} else {
@@ -144,17 +153,7 @@ func (s *Shadow) state(t Turn) map[string]any {
 func (s *Shadow) questions(t Turn) (map[string]Question, bool) {
 	q := map[string]Question{}
 	if len(t.Projects) > 0 {
-		crit := map[string]string{"none": "general conversation, or nothing to do with any listed project"}
-		for _, p := range t.Projects {
-			desc := p.Title
-			if p.Instructions != "" {
-				desc += " — " + clipRunes(p.Instructions, 160)
-			}
-			crit[p.Slug] = desc
-		}
-		q["which_project"] = Question{Type: "choice",
-			Instructions: "Which ongoing family project, if any, is this message about? Choose none unless the message is clearly about one of them.",
-			Criteria:     crit}
+		q["which_project"] = WhichProjectQuestion(t.Projects)
 	}
 	peer := strings.Contains(t.Message[:min(len(t.Message), 200)], PeerTurnMarker)
 	if peer {
@@ -174,6 +173,29 @@ func (s *Shadow) questions(t Turn) (map[string]Question, bool) {
 		Instructions: "The message settles a choice between options or commits to a plan: an option picked, a booking confirmed, a date or plan fixed. " +
 			"Reporting or logging what already happened (meals eaten, activities done, a status update) is NOT a decision, and neither is a question."}
 	return q, peer
+}
+
+// WhichProjectQuestion is the one lane question, shared by the live shadow
+// and route replay so both ask Jev exactly the same thing. "none" is the
+// general lane.
+func WhichProjectQuestion(projects []Project) Question {
+	crit := map[string]string{"none": "general conversation, or nothing to do with any listed project"}
+	for _, p := range projects {
+		desc := p.Title
+		if p.Instructions != "" {
+			desc += " — " + clipRunes(p.Instructions, 160)
+		}
+		crit[p.Slug] = desc
+	}
+	return Question{Type: "choice",
+		Instructions: "Which ongoing family project, if any, is this message about? Choose none unless the message is clearly about one of them.",
+		Criteria:     crit}
+}
+
+// ShadowState is the state the shadow sends for a message (exported for
+// route replay, which must send the same shape).
+func ShadowState(chatKind string, threadID int64, message string) map[string]any {
+	return (&Shadow{}).state(Turn{ChatKind: chatKind, ThreadID: threadID, Message: message})
 }
 
 func clipRunes(s string, n int) string {

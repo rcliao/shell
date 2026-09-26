@@ -110,6 +110,7 @@ type Bridge struct {
 	// mentioned).
 	agentHomeDir string         // per-agent config/data dir (shell.db, memory.db)
 	ownerChatID  int64          // where own-skill change notices go (0 = none)
+	routeSticky  float64        // R0 sticky-rule threshold (0 = default)
 	agentName    string         // commit author / notice name for own-skill changes
 	workspaceDir string         // persistent agent scratch space
 	routerShadow *decide.Shadow // P3.7 shadow router; nil = off
@@ -386,7 +387,12 @@ func (b *Bridge) SetProjectHome(h ProjectHome) {
 // SetRouterShadow enables the shadow router: every user turn is also
 // answered by a decision model, asynchronously, and recorded — never acted
 // on. Nil turns it off.
-func (b *Bridge) SetRouterShadow(sh *decide.Shadow) { b.routerShadow = sh }
+func (b *Bridge) SetRouterShadow(sh *decide.Shadow) {
+	if sh != nil {
+		sh.OnWhichProject = b.logLiveRoute // R0: the shadow's answer feeds the router
+	}
+	b.routerShadow = sh
+}
 
 // SetPool enables multi-agent routing. When set, the bridge resolves
 // which Agent handles each chat via the pool instead of using proc directly.

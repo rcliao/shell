@@ -386,6 +386,34 @@ chat. The owner can also use `shell suggestions decide`. `shell suggestions
 review-now` runs the review on the next tick. Design:
 `docs/DESIGN-ROUTER-AND-SUGGESTIONS.md` (S0).
 
+## Message router (R0: shadow)
+
+`internal/route` decides a message's **lane**: one of the chat's active
+projects, or `general`. The sticky rule (`route.sticky_threshold`, default
+0.6) keeps an unsure switch in the thread's previous lane. There are two
+backends:
+- **jev**: the typed-decision model. Live, it reuses the Jev shadow's
+  `which_project` answer through `decide.Shadow.OnWhichProject`, so there is
+  no second call.
+- **keyword**: a local baseline built from project title words.
+
+Every real turn in a chat with projects logs one `route_decisions` row per
+backend (`source = live`, with the Telegram message id). Nothing on the turn
+path reads these rows yet.
+
+Scoring:
+- `shell route replay` re-routes the last N days of real user messages (from
+  the agent's own `messages`), in thread order (`source = replay`).
+- `shell route judge` labels those messages with a stronger model through the
+  Claude CLI (`route.judge_model`).
+- `shell route label` records the owner's override.
+- The `shell_lane` tool lets the agent label the message it is answering.
+
+Labels go in `route_labels`, keyed by chat, thread and text hash; no text is
+stored. `shell route report` scores each backend against the strongest label,
+next to the always-general baseline. Design:
+`docs/DESIGN-ROUTER-AND-SUGGESTIONS.md` (R0).
+
 ## Shadow Router
 
 When the `TYPESAFE_API_KEY` secret resolves (secret store, then

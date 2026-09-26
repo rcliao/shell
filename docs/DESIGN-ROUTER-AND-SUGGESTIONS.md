@@ -214,6 +214,83 @@ or is retired.
 - S0 delivers a suggestion (tested from the CLI first), and a decision lands on the suggestion
   and shows up in the next review's evidence pack.
 
+## R0 build spec (2026-09-25)
+
+R0 builds one router and measures it. Nothing it decides changes a turn.
+
+**Ground truth.** The data rules out the planned label sources. Over 14 days,
+real chat turns touched a project doc 5 times (one session) against about 400
+(Pika) and 350 (Umbreon) user messages. Project-write labels are kept, but
+they cannot carry the score.
+
+The main labels therefore come from a **judge**: a stronger model
+(`route.judge_model`, default Opus) called in batches through the Claude CLI.
+For each message it sees the message in its thread's order and the agent's
+projects, and it answers with a lane and "sure" / "unsure". The owner can
+override any label from the CLI (`label_source = human`); an override always
+wins. The agent's `shell_lane` tool can also record a label (`agent`).
+
+The judge is not the truth. The report says which label source each number
+rests on, and the owner is shown a sample of judge labels to check.
+
+**Lanes.** A lane is one of the agent's non-archived projects, or `general`.
+Detecting a new subject is deferred to R1.
+
+**The router.** `route.Decide` takes a backend's choice and its confidence,
+applies the sticky rule (below `route.sticky_threshold`, default 0.6, the
+message stays in the previous lane of the same chat and thread), and returns
+the route. There are two backends:
+- **jev**: live, the shadow's existing `which_project` answer (no second
+  call); in replay, the same question asked directly.
+- **keyword**: a local baseline that matches words from project titles and
+  slugs.
+
+**Live.** The Jev shadow hands each `which_project` answer to the router.
+The router logs one `route_decisions` row per backend (`source = live`),
+carrying the Telegram message id.
+
+**Replay.** `shell route replay --days N` re-routes the agent's real user
+messages from its own `messages` and `sessions` tables, in order per chat and
+thread, so the sticky rule sees the real sequence. Synthetic turns (text
+starting with `[`) are excluded. Rows are logged with `source = replay`.
+`--judge` labels the same messages.
+
+**Report.** `shell route report`, for each backend and source:
+- agreement with labels, overall and on the non-general messages;
+- the **always-general baseline** (a router that never picks a project);
+- churn (lane changes per message within a thread);
+- sticky share;
+- latency.
+
+The pass bar is compared against the baseline: agreement ≥ 85% **and**
+above the always-general score on the same labelled rows, with lane changes
+under 20%. "Beats the baseline on project messages" cannot fail (the
+baseline finds none), so recall and precision on project messages are
+reported, not gated. The baseline is computed per backend, because a backend
+that errored scores fewer rows.
+
+**Deviations from the plan.**
+- The tier router stays separate until R2 (it is about models, not lanes).
+- The decide shadow keeps its other questions for the 9/28 verdict.
+
+**Data.**
+- `route_decisions(id, created_at, source live|replay, chat_id, thread_id,
+  msg_id, msg_at, text_hash, backend, lane_prev, choice, confidence, lane,
+  sticky, latency_ms)`.
+- `route_labels(chat_id, thread_id, text_hash, lane, source
+  human|agent|judge|project, sure, note, created_at)`. There is one label per
+  source per message, and the report uses the strongest: human, then agent,
+  then judge, then project.
+
+The message text is stored in neither table: `text_hash` joins them, and the
+judge reads text from the agent's own `messages` table.
+
+**Interfaces.**
+- CLI `shell route replay|judge|report|label`.
+- MCP `shell_lane(action=label, lane, note)`, which labels the current
+  message.
+- Config `route.sticky_threshold`, `route.judge_model`.
+
 ## S0 build spec (2026-09-25)
 
 S0 is the first step, and nothing in it depends on the router.
