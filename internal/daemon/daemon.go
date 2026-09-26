@@ -27,6 +27,7 @@ import (
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/reload"
+	"github.com/rcliao/shell/internal/route"
 	"github.com/rcliao/shell/internal/rpc"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/skill"
@@ -679,6 +680,16 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Shadow router (P3.7): observes every user turn with a decision model,
 	// records, never acts. Silent when no TYPESAFE_API_KEY is present.
 	br.SetRouteStickyThreshold(cfg.Route.Sticky())
+	if lanes := cfg.Route.Lanes(); len(lanes) > 0 {
+		// R1: lanes pick the session in these chats only. Jev v2 is the
+		// router; without a key every message stays in general (safe).
+		var backend route.Backend
+		if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
+			backend = route.Jev{D: jev, Variant: "v2"}
+		}
+		br.SetLanes(lanes, backend)
+		slog.Info("lanes: enabled", "chats", len(lanes), "router", backend != nil)
+	}
 	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
 		br.SetRouterShadow(decide.NewShadow(jev, st))
 		slog.Info("router shadow: enabled", "backend", "jev")

@@ -58,7 +58,9 @@ func (s *Server) handleLane(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "the message you are answering is not from a person (a relayed or scheduled turn); only human messages are labelled")
 		return
 	}
-	if err := s.store.UpsertRouteLabel(store.RouteLabel{ChatID: req.ChatID, ThreadID: req.ThreadID,
+	// The agent's session may be a lane session (R1, negative thread id):
+	// the label belongs to the real thread, where route decisions live.
+	if err := s.store.UpsertRouteLabel(store.RouteLabel{ChatID: req.ChatID, ThreadID: s.store.RealThread(req.ChatID, req.ThreadID),
 		TextHash: store.TextHash(text), Lane: req.Lane, Source: "agent", Sure: true, Note: req.Note}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

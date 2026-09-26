@@ -61,3 +61,27 @@ func TestRouteDecisionsAndBestLabel(t *testing.T) {
 		t.Error("clear must remove the source's decisions")
 	}
 }
+
+func TestLaneSessionThread(t *testing.T) {
+	s, done := newTestStore(t)
+	defer done()
+	if id, _ := s.LaneSessionThread(42, 7, "general"); id != 7 {
+		t.Errorf("general must keep the real thread, got %d", id)
+	}
+	a, err := s.LaneSessionThread(42, 7, "japan")
+	if err != nil || a >= 0 {
+		t.Fatalf("project lane id = %d, %v (want negative)", a, err)
+	}
+	b, _ := s.LaneSessionThread(42, 7, "health")
+	c, _ := s.LaneSessionThread(42, 0, "japan")
+	again, _ := s.LaneSessionThread(42, 7, "japan")
+	if again != a || b == a || c == a || c == b {
+		t.Errorf("ids must be stable and distinct: a=%d again=%d b=%d c=%d", a, again, b, c)
+	}
+	if s.RealThread(42, a) != 7 || s.RealThread(42, 7) != 7 || s.RealThread(42, -999) != -999 {
+		t.Error("RealThread must map a lane session back to its thread and leave others alone")
+	}
+	if other, _ := s.LaneSessionThread(-100200300, 7, "japan"); other != -1 {
+		t.Errorf("another chat allocates from -1, got %d", other)
+	}
+}

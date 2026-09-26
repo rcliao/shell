@@ -41,6 +41,21 @@ type RouteConfig struct {
 	StickyThreshold float64 `json:"sticky_threshold"`
 	// JudgeModel labels messages for scoring (shell route judge). Default Opus.
 	JudgeModel string `json:"judge_model"`
+	// LaneChats turns lanes on (R1): chat id → chat whose active projects
+	// are its lanes (usually itself; a test chat can borrow another's).
+	// Empty = lanes off everywhere.
+	LaneChats map[string]int64 `json:"lane_chats"`
+}
+
+// Lanes parses LaneChats; entries with a bad key are skipped.
+func (r RouteConfig) Lanes() map[int64]int64 {
+	out := map[int64]int64{}
+	for k, v := range r.LaneChats {
+		if id, err := strconv.ParseInt(k, 10, 64); err == nil {
+			out[id] = v
+		}
+	}
+	return out
 }
 
 // Judge returns the judge model or the default.

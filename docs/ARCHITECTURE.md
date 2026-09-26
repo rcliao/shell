@@ -358,6 +358,21 @@ the revert command to `agent.owner_chat_id` (0 = commit silently).
 owner, tier, whether it reaches the prompt, real usage, playground drafts and
 the agent's self-authored commit count.
 
+### Lanes (R1)
+
+In a chat listed in `route.lane_chats` (off by default), each real turn is
+routed **before** its session is chosen, by Jev with the v2 question and a
+1.5 s timeout; on a timeout or error the thread keeps its previous lane.
+- A **project lane** gets its own Claude session, on a negative "session
+  thread" allocated in `lane_sessions`, and that project's scoped
+  `[Project]` block.
+- The **general lane** keeps the chat's existing session.
+
+The turn keeps two thread ids. The session thread is used for the process
+key, session row, rotation, prefix hash and compaction. The real thread is
+used for delivery, transcript, message maps and the shadow. Acted-on
+decisions are logged with `source = lane`.
+
 ## Weekly review and suggestions
 
 Once a week (`review.cron`, default Wednesday 10:30), each agent that has
