@@ -58,6 +58,9 @@ func newSecretsCmd() *cobra.Command {
 				{"notion token", notion},
 				{"jev key (shadow router)", decide.KeyName},
 			}
+			if cfg.Discord.Enabled {
+				refs = append(refs, struct{ what, name string }{"discord bot token", cfg.Discord.TokenEnv})
+			}
 			fmt.Fprintln(out, "references:")
 			for _, r := range refs {
 				src := secretSource(cfg, r.name)
@@ -88,7 +91,7 @@ func newSecretsCmd() *cobra.Command {
 			// passthrough (applied after stripping), deduplicated.
 			seen := map[string]bool{}
 			var stripped []string
-			for _, n := range append(config.ManagedSecretNames(), cfg.Telegram.TokenEnv, notion, decide.KeyName) {
+			for _, n := range append(config.ManagedSecretNames(), cfg.Telegram.TokenEnv, cfg.Discord.TokenEnv, notion, decide.KeyName) {
 				if _, passes := pass[n]; passes || seen[n] || n == "" {
 					continue
 				}

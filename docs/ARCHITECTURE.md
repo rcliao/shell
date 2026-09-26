@@ -41,6 +41,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **process** | `internal/process/` | Claude CLI subprocess lifecycle. Agent interface, session management, streaming |
 | **mcp** | `internal/mcp/` | MCP stdio server exposing `shell_pm`, `shell_tunnel`, `shell_relay` as native Claude tools |
 | **rpc** | `internal/rpc/` | HTTP-over-Unix-socket RPC server for skill scripts and MCP server |
+| **discord** | `internal/discord/` | Discord gateway bot: inbound turns (auth via linked Telegram ids, group addressing, attachments, streaming edits, 2,000-char chunking, status reactions, text commands, reaction feedback) and the daemon `outbound` surface. Discord ids ↔ internal (chat, thread) ids (`address.go`) |
 | **telegram** | `internal/telegram/` | Bot wrapper, handlers, policy-based auth, pairing, rate limiting, allowlist, photo/PDF download, MarkdownV2 formatting |
 | **store** | `internal/store/` | SQLite persistence: sessions, messages, message_map, schedules, tasks |
 | **config** | `internal/config/` | JSON config from `~/.shell/config.json` with all feature flags |
@@ -220,6 +221,28 @@ follow-up.
 Environment variables set on Claude subprocess:
 - `SHELL_CHAT_ID` — current Telegram chat ID
 - `SHELL_BRIDGE_SOCK` — path to RPC Unix socket
+
+## Messaging platforms (Telegram, Discord)
+
+Design: `docs/DESIGN-DISCORD.md`; setup: `docs/DISCORD-SETUP.md`.
+
+Internal conversation ids stay Telegram-shaped `(chat_id, thread_id)` int64 pairs; every table, session,
+memory namespace, schedule and lane keys on them. Discord maps onto them in `internal/discord/address.go`:
+
+- **Linked** (`discord.chats` in config): a Discord channel/thread takes over an existing internal
+  conversation — the Telegram chat it replaces — so history carries over. `discord.users` maps a Discord
+  user to the person's Telegram user id; labels, canonical ids, the allowlist and the rate limiter apply
+  unchanged.
+- **Derived** (unlinked): DM channel → `+snowflake`, guild channel → `−snowflake` (keeps "negative =
+  group"), thread → `+thread_snowflake` inside its parent's chat. Snowflakes are ≥ 10^17, Telegram ids
+  < 10^16, so the ranges never meet; negative thread ids stay reserved for lanes.
+
+Outbound: the daemon's `outbound` is a `routedOutbound{telegram, discord}` when Discord is enabled. Each
+send picks Discord when the chat is linked or in the derived range, else Telegram, so reminders, relays,
+heartbeats, the project home and replays follow a conversation to whichever platform it lives on.
+Inbound: `discord.Handler` runs turns through `bridge.HandleMessageStreamingEvents` like the Telegram
+handler, sharing the pending-turn ledger and message map (Discord message ids are global snowflakes and fit
+`int`). Bot-authored Discord messages are ignored (v1 loop guard).
 
 ## Security & Access Control
 
@@ -674,7 +697,7 @@ Key operations:
 Design and evidence: `docs/DESIGN-SECRETS.md`. Secrets live in the
 `shell-secrets` store (age-encrypted file, local identity file, no OS
 keychain) and resolve through `config.Secret(name)`: store first, then the
-environment. Config refers to secrets by **name** (`telegram.token_env`,
+environment. Config refers to secrets by **name** (`telegram.token_env`, `discord.token_env`,
 `notion.token_secret`); values are read at startup and handed to the
 component that needs them — the Telegram client in-process, the Notion
 token into the Notion MCP server's env only, the Jev key to the decider.
@@ -699,6 +722,7 @@ value; `shell-secrets doctor` covers the store itself.
 ```json
 {
   "telegram": { "token_env", "allowed_users", "reaction_map" },
+  "discord": { "enabled", "token_env", "users", "chats" },
   "claude": { "binary", "model", "model_routing": { "conversation", "heartbeat", "heartbeat_deep", "compaction", "chat_models": { "<chat_id>": "<model>" } }, "timeout", "max_sessions", "work_dir", "allowed_tools", "disallowed_tools", "setting_sources" },
   "store": { "db_path" },
   "memory": { "enabled", "db_path", "budget", "profiles", "chat_profiles" },

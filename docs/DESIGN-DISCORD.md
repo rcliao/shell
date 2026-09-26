@@ -1,6 +1,6 @@
 # Design: Discord as a messaging platform
 
-Status: building (2026-09-26). Research: `docs/RESEARCH-MESSAGING-PLATFORMS.md`.
+Status: built, pending a live check with real bots (2026-09-26). Research: `docs/RESEARCH-MESSAGING-PLATFORMS.md`.
 
 ## Intent
 
