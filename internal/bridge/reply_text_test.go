@@ -118,3 +118,23 @@ func TestReviewRepliesAreFilteredLikeUserText(t *testing.T) {
 		t.Errorf("review reply = %q", got)
 	}
 }
+
+func TestIsCLIAPIError(t *testing.T) {
+	for _, s := range []string{
+		"API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.",
+		"  API Error: 529 Overloaded.",
+	} {
+		if !isCLIAPIError(s) {
+			t.Errorf("not detected: %q", s)
+		}
+	}
+	for _, s := range []string{
+		"The API Error: 500 you saw earlier was on their side; the reminder is set.",
+		"API Error: " + strings.Repeat("x", 900), // too long to be the synthetic line
+		"",
+	} {
+		if isCLIAPIError(s) {
+			t.Errorf("false positive: %q", s)
+		}
+	}
+}
