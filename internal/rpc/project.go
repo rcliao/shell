@@ -251,6 +251,9 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	cadence := req.Cadence
 	if cadence == "" {
 		cadence = "weekly"
+		if req.Kind == store.ProjectKindArea {
+			cadence = "monthly" // an area's pass consolidates; it is not research
+		}
 	}
 	if _, ok := cadenceCrons[cadence]; !ok {
 		writeError(w, http.StatusBadRequest, "cadence must be daily, weekly, or monthly")

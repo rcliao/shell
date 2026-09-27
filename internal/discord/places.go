@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"regexp"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -226,33 +227,97 @@ func (b *Bot) EnsureAreaChannels(chatID int64, name, forumName string, tags []st
 		return mine, nil
 	}
 
-	forum, err := ensure(discordgo.ChannelTypeGuildForum, forumKey, forumName, "")
-	if err != nil {
-		return out, fmt.Errorf("discord: create forum %s: %w", forumName, err)
-	}
-	if out.Created && len(forum.AvailableTags) == 0 && len(tags) > 0 {
-		ft := make([]discordgo.ForumTag, 0, len(tags))
-		for _, t := range tags {
-			if t = truncateRunes(strings.TrimSpace(t), maxTagName); t != "" {
-				ft = append(ft, discordgo.ForumTag{Name: t})
-			}
-		}
-		if _, err := b.api.EditChannel(forum.ID, &discordgo.ChannelEdit{AvailableTags: &ft}); err != nil {
-			slog.Warn("discord: area forum created without tags", "forum", forum.ID, "error", err)
-		}
-	}
-	topic := "Projects: <#" + forum.ID + ">"
-	text, err := ensure(discordgo.ChannelTypeGuildText, textKey, name, topic)
+	// The text channel is the area's identity: both agents converge on it
+	// by name. Its forum is then found through the channel, not by name —
+	// two agents may name the forum differently (seen live: "gaming-projects"
+	// vs a Chinese name), and a name match alone gave each its own forum.
+	text, err := ensure(discordgo.ChannelTypeGuildText, textKey, name, "")
 	if err != nil {
 		return out, fmt.Errorf("discord: create channel %s: %w", name, err)
 	}
-	if text.Topic == "" {
+	backref := "<#" + text.ID + ">"
+	byID := func(list []*discordgo.Channel, id string) *discordgo.Channel {
+		for _, c := range list {
+			if c.ID == id && c.Type == discordgo.ChannelTypeGuildForum {
+				return c
+			}
+		}
+		return nil
+	}
+	// oldestFor is the forum that belongs to this channel: the oldest forum
+	// whose topic points back at it. Both agents pick the same one.
+	oldestFor := func(list []*discordgo.Channel) *discordgo.Channel {
+		var best *discordgo.Channel
+		var bestID int64
+		for _, c := range list {
+			if c.Type != discordgo.ChannelTypeGuildForum || !strings.Contains(c.Topic, backref) {
+				continue
+			}
+			if id, err := strconv.ParseInt(c.ID, 10, 64); err == nil && (best == nil || id < bestID) {
+				best, bestID = c, id
+			}
+		}
+		return best
+	}
+	var forum *discordgo.Channel
+	if id := topicForum(text.Topic); id != "" {
+		forum = byID(chans, id) // the channel already names its forum
+	}
+	if forum == nil {
+		forum = oldestFor(chans)
+	}
+	if forum == nil {
+		forum = oldest(chans, discordgo.ChannelTypeGuildForum, forumKey)
+	}
+	if forum == nil {
+		mine, err := b.api.CreateGuildChannel(guild, discordgo.GuildChannelCreateData{
+			Name: strings.ToLower(strings.Join(strings.Fields(forumName), "-")), Type: discordgo.ChannelTypeGuildForum,
+			ParentID: category, Topic: "Area: " + backref})
+		if err != nil {
+			return out, fmt.Errorf("discord: create forum %s: %w", forumName, err)
+		}
+		out.Created = true
+		forum = mine
+		if again, err := b.api.GuildChannels(guild); err == nil {
+			if first := oldestFor(again); first != nil && first.ID != mine.ID {
+				// Another agent made this area's forum first: use theirs.
+				if err := b.api.DeleteChannel(mine.ID); err != nil {
+					slog.Warn("discord: duplicate area forum not removed", "forum", mine.ID, "error", err)
+				}
+				forum = first
+			}
+		}
+		if forum.ID == mine.ID && len(tags) > 0 {
+			ft := make([]discordgo.ForumTag, 0, len(tags))
+			for _, t := range tags {
+				if t = truncateRunes(strings.TrimSpace(t), maxTagName); t != "" {
+					ft = append(ft, discordgo.ForumTag{Name: t})
+				}
+			}
+			if _, err := b.api.EditChannel(forum.ID, &discordgo.ChannelEdit{AvailableTags: &ft}); err != nil {
+				slog.Warn("discord: area forum created without tags", "forum", forum.ID, "error", err)
+			}
+		}
+	}
+	if topicForum(text.Topic) != forum.ID {
+		topic := "Projects: <#" + forum.ID + ">"
 		if _, err := b.api.EditChannel(text.ID, &discordgo.ChannelEdit{Topic: topic}); err != nil {
 			slog.Warn("discord: area channel topic not set", "channel", text.ID, "error", err)
 		}
 	}
 	out.ChannelID, out.ForumID = text.ID, forum.ID
 	return out, nil
+}
+
+var channelMention = regexp.MustCompile(`<#([0-9]{17,20})>`)
+
+// topicForum returns the forum id an area channel's topic points at
+// ("Projects: <#id>"), or "".
+func topicForum(topic string) string {
+	if m := channelMention.FindStringSubmatch(topic); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // postTitleKey compares post titles without their leading emoji and case:

@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"fmt"
+	"github.com/rcliao/shell/internal/store"
 	"net/http"
 	"strings"
 	"testing"
@@ -295,5 +296,28 @@ func TestStageRefreshesOpener(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "🎮 **Zelda** · booked") {
 		t.Fatalf("opener = %q", got)
+	}
+}
+
+// Re-running an area create heals a row whose forum lost the convergence,
+// and a new area defaults to a monthly pass.
+func TestAreaCreateHealsPlaceRef(t *testing.T) {
+	fp := &fakePlaces{}
+	s, st := newProjectTestServer(t)
+	s.places = fp
+	req := map[string]any{"action": "create", "title": "Gaming", "chat_id": -100200300, "kind": "area", "place": "new"}
+	_, out := postProject(t, s, req)
+	slug := out["slug"].(string)
+	stale := "discord:900000000000000555"
+	if err := st.UpdateProjectFields(slug, store.ProjectFieldUpdate{PlaceRef: &stale}); err != nil {
+		t.Fatal(err)
+	}
+	_, again := postProject(t, s, req)
+	if again["created"] != false || again["place_ref"] != out["place_ref"] {
+		t.Fatalf("not healed: %v (want %v)", again["place_ref"], out["place_ref"])
+	}
+	p, _ := st.GetProjectBySlug(slug)
+	if p.PlaceRef != out["place_ref"] {
+		t.Fatalf("row place_ref = %s", p.PlaceRef)
 	}
 }

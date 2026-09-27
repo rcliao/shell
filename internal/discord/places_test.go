@@ -173,12 +173,15 @@ func (r *racingAPI) GuildChannels(guild string) ([]*discordgo.Channel, error) {
 	return out, err
 }
 
-// Two agents creating at the same moment converge on the older channel,
-// and the later one removes its own duplicate.
+// Two agents creating at the same moment, naming the forum differently (as
+// seen live), converge on the older forum that points back at the shared
+// channel; the later one removes its own.
 func TestEnsureAreaChannelsRace(t *testing.T) {
 	_, base := areaBot(t)
-	theirs := &discordgo.Channel{ID: "100000000000000001", GuildID: testGuild, Name: "gaming-projects", Type: discordgo.ChannelTypeGuildForum}
-	base.channels[theirs.ID] = theirs
+	text := &discordgo.Channel{ID: "100000000000000001", GuildID: testGuild, Name: "gaming", Type: discordgo.ChannelTypeGuildText}
+	theirs := &discordgo.Channel{ID: "100000000000000002", GuildID: testGuild, Name: "遊戲-projects", Type: discordgo.ChannelTypeGuildForum,
+		Topic: "Area: <#100000000000000001>"}
+	base.channels[text.ID], base.channels[theirs.ID] = text, theirs
 	api := &racingAPI{fakeAPI: base, hidden: theirs.ID}
 	addr := NewAddresses(config.DiscordConfig{
 		Chats:  map[string]config.DiscordChatLink{groupChan: {ChatID: -100200300}},
@@ -189,10 +192,30 @@ func TestEnsureAreaChannelsRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ac.ForumID != theirs.ID {
-		t.Fatalf("forum = %s, want the older %s", ac.ForumID, theirs.ID)
+	if ac.ChannelID != text.ID || ac.ForumID != theirs.ID {
+		t.Fatalf("got %+v, want channel %s forum %s", ac, text.ID, theirs.ID)
 	}
 	if len(base.deleted) != 1 || base.channels[base.deleted[0]] != nil {
 		t.Fatalf("own duplicate not removed: deleted=%v", base.deleted)
+	}
+	if text.Topic != "Projects: <#"+theirs.ID+">" {
+		t.Fatalf("channel topic = %q", text.Topic)
+	}
+}
+
+// The second agent, later and with a different forum name, reaches the same
+// forum through the channel's topic.
+func TestEnsureAreaChannelsForumFollowsChannel(t *testing.T) {
+	b, api := areaBot(t)
+	first, err := b.EnsureAreaChannels(-100200300, "gaming", "gaming-projects", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := b.EnsureAreaChannels(-100200300, "gaming", "遊戲 projects", []string{"想玩"})
+	if err != nil || second.ForumID != first.ForumID || second.ChannelID != first.ChannelID || second.Created {
+		t.Fatalf("second = %+v (%v), want %+v", second, err, first)
+	}
+	if len(api.created) != 2 {
+		t.Fatalf("created %d channels, want 2", len(api.created))
 	}
 }

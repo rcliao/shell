@@ -263,6 +263,15 @@ func (s *Server) ensureAreaPlaces(req *ProjectRequest) (existing *store.Project,
 		for i := range projects {
 			p := projects[i]
 			if p.Kind == store.ProjectKindArea && p.MessageThreadID == thread && p.Status != "archived" {
+				// Self-heal: the row may point at a forum that lost the
+				// convergence (two agents, two forum names). The channel
+				// decides; follow it.
+				if p.PlaceRef != ref {
+					if err := s.store.UpdateProjectFields(p.Slug, store.ProjectFieldUpdate{PlaceRef: &ref}); err == nil {
+						slog.Info("rpc: area place_ref healed", "slug", p.Slug, "from", p.PlaceRef, "to", ref)
+						p.PlaceRef = ref
+					}
+				}
 				return &p, created, ""
 			}
 		}
