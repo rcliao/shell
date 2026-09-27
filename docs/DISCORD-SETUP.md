@@ -113,6 +113,9 @@ Discord alone. A send for a Telegram chat that was never linked is logged as dro
 
 ## What differs from Telegram today
 
+- **Files the agent sends:** Discord's limit is 20 MB per file. A bigger file isn't attempted, and a rejected upload
+  isn't dropped silently. Either way the chat says which file couldn't be attached and how big it was, and keeps
+  its caption.
 - **Images:** several images attached to one Discord message arrive as one turn, like a Telegram album.
 - **Tables:** Markdown tables are shown in a code block, because Discord does not render tables.
 - **Replies:** they stream by editing one message about every 1.5 s. Anything over 2,000 characters arrives as

@@ -72,6 +72,7 @@ Legend:
 | Feature | Telegram | Discord | Notes |
 |---|---|---|---|
 | Proactive text, photo, video, document, dedup | ✅ | ✅ | Routed by chat (`routedOutbound`) |
+| File over the upload limit / rejected upload | silent | ✅ said in chat | Over 20 MiB is not attempted; the conversation gets "couldn't attach <file> (23.4 MB)…" with the caption kept |
 | Link buttons, pin/unpin, edit by id | ✅ | ✅ | |
 | Replay after a crash | ✅ | ✅ | Replies route to Discord |
 | Access control | pairing + allowlist | ✅ manual links + same allowlist | Pairing is deliberately not ported |
@@ -100,6 +101,7 @@ The ranking weighs how the family uses the agents against the cost of building.
 | B11 | **Voice messages → transcription** | Discord mobile makes voice notes easy. Neither platform handles them today. | Usage unknown: it was never supported | M |
 | B12 ✅ | **Localized timestamps** `<t:unix:R>` in schedules ("in 2 hours") | Clearer times, correct in any time zone while travelling | Schedules, travel | S |
 | B13 ✅ | **Let the agents see each other's replies** as observation only (transcript, not triggering turns) | Fits "blind until observed" | Owner decision 2026-09-23 | S, needs an owner call |
+| B14 | **Person ids that don't depend on Telegram**: link a Discord user to a stable internal person id (canonical name, label, allowlist) rather than to a Telegram user id | Today `discord.users` maps to a Telegram id, so someone without Telegram (a grandparent, a sitter) cannot be linked. Once Telegram is off, that is everyone new | Owner review 2026-09-27: backlog | S–M |
 
 **Suggested next build:**
 1. ~~B1 (auto-join)~~ and ~~the sticker gap~~: done (PRs #53 and #55). Project areas (forum posts per
