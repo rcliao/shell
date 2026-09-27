@@ -22,16 +22,17 @@ import (
 
 // fakeAPI records what the bot did on Discord.
 type fakeAPI struct {
-	mu        sync.Mutex
-	channels  map[string]*discordgo.Channel
-	nextID    int64
-	sends     []sent
-	edits     map[string]string // message id → latest content
-	embedsOn  map[string]int    // message id → embeds on its latest edit
-	compsOn   map[string]int    // message id → component rows on its latest edit
-	responses []discordgo.InteractionResponseType
-	deletes   []string
-	reacts    []string // "+emoji" / "-emoji"
+	mu           sync.Mutex
+	channels     map[string]*discordgo.Channel
+	nextID       int64
+	sends        []sent
+	edits        map[string]string // message id → latest content
+	embedsOn     map[string]int    // message id → embeds on its latest edit
+	compsOn      map[string]int    // message id → component rows on its latest edit
+	responses    []discordgo.InteractionResponseType
+	slashReplies []string
+	deletes      []string
+	reacts       []string // "+emoji" / "-emoji"
 }
 
 type sent struct {
@@ -138,6 +139,20 @@ func (f *fakeAPI) Respond(i *discordgo.Interaction, r *discordgo.InteractionResp
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.responses = append(f.responses, r.Type)
+	return nil
+}
+func (f *fakeAPI) EditResponse(i *discordgo.Interaction, e *discordgo.WebhookEdit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e.Content != nil {
+		f.slashReplies = append(f.slashReplies, *e.Content)
+	}
+	return nil
+}
+func (f *fakeAPI) Followup(i *discordgo.Interaction, p *discordgo.WebhookParams) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.slashReplies = append(f.slashReplies, p.Content)
 	return nil
 }
 func (f *fakeAPI) Channel(id string) (*discordgo.Channel, error) {
@@ -595,5 +610,46 @@ func TestReplyButtonsAndClick(t *testing.T) {
 	})
 	if len(h3.api.reacts) != 0 {
 		t.Fatal("an unlinked person's click must do nothing")
+	}
+}
+
+func slash(name, channel, user string, opts ...*discordgo.ApplicationCommandInteractionDataOption) *discordgo.Interaction {
+	return &discordgo.Interaction{
+		Type: discordgo.InteractionApplicationCommand, ChannelID: channel,
+		User: &discordgo.User{ID: user},
+		Data: discordgo.ApplicationCommandInteractionData{Name: name, Options: opts},
+	}
+}
+
+func TestSlashCommandRunsTheBridgeCommand(t *testing.T) {
+	h := newHarness(t, "no turn")
+	h.bot.handler.HandleInteraction(context.Background(), slash("help", dmChan, linkedUser))
+	if h.agent.turnCount() != 0 {
+		t.Fatal("a command is not a turn")
+	}
+	if len(h.api.responses) != 1 || h.api.responses[0] != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("must be acknowledged first, got %v", h.api.responses)
+	}
+	if len(h.api.slashReplies) == 0 || !strings.Contains(h.api.slashReplies[0], "Commands") {
+		t.Fatalf("the help text should fill the reply, got %q", h.api.slashReplies)
+	}
+}
+
+func TestSlashCommandFromAnUnlinkedPerson(t *testing.T) {
+	h := newHarness(t, "x")
+	h.bot.handler.HandleInteraction(context.Background(), slash("new", dmChan, strangerID))
+	if len(h.api.slashReplies) != 1 || !strings.Contains(h.api.slashReplies[0], strangerID) {
+		t.Fatalf("an unlinked person is told which id to link, got %q", h.api.slashReplies)
+	}
+}
+
+func TestApplicationCommandsAreValid(t *testing.T) {
+	for _, c := range applicationCommands() {
+		if len(c.Name) < 1 || len(c.Name) > 32 || strings.ToLower(c.Name) != c.Name {
+			t.Errorf("bad name %q", c.Name)
+		}
+		if len(c.Description) < 1 || len(c.Description) > 100 {
+			t.Errorf("%s: description must be 1-100 chars", c.Name)
+		}
 	}
 }

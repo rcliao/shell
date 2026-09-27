@@ -127,8 +127,9 @@ Discord alone. A send for a Telegram chat that was never linked is logged as dro
   language `card` holding JSON (title, url, description, image, thumbnail, fields, footer). A block that doesn't
   parse is shown as written. On Telegram the block shows as plain JSON.
 - **Times:** the agent may write Discord timestamps (`<t:UNIX:R>`), shown in each reader's local time.
-- **Commands:** type `/new`, `/help` and the other commands as text. Discord's slash-command menu is not set up
-  yet.
+- **Commands:** typing `/` shows a menu: `/new`, `/status`, `/help`, `/remember`, `/forget`, `/memories`,
+  `/projects`, `/schedule` and `/reactions`, one entry per agent. Each bot registers them when it connects.
+  Operator commands (`/plan`, `/usage` and so on) still work typed as text.
 - **Not yet supported:**
   - voice notes and stickers;
   - merging several quick messages into one turn;

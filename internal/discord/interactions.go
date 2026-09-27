@@ -57,8 +57,12 @@ func (h *Handler) addReplyButtons(channelID string, messageID int) {
 	}
 }
 
-// HandleInteraction routes a button click.
+// HandleInteraction routes a slash command or a button click.
 func (h *Handler) HandleInteraction(ctx context.Context, i *discordgo.Interaction) {
+	if i != nil && i.Type == discordgo.InteractionApplicationCommand {
+		h.handleSlash(ctx, i)
+		return
+	}
 	if i == nil || i.Type != discordgo.InteractionMessageComponent || i.Message == nil {
 		return
 	}

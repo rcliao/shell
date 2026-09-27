@@ -37,6 +37,9 @@ type api interface {
 	EditChannel(channelID string, e *discordgo.ChannelEdit) (*discordgo.Channel, error)
 	// Respond answers an interaction (a button click or slash command).
 	Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error
+	// EditResponse fills a deferred interaction reply; Followup adds more.
+	EditResponse(i *discordgo.Interaction, e *discordgo.WebhookEdit) error
+	Followup(i *discordgo.Interaction, p *discordgo.WebhookParams) error
 }
 
 // Bot is one agent's Discord presence: inbound turns through Handler, and the
@@ -99,6 +102,9 @@ func NewBot(token string, opts Options) (*Bot, error) {
 	b.session = s
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		b.handler.selfID = r.User.ID
+		if r.Application != nil {
+			go b.registerCommands(r.Application.ID)
+		}
 		slog.Info("discord: connected", "bot", r.User.Username, "guilds", len(r.Guilds))
 	})
 	// Turns run under a background context, not Start's: a drain-restart
@@ -446,6 +452,14 @@ func (a sessionAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo
 }
 func (a sessionAPI) Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error {
 	return a.s.InteractionRespond(i, r)
+}
+func (a sessionAPI) EditResponse(i *discordgo.Interaction, e *discordgo.WebhookEdit) error {
+	_, err := a.s.InteractionResponseEdit(i, e)
+	return err
+}
+func (a sessionAPI) Followup(i *discordgo.Interaction, p *discordgo.WebhookParams) error {
+	_, err := a.s.FollowupMessageCreate(i, true, p)
+	return err
 }
 func (a sessionAPI) Channel(id string) (*discordgo.Channel, error) {
 	if c, err := a.s.State.Channel(id); err == nil {
