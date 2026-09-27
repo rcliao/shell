@@ -123,6 +123,9 @@ Discord alone. A send for a Telegram chat that was never linked is logged as dro
 - **Replies:** replying to an earlier message quotes it to the agent, so "yes, that one" makes sense.
 - **Reply buttons** (`"reply_buttons": true`): 🔄 Regenerate and 📌 Remember appear under each reply. A click does
   exactly what that reaction does. A button shows only when the agent's reaction map has the action.
+- **Answer buttons** (experiment, `"answer_buttons": true`): when the agent asks a question with a few clear options,
+  they appear as buttons. A tap posts "<name> picked: X" and runs as that person's reply to the question, and the
+  buttons then disable.
 - **Cards:** the agent can show a place, listing or project as a rich card by writing a fenced block with
   language `card` holding JSON (title, url, description, image, thumbnail, fields, footer). A block that doesn't
   parse is shown as written. On Telegram the block shows as plain JSON.

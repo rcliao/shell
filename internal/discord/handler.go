@@ -58,6 +58,7 @@ type Handler struct {
 	authorize func(userID, chatID int64, isGroup bool) bool
 	voice     *progress.Voice
 	buttons   bool // reply buttons under each reply
+	choices   bool // answer buttons from ```choices blocks (experiment)
 	selfID    string
 	http      *http.Client
 
@@ -75,6 +76,7 @@ func newHandler(a api, b *Bot, opts Options) *Handler {
 		authorize: opts.Authorize,
 		voice:     progress.New(opts.ProgressPhrasesPath),
 		buttons:   opts.ReplyButtons,
+		choices:   opts.AnswerButtons,
 		http:      &http.Client{Timeout: 60 * time.Second},
 		locks:     map[Conv]*sync.Mutex{},
 	}
@@ -290,7 +292,12 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 	}
 
 	var botIDs []int
-	body, embeds := extractCards(response)
+	shown := response
+	var choices []string
+	if h.choices {
+		shown, choices = extractChoices(response)
+	}
+	body, embeds := extractCards(shown)
 	if len([]rune(fenceTables(body))) <= maxMessageLen && len(embeds) <= maxEmbedsPerMessage {
 		h.editFinal(w.channelID, placeholder.ID, fenceTables(body), embeds)
 		if id, err := strconv.Atoi(placeholder.ID); err == nil {
@@ -301,10 +308,10 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 		if err := h.api.Delete(w.channelID, placeholder.ID); err != nil {
 			slog.Warn("discord: delete placeholder before chunked reply", "error", err)
 		}
-		botIDs, _ = h.bot.sendChunks(w.channelID, response, nil)
+		botIDs, _ = h.bot.sendChunks(w.channelID, shown, nil)
 	}
-	if h.buttons && len(botIDs) > 0 {
-		h.addReplyButtons(w.channelID, botIDs[len(botIDs)-1])
+	if len(botIDs) > 0 {
+		h.addComponents(w.channelID, botIDs[len(botIDs)-1], h.finalComponents(choices))
 	}
 	for _, id := range botIDs {
 		if err := h.bridge.SaveMessageMap(chat, thread, msgID, id, text, response); err != nil {

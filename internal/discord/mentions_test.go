@@ -33,13 +33,19 @@ func TestMentionsRender(t *testing.T) {
 }
 
 func TestPlatformNote(t *testing.T) {
-	note := PlatformNote([]string{"alex", "sam"})
-	for _, want := range []string{"Discord", "`@alex`", "`@sam`", "<t:UNIX:R>"} {
+	note := PlatformNote([]string{"alex", "sam"}, true)
+	for _, want := range []string{"Discord", "`@alex`", "`@sam`", "<t:UNIX:R>", "`choices`"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note lacks %q", want)
 		}
 	}
-	if strings.Contains(PlatformNote(nil), "@") {
+	if strings.Contains(PlatformNote(nil, false), "@") {
 		t.Fatal("with no linked people the note must not offer mentions")
+	}
+}
+
+func TestPlatformNoteOffersChoicesOnlyWhenEnabled(t *testing.T) {
+	if strings.Contains(PlatformNote(nil, false), "choices") {
+		t.Fatal("answer buttons are an experiment: not mentioned unless enabled")
 	}
 }
