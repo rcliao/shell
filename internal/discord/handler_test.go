@@ -656,6 +656,11 @@ func TestApplicationCommandsAreValid(t *testing.T) {
 }
 
 func TestGroupMessageRecordedInLocalTime(t *testing.T) {
+	// Pin a non-UTC local zone: on a machine whose local zone IS UTC (CI),
+	// local and UTC are indistinguishable and the test would prove nothing.
+	prev := time.Local
+	time.Local = time.FixedZone("PDT", -7*3600)
+	t.Cleanup(func() { time.Local = prev })
 	h := newHarness(t, "ok")
 	ts, err := transcript.Open(filepath.Join(t.TempDir(), "transcript.db"))
 	if err != nil {
@@ -670,8 +675,8 @@ func TestGroupMessageRecordedInLocalTime(t *testing.T) {
 	if err != nil || len(rows) == 0 {
 		t.Fatalf("no transcript row: %v", err)
 	}
-	if loc := rows[0].Timestamp.Location(); loc != time.Local {
-		t.Fatalf("stored in %v, want local time like every other row", loc)
+	if _, off := rows[0].Timestamp.Zone(); off != -7*3600 {
+		t.Fatalf("stored with UTC offset %ds, want the local -25200 like every other row", off)
 	}
 	if !rows[0].Timestamp.Equal(m.Timestamp) {
 		t.Fatal("the instant itself must not change")
