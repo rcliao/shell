@@ -144,12 +144,14 @@ func newHarness(t *testing.T, reply string) *harness {
 	api := newFakeAPI()
 	api.channels[dmChan] = &discordgo.Channel{ID: dmChan, Type: discordgo.ChannelTypeDM}
 	api.channels[groupChan] = &discordgo.Channel{ID: groupChan, Type: discordgo.ChannelTypeGuildText}
+	api.channels["200000000000000013"] = &discordgo.Channel{ID: "200000000000000013", Type: discordgo.ChannelTypeGuildText, GuildID: "200000000000000900"}
 	addr := NewAddresses(config.DiscordConfig{
 		Users: map[string]int64{linkedUser: 42},
 		Chats: map[string]config.DiscordChatLink{
 			dmChan:    {ChatID: 42},
 			groupChan: {ChatID: -100200300},
 		},
+		Guilds: map[string]config.DiscordGuildLink{"200000000000000900": {ChatID: -100200300}},
 	})
 	b := newBot(api, Options{
 		Addresses: addr,
@@ -402,5 +404,19 @@ func TestReactionActionGetsAResultMark(t *testing.T) {
 	})
 	if got := strings.Join(h.api.reacts, " "); got != "+✅" {
 		t.Fatalf("result marks = %q, want ✅ on the reacted reply", got)
+	}
+}
+
+func TestNewServerChannelJoinsTheFamilyChat(t *testing.T) {
+	h := newHarness(t, "hello, new channel")
+	h.bot.handler.HandleMessage(context.Background(), msg("600000000000000060", "200000000000000013", linkedUser, "first message here"))
+	if h.agent.turnCount() != 1 {
+		t.Fatal("no turn")
+	}
+	if req := h.agent.turns[0]; req.ChatID != -100200300 {
+		t.Fatalf("a channel created in the family server ran in chat %d, want the family chat", req.ChatID)
+	}
+	if h.api.sends[0].channel != "200000000000000013" {
+		t.Fatalf("reply went to %s, want the new channel", h.api.sends[0].channel)
 	}
 }

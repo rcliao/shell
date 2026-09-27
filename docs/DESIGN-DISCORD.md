@@ -70,6 +70,10 @@ No new tables and no migration. Ids:
   - A thread inside a channel becomes thread = +thread_channel_id. Thread ids stay positive, because negative
     thread ids are reserved for lanes.
   - Both agents compute the same ids, so the shared transcript and A2A agree without coordinating.
+- **Server-joined conversations** (`discord.guilds`, added 2026-09-27): in a mapped server, a channel,
+  forum, thread or post that is not linked becomes (server's chat, +own snowflake): its own topic of the
+  family chat. A thread whose parent is linked stays in the parent's chat. Channels created later need no
+  config edit.
 - **Linked conversations** (continuity) come from config, never from the database:
   ```json
   "discord": {

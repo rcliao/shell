@@ -234,7 +234,9 @@ memory namespace, schedule and lane keys on them. Discord maps onto them in `int
   conversation — the Telegram chat it replaces — so history carries over. `discord.users` maps a Discord
   user to the person's Telegram user id; labels, canonical ids, the allowlist and the rate limiter apply
   unchanged.
-- **Derived** (unlinked): DM channel → `+snowflake`, guild channel → `−snowflake` (keeps "negative =
+- **Server-joined** (`discord.guilds`): in a mapped server, any unlinked channel, forum, thread or post
+  becomes `(server's chat, +own snowflake)` — a topic of the family chat, with no config edit.
+- **Derived** (unlinked, unmapped server): DM channel → `+snowflake`, guild channel → `−snowflake` (keeps "negative =
   group"), thread → `+thread_snowflake` inside its parent's chat. Snowflakes are ≥ 10^17, Telegram ids
   < 10^16, so the ranges never meet; negative thread ids stay reserved for lanes.
 
@@ -727,7 +729,7 @@ value; `shell-secrets doctor` covers the store itself.
 ```json
 {
   "telegram": { "token_env", "allowed_users", "reaction_map" },
-  "discord": { "enabled", "token_env", "users", "chats" },
+  "discord": { "enabled", "token_env", "users", "chats", "guilds" },
   "claude": { "binary", "model", "model_routing": { "conversation", "heartbeat", "heartbeat_deep", "compaction", "chat_models": { "<chat_id>": "<model>" } }, "timeout", "max_sessions", "work_dir", "allowed_tools", "disallowed_tools", "setting_sources" },
   "store": { "db_path" },
   "memory": { "enabled", "db_path", "budget", "profiles", "chat_profiles" },

@@ -86,7 +86,11 @@ bot has its own DM channel with each person. Both entries map to the same Telegr
   permission for this; you create the channel.
 - A thread entry is optional. Link a thread only to carry over a Telegram forum topic's session. New threads
   in a linked channel stay in that chat automatically.
-- Channels you don't link still work, with ids derived from Discord. They start fresh.
+- **New channels join automatically** when the server is mapped:
+  `"guilds": { "<server id>": { "chat_id": <telegram family group id> } }`. Any channel, forum, thread or
+  forum post you create later becomes its own topic of the family chat, with the family's memory and projects.
+  No config edit or restart is needed. Explicit `chats` links still win.
+- Channels in a server that isn't mapped still work, with ids derived from Discord. They start fresh.
 - A person who isn't linked gets no answer. In a DM they are told the id to link.
 
 ## 5. Restart and check

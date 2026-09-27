@@ -87,7 +87,7 @@ The ranking weighs how the family uses the agents against the cost of building.
 
 | # | Feature | Why it helps | Evidence | Effort |
 |---|---|---|---|---|
-| B1 | **New channels join the family chat automatically** (`discord.guilds: {guild → family chat}`). Any channel created in the server becomes a new topic of the family chat, with no config edit. | You plan to add channels. Today an unlinked channel gets a separate chat with no family memory, and each channel needs a manual link and restart. | Topics carry about 2,000 messages; 5 channels were linked by hand | S |
+| B1 ✅ | **New channels join the family chat automatically** (`discord.guilds: {guild → family chat}`). Any channel created in the server becomes a new topic of the family chat, with no config edit. | You plan to add channels. Today an unlinked channel gets a separate chat with no family memory, and each channel needs a manual link and restart. | Topics carry about 2,000 messages; 5 channels were linked by hand | S |
 | B2 | **Native slash commands** with a menu and autocomplete (`/new`, `/status`, `/projects`, `/remember`, `/schedule`) | Makes the commands discoverable for non-technical family members. Today they are invisible and typed from memory. | 18 commands, no menu on either platform | M |
 | B3 | **Tap-to-answer buttons** when the agent asks a question (options become buttons) | Replying on a phone becomes one tap | About 70 replies a month end in a question | M |
 | B4 | **Regenerate and Remember buttons under replies** instead of hidden reaction codes | The reaction actions exist but are barely used | Reactions: 4 in 30 days | S–M |
@@ -102,7 +102,7 @@ The ranking weighs how the family uses the agents against the cost of building.
 | B13 | **Let the agents see each other's replies** as observation only (transcript, not triggering turns) | Fits "blind until observed" | Owner decision 2026-09-23 | S, needs an owner call |
 
 **Suggested next build:**
-1. B1 (auto-join): it removes the manual step you will hit every time you add a channel.
-2. The sticker gap: a silent drop is a correctness bug.
-3. B6 and B5, both small, with direct family value.
-4. B2 and B3 as the first interaction-based features.
+1. ~~B1 (auto-join)~~ and ~~the sticker gap~~: done (PRs #53 and #55). Project areas (forum posts per
+   project) are driven by the project/lanes session: docs/DESIGN-PROJECT-AREAS.md.
+2. B6 and B5, both small, with direct family value.
+3. B2 and B3 as the first interaction-based features.
