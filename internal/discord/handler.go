@@ -157,7 +157,9 @@ func (h *Handler) HandleMessage(ctx context.Context, m *discordgo.Message) {
 	if isGroup {
 		// Record what a person said before deciding whether to answer: a
 		// message for the other agent is still something this one observed.
-		h.bridge.RecordHumanMessage(w.conv.ChatID, w.conv.ThreadID, msgID, m.Timestamp, sender, transcriptText(m))
+		// Local time, like every other transcript row: Discord timestamps are UTC,
+		// and a UTC human row sorts hours after the agents' replies to it.
+		h.bridge.RecordHumanMessage(w.conv.ChatID, w.conv.ThreadID, msgID, m.Timestamp.Local(), sender, transcriptText(m))
 		if !h.shouldHandleGroup(m, text) {
 			return
 		}
