@@ -45,15 +45,14 @@ func (h *Handler) replyButtons() []discordgo.MessageComponent {
 	return []discordgo.MessageComponent{discordgo.ActionsRow{Components: row}}
 }
 
-// addReplyButtons puts the reply buttons under a delivered reply. Content is
-// left as it is (a nil Content in an edit means "unchanged").
-func (h *Handler) addReplyButtons(channelID string, messageID int) {
-	rows := h.replyButtons()
-	if rows == nil {
+// addComponents puts button rows under a delivered reply. Content is left as
+// it is (a nil Content in an edit means "unchanged").
+func (h *Handler) addComponents(channelID string, messageID int, rows []discordgo.MessageComponent) {
+	if len(rows) == 0 {
 		return
 	}
 	if _, err := h.api.Edit(&discordgo.MessageEdit{ID: itoa(messageID), Channel: channelID, Components: &rows}); err != nil {
-		slog.Debug("discord: add reply buttons", "error", err)
+		slog.Debug("discord: add reply components", "error", err)
 	}
 }
 
@@ -67,6 +66,10 @@ func (h *Handler) HandleInteraction(ctx context.Context, i *discordgo.Interactio
 		return
 	}
 	id := i.MessageComponentData().CustomID
+	if strings.HasPrefix(id, pickPrefix) {
+		h.handlePick(ctx, i, strings.TrimPrefix(id, pickPrefix))
+		return
+	}
 	if !strings.HasPrefix(id, replyActionPrefix) {
 		return
 	}

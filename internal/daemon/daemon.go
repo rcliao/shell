@@ -530,7 +530,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			}
 		}
 		discordMentions = discord.NewMentions(byName)
-		br.SetPlatformNote(discord.PlatformNote(discordMentions.Names()))
+		br.SetPlatformNote(discord.PlatformNote(discordMentions.Names(), cfg.Discord.AnswerButtons))
 	}
 
 	// Configure in-place compaction by token count.
@@ -719,6 +719,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			ProgressPhrasesPath: phrases,
 			Mentions:            discordMentions,
 			ReplyButtons:        cfg.Discord.ReplyButtons,
+			AnswerButtons:       cfg.Discord.AnswerButtons,
 			Addresses:           addr,
 			Bridge:              br,
 			Agent: discord.AgentConfig{

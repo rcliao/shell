@@ -283,6 +283,9 @@ type DiscordConfig struct {
 	// ReplyButtons puts Regenerate / Remember buttons under each reply (the
 	// reaction actions, made visible). Off by default.
 	ReplyButtons bool `json:"reply_buttons"`
+	// AnswerButtons lets the agent offer a question's options as buttons
+	// (a ```choices block). Experiment; off by default.
+	AnswerButtons bool `json:"answer_buttons"`
 }
 
 // DiscordGuildLink is the internal chat a Discord server's channels join.

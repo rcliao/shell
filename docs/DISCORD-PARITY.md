@@ -89,7 +89,7 @@ The ranking weighs how the family uses the agents against the cost of building.
 |---|---|---|---|---|
 | B1 ✅ | **New channels join the family chat automatically** (`discord.guilds: {guild → family chat}`). Any channel created in the server becomes a new topic of the family chat, with no config edit. | You plan to add channels. Today an unlinked channel gets a separate chat with no family memory, and each channel needs a manual link and restart. | Topics carry about 2,000 messages; 5 channels were linked by hand | S |
 | B2 ✅ | **Native slash commands** with a menu and autocomplete (`/new`, `/status`, `/projects`, `/remember`, `/schedule`) | Makes the commands discoverable for non-technical family members. Today they are invisible and typed from memory. | 18 commands, no menu on either platform | M |
-| B3 | **Tap-to-answer buttons** when the agent asks a question (options become buttons) | Replying on a phone becomes one tap | About 70 replies a month end in a question | M |
+| B3 🧪 | **Tap-to-answer buttons** when the agent asks a question (options become buttons) | Replying on a phone becomes one tap | About 70 replies a month end in a question | M |
 | B4 ✅ | **Regenerate and Remember buttons under replies** instead of hidden reaction codes | The reaction actions exist but are barely used | Reactions: 4 in 30 days | S–M |
 | B5 ✅ | **Mention the person a reminder is for** (`<@user>`) | Guarantees a push notification even when the server notifies on mentions only | 31 active schedules; replies currently never ping | S |
 | B6 ✅ | **Quote the replied-to message into the prompt** | Discord shows replies prominently, so the family will reply to specific answers and the agent should see what they replied to | Missing on both platforms | S |
@@ -108,4 +108,4 @@ The ranking weighs how the family uses the agents against the cost of building.
    shared transcript, which is injected into the other agent's context (verified 2026-09-27: 7 rows each
    since the switch).
 3. Owner's order for the rest (2026-09-27): ~~B10 cards~~ (done: ```card JSON blocks → embeds), ~~B4 reply buttons~~ (done: `discord.reply_buttons`), ~~B2 slash commands~~ (done: 9 family-facing commands), B3 answer
-   buttons (experiment). Later: B8 events, B11 voice. B9 polls not picked.
+   buttons (shipped as an experiment: `discord.answer_buttons`; judge by whether the family taps them). Later: B8 events, B11 voice. B9 polls not picked.

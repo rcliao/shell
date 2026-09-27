@@ -79,6 +79,9 @@ type Options struct {
 	Mentions *Mentions
 	// ReplyButtons puts Regenerate / Remember buttons under each reply.
 	ReplyButtons bool
+	// AnswerButtons turns a reply's ```choices block into tap-to-answer
+	// buttons (experiment).
+	AnswerButtons bool
 }
 
 // NewBot opens nothing yet: Start connects the gateway.

@@ -115,8 +115,15 @@ func webURL(s string) string {
 
 // hideCards is what streaming shows while a card is being written: the text
 // with each card block — including one still being typed — replaced by a
-// marker, instead of raw JSON flickering on screen.
+// marker, instead of raw JSON flickering on screen. Choices blocks are
+// dropped the same way; they become buttons when the reply is done.
 func hideCards(text string) string {
+	if strings.Contains(text, "```choices") {
+		text = choicesBlockRe.ReplaceAllString(text, "")
+		if i := strings.LastIndex(text, "```choices"); i >= 0 {
+			text = text[:i]
+		}
+	}
 	if !strings.Contains(text, "```card") {
 		return text
 	}
