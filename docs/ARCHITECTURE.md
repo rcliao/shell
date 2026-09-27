@@ -706,6 +706,7 @@ so it can propose homes; a new area needs a person's yes, a post does not.
 **Keeping places current.**
 - A project post's first message is its **live summary**. `project.OpenerText` renders it from the doc (目標, 決定, 待決定, stage, date), and it is edited in place after every doc write: the doc-write RPC, a stage change, and a human edit reconciled from Notion (`project.RefreshOpener` → `Places.UpdateOpener`). Only the bot that opened the post can edit it.
 - The pinned 📋 home becomes a **board grouped by area** once a chat has an area. Each area row links its channel, and each project row shows its stage and ❓N (open questions) and links its post. Projects with no area are listed last.
+- Focus. A lane-routed message about a project that has a post asks the agent to leave ONE line in the post, and only when something was settled (`postNoteLine`, sent via `shell_relay` with the post's thread). The per-turn project line also asks for `project stage` when the project moves to its next step. The weekly review lists projects in an area with no human activity for 3+ weeks (`staleEvidence`), to ask keep, pause or archive, and never to archive unasked.
 - An area's research pass uses its own prompt, `project.AreaResearchPrompt`. It folds lessons from finished projects into the area doc, and checks that each active project in the area is moving.
 
 **Needs you.** The pinned 📋 list marks each active project with `❓N`, the

@@ -104,16 +104,36 @@ func (b *Bridge) laneProjectBlock(own store.Project, all []store.Project) string
 			others = append(others, p.Slug)
 		}
 	}
-	return b.renderScopedProject(own, others,
+	block := b.renderScopedProject(own, others,
 		"[Project] — this message was routed to this project's lane; this conversation (session) is about it.",
 		"other active projects in this chat")
+	if line := postNoteLine(own); line != "" {
+		block += "\n" + line
+	}
+	return block
+}
+
+// postNoteLine keeps a project's post the full record when the project is
+// discussed elsewhere (a lane-routed message in the main channel): the
+// agent answers where it was asked and, only when something was settled,
+// leaves one line in the post. The agent decides; nothing is mirrored
+// automatically. "" when the project has no Discord post.
+func postNoteLine(p store.Project) string {
+	if p.MessageThreadID < discordThreadFloor {
+		return ""
+	}
+	return fmt.Sprintf("This project has its own post <#%d>, and this message is not in it. Answer here as usual. "+
+		"Only if this message settles something for the project (a decision, a date, a booking, a changed plan), "+
+		"also leave ONE short line in the post so it stays the full record: shell_relay(message_thread_id=%d, text=\"📌 <what was settled> (from the chat)\"). "+
+		"Nothing settled, no note.", p.MessageThreadID, p.MessageThreadID)
 }
 
 // advanceProjectLine turns a project conversation into project progress
 // (router feedback loop 3): a decision said in chat lands in the doc in the
 // same turn instead of waiting for a research pass.
 const advanceProjectLine = "If this message settles a decision or raises a new open question for this project, update the doc's " +
-	docDecisionsHeading + " / " + docToDecideHeading + " sections in this same turn (read the doc, edit that section, project doc-write)."
+	docDecisionsHeading + " / " + docToDecideHeading + " sections in this same turn (read the doc, edit that section, project doc-write). " +
+	"If it moves the project to its next step (e.g. planned → booked → done), also run `project stage <slug> --stage <step>`; when the project is finished, offer to archive it."
 
 func (b *Bridge) renderScopedProject(own store.Project, others []string, header, othersLabel string) string {
 	var sb strings.Builder

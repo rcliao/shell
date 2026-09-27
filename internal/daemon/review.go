@@ -257,6 +257,7 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 	section("Where routing disagreed with an independent judge (fix by sharpening that project's instructions)", d.missEvidence(since))
 	section("Subjects that keep coming back with no project behind them (candidate projects — or a candidate area, if several share a kind)", recurringEvidence(d.store, time.Now().Add(-recurringWindow), 0, d.exclude))
 	section("Your areas, and active projects with no area (propose a home for each; a new area needs a person's yes, filing into an existing one does not)", areaEvidence(d.store, d.exclude))
+	section("Projects in an area that nobody has touched for 3+ weeks (ask the family in the project's post: keep, pause, or archive? Never archive unasked)", staleEvidence(d.store, d.exclude, time.Now()))
 
 	if refl, err := d.store.ListReflections(3); err == nil {
 		var lines []string
@@ -477,4 +478,44 @@ func areaEvidence(st *store.Store, exclude map[int64]bool) string {
 		return ""
 	}
 	return strings.Join(append(areas, loose...), "\n") + "\n"
+}
+
+// staleAfter is how long a project in an area can go without human activity
+// before the review asks whether it is still alive.
+const staleAfter = 21 * 24 * time.Hour
+
+// staleEvidence lists active projects in an area with no human activity for
+// staleAfter (docs/DESIGN-PROJECT-AREAS.md): the channel list is only an
+// honest picture of what is tracked if dead projects get closed.
+func staleEvidence(st *store.Store, exclude map[int64]bool, now time.Time) string {
+	projects, err := st.ListProjects(0)
+	if err != nil {
+		return ""
+	}
+	var lines []string
+	for _, p := range projects {
+		if p.Status != "active" || p.Area == "" || exclude[p.ChatID] {
+			continue
+		}
+		last := p.CreatedAt
+		if p.LastHumanActivityAt != nil {
+			last = *p.LastHumanActivityAt
+		}
+		if now.Sub(last) < staleAfter {
+			continue
+		}
+		line := fmt.Sprintf("- %s — %s (area %s", p.Slug, p.Title, p.Area)
+		if p.Stage != "" {
+			line += ", stage " + p.Stage
+		}
+		line += ", last human activity " + last.Local().Format("Jan 2")
+		if p.MessageThreadID >= 100_000_000_000_000_000 {
+			line += fmt.Sprintf(", post <#%d>", p.MessageThreadID)
+		}
+		lines = append(lines, line+")")
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
