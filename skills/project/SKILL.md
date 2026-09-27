@@ -24,6 +24,8 @@ never re-derive an id.
   when answered (record the answer in `決定`) · `更新紀錄` recent entries,
   older folded into one line.
 - Managed docs mirror to Notion by themselves — never edit that page by hand.
+- Areas (travel, home, school…) hold many projects; a project in an area gets
+  its own place with `create --area <slug> --place auto`. See "Areas" below.
 <!-- /hot -->
 
 A **project** is a named unit of multi-week research work (trip planning,
@@ -140,7 +142,9 @@ revision turn in the project's chat session with the comment text. Contract:
 - `--title <text>` — required; the human-readable project name
 - `--emoji <e>` — project emoji (list row, doc icon, P4 reactions)
 - `--chat <id>` — target chat (default: current `SHELL_CHAT_ID`)
-- `--thread <id>` — Telegram forum topic id for group projects (default 0)
+- `--thread <id>` — the project's thread on its platform: a Telegram forum
+  topic or a Discord thread/post id (default 0 = the chat itself). With an
+  area, prefer `--place auto`, which creates the thread for you.
 - `--export-ref <id>` — external doc id (export kind defaults to notion)
 - `--doc-path <path>` — canonical doc path, e.g. `workspace/projects/<slug>/doc.md`
 - `--instructions <text>` — standing guidance injected with the project row
@@ -156,3 +160,31 @@ revision turn in the project's chat session with the comment text. Contract:
   delta there. Archiving or pausing the project disables the schedule;
   re-activating re-enables it — never manage `project:<slug>` schedules by
   hand via shell-schedule.
+
+## Areas
+
+An **area** is an umbrella for one recurring kind of work (travel, home,
+school). Its doc holds what is true across all its projects (who travels, 2
+rooms, budget habits, lessons from past trips); each **project** in it (one
+trip) has its own doc and its own place. Sub-topics (flights, hotels,
+itinerary) are sections of the project doc, not more places.
+
+- `project create --title 旅遊 --kind area --place-ref discord:<forum id>` —
+  an area; `--place-ref` is the forum where its projects get posts
+  (`telegram` = forum topics in the chat). Bind the area to its own
+  channel/topic with `--thread`.
+- `project create --title "<trip>" --emoji ✈️ --area <area> --stage 規劃中 --place auto --content "<first message>"`
+  — a project in the area. It lives in the area's chat, and `--place auto`
+  opens its post (or topic) and binds it; the receipt prints the thread.
+  Messages there get this project's `[Project]` block by themselves.
+- `project move <slug> --area <area> [--stage <s>] [--place auto] [--content <text>]`
+  — file an existing project under an area (and give it a place).
+- `project stage <slug> --stage <s>` — the project's step (e.g. 規劃中 → 已訂 →
+  完成); on Discord it is the post's tag.
+- `project archive <slug>` — archive; its post/topic is closed too.
+
+In an area's own channel your `[Project]` block lists its projects with
+their threads. Talk that belongs to one project: answer, then point to its
+place (on Discord write `<#thread id>`). A new effort that keeps coming up:
+offer to start a project for it; on yes, create it with `--place auto`.
+

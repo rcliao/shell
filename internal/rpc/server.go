@@ -68,6 +68,7 @@ type Server struct {
 	// after create/status/doc-write. Nil when the daemon runs without it.
 	projectHomeRefresh func(chatID int64)
 	ownerChatID        int64
+	places             Places
 }
 
 // KillSessionFunc terminates the live CLI subprocess for a chat (all threads
@@ -105,6 +106,9 @@ type Config struct {
 	// OwnerChatID is the owner's DM (agent.owner_chat_id). Suggestion
 	// decisions are accepted only from that chat. 0 disables decide.
 	OwnerChatID int64
+	// Places creates and manages projects' own places (forum posts or
+	// topics) for project areas. Nil disables --place auto.
+	Places Places
 }
 
 // handleContext serves the live system-prompt manifest (GET /context?chat_id=N&full=1).
@@ -154,6 +158,7 @@ func New(cfg Config) *Server {
 		workspaceDir:    cfg.WorkspaceDir,
 
 		projectHomeRefresh: cfg.ProjectHomeRefresh,
+		places:             cfg.Places,
 		ownerChatID:        cfg.OwnerChatID,
 	}
 }

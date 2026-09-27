@@ -842,6 +842,11 @@ func (s *Store) migrate() error {
 	// notion_polled_at (P3.5 poll backoff): same best-effort ALTER. Not in the
 	// CREATE above, so this line is what adds it on fresh DBs too.
 	s.db.Exec("ALTER TABLE projects ADD COLUMN notion_polled_at DATETIME")
+	// Areas (docs/DESIGN-PROJECT-AREAS.md): same best-effort ALTERs.
+	s.db.Exec("ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'project'")
+	s.db.Exec("ALTER TABLE projects ADD COLUMN area TEXT NOT NULL DEFAULT ''")
+	s.db.Exec("ALTER TABLE projects ADD COLUMN stage TEXT NOT NULL DEFAULT ''")
+	s.db.Exec("ALTER TABLE projects ADD COLUMN place_ref TEXT NOT NULL DEFAULT ''")
 
 	// chat_pins is the pinned 📋 Projects home message per chat (P2) — see
 	// internal/store/chatpins.go. PK-only table: no separate index needed, and

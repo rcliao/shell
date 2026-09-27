@@ -22,7 +22,14 @@ type Project struct {
 	Status string // active | paused | archived
 
 	ChatID          int64
-	MessageThreadID int64 // Telegram forum topic ID (0 = DM / main chat)
+	MessageThreadID int64 // the project's thread on its platform: a Telegram forum topic, or a Discord thread/forum post snowflake (0 = the chat itself)
+
+	// Areas (docs/DESIGN-PROJECT-AREAS.md). An area is a long-lived umbrella
+	// project (Kind "area"); a project in it names it in Area.
+	Kind     string // project | area
+	Area     string // slug of the area this project belongs to ("" = none)
+	Stage    string // area-defined lifecycle step, mirrored as a forum tag
+	PlaceRef string // area only: where its projects get places — "discord:<forum channel id>" or "telegram" (forum topics)
 
 	DocPath            string     // workspace/projects/<slug>/doc.md
 	DocRev             string     // last rendered commit
@@ -123,18 +130,26 @@ func (s *Store) CreateProject(p Project) (*Project, error) {
 	if p.GhostTag == "" {
 		p.GhostTag = "project:" + p.Slug
 	}
+	if p.Kind == "" {
+		p.Kind = ProjectKindProject
+	}
+	if !validProjectKind(p.Kind) {
+		return nil, fmt.Errorf("invalid kind %q: must be project or area", p.Kind)
+	}
 
 	_, err := s.db.Exec(`
 		INSERT INTO projects
 		  (slug, title, emoji, status, chat_id, message_thread_id,
 		   doc_path, doc_rev, export_kind, export_ref, block_map, handled_discussions,
 		   notion_watermark, instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
-		   topic_thread_ref, review_after, last_research_at, last_human_activity_at, notion_polled_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   topic_thread_ref, review_after, last_research_at, last_human_activity_at, notion_polled_at,
+		   kind, area, stage, place_ref)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Slug, p.Title, p.Emoji, p.Status, p.ChatID, p.MessageThreadID,
 		p.DocPath, p.DocRev, p.ExportKind, p.ExportRef, p.BlockMap, p.HandledDiscussions,
 		p.NotionWatermark, p.Instructions, p.NotifyPolicy, p.Lang, p.GhostTag, p.ScheduleDedupKey,
-		p.TopicThreadRef, p.ReviewAfter, p.LastResearchAt, p.LastHumanActivityAt, p.NotionPolledAt)
+		p.TopicThreadRef, p.ReviewAfter, p.LastResearchAt, p.LastHumanActivityAt, p.NotionPolledAt,
+		p.Kind, p.Area, p.Stage, p.PlaceRef)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +160,7 @@ const projectColumns = `id, slug, title, emoji, status, chat_id, message_thread_
 	doc_path, doc_rev, export_kind, export_ref, block_map, handled_discussions,
 	notion_watermark, instructions, notify_policy, lang, ghost_tag, schedule_dedup_key,
 	topic_thread_ref, review_after, last_research_at, last_human_activity_at, notion_polled_at,
+	kind, area, stage, place_ref,
 	created_at, updated_at`
 
 // scanProject scans one projects row from any row-shaped scanner.
@@ -156,6 +172,7 @@ func scanProject(scan func(dest ...any) error) (*Project, error) {
 		&p.DocPath, &p.DocRev, &p.ExportKind, &p.ExportRef, &p.BlockMap, &p.HandledDiscussions,
 		&p.NotionWatermark, &p.Instructions, &p.NotifyPolicy, &p.Lang, &p.GhostTag, &p.ScheduleDedupKey,
 		&topicRef, &reviewAfter, &lastResearch, &lastHuman, &polledAt,
+		&p.Kind, &p.Area, &p.Stage, &p.PlaceRef,
 		&p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -267,6 +284,9 @@ type ProjectFieldUpdate struct {
 	ReviewAfter         *time.Time
 	LastResearchAt      *time.Time
 	LastHumanActivityAt *time.Time
+	Area                *string
+	Stage               *string
+	PlaceRef            *string
 }
 
 // MarkProjectPolled records a completed Notion comment sweep. Deliberately
@@ -328,6 +348,15 @@ func (s *Store) UpdateProjectFields(slug string, u ProjectFieldUpdate) error {
 	}
 	if u.Lang != nil {
 		add("lang", *u.Lang)
+	}
+	if u.Area != nil {
+		add("area", *u.Area)
+	}
+	if u.Stage != nil {
+		add("stage", *u.Stage)
+	}
+	if u.PlaceRef != nil {
+		add("place_ref", *u.PlaceRef)
 	}
 	if u.GhostTag != nil {
 		add("ghost_tag", *u.GhostTag)
@@ -439,4 +468,32 @@ func (s *Store) AppendHandledDiscussion(slug, discussionID string) error {
 	}
 	encoded := string(data)
 	return s.UpdateProjectFields(slug, ProjectFieldUpdate{HandledDiscussions: &encoded})
+}
+
+// Project kinds. An area is an umbrella over projects of one recurring kind
+// of work (travel, home, school); see docs/DESIGN-PROJECT-AREAS.md.
+const (
+	ProjectKindProject = "project"
+	ProjectKindArea    = "area"
+)
+
+func validProjectKind(k string) bool { return k == ProjectKindProject || k == ProjectKindArea }
+
+// AreaProjects returns the projects filed under the area slug, newest first
+// (all statuses: the area index shows finished ones too).
+func (s *Store) AreaProjects(area string) ([]Project, error) {
+	rows, err := s.db.Query(`SELECT `+projectColumns+` FROM projects WHERE area = ? ORDER BY created_at DESC, id DESC`, area)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Project
+	for rows.Next() {
+		p, err := scanProject(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
 }

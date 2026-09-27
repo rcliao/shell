@@ -319,3 +319,38 @@ func TestMarkProjectPolledLeavesUpdatedAtAlone(t *testing.T) {
 		t.Errorf("a poll bumped updated_at: %v -> %v", p.UpdatedAt, got.UpdatedAt)
 	}
 }
+
+func TestProjectAreasRoundTrip(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	area, err := s.CreateProject(Project{Title: "Travel", Slug: "travel", ChatID: 42, Kind: ProjectKindArea, PlaceRef: "discord:900000000000000001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if area.Kind != ProjectKindArea || area.PlaceRef != "discord:900000000000000001" {
+		t.Fatalf("area = %+v", area)
+	}
+	trip, err := s.CreateProject(Project{Title: "Trip", ChatID: 42, Area: "travel", Stage: "planning"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trip.Kind != ProjectKindProject || trip.Area != "travel" || trip.Stage != "planning" {
+		t.Fatalf("trip = %+v", trip)
+	}
+	if _, err := s.CreateProject(Project{Title: "Bad", ChatID: 42, Kind: "umbrella"}); err == nil {
+		t.Fatal("invalid kind accepted")
+	}
+
+	stage := "booked"
+	if err := s.UpdateProjectFields(trip.Slug, ProjectFieldUpdate{Stage: &stage}); err != nil {
+		t.Fatal(err)
+	}
+	kids, err := s.AreaProjects("travel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kids) != 1 || kids[0].Slug != trip.Slug || kids[0].Stage != "booked" {
+		t.Fatalf("AreaProjects = %+v", kids)
+	}
+}

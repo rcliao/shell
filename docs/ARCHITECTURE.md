@@ -666,6 +666,18 @@ whose id is the project's `message_thread_id` — the turn gets a scoped
 is classified. Anywhere else the turn gets the chat-wide `[Projects]` list.
 Two projects claiming one thread is ambiguous and falls back to the list.
 
+**Areas** (`docs/DESIGN-PROJECT-AREAS.md`). An area is a project row with
+`kind = area`: an umbrella for one recurring kind of work (travel, home,
+school). Its projects name it in `area`, carry a `stage` (shown as a Discord
+forum tag), and get their own place from `project create --area <slug>
+--place auto`. The area's `place_ref` (`discord:<forum id>` or `telegram`)
+picks where: the RPC calls `rpc.Places`, which the daemon implements over
+the platform bots (`daemon/places.go`: Discord forum posts, Telegram forum
+topics) and binds the new thread as the project's `message_thread_id`.
+Archiving a project in an area closes its place. An area's own `[Project]`
+block adds a guide line and an index of its projects with their threads; a
+project in an area points at the area's doc for shared constraints.
+
 **Needs you.** The pinned 📋 list marks each active project with `❓N`, the
 number of open items under its doc's 待決定 section — bulleted or numbered,
 not checked off, not struck through.

@@ -83,6 +83,47 @@ func (f *fakeAPI) Unreact(ch, id, e string) error {
 func (f *fakeAPI) Typing(string) error        { return nil }
 func (f *fakeAPI) Pin(string, string) error   { return nil }
 func (f *fakeAPI) Unpin(string, string) error { return nil }
+func (f *fakeAPI) StartForumThread(forum string, t *discordgo.ThreadStart, m *discordgo.MessageSend) (*discordgo.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	id := strconv.FormatInt(f.nextID, 10)
+	th := &discordgo.Channel{ID: id, ParentID: forum, Name: t.Name, Type: discordgo.ChannelTypeGuildPublicThread, AppliedTags: t.AppliedTags}
+	f.channels[id] = th
+	f.sends = append(f.sends, sent{channel: id, content: m.Content})
+	return th, nil
+}
+
+func (f *fakeAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.channels[id]
+	if !ok {
+		return nil, discordgo.ErrStateNotFound
+	}
+	if e.AvailableTags != nil {
+		// Discord assigns ids to new tags.
+		tags := append([]discordgo.ForumTag(nil), (*e.AvailableTags)...)
+		for i := range tags {
+			if tags[i].ID == "" {
+				f.nextID++
+				tags[i].ID = strconv.FormatInt(f.nextID, 10)
+			}
+		}
+		c.AvailableTags = tags
+	}
+	if e.AppliedTags != nil {
+		c.AppliedTags = *e.AppliedTags
+	}
+	if e.Archived != nil {
+		if c.ThreadMetadata == nil {
+			c.ThreadMetadata = &discordgo.ThreadMetadata{}
+		}
+		c.ThreadMetadata.Archived = *e.Archived
+	}
+	return c, nil
+}
+
 func (f *fakeAPI) Channel(id string) (*discordgo.Channel, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
