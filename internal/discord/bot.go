@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -302,17 +303,56 @@ func (b *Bot) SendTextButtons(chatID, threadID int64, text string, buttons []bri
 	return err
 }
 
+// maxUploadBytes is Discord's default per-file limit for bots (20 MiB since
+// 2026-09-03; boosted servers allow more, but this server is not boosted).
+const maxUploadBytes = 20 << 20
+
+// errTooLarge is returned for a file over the upload limit.
+var errTooLarge = errors.New("discord: file over the upload limit")
+
+// sendFile uploads one file. A file that cannot be delivered is said out
+// loud in the conversation — before this, an oversized video or document
+// the agent produced vanished with only a log line, and the family was left
+// waiting for something that would never come.
 func (b *Bot) sendFile(chatID, threadID int64, name string, data []byte, caption string) error {
 	ch, err := b.target(chatID, threadID)
 	if err != nil {
 		return err
+	}
+	if len(data) > maxUploadBytes {
+		b.fileNotice(ch, name, len(data), caption, "Discord's limit is "+humanBytes(maxUploadBytes)+". Ask me for a smaller or shorter version, or a link instead.")
+		return fmt.Errorf("%w: %s is %d bytes", errTooLarge, name, len(data))
 	}
 	caption = truncateRunes(caption, maxMessageLen)
 	_, err = b.send(ch, &discordgo.MessageSend{
 		Content: caption,
 		Files:   []*discordgo.File{{Name: name, Reader: bytes.NewReader(data)}},
 	})
+	if err != nil {
+		b.fileNotice(ch, name, len(data), caption, "Discord refused the upload. Ask me to try again, or for a link instead.")
+	}
 	return err
+}
+
+// fileNotice tells the conversation a file could not be attached, keeping
+// the caption so its words are not lost with the file.
+func (b *Bot) fileNotice(channelID, name string, size int, caption, why string) {
+	msg := "⚠️ I couldn't attach **" + name + "** (" + humanBytes(size) + "). " + why
+	if c := strings.TrimSpace(caption); c != "" {
+		msg += "\n" + c
+	}
+	if _, err := b.send(channelID, &discordgo.MessageSend{Content: truncateRunes(msg, maxMessageLen)}); err != nil {
+		slog.Error("discord: file notice failed too", "error", err, "file", name)
+	}
+}
+
+// humanBytes renders a size the way a person reads it: "23.4 MB".
+func humanBytes(n int) string {
+	const mb = 1 << 20
+	if n >= mb {
+		return strconv.FormatFloat(float64(n)/mb, 'f', 1, 64) + " MB"
+	}
+	return strconv.Itoa((n+1023)/1024) + " KB"
 }
 
 func (b *Bot) SendPhoto(chatID, threadID int64, data []byte, caption string) {

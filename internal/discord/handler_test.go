@@ -2,8 +2,10 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,6 +34,7 @@ type fakeAPI struct {
 	compsOn      map[string]int    // message id → component rows on its latest edit
 	responses    []discordgo.InteractionResponseType
 	slashReplies []string
+	failFiles    bool
 	deletes      []string
 	reacts       []string // "+emoji" / "-emoji"
 	created      []string // channels made by CreateGuildChannel
@@ -53,6 +56,9 @@ func newFakeAPI() *fakeAPI {
 func (f *fakeAPI) Send(ch string, m *discordgo.MessageSend) (*discordgo.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failFiles && len(m.Files) > 0 {
+		return nil, errors.New("upload rejected")
+	}
 	f.nextID++
 	id := strconv.FormatInt(f.nextID, 10)
 	var pings []string
@@ -732,5 +738,33 @@ func TestGroupMessageRecordedInLocalTime(t *testing.T) {
 	}
 	if !rows[0].Timestamp.Equal(m.Timestamp) {
 		t.Fatal("the instant itself must not change")
+	}
+}
+
+func TestOversizedFileIsSaidOutLoud(t *testing.T) {
+	h := newHarness(t, "")
+	big := make([]byte, maxUploadBytes+1)
+	h.bot.SendVideo(-100200300, 0, big, "Your trip video")
+	if len(h.api.sends) != 1 || h.api.sends[0].files != 0 {
+		t.Fatalf("an oversized file must not be uploaded; sends=%+v", h.api.sends)
+	}
+	got := h.api.sends[0].content
+	if !strings.Contains(got, "couldn't attach") || !strings.Contains(got, "20.0 MB") || !strings.Contains(got, "Your trip video") {
+		t.Fatalf("notice = %q, want the file, the limit and the caption", got)
+	}
+}
+
+func TestRejectedUploadIsSaidOutLoud(t *testing.T) {
+	h := newHarness(t, "")
+	h.api.failFiles = true
+	path := filepath.Join(t.TempDir(), "plan.pdf")
+	if err := os.WriteFile(path, []byte("%PDF-1.4 small"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.bot.SendDocument(-100200300, 0, path, "Japan plan"); err == nil {
+		t.Fatal("a rejected upload must return an error to the caller")
+	}
+	if len(h.api.sends) != 1 || !strings.Contains(h.api.sends[0].content, "plan.pdf") {
+		t.Fatalf("want a notice naming the file, got %+v", h.api.sends)
 	}
 }
