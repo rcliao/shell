@@ -57,6 +57,20 @@ and the weekly review.
   channels.
 - **Forum tags** mirror `stage`. Archiving the project archives (closes) the
   post.
+- **Both channels must belong to the family chat.** `Addresses.Inbound` maps a
+  post to its parent's chat only when the parent (the forum) is in
+  `discord.chats`. Otherwise a post resolves to chat = −forum snowflake, a
+  separate chat with no family memory or projects. Two ways to fix this:
+  - (a) add a `discord.chats` entry for the forum (family chat; its
+    `thread_id` is ignored for posts). This is a config edit for every new
+    area forum.
+  - (b) **guild auto-join** (B1 in `docs/DISCORD-PARITY.md`): any channel in
+    a configured guild defaults to a topic of the family chat.
+
+  **Recommended: (b), built first**, so that an agent that creates an area or
+  forum never needs a config change or deploy. This design assumes (b). If
+  the owner picks (a), the migration adds the entry in step 1, and
+  `project create --kind area` must also write that link.
 
 **On Telegram (while it lasts):**
 - The area is a forum topic.
@@ -136,7 +150,9 @@ project and no trips.
 ## Migration
 
 1. Create the forum `#旅遊-trips` with tags 規劃中 / 已訂 / 完成. Keep
-   `#旅遊-travel` (text) as the area channel.
+   `#旅遊-travel` (text) as the area channel. Prerequisite: guild auto-join
+   (B1) is live, or the forum has its own `discord.chats` entry. Check this
+   by posting a test message in the forum: it must resolve to the family chat.
 2. Create the area project `travel` (kind area; doc: family travel
    constraints and a trip index) and bind it to `#旅遊-travel`.
 3. **日本行程-2027 (pikamini):**
