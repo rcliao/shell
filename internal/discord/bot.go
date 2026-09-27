@@ -219,15 +219,37 @@ func (b *Bot) send(channelID string, m *discordgo.MessageSend) (int, error) {
 // sendChunks sends text as one or more messages; buttons ride the last one.
 // Returns the ids of the messages that landed.
 func (b *Bot) sendChunks(channelID, text string, buttons []bridge.LinkButton) ([]int, error) {
-	if text == "" {
+	text, embeds := extractCards(text)
+	if text == "" && len(embeds) == 0 {
 		text = "(empty response)"
 	}
-	chunks := splitMessage(fenceTables(text), maxMessageLen)
+	var chunks []string
+	if text != "" {
+		chunks = splitMessage(fenceTables(text), maxMessageLen)
+	}
+	// Cards ride the last text chunk; more than one message's worth follow
+	// in their own messages. Buttons go on the very last message.
+	batches := embedBatches(embeds)
+	type msgPlan struct {
+		content string
+		embeds  []*discordgo.MessageEmbed
+	}
+	var plan []msgPlan
+	for _, c := range chunks {
+		plan = append(plan, msgPlan{content: c})
+	}
+	for i, batch := range batches {
+		if i == 0 && len(plan) > 0 {
+			plan[len(plan)-1].embeds = batch
+			continue
+		}
+		plan = append(plan, msgPlan{embeds: batch})
+	}
 	var ids []int
 	var lastErr error
-	for i, c := range chunks {
-		m := &discordgo.MessageSend{Content: c}
-		if i == len(chunks)-1 {
+	for i, p := range plan {
+		m := &discordgo.MessageSend{Content: p.content, Embeds: p.embeds}
+		if i == len(plan)-1 {
 			m.Components = linkButtons(buttons)
 		}
 		id, err := b.send(channelID, m)
