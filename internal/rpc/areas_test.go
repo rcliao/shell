@@ -3,6 +3,7 @@ package rpc
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +16,7 @@ type fakePlaces struct {
 	fail     bool
 	areas    map[string][2]int64 // channel name → (channel thread, forum id)
 	titles   map[int64]string    // thread → post title (without emoji)
+	openers  map[int64]string    // thread → last live summary
 }
 
 func (f *fakePlaces) EnsureAreaPlaces(chatID int64, name, forumName string, tags []string) (int64, string, bool, error) {
@@ -37,6 +39,14 @@ func (f *fakePlaces) FindThread(chatID int64, ref, title string) (int64, bool, e
 		}
 	}
 	return 0, false, nil
+}
+
+func (f *fakePlaces) UpdateOpener(chatID, threadID int64, ref, text string) error {
+	if f.openers == nil {
+		f.openers = map[int64]string{}
+	}
+	f.openers[threadID] = text
+	return nil
 }
 
 func (f *fakePlaces) ThreadInfo(chatID, threadID int64) (string, string, []string, error) {
@@ -271,5 +281,19 @@ func TestAreaCreateRetryAndJoinSchedule(t *testing.T) {
 	_, joined := postProject(t, other, map[string]any{"action": "create", "title": "Zelda", "area": "travel", "place": "auto"})
 	if joined["place_joined"] != true || joined["cadence"] != "none (joined another agent's post)" {
 		t.Fatalf("joined create: %v", joined)
+	}
+}
+
+// A stage change re-renders the post's opener with the new stage.
+func TestStageRefreshesOpener(t *testing.T) {
+	s, fp := newAreaServer(t)
+	_, out := postProject(t, s, map[string]any{"action": "create", "title": "Zelda", "emoji": "🎮", "area": "travel", "place": "auto"})
+	postProject(t, s, map[string]any{"action": "stage", "slug": out["slug"], "stage": "booked"})
+	var got string
+	for _, v := range fp.openers {
+		got = v
+	}
+	if !strings.HasPrefix(got, "🎮 **Zelda** · booked") {
+		t.Fatalf("opener = %q", got)
 	}
 }

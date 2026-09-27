@@ -315,3 +315,14 @@ func (b *Bot) PostInfo(threadID int64) (PostInfo, error) {
 	}
 	return out, nil
 }
+
+// EditPostOpener replaces a forum post's first message (its id is the
+// post's id) with the project's live summary. Only the bot that opened the
+// post can edit it; for another agent's post Discord refuses, which the
+// caller treats as "not mine to keep".
+func (b *Bot) EditPostOpener(postID int64, text string) error {
+	id := strconv.FormatInt(postID, 10)
+	text = truncateRunes(text, maxMessageLen)
+	_, err := b.api.Edit(&discordgo.MessageEdit{Channel: id, ID: id, Content: &text})
+	return err
+}

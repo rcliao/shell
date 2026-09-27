@@ -114,6 +114,15 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 	}
 
 	prompt := project.ResearchPrompt(proj.Slug, proj.Title, proj.Instructions, proj.Lang, d.readManagedDoc(slug))
+	if proj.Kind == store.ProjectKindArea {
+		var children []string
+		if kids, err := d.store.AreaProjects(proj.Slug); err == nil {
+			for _, k := range kids {
+				children = append(children, project.AreaChildLine(k, time.Now()))
+			}
+		}
+		prompt = project.AreaResearchPrompt(proj.Slug, proj.Title, proj.Instructions, proj.Lang, d.readManagedDoc(slug), children)
+	}
 
 	started := time.Now().UTC()
 	text, err := d.runProjectTurn(ctx, proj, prompt)

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/rcliao/shell/internal/store"
 )
 
 // The project.event contract (P2, docs/PLAN-PROJECT-WORKSPACE.md "Autonomous
@@ -182,4 +185,61 @@ func CommentRevisionPrompt(slug, title, instructions, lang, doc, comment, sectio
 		fmt.Fprintf(&b, "- Reply in the project's language: %s.\n", lang)
 	}
 	return b.String()
+}
+
+// AreaResearchPrompt is the research pass for an area
+// (docs/DESIGN-PROJECT-AREAS.md): an area is not researched like a trip. Its
+// pass keeps the area doc true across its projects — lessons from finished
+// ones, constraints that keep recurring — and checks that each active
+// project in it is moving. children are one line per project in the area.
+func AreaResearchPrompt(slug, title, instructions, lang, doc string, children []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Area review: %s]\n", slug)
+	fmt.Fprintf(&b, "Area: %s\n", title)
+	if instructions != "" {
+		fmt.Fprintf(&b, "Standing instructions: %s\n", instructions)
+	}
+	if doc != "" {
+		b.WriteString("\nCurrent area doc:\n---\n")
+		b.WriteString(doc)
+		if !strings.HasSuffix(doc, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("---\n")
+	}
+	b.WriteString("\nProjects in this area:\n")
+	if len(children) == 0 {
+		b.WriteString("(none yet)\n")
+	}
+	for _, c := range children {
+		b.WriteString("- " + c + "\n")
+	}
+	b.WriteString("\nDo ONE bounded area pass now. This is not research on a new topic. Hard rules:\n")
+	b.WriteString("- Keep the area doc true across its projects: fold lessons from finished (archived) projects and constraints that keep recurring into it (read those projects' docs with project doc-read). Drop what no longer holds.\n")
+	b.WriteString("- For each active project, check it is moving: a stage that no longer matches its doc gets `project stage`; one with no human activity for 3+ weeks gets named in your reply as a question (keep, pause or archive?). Never archive unasked.\n")
+	b.WriteString("- Update the area doc via the project skill's doc-write (full revised content); the printed commit rev is your receipt — no rev, no claim.\n")
+	if doc != "" {
+		b.WriteString(BudgetPromptLine(doc, 0))
+	}
+	b.WriteString("- Reply with the DELTA only: at most 3 short lines (what the area doc gained, which project needs a decision). Never re-dump the doc.\n")
+	b.WriteString("- Text only — no images, files, or generated media.\n")
+	b.WriteString("- If nothing changed and nothing needs a decision, reply [noop].\n")
+	if lang != "" {
+		fmt.Fprintf(&b, "- Reply in the area's language: %s.\n", lang)
+	}
+	return b.String()
+}
+
+// AreaChildLine renders one project of an area for AreaResearchPrompt.
+func AreaChildLine(p store.Project, now time.Time) string {
+	line := fmt.Sprintf("%s — %s | %s", p.Slug, p.Title, p.Status)
+	if p.Stage != "" {
+		line += " | stage: " + p.Stage
+	}
+	if p.LastHumanActivityAt != nil {
+		line += fmt.Sprintf(" | last human activity %d days ago", int(now.Sub(*p.LastHumanActivityAt).Hours()/24))
+	} else {
+		line += " | no human activity recorded"
+	}
+	return line
 }

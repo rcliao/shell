@@ -703,6 +703,11 @@ that is none of the agent's projects gets a one-line join hint. The weekly
 review lists the agent's areas and its active projects that have no area,
 so it can propose homes; a new area needs a person's yes, a post does not.
 
+**Keeping places current.**
+- A project post's first message is its **live summary**. `project.OpenerText` renders it from the doc (目標, 決定, 待決定, stage, date), and it is edited in place on every doc-write and stage change (`Places.UpdateOpener`). Only the bot that opened the post can edit it.
+- The pinned 📋 home becomes a **board grouped by area** once a chat has an area. Each area row links its channel, and each project row shows its stage and ❓N (open questions) and links its post. Projects with no area are listed last.
+- An area's research pass uses its own prompt, `project.AreaResearchPrompt`. It folds lessons from finished projects into the area doc, and checks that each active project in the area is moving.
+
 **Needs you.** The pinned 📋 list marks each active project with `❓N`, the
 number of open items under its doc's 待決定 section — bulleted or numbered,
 not checked off, not struck through.

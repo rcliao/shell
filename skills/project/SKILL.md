@@ -197,5 +197,9 @@ active project should live in an area.
 - `project stage <slug> --stage <s>` — its step, shown as the post's tag.
 - `project archive <slug>` — archive; its post is closed too.
 
+A post's first message is its live summary: shell re-renders it from the doc
+on every doc-write and stage change, so keeping the doc's 目標/決定/待決定
+current keeps the post current. Don't edit it by hand.
+
 In an area's own channel your `[Project]` block lists its projects with
 their threads: answer there, then point to the project's post.

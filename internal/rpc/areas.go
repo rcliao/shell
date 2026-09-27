@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"time"
+
+	"github.com/rcliao/shell/internal/project"
 	"strings"
 	"unicode"
 
@@ -33,6 +36,9 @@ type Places interface {
 	// ThreadInfo describes a thread: its title, the placeRef it lives under
 	// ("" when it is not in a forum), and its tags.
 	ThreadInfo(chatID, threadID int64) (title, placeRef string, tags []string, err error)
+	// UpdateOpener replaces the first message of a project's own place with
+	// its live summary. An error means it could not (not ours, or gone).
+	UpdateOpener(chatID, threadID int64, placeRef, text string) error
 }
 
 var discordPlaceRef = regexp.MustCompile(`^discord:[0-9]{17,20}$`)
@@ -160,6 +166,7 @@ func (s *Server) projectStage(w http.ResponseWriter, req ProjectRequest) {
 			resp["warning"] = "stage saved, but the place's tag was not updated: " + err.Error()
 		}
 	}
+	s.refreshOpener(p, "")
 	s.refreshProjectHome(p.ChatID)
 	writeJSON(w, resp)
 }
@@ -392,4 +399,22 @@ func (s *Server) ownProjectOn(chatID, thread int64, except string) string {
 		}
 	}
 	return ""
+}
+
+// refreshOpener re-renders the first message of p's post from its doc
+// (the live summary). Best effort: a post another agent opened cannot be
+// edited by this agent's bot, and that is fine.
+func (s *Server) refreshOpener(p *store.Project, doc string) {
+	a := s.placeOf(p)
+	if a == nil || s.places == nil {
+		return
+	}
+	if doc == "" && s.workspaceDir != "" {
+		if dir, ok := project.ManagedDocDir(s.workspaceDir, p.Slug); ok {
+			doc, _ = project.ReadDoc(dir)
+		}
+	}
+	if err := s.places.UpdateOpener(p.ChatID, p.MessageThreadID, a.PlaceRef, project.OpenerText(*p, doc, time.Now())); err != nil {
+		slog.Info("rpc: post opener not updated", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
+	}
 }

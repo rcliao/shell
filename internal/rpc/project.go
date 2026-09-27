@@ -683,6 +683,7 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 	}
 	slog.Info("rpc: project doc written", "slug", p.Slug, "rev", rev, "bytes", len(req.Content))
 	s.refreshProjectHome(p.ChatID)
+	s.refreshOpener(p, req.Content)
 	writeJSON(w, map[string]any{
 		"slug": p.Slug, "doc_path": p.DocPath, "rev": rev, "committed": true,
 	})
