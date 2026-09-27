@@ -120,6 +120,7 @@ type Bridge struct {
 	workspaceDir string          // persistent agent scratch space
 	platformNote string          // how the family's messaging platform renders replies (environment prompt)
 	routerShadow *decide.Shadow  // P3.7 shadow router; nil = off
+	a2aGate      decide.Decider  // checks each A2A hand-off needs a reply; nil = off
 
 	// Agent identity prompt (prepended to system prompt)
 	agentIdentity     string

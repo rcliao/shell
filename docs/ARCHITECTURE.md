@@ -247,6 +247,19 @@ Inbound: `discord.Handler` runs turns through `bridge.HandleMessageStreamingEven
 handler, sharing the pending-turn ledger and message map (Discord message ids are global snowflakes and fit
 `int`). Bot-authored Discord messages are ignored (v1 loop guard).
 
+## Agent-to-agent hand-offs (A2A)
+
+In a group, when one agent's reply addresses the other (an @mention, the name followed by `,` `:` `?` `!` `—`,
+or the name opening a question), `bridge.maybeEnqueueA2A` publishes a turn for the peer through the shared task
+store. The chain is bounded by `agent.a2a_max_depth` (default 3; the family agents run 10 for agent-sync agendas),
+and every human message resets it.
+
+Naming the peer is not the same as asking it something. So each candidate hand-off goes through a Jev check
+(`a2aNeedsReply`, 2 s timeout, ~150 ms typical): does the reply ask the peer a question, ask it to reply with
+something now, or pass the turn — or does it only acknowledge, agree, thank, settle who does what, or ask the
+family? Only "needs a reply" (p ≥ 0.5) hands off. When Jev is unavailable, the first hop after a person spoke
+hands off and deeper hops stop. Every decision logs `a2a: gate`. Off switch: `agent.a2a_gate_off`.
+
 ## Security & Access Control
 
 Multi-layered auth inspired by OpenClaw's pairing model. Fail-closed by default.

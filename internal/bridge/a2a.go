@@ -1,14 +1,17 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/decide"
 )
 
 // Agent-to-agent (A2A) group conversation.
@@ -134,6 +137,9 @@ func (b *Bridge) maybeEnqueueA2A(chatID, threadID int64, replyText string, incom
 		if peer == nil {
 			return
 		}
+	}
+	if !b.a2aNeedsReply(replyText, peer, nextDepth) {
+		return
 	}
 	payload, _ := json.Marshal(A2APayload{
 		ChatID:   chatID,
@@ -266,4 +272,62 @@ func invitesReply(reply string) bool {
 		return false
 	}
 	return strings.ContainsAny(reply, "?？") || turnPassRe.MatchString(reply)
+}
+
+// a2aGateTimeout bounds the reply check. It runs after the reply is written
+// and before it is delivered, so it must stay short; Jev answers in ~150 ms.
+const a2aGateTimeout = 2 * time.Second
+
+// a2aGateMinP is the probability "needs a reply" must reach for a hand-off.
+const a2aGateMinP = 0.5
+
+// SetA2AGate installs the decision model that checks each hand-off (nil = off,
+// every addressed reply hands off as before).
+func (b *Bridge) SetA2AGate(d decide.Decider) { b.a2aGate = d }
+
+// a2aNeedsReply asks whether a reply addressed to the peer actually needs an
+// answer from them.
+//
+// Addressing the peer by name was the whole hand-off rule, and agents name
+// each other in thanks and agreement as often as in requests. On 2026-09-27 a
+// family question turned into five hops of "got it, Pika" / "deal, Umbreon" /
+// "final answer" with no one asking anything. The name says who a reply is
+// for; whether it wants an answer is a judgement, so a model makes it.
+//
+// Fails open on the first hop after a person spoke (a real ask between the
+// agents must not be lost to an outage) and closed on deeper hops, where a
+// lost acknowledgement costs nothing.
+func (b *Bridge) a2aNeedsReply(replyText string, peer *peerAddr, depth int) bool {
+	if b.a2aGate == nil || !b.a2aGate.Enabled() {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), a2aGateTimeout)
+	defer cancel()
+	to := peer.Name
+	res, err := b.a2aGate.Ask(ctx, map[string]any{
+		"message": truncateRunesTo(replyText, 2000),
+		"from":    b.selfDisplayName(),
+		"to":      to,
+	}, map[string]decide.Question{
+		"reply": {
+			Type:         "choice",
+			Instructions: "This message was written by " + b.selfDisplayName() + ", an AI agent in a family group chat with the family and another agent, " + to + ". It names " + to + ". Decide whether " + to + " must post a reply in the chat now. Naming someone is not the same as asking them something.",
+			Criteria: map[string]string{
+				"needs_reply": "It asks " + to + " a question they have not answered, asks " + to + " to reply with something now (an opinion, a choice, information, the result of a check), or explicitly passes the turn to " + to + ".",
+				"no_reply":    "It acknowledges, agrees, thanks, apologises, corrects itself, settles or restates who does what, announces a decision or plan, or asks the family (not " + to + ") for something. Being assigned a task for later does not need a reply now.",
+			},
+		},
+	})
+	if err != nil {
+		open := depth <= 1
+		slog.Warn("a2a: gate unavailable", "error", err, "depth", depth, "handoff", open)
+		return open
+	}
+	a := res.Answers["reply"]
+	p := a.Probabilities["needs_reply"]
+	handoff := a.Choice == "needs_reply" && p >= a2aGateMinP
+	slog.Info("a2a: gate", "handoff", handoff, "choice", a.Choice, "p_needs_reply", p,
+		"depth", depth, "reason", peer.Reason, "to", to, "latency_ms", res.Latency.Milliseconds(),
+		"text_prefix", truncateRunesTo(replyText, 60))
+	return handoff
 }
