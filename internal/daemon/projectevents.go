@@ -121,6 +121,7 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 		var children []string
 		if kids, err := d.store.AreaProjects(proj.Slug); err == nil {
 			for _, k := range kids {
+				k.LastHumanActivityAt = d.store.LastHumanTouch(k) // chat, not just Notion edits
 				children = append(children, project.AreaChildLine(k, time.Now()))
 			}
 		}

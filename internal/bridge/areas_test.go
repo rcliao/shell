@@ -68,3 +68,21 @@ func TestUnboundThreadHint(t *testing.T) {
 		t.Fatal("own post or a Telegram topic got the hint")
 	}
 }
+
+// A lane-routed message about a project with a post asks for one note in the
+// post when something is settled; a project without a post gets no such line.
+func TestLaneBlockPostNote(t *testing.T) {
+	b := &Bridge{}
+	withPost := store.Project{Slug: "trip", Title: "Trip", Status: "active", MessageThreadID: 900000000000000011}
+	block := b.laneProjectBlock(withPost, []store.Project{withPost})
+	if !strings.Contains(block, "shell_relay(message_thread_id=900000000000000011, message=") || !strings.Contains(block, "Nothing settled, no note.") {
+		t.Fatalf("lane block = %q", block)
+	}
+	if !strings.Contains(block, "project stage trip") && !strings.Contains(block, "project stage <slug>") {
+		t.Fatal("stage nudge missing")
+	}
+	plain := store.Project{Slug: "log", Title: "Log", Status: "active"}
+	if strings.Contains(b.laneProjectBlock(plain, []store.Project{plain}), "shell_relay") {
+		t.Fatal("a project without a post got the note line")
+	}
+}
