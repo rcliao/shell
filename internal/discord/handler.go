@@ -20,6 +20,7 @@ import (
 
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/progress"
 )
 
 // streamEditInterval paces streaming edits. Discord does not document its
@@ -54,6 +55,7 @@ type Handler struct {
 	bridge    *bridge.Bridge
 	agent     AgentConfig
 	authorize func(userID, chatID int64, isGroup bool) bool
+	voice     *progress.Voice
 	selfID    string
 	http      *http.Client
 
@@ -69,6 +71,7 @@ func newHandler(a api, b *Bot, opts Options) *Handler {
 		bridge:    opts.Bridge,
 		agent:     opts.Agent,
 		authorize: opts.Authorize,
+		voice:     progress.New(opts.ProgressPhrasesPath),
 		http:      &http.Client{Timeout: 60 * time.Second},
 		locks:     map[Conv]*sync.Mutex{},
 	}
@@ -202,7 +205,7 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 	defer longRunning.Stop()
 
 	placeholder, err := h.api.Send(w.channelID, &discordgo.MessageSend{
-		Content:         "Thinking…",
+		Content:         h.voice.Thinking(0),
 		Reference:       &discordgo.MessageReference{MessageID: m.ID, ChannelID: w.channelID},
 		AllowedMentions: noPings(),
 	})
@@ -216,10 +219,15 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 	stopTyping := h.typing(w.channelID)
 	defer stopTyping()
 
-	s := newStreamer(h.api, w.channelID, placeholder.ID)
+	s := newStreamer(h.api, w.channelID, placeholder.ID, h.voice)
 	onEvent := func(ev process.StreamEvent) {
-		if d, ok := ev.(process.TextDelta); ok {
-			s.append(d.Text)
+		switch e := ev.(type) {
+		case process.TextDelta:
+			s.append(e.Text)
+		case process.ToolStarted:
+			s.setTool(e.Name)
+		case process.ToolFinished:
+			s.setTool("")
 		}
 	}
 	turnCtx := bridge.WithTelegramMsgID(ctx, msgID)
@@ -652,24 +660,33 @@ func looksLikeQuestion(s string) bool {
 	return strings.HasSuffix(t, "?") || strings.HasSuffix(t, "？")
 }
 
-// streamer flushes a growing reply into the placeholder message, at most one
-// edit per streamEditInterval, never blocking the model's output reader.
+// progressInterval is how often the placeholder's progress phrase changes
+// before the first words arrive — the same 2 s cadence as Telegram.
+const progressInterval = 2 * time.Second
+
+// streamer owns every edit of the placeholder. Before the reply's first
+// words it shows the agent's progress voice (what it is thinking or which
+// kind of tool it is using); after, it flushes the growing reply at most once
+// per streamEditInterval. One goroutine does both, so a late progress edit
+// can never overwrite streamed text.
 type streamer struct {
 	api       api
 	channelID string
 	messageID string
+	voice     *progress.Voice
 
 	mu           sync.Mutex
 	text         strings.Builder
+	tool         string
 	firstVisible time.Time
 	dirty        chan struct{}
 	done         chan struct{}
 }
 
-func newStreamer(a api, channelID, messageID string) *streamer {
-	s := &streamer{api: a, channelID: channelID, messageID: messageID,
+func newStreamer(a api, channelID, messageID string, voice *progress.Voice) *streamer {
+	s := &streamer{api: a, channelID: channelID, messageID: messageID, voice: voice,
 		dirty: make(chan struct{}, 1), done: make(chan struct{})}
-	go s.loop()
+	go s.loop(progressInterval)
 	return s
 }
 
@@ -683,32 +700,72 @@ func (s *streamer) append(delta string) {
 	}
 }
 
-func (s *streamer) loop() {
+// setTool records the tool now running ("" when it finished), for the
+// progress phrase.
+func (s *streamer) setTool(name string) {
+	s.mu.Lock()
+	s.tool = name
+	s.mu.Unlock()
+}
+
+func (s *streamer) edit(content string) error {
+	_, err := s.api.Edit(&discordgo.MessageEdit{ID: s.messageID, Channel: s.channelID, Content: &content, AllowedMentions: noPings()})
+	return err
+}
+
+func (s *streamer) loop(every time.Duration) {
 	defer close(s.done)
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	tick := 0
 	last := ""
-	first := true
-	for range s.dirty {
-		if !first {
-			time.Sleep(streamEditInterval)
+	var lastEdit time.Time
+	for {
+		select {
+		case _, ok := <-s.dirty:
+			if !ok {
+				return
+			}
+			if !lastEdit.IsZero() {
+				if wait := streamEditInterval - time.Since(lastEdit); wait > 0 {
+					time.Sleep(wait)
+				}
+			}
+			s.mu.Lock()
+			cur := s.text.String()
+			s.mu.Unlock()
+			if cur == last || strings.TrimSpace(cur) == "" {
+				continue
+			}
+			if err := s.edit(streamView(cur, maxMessageLen)); err != nil {
+				slog.Debug("discord: streaming edit failed", "error", err)
+				continue
+			}
+			last = cur
+			lastEdit = time.Now()
+			s.mu.Lock()
+			if s.firstVisible.IsZero() {
+				s.firstVisible = lastEdit
+			}
+			s.mu.Unlock()
+		case <-ticker.C:
+			s.mu.Lock()
+			started := s.text.Len() > 0
+			tool := s.tool
+			s.mu.Unlock()
+			if started {
+				ticker.Stop() // the reply itself is the progress now
+				continue
+			}
+			tick++
+			msg := s.voice.Thinking(tick)
+			if tool != "" {
+				msg = s.voice.Tool(tick, tool)
+			}
+			if err := s.edit(msg); err != nil {
+				slog.Debug("discord: progress edit failed", "error", err)
+			}
 		}
-		first = false
-		s.mu.Lock()
-		cur := s.text.String()
-		s.mu.Unlock()
-		if cur == last || strings.TrimSpace(cur) == "" {
-			continue
-		}
-		view := streamView(cur, maxMessageLen)
-		if _, err := s.api.Edit(&discordgo.MessageEdit{ID: s.messageID, Channel: s.channelID, Content: &view, AllowedMentions: noPings()}); err != nil {
-			slog.Debug("discord: streaming edit failed", "error", err)
-			continue
-		}
-		last = cur
-		s.mu.Lock()
-		if s.firstVisible.IsZero() {
-			s.firstVisible = time.Now()
-		}
-		s.mu.Unlock()
 	}
 }
 

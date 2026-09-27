@@ -1,4 +1,4 @@
-package telegram
+package progress
 
 import (
 	"encoding/json"
@@ -11,6 +11,10 @@ import (
 	"unicode/utf8"
 )
 
+// Package progress is the placeholder's voice while a turn runs, shared by
+// every messaging platform so an agent sounds the same on Telegram and
+// Discord.
+//
 // Progress voice (plan P3.7). The placeholder that ticks while a turn runs
 // used to say "Running Bash..." in one voice for every agent. Each agent
 // now owns a phrase file in its workspace and may rewrite it in its own
@@ -20,8 +24,8 @@ import (
 // text is sent as plain text, and each phrase is validated to one short
 // line with no control characters.
 
-// ProgressPhrasesFile is the file name inside the agent's workspace.
-const ProgressPhrasesFile = "progress-phrases.json"
+// PhrasesFile is the file name inside the agent's workspace.
+const PhrasesFile = "progress-phrases.json"
 
 const (
 	progressMaxPhrases   = 12
@@ -61,6 +65,9 @@ func toolFamily(tool string) string {
 	}
 }
 
+// spinnerFrames animate the placeholder between phrase changes.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 // defaultProgress is what every agent says until it writes its own file.
 var defaultProgress = ProgressPhrases{
 	Thinking: []string{"Thinking", "Reasoning", "Working", "Processing", "Analyzing"},
@@ -76,8 +83,8 @@ var defaultProgress = ProgressPhrases{
 	VeryLong: []string{"Still working — this one's taking a while, hang tight"},
 }
 
-// progressVoice serves phrases for one agent, reloading its file lazily.
-type progressVoice struct {
+// Voice serves phrases for one agent, reloading its file lazily.
+type Voice struct {
 	path string
 
 	mu       sync.Mutex
@@ -87,14 +94,14 @@ type progressVoice struct {
 	nextStat time.Time
 }
 
-func newProgressVoice(path string) *progressVoice {
-	return &progressVoice{path: path, phrases: defaultProgress}
+func New(path string) *Voice {
+	return &Voice{path: path, phrases: defaultProgress}
 }
 
 // current returns the phrases in force, re-reading the file at most every
 // progressReloadPeriod. Missing file = defaults, quietly; a present but
 // unusable file = defaults, with one warning per change.
-func (v *progressVoice) current() ProgressPhrases {
+func (v *Voice) current() ProgressPhrases {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	now := time.Now()
@@ -191,11 +198,11 @@ func pick(list []string, tick int) string {
 	return list[(tick/5)%len(list)]
 }
 
-// thinkingMessage renders the placeholder while the model is thinking. The
+// Thinking renders the placeholder while the model is thinking. The
 // ticker runs every 2 s, so tick doubles as elapsed seconds/2. Past ~20 s
 // and ~60 s the phrasing switches to the long-wait slots, so a slow turn
 // reads as "still working" rather than a dead "Analyzing".
-func (v *progressVoice) thinkingMessage(tick int) string {
+func (v *Voice) Thinking(tick int) string {
 	ph := v.current()
 	frame := spinnerFrames[tick%len(spinnerFrames)]
 	dots := strings.Repeat(".", (tick%3)+1)
@@ -209,8 +216,8 @@ func (v *progressVoice) thinkingMessage(tick int) string {
 	}
 }
 
-// toolMessage renders what the agent is doing right now, by tool family.
-func (v *progressVoice) toolMessage(tick int, tool string) string {
+// Tool renders what the agent is doing right now, by tool family.
+func (v *Voice) Tool(tick int, tool string) string {
 	ph := v.current()
 	frame := spinnerFrames[tick%len(spinnerFrames)]
 	dots := strings.Repeat(".", (tick%3)+1)

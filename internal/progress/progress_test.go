@@ -1,4 +1,4 @@
-package telegram
+package progress
 
 import (
 	"os"
@@ -19,7 +19,7 @@ func TestToolFamilyHidesRawNames(t *testing.T) {
 			t.Errorf("toolFamily(%q) = %q, want %q", tool, got, want)
 		}
 	}
-	msg := newProgressVoice("").toolMessage(1, "mcp__ghost__ghost_put")
+	msg := New("").Tool(1, "mcp__ghost__ghost_put")
 	if strings.Contains(msg, "mcp__") || !strings.Contains(msg, "Checking my notes") {
 		t.Errorf("raw tool name leaked or family phrase missing: %q", msg)
 	}
@@ -50,25 +50,25 @@ func TestParseProgressPhrasesSanitises(t *testing.T) {
 }
 
 func TestProgressVoiceReloadsAndFallsBack(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ProgressPhrasesFile)
-	v := newProgressVoice(path)
-	if got := v.thinkingMessage(1); !strings.Contains(got, "Thinking") {
+	path := filepath.Join(t.TempDir(), PhrasesFile)
+	v := New(path)
+	if got := v.Thinking(1); !strings.Contains(got, "Thinking") {
 		t.Fatalf("missing file must use defaults: %q", got)
 	}
 	if err := os.WriteFile(path, []byte(`{"thinking":["小小想一下"]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	v.nextStat = time.Time{} // skip the 30 s stat throttle
-	if got := v.thinkingMessage(1); !strings.Contains(got, "小小想一下") {
+	if got := v.Thinking(1); !strings.Contains(got, "小小想一下") {
 		t.Errorf("file not picked up: %q", got)
 	}
 	os.Remove(path)
 	v.nextStat = time.Time{}
-	if got := v.thinkingMessage(1); !strings.Contains(got, "Thinking") {
+	if got := v.Thinking(1); !strings.Contains(got, "Thinking") {
 		t.Errorf("removed file must fall back to defaults: %q", got)
 	}
 	// Long-wait slots still switch on tick.
-	if got := v.thinkingMessage(35); !strings.Contains(got, "taking a while") {
+	if got := v.Thinking(35); !strings.Contains(got, "taking a while") {
 		t.Errorf("very_long slot: %q", got)
 	}
 }

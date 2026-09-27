@@ -42,6 +42,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **mcp** | `internal/mcp/` | MCP stdio server exposing `shell_pm`, `shell_tunnel`, `shell_relay` as native Claude tools |
 | **rpc** | `internal/rpc/` | HTTP-over-Unix-socket RPC server for skill scripts and MCP server |
 | **discord** | `internal/discord/` | Discord gateway bot: inbound turns (auth via linked Telegram ids, group addressing, attachments, streaming edits, 2,000-char chunking, status reactions, text commands, reaction feedback) and the daemon `outbound` surface. Discord ids ↔ internal (chat, thread) ids (`address.go`) |
+| **progress** | `internal/progress/` | Per-agent progress voice for the placeholder while a turn runs (`progress-phrases.json`), shared by Telegram and Discord |
 | **telegram** | `internal/telegram/` | Bot wrapper, handlers, policy-based auth, pairing, rate limiting, allowlist, photo/PDF download, MarkdownV2 formatting |
 | **store** | `internal/store/` | SQLite persistence: sessions, messages, message_map, schedules, tasks |
 | **config** | `internal/config/` | JSON config from `~/.shell/config.json` with all feature flags |
@@ -524,7 +525,11 @@ rewrite in its own voice (the environment prompt says so). The handler loads
 it with an mtime check every 30 s, validates each phrase to one short plain
 line, and falls back to built-in defaults per slot. Tool names map to
 families (search / browse / memory / file / shell / default) so the screen
-never shows a raw tool name.
+never shows a raw tool name. The voice lives in `internal/progress` and is
+shared by both platforms: Telegram and Discord read the same file, so an agent
+sounds the same on either. On Discord one goroutine owns every placeholder
+edit (progress ticks, then streamed text), so a late tick cannot overwrite the
+reply.
 
 ## Reaction System
 

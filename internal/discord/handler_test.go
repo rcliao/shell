@@ -14,6 +14,7 @@ import (
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/progress"
 	"github.com/rcliao/shell/internal/store"
 )
 
@@ -60,11 +61,21 @@ func (f *fakeAPI) Delete(ch, id string) error {
 	f.deletes = append(f.deletes, id)
 	return nil
 }
-func (f *fakeAPI) React(ch, id, e string) error   { f.mu.Lock(); f.reacts = append(f.reacts, "+"+e); f.mu.Unlock(); return nil }
-func (f *fakeAPI) Unreact(ch, id, e string) error { f.mu.Lock(); f.reacts = append(f.reacts, "-"+e); f.mu.Unlock(); return nil }
-func (f *fakeAPI) Typing(string) error            { return nil }
-func (f *fakeAPI) Pin(string, string) error       { return nil }
-func (f *fakeAPI) Unpin(string, string) error     { return nil }
+func (f *fakeAPI) React(ch, id, e string) error {
+	f.mu.Lock()
+	f.reacts = append(f.reacts, "+"+e)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeAPI) Unreact(ch, id, e string) error {
+	f.mu.Lock()
+	f.reacts = append(f.reacts, "-"+e)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeAPI) Typing(string) error        { return nil }
+func (f *fakeAPI) Pin(string, string) error   { return nil }
+func (f *fakeAPI) Unpin(string, string) error { return nil }
 func (f *fakeAPI) Channel(id string) (*discordgo.Channel, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -167,7 +178,7 @@ func TestDMTurnStreamsAndFinalizes(t *testing.T) {
 	if req.ChatID != 42 {
 		t.Fatalf("turn ran in chat %d, want the linked Telegram DM 42", req.ChatID)
 	}
-	if len(h.api.sends) != 1 || h.api.sends[0].content != "Thinking…" || h.api.sends[0].channel != dmChan {
+	if len(h.api.sends) != 1 || !strings.Contains(h.api.sends[0].content, "Thinking") || h.api.sends[0].channel != dmChan {
 		t.Fatalf("want one placeholder in the DM, got %+v", h.api.sends)
 	}
 	placeholder := h.api.sends[0].id
@@ -311,5 +322,32 @@ func TestOutboundSendsAndEditsInTheRightChannel(t *testing.T) {
 	}
 	if err := h.bot.SendTextButtons(-100999, 0, "not on discord", nil); err == nil {
 		t.Fatal("a Telegram-only chat must be refused, not guessed")
+	}
+}
+
+func startTestStreamer(api *fakeAPI) *streamer {
+	s := &streamer{api: api, channelID: dmChan, messageID: "900000000000000001", voice: progress.New(""),
+		dirty: make(chan struct{}, 1), done: make(chan struct{})}
+	go s.loop(10 * time.Millisecond)
+	return s
+}
+
+func TestStreamerShowsProgressUntilFirstWords(t *testing.T) {
+	api := newFakeAPI()
+	s := startTestStreamer(api)
+	s.setTool("WebSearch")
+	time.Sleep(60 * time.Millisecond)
+	api.mu.Lock()
+	during := api.edits["900000000000000001"]
+	api.mu.Unlock()
+	if !strings.Contains(during, "Searching the web") {
+		t.Fatalf("while a search runs the placeholder should say so, got %q", during)
+	}
+	s.setTool("")
+	s.append("Here is the answer.")
+	time.Sleep(60 * time.Millisecond) // several progress ticks pass
+	s.close()
+	if got := api.edits["900000000000000001"]; got != "Here is the answer." {
+		t.Fatalf("a progress tick overwrote the streamed reply: %q", got)
 	}
 }

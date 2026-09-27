@@ -10,6 +10,8 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+
+	"github.com/rcliao/shell/internal/progress"
 )
 
 func TestFormatForMarkdownV2(t *testing.T) {
@@ -1526,15 +1528,15 @@ func TestSplitMessage_LongCJKRuneSafe(t *testing.T) {
 func TestThinkingMessageLongWait(t *testing.T) {
 	// Early ticks rotate normal phrases; past ~20s and ~60s they switch to
 	// honest long-wait reassurance so a slow turn never reads as dead (V2-H13).
-	early := newProgressVoice("").thinkingMessage(3)
+	early := progress.New("").Thinking(3)
 	if !strings.ContainsAny(early, "Thinking Reasoning Working Processing Analyzing") {
 		t.Errorf("early tick should show a normal phrase, got %q", early)
 	}
-	mid := newProgressVoice("").thinkingMessage(12) // ~24s
+	mid := progress.New("").Thinking(12) // ~24s
 	if !strings.Contains(mid, "Still working") {
 		t.Errorf("tick 12 should show long-wait reassurance, got %q", mid)
 	}
-	long := newProgressVoice("").thinkingMessage(35) // ~70s
+	long := progress.New("").Thinking(35) // ~70s
 	if !strings.Contains(long, "taking a while") {
 		t.Errorf("tick 35 should show extended-wait reassurance, got %q", long)
 	}
@@ -1574,14 +1576,14 @@ func TestAddressedTo(t *testing.T) {
 		text string
 		want bool
 	}{
-		{"Umbreon 幫我看這個", true},          // english address
+		{"Umbreon 幫我看這個", true}, // english address
 		{"umbreon check this", true},
-		{"@小傘 在嗎", true},                 // punctuation/emoji lead stripped
+		{"@小傘 在嗎", true}, // punctuation/emoji lead stripped
 		{"哥哥你覺得呢", true},
 		{"  Umbreon: hi", true},
-		{"這個問題想問 Umbreon", false},        // mention mid-sentence, not an address
+		{"這個問題想問 Umbreon", false},             // mention mid-sentence, not an address
 		{"the umbreon evolution line", false}, // substring, not leading
-		{"這株植物怎麼澆水", false},             // no name
+		{"這株植物怎麼澆水", false},                   // no name
 	}
 	for _, c := range cases {
 		if got := addressedTo(c.text, peer); got != c.want {

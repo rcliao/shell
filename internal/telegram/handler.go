@@ -21,20 +21,18 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/progress"
 )
 
 const streamEditInterval = time.Second // minimum interval between Telegram message edits
 
 const maxMessageLength = 4096
 
-// spinner frames for the thinking indicator.
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
 // Placeholder wording lives in progress.go (per-agent progress voice).
 
 // SetProgressPhrasesPath points the placeholder at an agent's own phrase
 // file; "" keeps the built-in wording.
-func (h *Handler) SetProgressPhrasesPath(path string) { h.voice = newProgressVoice(path) }
+func (h *Handler) SetProgressPhrasesPath(path string) { h.voice = progress.New(path) }
 
 // friendlyTurnError maps low-level turn failures (timeouts, cancellations) to a
 // short retryable message. A raw "context deadline exceeded" reads as a crash;
@@ -1057,16 +1055,16 @@ const peerBroadcastProbability = 0.15
 type Handler struct {
 	auth   *Auth
 	bridge *bridge.Bridge
-	voice  *progressVoice // placeholder wording, per agent (progress.go)
+	voice  *progress.Voice // placeholder wording, per agent (progress.go)
 
 	// Multi-agent group chat support
 	botUsername          string
 	myAliases            []string // name variants for this agent (lowercased)
 	broadcastProbability float64
 	peerBotUsernames     map[string]bool
-	peerAliases          []string // name variants for peer agents (lowercased)
-	groupMode            string   // "autonomous" = always deliver, agent decides via [noop]
-	groupDomain          string   // role-based routing domain for this agent ("practical"|"companionship"|"")
+	peerAliases          []string         // name variants for peer agents (lowercased)
+	groupMode            string           // "autonomous" = always deliver, agent decides via [noop]
+	groupDomain          string           // role-based routing domain for this agent ("practical"|"companionship"|"")
 	userLabels           map[int64]string // Telegram user ID → display label for the [From: ...] tag
 
 	// Bot-to-bot exchange tracking (per chat)
@@ -1166,11 +1164,11 @@ type AgentConfig struct {
 	Aliases              []string // name variants for this agent (e.g. "pika")
 	BroadcastProbability float64
 	PeerBots             []string
-	PeerAliases          []string // name variants for peer agents (e.g. "umbreon", "小傘")
-	GroupMode            string   // "autonomous" = agent decides, "" = legacy probability
-	GroupDomain          string   // "practical" | "companionship" — role-based routing for general messages (empty = no routing)
-	CoalesceDisabled     bool     // kill switch for V2-H44 queued-message coalescing
-	AbsorbEnabled        bool     // V2-H46 absorb-into-active-turn (default false; canaried per agent)
+	PeerAliases          []string         // name variants for peer agents (e.g. "umbreon", "小傘")
+	GroupMode            string           // "autonomous" = agent decides, "" = legacy probability
+	GroupDomain          string           // "practical" | "companionship" — role-based routing for general messages (empty = no routing)
+	CoalesceDisabled     bool             // kill switch for V2-H44 queued-message coalescing
+	AbsorbEnabled        bool             // V2-H46 absorb-into-active-turn (default false; canaried per agent)
 	UserLabels           map[int64]string // Telegram user ID → display label for the [From: ...] tag
 }
 
@@ -1188,7 +1186,7 @@ func NewHandler(auth *Auth, br *bridge.Bridge, agentCfg AgentConfig) *Handler {
 		peerAliases = append(peerAliases, strings.ToLower(a))
 	}
 	return &Handler{
-		voice: newProgressVoice(""),
+		voice:                progress.New(""),
 		auth:                 auth,
 		bridge:               br,
 		botUsername:          strings.ToLower(agentCfg.BotUsername),
@@ -2208,9 +2206,9 @@ func (h *Handler) HandleMessage(ctx context.Context, b *bot.Bot, msg *models.Mes
 				toolMu.Lock()
 				running := activeTool
 				toolMu.Unlock()
-				text := h.voice.thinkingMessage(tick)
+				text := h.voice.Thinking(tick)
 				if running != "" {
-					text = h.voice.toolMessage(tick, running)
+					text = h.voice.Tool(tick, running)
 				}
 				b.EditMessageText(ctx, &bot.EditMessageTextParams{
 					ChatID:    msg.Chat.ID,
@@ -3131,4 +3129,3 @@ func transcriptText(msg *models.Message) string {
 	}
 	return caption
 }
-
