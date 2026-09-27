@@ -128,6 +128,14 @@ func (s *Store) MarkEvent(id int64, status, note string) error {
 	return nil
 }
 
+// MarkEventSeen marks an event seen only if it is still new: the agent may
+// have closed it (done/ignored) during the very beat that showed it, and
+// that decision must not be overwritten.
+func (s *Store) MarkEventSeen(id int64) error {
+	_, err := s.db.Exec(`UPDATE events SET status = ? WHERE id = ? AND status = ?`, EventSeen, id, EventNew)
+	return err
+}
+
 func asTime(v any) time.Time {
 	switch t := v.(type) {
 	case time.Time:
