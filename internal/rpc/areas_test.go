@@ -2,7 +2,9 @@ package rpc
 
 import (
 	"fmt"
+	"github.com/rcliao/shell/internal/store"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +17,7 @@ type fakePlaces struct {
 	fail     bool
 	areas    map[string][2]int64 // channel name → (channel thread, forum id)
 	titles   map[int64]string    // thread → post title (without emoji)
+	openers  map[int64]string    // thread → last live summary
 }
 
 func (f *fakePlaces) EnsureAreaPlaces(chatID int64, name, forumName string, tags []string) (int64, string, bool, error) {
@@ -37,6 +40,14 @@ func (f *fakePlaces) FindThread(chatID int64, ref, title string) (int64, bool, e
 		}
 	}
 	return 0, false, nil
+}
+
+func (f *fakePlaces) UpdateOpener(chatID, threadID int64, ref, text string) error {
+	if f.openers == nil {
+		f.openers = map[int64]string{}
+	}
+	f.openers[threadID] = text
+	return nil
 }
 
 func (f *fakePlaces) ThreadInfo(chatID, threadID int64) (string, string, []string, error) {
@@ -271,5 +282,42 @@ func TestAreaCreateRetryAndJoinSchedule(t *testing.T) {
 	_, joined := postProject(t, other, map[string]any{"action": "create", "title": "Zelda", "area": "travel", "place": "auto"})
 	if joined["place_joined"] != true || joined["cadence"] != "none (joined another agent's post)" {
 		t.Fatalf("joined create: %v", joined)
+	}
+}
+
+// A stage change re-renders the post's opener with the new stage.
+func TestStageRefreshesOpener(t *testing.T) {
+	s, fp := newAreaServer(t)
+	_, out := postProject(t, s, map[string]any{"action": "create", "title": "Zelda", "emoji": "🎮", "area": "travel", "place": "auto"})
+	postProject(t, s, map[string]any{"action": "stage", "slug": out["slug"], "stage": "booked"})
+	var got string
+	for _, v := range fp.openers {
+		got = v
+	}
+	if !strings.HasPrefix(got, "🎮 **Zelda** · booked") {
+		t.Fatalf("opener = %q", got)
+	}
+}
+
+// Re-running an area create heals a row whose forum lost the convergence,
+// and a new area defaults to a monthly pass.
+func TestAreaCreateHealsPlaceRef(t *testing.T) {
+	fp := &fakePlaces{}
+	s, st := newProjectTestServer(t)
+	s.places = fp
+	req := map[string]any{"action": "create", "title": "Gaming", "chat_id": -100200300, "kind": "area", "place": "new"}
+	_, out := postProject(t, s, req)
+	slug := out["slug"].(string)
+	stale := "discord:900000000000000555"
+	if err := st.UpdateProjectFields(slug, store.ProjectFieldUpdate{PlaceRef: &stale}); err != nil {
+		t.Fatal(err)
+	}
+	_, again := postProject(t, s, req)
+	if again["created"] != false || again["place_ref"] != out["place_ref"] {
+		t.Fatalf("not healed: %v (want %v)", again["place_ref"], out["place_ref"])
+	}
+	p, _ := st.GetProjectBySlug(slug)
+	if p.PlaceRef != out["place_ref"] {
+		t.Fatalf("row place_ref = %s", p.PlaceRef)
 	}
 }

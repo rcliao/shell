@@ -46,3 +46,10 @@ func (p daemonPlaces) ThreadInfo(chatID, threadID int64) (string, string, []stri
 	}
 	return info.Title, ref, info.Tags, nil
 }
+
+func (p daemonPlaces) UpdateOpener(chatID, threadID int64, ref, text string) error {
+	if !strings.HasPrefix(ref, "discord:") || p.dc == nil {
+		return nil // A Telegram topic's first message id is not known.
+	}
+	return p.dc.EditPostOpener(threadID, text)
+}

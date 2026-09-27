@@ -1162,9 +1162,10 @@ func New(cfg config.Config) (*Daemon, error) {
 				// Fire-and-forget like Notify; the bot already logs failures.
 				_ = tgTransport.NotifyButtons(chatID, threadID, text, buttons)
 			},
-			refreshHome: projectHome.Refresh,
-			notion:      notionClient,
-			notionID:    &notionIdentity{},
+			refreshHome:  projectHome.Refresh,
+			updateOpener: places.UpdateOpener,
+			notion:       notionClient,
+			notionID:     &notionIdentity{},
 		})
 		// project.render consumer (P3 Wave C): doc writes enqueue renders; this
 		// worker mirrors the canonical doc to Notion via the block-map renderer.

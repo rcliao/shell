@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -140,6 +141,9 @@ func RenderHome(projects []store.Project) string {
 // open questions (needs is slug → count; nil or 0 renders nothing). The list
 // is where people look first, so it says which project is waiting on them.
 func RenderHomeWithNeeds(projects []store.Project, needs map[string]int) string {
+	if board := renderBoard(projects, needs); board != "" {
+		return board
+	}
 	var lines []string
 	for _, p := range projects {
 		if p.Status != "active" {
@@ -383,4 +387,96 @@ func (h *Home) readDoc(p store.Project) string {
 		return ""
 	}
 	return string(data)
+}
+
+// discordPlaceFloor: a thread id this large is a Discord channel or post
+// snowflake, which Discord renders as a clickable <#id> mention.
+const discordPlaceFloor = 100_000_000_000_000_000
+
+// placeMention links a project's own place, "" when it has none on Discord.
+func placeMention(p store.Project) string {
+	if p.MessageThreadID >= discordPlaceFloor {
+		return fmt.Sprintf(" <#%d>", p.MessageThreadID)
+	}
+	return ""
+}
+
+// renderBoard renders the home as a board grouped by area
+// (docs/DESIGN-PROJECT-AREAS.md): each active area with a link to its
+// channel, its active projects under it with stage and a link to their post,
+// then the projects in no area. "" when the chat has no active area, so a
+// chat without areas keeps the flat list.
+func renderBoard(projects []store.Project, needs map[string]int) string {
+	var areas []store.Project
+	inArea := map[string][]store.Project{}
+	var loose []store.Project
+	for _, p := range projects {
+		if p.Status != "active" {
+			continue
+		}
+		if p.Kind == store.ProjectKindArea {
+			areas = append(areas, p)
+			continue
+		}
+		inArea[p.Area] = append(inArea[p.Area], p)
+	}
+	if len(areas) == 0 {
+		return ""
+	}
+	known := map[string]bool{}
+	for _, a := range areas {
+		known[a.Slug] = true
+	}
+	for area, ps := range inArea {
+		if !known[area] {
+			loose = append(loose, ps...)
+		}
+	}
+	row := func(p store.Project) string {
+		var sb strings.Builder
+		sb.WriteString("  ")
+		if p.Emoji != "" {
+			sb.WriteString(p.Emoji + " ")
+		}
+		sb.WriteString(p.Title)
+		if p.Stage != "" {
+			sb.WriteString(" · " + p.Stage)
+		}
+		sb.WriteString(" · " + lastActivity(p).Format("01-02"))
+		if n := needs[p.Slug]; n > 0 {
+			fmt.Fprintf(&sb, " ❓%d", n)
+		}
+		sb.WriteString(placeMention(p))
+		return sb.String()
+	}
+	var b strings.Builder
+	b.WriteString("📋 Projects")
+	for _, a := range areas {
+		b.WriteString("\n\n")
+		if a.Emoji != "" {
+			b.WriteString(a.Emoji + " ")
+		}
+		b.WriteString(a.Title + placeMention(a))
+		kids := inArea[a.Slug]
+		if len(kids) == 0 {
+			b.WriteString("\n  (no active projects)")
+		}
+		for _, k := range kids {
+			b.WriteString("\n" + row(k))
+		}
+	}
+	if len(loose) > 0 {
+		sort.SliceStable(loose, func(i, j int) bool {
+			ai, aj := lastActivity(loose[i]), lastActivity(loose[j])
+			if !ai.Equal(aj) {
+				return ai.After(aj)
+			}
+			return loose[i].Slug < loose[j].Slug
+		})
+		b.WriteString("\n\nNo area yet")
+		for _, p := range loose {
+			b.WriteString("\n" + row(p))
+		}
+	}
+	return b.String()
 }

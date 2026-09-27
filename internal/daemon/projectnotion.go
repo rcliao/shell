@@ -532,6 +532,7 @@ func (d projectResearchDeps) runPageEditReconcile(ctx context.Context, p project
 	if d.refreshHome != nil {
 		d.refreshHome(proj.ChatID)
 	}
+	project.RefreshOpener(d.store, d.workspaceDir, proj, merged, d.updateOpener)
 	slog.Info("project page-edit: reconciled into canonical", "slug", proj.Slug, "rev", rev)
 	return "reconciled: rev " + rev, nil
 }

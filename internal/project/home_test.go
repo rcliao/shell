@@ -402,3 +402,24 @@ func TestHomeNeedsReadsDocsFromDisk(t *testing.T) {
 		t.Errorf("needs = %v, want legacy:2 only", got)
 	}
 }
+
+// With an area, the home is a board: areas with their channel, their
+// projects with stage and post, then projects with no area.
+func TestRenderHomeBoard(t *testing.T) {
+	at := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
+	ps := []store.Project{
+		{Slug: "travel", Title: "Travel", Emoji: "🧳", Status: "active", Kind: store.ProjectKindArea, MessageThreadID: 900000000000000010, UpdatedAt: at},
+		{Slug: "trip", Title: "Japan 2027", Emoji: "🎉", Status: "active", Area: "travel", Stage: "planning", MessageThreadID: 900000000000000011, UpdatedAt: at},
+		{Slug: "old", Title: "Old trip", Status: "archived", Area: "travel", UpdatedAt: at},
+		{Slug: "health", Title: "Health log", Status: "active", UpdatedAt: at},
+	}
+	got := RenderHomeWithNeeds(ps, map[string]int{"trip": 5})
+	want := "📋 Projects\n\n🧳 Travel <#900000000000000010>\n  🎉 Japan 2027 · planning · 09-27 ❓5 <#900000000000000011>\n\nNo area yet\n  Health log · 09-27"
+	if got != want {
+		t.Fatalf("board:\n%s\nwant:\n%s", got, want)
+	}
+	// No area: the flat list is unchanged.
+	if flat := RenderHomeWithNeeds(ps[3:], nil); !strings.HasPrefix(flat, "📋 Projects\nHealth log — ") {
+		t.Fatalf("flat = %q", flat)
+	}
+}

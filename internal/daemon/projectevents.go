@@ -50,6 +50,9 @@ type projectResearchDeps struct {
 	deliver func(chatID, threadID int64, text string, buttons []bridge.LinkButton)
 	// refreshHome updates the chat's pinned 📋 Projects message.
 	refreshHome func(chatID int64)
+	// updateOpener edits a project post's first message (its live summary)
+	// after a doc write that bypasses the RPC; nil = no places.
+	updateOpener project.OpenerUpdater
 
 	// notion is the shared Notion client (Wave D): the poll consumer reads
 	// comments and page state through it, the revision consumer replies
@@ -114,6 +117,15 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 	}
 
 	prompt := project.ResearchPrompt(proj.Slug, proj.Title, proj.Instructions, proj.Lang, d.readManagedDoc(slug))
+	if proj.Kind == store.ProjectKindArea {
+		var children []string
+		if kids, err := d.store.AreaProjects(proj.Slug); err == nil {
+			for _, k := range kids {
+				children = append(children, project.AreaChildLine(k, time.Now()))
+			}
+		}
+		prompt = project.AreaResearchPrompt(proj.Slug, proj.Title, proj.Instructions, proj.Lang, d.readManagedDoc(slug), children)
+	}
 
 	started := time.Now().UTC()
 	text, err := d.runProjectTurn(ctx, proj, prompt)

@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+
+	"github.com/rcliao/shell/internal/project"
 	"strings"
 	"unicode"
 
@@ -33,6 +35,9 @@ type Places interface {
 	// ThreadInfo describes a thread: its title, the placeRef it lives under
 	// ("" when it is not in a forum), and its tags.
 	ThreadInfo(chatID, threadID int64) (title, placeRef string, tags []string, err error)
+	// UpdateOpener replaces the first message of a project's own place with
+	// its live summary. An error means it could not (not ours, or gone).
+	UpdateOpener(chatID, threadID int64, placeRef, text string) error
 }
 
 var discordPlaceRef = regexp.MustCompile(`^discord:[0-9]{17,20}$`)
@@ -160,6 +165,7 @@ func (s *Server) projectStage(w http.ResponseWriter, req ProjectRequest) {
 			resp["warning"] = "stage saved, but the place's tag was not updated: " + err.Error()
 		}
 	}
+	s.refreshOpener(p, "")
 	s.refreshProjectHome(p.ChatID)
 	writeJSON(w, resp)
 }
@@ -256,6 +262,15 @@ func (s *Server) ensureAreaPlaces(req *ProjectRequest) (existing *store.Project,
 		for i := range projects {
 			p := projects[i]
 			if p.Kind == store.ProjectKindArea && p.MessageThreadID == thread && p.Status != "archived" {
+				// Self-heal: the row may point at a forum that lost the
+				// convergence (two agents, two forum names). The channel
+				// decides; follow it.
+				if p.PlaceRef != ref {
+					if err := s.store.UpdateProjectFields(p.Slug, store.ProjectFieldUpdate{PlaceRef: &ref}); err == nil {
+						slog.Info("rpc: area place_ref healed", "slug", p.Slug, "from", p.PlaceRef, "to", ref)
+						p.PlaceRef = ref
+					}
+				}
 				return &p, created, ""
 			}
 		}
@@ -392,4 +407,13 @@ func (s *Server) ownProjectOn(chatID, thread int64, except string) string {
 		}
 	}
 	return ""
+}
+
+// refreshOpener re-renders the first message of p's post from its doc
+// (the live summary); see project.RefreshOpener.
+func (s *Server) refreshOpener(p *store.Project, doc string) {
+	if s.places == nil {
+		return
+	}
+	project.RefreshOpener(s.store, s.workspaceDir, p, doc, s.places.UpdateOpener)
 }
