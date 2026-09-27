@@ -149,3 +149,50 @@ func TestFindOpenPostAndInfo(t *testing.T) {
 	}
 	_ = api
 }
+
+// racingAPI hides a channel the other agent made a moment earlier from the
+// first listing only, as when both agents list before either creates.
+type racingAPI struct {
+	*fakeAPI
+	hidden string
+	listed int
+}
+
+func (r *racingAPI) GuildChannels(guild string) ([]*discordgo.Channel, error) {
+	all, err := r.fakeAPI.GuildChannels(guild)
+	r.listed++
+	if r.listed > 1 {
+		return all, err
+	}
+	var out []*discordgo.Channel
+	for _, c := range all {
+		if c.ID != r.hidden {
+			out = append(out, c)
+		}
+	}
+	return out, err
+}
+
+// Two agents creating at the same moment converge on the older channel,
+// and the later one removes its own duplicate.
+func TestEnsureAreaChannelsRace(t *testing.T) {
+	_, base := areaBot(t)
+	theirs := &discordgo.Channel{ID: "100000000000000001", GuildID: testGuild, Name: "gaming-projects", Type: discordgo.ChannelTypeGuildForum}
+	base.channels[theirs.ID] = theirs
+	api := &racingAPI{fakeAPI: base, hidden: theirs.ID}
+	addr := NewAddresses(config.DiscordConfig{
+		Chats:  map[string]config.DiscordChatLink{groupChan: {ChatID: -100200300}},
+		Guilds: map[string]config.DiscordGuildLink{testGuild: {ChatID: -100200300}},
+	})
+	b := newBot(api, Options{Addresses: addr})
+	ac, err := b.EnsureAreaChannels(-100200300, "gaming", "Gaming Projects", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ac.ForumID != theirs.ID {
+		t.Fatalf("forum = %s, want the older %s", ac.ForumID, theirs.ID)
+	}
+	if len(base.deleted) != 1 || base.channels[base.deleted[0]] != nil {
+		t.Fatalf("own duplicate not removed: deleted=%v", base.deleted)
+	}
+}

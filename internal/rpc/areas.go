@@ -90,6 +90,9 @@ func (s *Server) createPlace(p, area *store.Project, content string) (thread int
 		slog.Warn("rpc: project place lookup failed; creating", "slug", p.Slug, "error", err)
 	}
 	if found {
+		if own := s.ownProjectOn(p.ChatID, thread, p.Slug); own != "" {
+			return 0, false, fmt.Sprintf("post %d is already your project %s; this one stays unbound (archive it)", thread, own)
+		}
 		slog.Info("rpc: project joined an existing place", "slug", p.Slug, "thread", thread)
 	} else {
 		thread, err = s.places.CreateThread(p.ChatID, area.PlaceRef, placeTitle(p), content, tags)
@@ -352,4 +355,41 @@ func splitLeadingEmoji(title string) (emoji, rest string) {
 		return "", title
 	}
 	return strings.TrimSpace(title[:i]), strings.TrimSpace(title[i:])
+}
+
+// titleKey compares project titles without leading emoji, case or spacing.
+func titleKey(t string) string {
+	_, bare := splitLeadingEmoji(t)
+	return strings.ToLower(strings.Join(strings.Fields(bare), " "))
+}
+
+// sameTitleInArea returns this agent's active project in the area with the
+// same title, or nil.
+func (s *Server) sameTitleInArea(area *store.Project, title string) *store.Project {
+	kids, err := s.store.AreaProjects(area.Slug)
+	if err != nil {
+		return nil
+	}
+	want := titleKey(title)
+	for i := range kids {
+		if kids[i].Status == "active" && titleKey(kids[i].Title) == want && want != "" {
+			return &kids[i]
+		}
+	}
+	return nil
+}
+
+// ownProjectOn returns the slug of this agent's other active project bound
+// to the thread, or "".
+func (s *Server) ownProjectOn(chatID, thread int64, except string) string {
+	projects, err := s.store.ListProjects(chatID)
+	if err != nil {
+		return ""
+	}
+	for _, p := range projects {
+		if p.Status == "active" && p.MessageThreadID == thread && p.Slug != except {
+			return p.Slug
+		}
+	}
+	return ""
 }

@@ -140,24 +140,56 @@ type AreaChannels struct {
 	Created   bool   // at least one of them was created now
 }
 
-// discordName is how Discord stores a text channel or forum name: lower
-// case, spaces as dashes. CJK passes through.
-func discordName(s string) string {
-	return strings.ToLower(strings.Join(strings.Fields(s), "-"))
+// channelKey compares channel names however Discord stored them: letters
+// and digits only, lower case. "Gaming Projects", "gaming-projects" and a
+// name Discord stripped of punctuation all match.
+func channelKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// oldest returns the channel of this type and name with the lowest id (the
+// first one made), or nil. Both agents pick the same one.
+func oldest(chans []*discordgo.Channel, typ discordgo.ChannelType, key string) *discordgo.Channel {
+	var best *discordgo.Channel
+	var bestID int64
+	for _, c := range chans {
+		if c.Type != typ || channelKey(c.Name) != key {
+			continue
+		}
+		id, err := strconv.ParseInt(c.ID, 10, 64)
+		if err != nil {
+			continue
+		}
+		if best == nil || id < bestID {
+			best, bestID = c, id
+		}
+	}
+	return best
 }
 
 // EnsureAreaChannels finds or creates the text channel `name` and the forum
 // `forumName` (with tags) in the server chatID joins, next to the chat's
 // main channel. A new or topic-less text channel gets a topic that points
 // at the forum.
+//
+// Two agents may run this at the same moment (both answer the same yes).
+// After creating, it lists again and keeps the oldest channel of each name,
+// deleting its own duplicate: the later creator always sees the earlier
+// one, so both converge on one pair.
 func (b *Bot) EnsureAreaChannels(chatID int64, name, forumName string, tags []string) (AreaChannels, error) {
 	var out AreaChannels
 	guild, ok := b.addr.GuildFor(chatID)
 	if !ok {
 		return out, fmt.Errorf("discord: chat %d has no server (discord.guilds) to create channels in", chatID)
 	}
-	name, forumName = discordName(name), discordName(forumName)
-	if name == "" || forumName == "" || name == forumName {
+	textKey, forumKey := channelKey(name), channelKey(forumName)
+	if textKey == "" || forumKey == "" || textKey == forumKey {
 		return out, fmt.Errorf("discord: area needs two distinct channel names")
 	}
 	chans, err := b.api.GuildChannels(guild)
@@ -170,46 +202,51 @@ func (b *Bot) EnsureAreaChannels(chatID int64, name, forumName string, tags []st
 			category = main.ParentID
 		}
 	}
-	find := func(typ discordgo.ChannelType, n string) *discordgo.Channel {
-		for _, c := range chans {
-			if c.Type == typ && discordName(c.Name) == n {
-				return c
-			}
+	ensure := func(typ discordgo.ChannelType, key, display, topic string) (*discordgo.Channel, error) {
+		if c := oldest(chans, typ, key); c != nil {
+			return c, nil
 		}
-		return nil
+		mine, err := b.api.CreateGuildChannel(guild, discordgo.GuildChannelCreateData{
+			Name: strings.ToLower(strings.Join(strings.Fields(display), "-")), Type: typ, ParentID: category, Topic: topic})
+		if err != nil {
+			return nil, err
+		}
+		out.Created = true
+		again, err := b.api.GuildChannels(guild)
+		if err != nil {
+			return mine, nil
+		}
+		if first := oldest(again, typ, key); first != nil && first.ID != mine.ID {
+			// Another agent made it first: use theirs, remove ours.
+			if err := b.api.DeleteChannel(mine.ID); err != nil {
+				slog.Warn("discord: duplicate area channel not removed", "channel", mine.ID, "error", err)
+			}
+			return first, nil
+		}
+		return mine, nil
 	}
 
-	forum := find(discordgo.ChannelTypeGuildForum, forumName)
-	if forum == nil {
-		forum, err = b.api.CreateGuildChannel(guild, discordgo.GuildChannelCreateData{
-			Name: forumName, Type: discordgo.ChannelTypeGuildForum, ParentID: category})
-		if err != nil {
-			return out, fmt.Errorf("discord: create forum %s: %w", forumName, err)
+	forum, err := ensure(discordgo.ChannelTypeGuildForum, forumKey, forumName, "")
+	if err != nil {
+		return out, fmt.Errorf("discord: create forum %s: %w", forumName, err)
+	}
+	if out.Created && len(forum.AvailableTags) == 0 && len(tags) > 0 {
+		ft := make([]discordgo.ForumTag, 0, len(tags))
+		for _, t := range tags {
+			if t = truncateRunes(strings.TrimSpace(t), maxTagName); t != "" {
+				ft = append(ft, discordgo.ForumTag{Name: t})
+			}
 		}
-		out.Created = true
-		if len(tags) > 0 {
-			ft := make([]discordgo.ForumTag, 0, len(tags))
-			for _, t := range tags {
-				if t = truncateRunes(strings.TrimSpace(t), maxTagName); t != "" {
-					ft = append(ft, discordgo.ForumTag{Name: t})
-				}
-			}
-			if _, err := b.api.EditChannel(forum.ID, &discordgo.ChannelEdit{AvailableTags: &ft}); err != nil {
-				slog.Warn("discord: area forum created without tags", "forum", forum.ID, "error", err)
-			}
+		if _, err := b.api.EditChannel(forum.ID, &discordgo.ChannelEdit{AvailableTags: &ft}); err != nil {
+			slog.Warn("discord: area forum created without tags", "forum", forum.ID, "error", err)
 		}
 	}
-	text := find(discordgo.ChannelTypeGuildText, name)
-	if text == nil {
-		text, err = b.api.CreateGuildChannel(guild, discordgo.GuildChannelCreateData{
-			Name: name, Type: discordgo.ChannelTypeGuildText, ParentID: category,
-			Topic: "Projects: <#" + forum.ID + ">"})
-		if err != nil {
-			return out, fmt.Errorf("discord: create channel %s: %w", name, err)
-		}
-		out.Created = true
-	} else if text.Topic == "" {
-		topic := "Projects: <#" + forum.ID + ">"
+	topic := "Projects: <#" + forum.ID + ">"
+	text, err := ensure(discordgo.ChannelTypeGuildText, textKey, name, topic)
+	if err != nil {
+		return out, fmt.Errorf("discord: create channel %s: %w", name, err)
+	}
+	if text.Topic == "" {
 		if _, err := b.api.EditChannel(text.ID, &discordgo.ChannelEdit{Topic: topic}); err != nil {
 			slog.Warn("discord: area channel topic not set", "channel", text.ID, "error", err)
 		}

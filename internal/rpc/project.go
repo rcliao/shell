@@ -262,6 +262,17 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	if kind == "" && req.ExportRef != "" {
 		kind = "notion"
 	}
+	// A retry of the same project in an area is a no-op, not a second row
+	// on the same post.
+	if area != nil {
+		if prev := s.sameTitleInArea(area, req.Title); prev != nil {
+			resp := projectJSON(*prev)
+			resp["created"] = false
+			resp["result"] = "You already track this project as " + prev.Slug + "."
+			writeJSON(w, resp)
+			return
+		}
+	}
 	p, err := s.store.CreateProject(store.Project{
 		Slug:            req.Slug,
 		Title:           req.Title,
@@ -294,6 +305,7 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	// leaves an unbound project and place_warning (its own field: the single
 	// warning slot is overwritten by later scaffold/emoji warnings); `move`
 	// with place=auto retries.
+	placeJoined := false
 	if req.Place == "auto" {
 		if thread, joined, warn := s.createPlace(p, area, req.Content); warn != "" {
 			resp["place_warning"] = warn
@@ -302,6 +314,7 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 			resp["message_thread_id"] = thread
 			resp["place_created"] = !joined
 			resp["place_joined"] = joined
+			placeJoined = joined
 		}
 	}
 
@@ -328,7 +341,11 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	// Self-register the autonomous-research schedule: an event-mode cron whose
 	// fire enqueues project.event{research.due} for the daemon's consumer.
 	// dedup_key = project:<slug>, which is how archive/pause later finds it.
-	if ok, warn := s.registerResearchSchedule(p, cadence); ok {
+	// A project that joined another agent's post has no schedule of its own:
+	// that agent already researches it, and two schedules double the cost.
+	if placeJoined {
+		resp["cadence"] = "none (joined another agent's post)"
+	} else if ok, warn := s.registerResearchSchedule(p, cadence); ok {
 		resp["cadence"] = cadence
 	} else if warn != "" {
 		// The warning field is single-valued by contract — an earlier warning

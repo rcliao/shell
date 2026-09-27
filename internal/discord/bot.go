@@ -40,6 +40,7 @@ type api interface {
 	GuildChannels(guildID string) ([]*discordgo.Channel, error)
 	CreateGuildChannel(guildID string, d discordgo.GuildChannelCreateData) (*discordgo.Channel, error)
 	ActiveThreads(guildID string) ([]*discordgo.Channel, error)
+	DeleteChannel(channelID string) error
 	// Respond answers an interaction (a button click or slash command).
 	Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error
 	// EditResponse fills a deferred interaction reply; Followup adds more.
@@ -463,6 +464,10 @@ func (a sessionAPI) GuildChannels(guild string) ([]*discordgo.Channel, error) {
 }
 func (a sessionAPI) CreateGuildChannel(guild string, d discordgo.GuildChannelCreateData) (*discordgo.Channel, error) {
 	return a.s.GuildChannelCreateComplex(guild, d)
+}
+func (a sessionAPI) DeleteChannel(id string) error {
+	_, err := a.s.ChannelDelete(id)
+	return err
 }
 func (a sessionAPI) ActiveThreads(guild string) ([]*discordgo.Channel, error) {
 	l, err := a.s.GuildThreadsActive(guild)

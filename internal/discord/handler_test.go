@@ -35,6 +35,7 @@ type fakeAPI struct {
 	deletes      []string
 	reacts       []string // "+emoji" / "-emoji"
 	created      []string // channels made by CreateGuildChannel
+	deleted      []string // channels removed by DeleteChannel
 }
 
 type sent struct {
@@ -132,6 +133,14 @@ func (f *fakeAPI) CreateGuildChannel(guild string, d discordgo.GuildChannelCreat
 	f.channels[id] = c
 	f.created = append(f.created, id)
 	return c, nil
+}
+
+func (f *fakeAPI) DeleteChannel(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.channels, id)
+	f.deleted = append(f.deleted, id)
+	return nil
 }
 
 func (f *fakeAPI) ActiveThreads(guild string) ([]*discordgo.Channel, error) {

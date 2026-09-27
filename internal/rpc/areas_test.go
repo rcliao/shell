@@ -256,3 +256,20 @@ func TestPostIsSharedRecord(t *testing.T) {
 		t.Fatal("join without the area must be refused")
 	}
 }
+
+// A retry is a no-op; a joined post gets no second research schedule.
+func TestAreaCreateRetryAndJoinSchedule(t *testing.T) {
+	s, fp := newAreaServer(t)
+	_, first := postProject(t, s, map[string]any{"action": "create", "title": "Zelda", "area": "travel", "place": "auto"})
+	code, again := postProject(t, s, map[string]any{"action": "create", "title": "zelda", "area": "travel", "place": "auto"})
+	if code != http.StatusOK || again["created"] != false || again["slug"] != first["slug"] || len(fp.created) != 1 {
+		t.Fatalf("retry: %d %v created=%v", code, again, fp.created)
+	}
+	other, _ := newProjectTestServer(t)
+	other.places = fp
+	postProject(t, other, map[string]any{"action": "create", "title": "Travel", "slug": "travel", "chat_id": -100200300, "kind": "area", "place_ref": forumRef})
+	_, joined := postProject(t, other, map[string]any{"action": "create", "title": "Zelda", "area": "travel", "place": "auto"})
+	if joined["place_joined"] != true || joined["cadence"] != "none (joined another agent's post)" {
+		t.Fatalf("joined create: %v", joined)
+	}
+}
