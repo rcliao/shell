@@ -68,8 +68,9 @@ const judgeBudget = 8 * time.Minute
 
 const (
 	recurringWindow   = 14 * 24 * time.Hour
-	recurringMinCount = 3
-	recurringMinDays  = 2
+	recurringMinCount = 5 // a real ongoing topic, not one evening's thread
+	recurringMinDays  = 3 // distinct days: one evening across midnight is not recurring
+	recurringMax      = 5 // the strongest few; a long list is noise
 )
 
 // reviewScheduleMessage is the event-mode schedule envelope.
@@ -353,10 +354,15 @@ func recurringEvidence(st *store.Store, since time.Time, chatID int64, exclude m
 		return ""
 	}
 	var sb strings.Builder
+	shown := 0
 	for _, s := range subs {
 		if chatID != 0 && s.ChatID != chatID {
 			continue
 		}
+		if shown == recurringMax {
+			break
+		}
+		shown++
 		fmt.Fprintf(&sb, "- \"%s\" (chat %d): %d messages on %d days, last %s — e.g. %s\n",
 			s.Name, s.ChatID, s.Count, s.Days, s.Last.Local().Format("Mon Jan 2"), strings.Join(s.Examples, " / "))
 	}
