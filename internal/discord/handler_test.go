@@ -768,3 +768,57 @@ func TestRejectedUploadIsSaidOutLoud(t *testing.T) {
 		t.Fatalf("want a notice naming the file, got %+v", h.api.sends)
 	}
 }
+
+func TestTextFileAttachmentIsSavedForTheAgent(t *testing.T) {
+	body := []byte("<html><body>Zoroark team</body></html>")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(body) }))
+	defer srv.Close()
+
+	h := newHarness(t, "got it")
+	m := msg("600000000000000042", dmChan, linkedUser, "This is the artifact")
+	m.Attachments = []*discordgo.MessageAttachment{{
+		URL: srv.URL + "/team.html", Filename: "team.html", ContentType: "text/html; charset=utf-8", Size: len(body),
+	}}
+	h.bot.handler.HandleMessage(context.Background(), m)
+
+	if h.agent.turnCount() != 1 {
+		t.Fatal("an HTML attachment must reach the agent")
+	}
+	text := h.agent.turns[0].Text
+	if !strings.Contains(text, "This is the artifact") || !strings.Contains(text, `attached file "team.html"`) {
+		t.Fatalf("turn text %q should keep the words and name the file", text)
+	}
+	i := strings.Index(text, "saved at ")
+	path := strings.Fields(text[i+len("saved at "):])[0]
+	if !strings.HasSuffix(path, ".html") {
+		t.Fatalf("saved path %q should keep the .html extension", path)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("temp copy %s should be removed after the turn (err=%v)", path, err)
+	}
+}
+
+func TestTextFileWithoutContentTypeIsRecognizedByExtension(t *testing.T) {
+	if !isTextFile("", "notes.md") || !isTextFile("application/octet-stream", "team.JSON") {
+		t.Fatal("known text extensions must count as text")
+	}
+	if isTextFile("application/zip", "team.zip") {
+		t.Fatal("a zip is not text")
+	}
+}
+
+func TestUnsupportedAttachmentIsNamedNotDropped(t *testing.T) {
+	h := newHarness(t, "ok")
+	m := msg("600000000000000043", dmChan, linkedUser, "")
+	m.Attachments = []*discordgo.MessageAttachment{{
+		URL: "http://127.0.0.1:1/x.zip", Filename: "team.zip", ContentType: "application/zip", Size: 10,
+	}}
+	h.bot.handler.HandleMessage(context.Background(), m)
+
+	if h.agent.turnCount() != 1 {
+		t.Fatal("a message with only an unsupported file must still start a turn")
+	}
+	if text := h.agent.turns[0].Text; !strings.Contains(text, `"team.zip"`) || !strings.Contains(text, "not supported") {
+		t.Fatalf("turn text %q should say the zip could not be opened", text)
+	}
+}

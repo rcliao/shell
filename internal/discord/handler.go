@@ -171,13 +171,14 @@ func (h *Handler) HandleMessage(ctx context.Context, m *discordgo.Message) {
 	}
 	text = h.withReplyContext(m, text)
 
-	images, pdfs, text, ok := h.downloadAttachments(ctx, m, w, msgID, text)
+	images, pdfs, files, text, ok := h.downloadAttachments(ctx, m, w, msgID, text)
 	if !ok {
 		h.setStatus(w.channelID, m.ID, "", "❌")
 		return
 	}
 	images, text = h.stickerTurn(ctx, m, sender, text, images)
 	defer cleanupMedia(images, pdfs)
+	defer removeFiles(files)
 	if text == "" {
 		// Say so: a message that silently vanishes (a sticker did, before
 		// stickers were handled) is invisible in every log.
@@ -643,12 +644,23 @@ func (h *Handler) editText(channelID, messageID, text string) {
 	}
 }
 
-// downloadAttachments fetches images and PDFs for the turn. It returns the
-// text to send (a caption stand-in when the message had no words) and false
-// when a download failed and the turn should not run.
-func (h *Handler) downloadAttachments(ctx context.Context, m *discordgo.Message, w where, msgID int, text string) ([]bridge.ImageInfo, []bridge.PDFInfo, string, bool) {
+// downloadAttachments fetches images, PDFs and text files for the turn. Images
+// and PDFs go to the model as media; a text file (HTML, Markdown, CSV, JSON,
+// source code) is saved to a temp path named in the turn text so the agent can
+// Read it. Any other file is named in the text as unreadable, so it never
+// vanishes without a word. It returns the text to send (a caption stand-in
+// when the message had no words), the text-file paths to remove after the
+// turn, and false when a download failed and the turn should not run.
+func (h *Handler) downloadAttachments(ctx context.Context, m *discordgo.Message, w where, msgID int, text string) ([]bridge.ImageInfo, []bridge.PDFInfo, []string, string, bool) {
 	var images []bridge.ImageInfo
 	var pdfs []bridge.PDFInfo
+	var files []string
+	var notes []string
+	fail := func() ([]bridge.ImageInfo, []bridge.PDFInfo, []string, string, bool) {
+		cleanupMedia(images, pdfs)
+		removeFiles(files)
+		return nil, nil, nil, text, false
+	}
 	for _, a := range m.Attachments {
 		ct := strings.ToLower(a.ContentType)
 		switch {
@@ -656,8 +668,7 @@ func (h *Handler) downloadAttachments(ctx context.Context, m *discordgo.Message,
 			path, size, err := h.download(ctx, a, "dc-photo-*"+extFor(a.Filename, ".jpg"))
 			if err != nil {
 				slog.Error("discord: image download failed", "error", err)
-				cleanupMedia(images, pdfs)
-				return nil, nil, text, false
+				return fail()
 			}
 			img := bridge.ImageInfo{Path: path, Width: a.Width, Height: a.Height, Size: size}
 			h.bridge.ArchiveInboundMedia(w.conv.ChatID, w.conv.ThreadID, msgID, text, &img)
@@ -666,11 +677,28 @@ func (h *Handler) downloadAttachments(ctx context.Context, m *discordgo.Message,
 			path, size, err := h.download(ctx, a, "dc-pdf-*.pdf")
 			if err != nil {
 				slog.Error("discord: pdf download failed", "error", err)
-				cleanupMedia(images, pdfs)
-				return nil, nil, text, false
+				return fail()
 			}
 			pdfs = append(pdfs, bridge.PDFInfo{Path: path, Size: size})
+		case isTextFile(ct, a.Filename):
+			path, size, err := h.download(ctx, a, "dc-file-*"+extFor(a.Filename, ".txt"))
+			if err != nil {
+				slog.Error("discord: file download failed", "error", err, "file", a.Filename)
+				return fail()
+			}
+			files = append(files, path)
+			notes = append(notes, fmt.Sprintf("[attached file %q (%d bytes) saved at %s — Read it to see the contents]", a.Filename, size, path))
+		default:
+			slog.Warn("discord: attachment type not supported, not downloaded",
+				"chat_id", w.conv.ChatID, "file", a.Filename, "content_type", a.ContentType, "size", a.Size)
+			notes = append(notes, fmt.Sprintf("[attached file %q (%s) could not be opened: this file type is not supported — ask for a PDF, an image, or the text pasted]", a.Filename, orUnknown(a.ContentType)))
 		}
+	}
+	if len(notes) > 0 {
+		if text != "" {
+			text += "\n\n"
+		}
+		text += strings.Join(notes, "\n")
 	}
 	if text == "" {
 		switch {
@@ -680,7 +708,45 @@ func (h *Handler) downloadAttachments(ctx context.Context, m *discordgo.Message,
 			text = "(pdf)"
 		}
 	}
-	return images, pdfs, text, true
+	return images, pdfs, files, text, true
+}
+
+// textFileExts are files the agent can Read as text when Discord sends no
+// content type, or a generic one (application/octet-stream).
+var textFileExts = map[string]bool{
+	".txt": true, ".md": true, ".markdown": true, ".html": true, ".htm": true,
+	".csv": true, ".tsv": true, ".json": true, ".jsonl": true, ".xml": true,
+	".yaml": true, ".yml": true, ".toml": true, ".log": true, ".svg": true,
+	".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
+	".css": true, ".sh": true, ".sql": true,
+}
+
+// isTextFile reports whether an attachment is text the agent can Read.
+func isTextFile(contentType, filename string) bool {
+	ct, _, _ := strings.Cut(contentType, ";")
+	ct = strings.TrimSpace(ct)
+	switch {
+	case strings.HasPrefix(ct, "text/"):
+		return true
+	case ct == "application/json", ct == "application/xml", ct == "application/javascript",
+		ct == "application/x-yaml", ct == "application/yaml", ct == "application/toml":
+		return true
+	}
+	return textFileExts[strings.ToLower(filepath.Ext(filename))]
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown type"
+	}
+	return s
+}
+
+// removeFiles deletes the text-file temp copies once the turn is over.
+func removeFiles(paths []string) {
+	for _, p := range paths {
+		os.Remove(p)
+	}
 }
 
 func (h *Handler) download(ctx context.Context, a *discordgo.MessageAttachment, pattern string) (string, int64, error) {
