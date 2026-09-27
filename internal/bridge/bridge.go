@@ -537,10 +537,13 @@ func (b *Bridge) RecordHumanMessage(chatID, threadID int64, telegramMsgID int, a
 		ChatID:        chatID,
 		ThreadID:      threadID,
 		TelegramMsgID: telegramMsgID,
-		Timestamp:     at,
-		SenderType:    "human",
-		SenderName:    sender,
-		Text:          text,
+		// Local, like every other row: transcript order is by timestamp, and a
+		// platform that hands over UTC (Discord does) would sort people hours
+		// after the replies to them.
+		Timestamp:  at.Local(),
+		SenderType: "human",
+		SenderName: sender,
+		Text:       text,
 	})
 }
 

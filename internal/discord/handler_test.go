@@ -18,6 +18,7 @@ import (
 	"github.com/rcliao/shell/internal/process"
 	"github.com/rcliao/shell/internal/progress"
 	"github.com/rcliao/shell/internal/store"
+	"github.com/rcliao/shell/internal/transcript"
 )
 
 // fakeAPI records what the bot did on Discord.
@@ -651,5 +652,28 @@ func TestApplicationCommandsAreValid(t *testing.T) {
 		if len(c.Description) < 1 || len(c.Description) > 100 {
 			t.Errorf("%s: description must be 1-100 chars", c.Name)
 		}
+	}
+}
+
+func TestGroupMessageRecordedInLocalTime(t *testing.T) {
+	h := newHarness(t, "ok")
+	ts, err := transcript.Open(filepath.Join(t.TempDir(), "transcript.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ts.Close() })
+	h.br.SetTranscript(ts, "bot", 2000)
+	m := msg("600000000000000110", groupChan, linkedUser, "what's for dinner")
+	m.Timestamp = time.Date(2026, 9, 27, 15, 54, 55, 0, time.UTC) // Discord sends UTC
+	h.bot.handler.HandleMessage(context.Background(), m)
+	rows, err := ts.Recent(-100200300, 5)
+	if err != nil || len(rows) == 0 {
+		t.Fatalf("no transcript row: %v", err)
+	}
+	if loc := rows[0].Timestamp.Location(); loc != time.Local {
+		t.Fatalf("stored in %v, want local time like every other row", loc)
+	}
+	if !rows[0].Timestamp.Equal(m.Timestamp) {
+		t.Fatal("the instant itself must not change")
 	}
 }
