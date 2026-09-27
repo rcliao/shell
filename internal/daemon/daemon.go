@@ -27,6 +27,7 @@ import (
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/progress"
 	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/reload"
 	"github.com/rcliao/shell/internal/route"
@@ -670,7 +671,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			return nil, err
 		}
 		if workspaceDir != "" {
-			tgBot.SetProgressPhrasesPath(filepath.Join(workspaceDir, telegram.ProgressPhrasesFile))
+			tgBot.SetProgressPhrasesPath(filepath.Join(workspaceDir, progress.PhrasesFile))
 		}
 		bot = tgBot
 	}
@@ -692,9 +693,14 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 		addr := discord.NewAddresses(cfg.Discord)
 		userLabels := parseUserLabels(cfg.Telegram.UserLabels)
+		phrases := ""
+		if workspaceDir != "" {
+			phrases = filepath.Join(workspaceDir, progress.PhrasesFile)
+		}
 		dc, err := discord.NewBot(dtoken, discord.Options{
-			Addresses: addr,
-			Bridge:    br,
+			ProgressPhrasesPath: phrases,
+			Addresses:           addr,
+			Bridge:              br,
 			Agent: discord.AgentConfig{
 				Aliases:              append([]string(nil), cfg.Agent.Aliases...),
 				PeerAliases:          append([]string(nil), peerAliases...),

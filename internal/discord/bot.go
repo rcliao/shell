@@ -61,6 +61,9 @@ type Options struct {
 	// Authorize applies the existing (Telegram-keyed) access policy to a
 	// linked person. Passed in so this package does not import telegram.
 	Authorize func(userID, chatID int64, isGroup bool) bool
+	// ProgressPhrasesPath is the agent's own progress-phrase file (the same
+	// one Telegram reads); "" uses the built-in phrases.
+	ProgressPhrasesPath string
 }
 
 // NewBot opens nothing yet: Start connects the gateway.
@@ -390,9 +393,9 @@ func (a sessionAPI) React(ch, id, emoji string) error {
 func (a sessionAPI) Unreact(ch, id, emoji string) error {
 	return a.s.MessageReactionRemove(ch, id, emoji, "@me")
 }
-func (a sessionAPI) Typing(ch string) error        { return a.s.ChannelTyping(ch) }
-func (a sessionAPI) Pin(ch, id string) error       { return a.s.ChannelMessagePin(ch, id) }
-func (a sessionAPI) Unpin(ch, id string) error     { return a.s.ChannelMessageUnpin(ch, id) }
+func (a sessionAPI) Typing(ch string) error    { return a.s.ChannelTyping(ch) }
+func (a sessionAPI) Pin(ch, id string) error   { return a.s.ChannelMessagePin(ch, id) }
+func (a sessionAPI) Unpin(ch, id string) error { return a.s.ChannelMessageUnpin(ch, id) }
 func (a sessionAPI) Channel(id string) (*discordgo.Channel, error) {
 	if c, err := a.s.State.Channel(id); err == nil {
 		return c, nil
