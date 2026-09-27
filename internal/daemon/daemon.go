@@ -718,6 +718,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		dc, err := discord.NewBot(dtoken, discord.Options{
 			ProgressPhrasesPath: phrases,
 			Mentions:            discordMentions,
+			ReplyButtons:        cfg.Discord.ReplyButtons,
 			Addresses:           addr,
 			Bridge:              br,
 			Agent: discord.AgentConfig{

@@ -22,14 +22,16 @@ import (
 
 // fakeAPI records what the bot did on Discord.
 type fakeAPI struct {
-	mu       sync.Mutex
-	channels map[string]*discordgo.Channel
-	nextID   int64
-	sends    []sent
-	edits    map[string]string // message id → latest content
-	embedsOn map[string]int    // message id → embeds on its latest edit
-	deletes  []string
-	reacts   []string // "+emoji" / "-emoji"
+	mu        sync.Mutex
+	channels  map[string]*discordgo.Channel
+	nextID    int64
+	sends     []sent
+	edits     map[string]string // message id → latest content
+	embedsOn  map[string]int    // message id → embeds on its latest edit
+	compsOn   map[string]int    // message id → component rows on its latest edit
+	responses []discordgo.InteractionResponseType
+	deletes   []string
+	reacts    []string // "+emoji" / "-emoji"
 }
 
 type sent struct {
@@ -41,7 +43,7 @@ type sent struct {
 }
 
 func newFakeAPI() *fakeAPI {
-	return &fakeAPI{channels: map[string]*discordgo.Channel{}, nextID: 400000000000000000, edits: map[string]string{}, embedsOn: map[string]int{}}
+	return &fakeAPI{channels: map[string]*discordgo.Channel{}, nextID: 400000000000000000, edits: map[string]string{}, embedsOn: map[string]int{}, compsOn: map[string]int{}}
 }
 
 func (f *fakeAPI) Send(ch string, m *discordgo.MessageSend) (*discordgo.Message, error) {
@@ -64,6 +66,9 @@ func (f *fakeAPI) Edit(m *discordgo.MessageEdit) (*discordgo.Message, error) {
 	}
 	if m.Embeds != nil {
 		f.embedsOn[m.ID] = len(*m.Embeds)
+	}
+	if m.Components != nil {
+		f.compsOn[m.ID] = len(*m.Components)
 	}
 	return &discordgo.Message{ID: m.ID, ChannelID: m.Channel}, nil
 }
@@ -129,6 +134,12 @@ func (f *fakeAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.C
 	return c, nil
 }
 
+func (f *fakeAPI) Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.responses = append(f.responses, r.Type)
+	return nil
+}
 func (f *fakeAPI) Channel(id string) (*discordgo.Channel, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -183,6 +194,11 @@ type harness struct {
 
 func newHarness(t *testing.T, reply string) *harness {
 	t.Helper()
+	return newHarnessWithReactions(t, reply, map[string]string{"❌": "cancel"})
+}
+
+func newHarnessWithReactions(t *testing.T, reply string, reactions map[string]string) *harness {
+	t.Helper()
 	t.Setenv("GHOST_EMBED_PROVIDER", "none")
 	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -190,7 +206,7 @@ func newHarness(t *testing.T, reply string) *harness {
 	}
 	t.Cleanup(func() { s.Close() })
 	agent := &fakeAgent{Agent: process.NewManager(process.ManagerConfig{Binary: "echo"}), reply: reply}
-	br := bridge.New(agent, s, nil, nil, false, "", map[string]string{"❌": "cancel"}, nil, nil, nil)
+	br := bridge.New(agent, s, nil, nil, false, "", reactions, nil, nil, nil)
 
 	api := newFakeAPI()
 	api.channels[dmChan] = &discordgo.Channel{ID: dmChan, Type: discordgo.ChannelTypeDM}
@@ -536,5 +552,48 @@ func TestProactiveCardsRideTheLastChunk(t *testing.T) {
 	}
 	if h.api.sends[0].embeds != 10 || h.api.sends[1].embeds != 2 || h.api.sends[1].content != "" {
 		t.Fatalf("sends = %+v", h.api.sends)
+	}
+}
+
+func TestReplyButtonsAndClick(t *testing.T) {
+	h := newHarness(t, "an answer")
+	h.bot.handler.buttons = true
+	h.bot.handler.HandleMessage(context.Background(), msg("600000000000000090", dmChan, linkedUser, "hi"))
+	// The default harness map has only ❌ → cancel: no Regenerate or
+	// Remember action exists, so no button is shown.
+	if h.api.compsOn[h.api.sends[0].id] != 0 {
+		t.Fatal("buttons for actions the agent doesn't have must not appear")
+	}
+
+	h2 := newHarnessWithReactions(t, "an answer", map[string]string{"🔄": "cancel", "📌": "cancel"})
+	h2.bot.handler.buttons = true
+	h2.bot.handler.HandleMessage(context.Background(), msg("600000000000000091", dmChan, linkedUser, "hi"))
+	reply := h2.api.sends[0].id
+	if h2.api.compsOn[reply] != 1 {
+		t.Fatalf("want one button row under the reply, got %d", h2.api.compsOn[reply])
+	}
+	h2.api.reacts = nil
+	h2.bot.handler.HandleInteraction(context.Background(), &discordgo.Interaction{
+		Type: discordgo.InteractionMessageComponent, ChannelID: dmChan,
+		Message: &discordgo.Message{ID: reply},
+		User:    &discordgo.User{ID: linkedUser},
+		Data:    discordgo.MessageComponentInteractionData{CustomID: "act:📌"},
+	})
+	if len(h2.api.responses) != 1 || h2.api.responses[0] != discordgo.InteractionResponseDeferredMessageUpdate {
+		t.Fatalf("the click must be acknowledged at once, responses=%v", h2.api.responses)
+	}
+	if got := strings.Join(h2.api.reacts, " "); got != "+✅" {
+		t.Fatalf("a click runs the reaction's action and marks the reply: %q", got)
+	}
+
+	h3 := newHarnessWithReactions(t, "x", map[string]string{"📌": "cancel"})
+	h3.bot.handler.HandleInteraction(context.Background(), &discordgo.Interaction{
+		Type: discordgo.InteractionMessageComponent, ChannelID: dmChan,
+		Message: &discordgo.Message{ID: "400000000000000999"},
+		User:    &discordgo.User{ID: strangerID},
+		Data:    discordgo.MessageComponentInteractionData{CustomID: "act:📌"},
+	})
+	if len(h3.api.reacts) != 0 {
+		t.Fatal("an unlinked person's click must do nothing")
 	}
 }

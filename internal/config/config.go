@@ -280,6 +280,9 @@ type DiscordConfig struct {
 	// not listed in Chats becomes its own topic of that chat (thread = its
 	// snowflake), so a channel created later needs no config edit.
 	Guilds map[string]DiscordGuildLink `json:"guilds"`
+	// ReplyButtons puts Regenerate / Remember buttons under each reply (the
+	// reaction actions, made visible). Off by default.
+	ReplyButtons bool `json:"reply_buttons"`
 }
 
 // DiscordGuildLink is the internal chat a Discord server's channels join.
