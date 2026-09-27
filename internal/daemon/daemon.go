@@ -774,6 +774,11 @@ func New(cfg config.Config) (*Daemon, error) {
 		br.SetLanesAll(cfg.Route.LanesAll())
 		slog.Info("lanes: enabled", "chats", len(lanes), "all_chats", cfg.Route.LanesAll(), "router", backend != nil)
 	}
+	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() && !cfg.Agent.A2AGateOff {
+		// Each A2A hand-off must need a reply, not just name the peer.
+		br.SetA2AGate(jev)
+		slog.Info("a2a gate: enabled", "backend", "jev")
+	}
 	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
 		br.SetRouterShadow(decide.NewShadow(jev, st))
 		slog.Info("router shadow: enabled", "backend", "jev")

@@ -181,6 +181,9 @@ type AgentIdentity struct {
 	// only thing bounding a bot-to-bot loop, so keep it as low as the use case
 	// allows. Every human message resets the chain to depth 0 regardless.
 	A2AMaxDepth int `json:"a2a_max_depth"`
+	// A2AGateOff turns off the decision-model check on A2A hand-offs, so
+	// every reply that addresses the peer hands off again (the old rule).
+	A2AGateOff bool `json:"a2a_gate_off"`
 }
 
 // PeerAgent describes a peer agent for multi-agent discovery.

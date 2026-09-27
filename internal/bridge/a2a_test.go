@@ -1,11 +1,14 @@
 package bridge
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/decide"
 	"github.com/rcliao/shell/internal/transcript"
 )
 
@@ -229,5 +232,81 @@ func TestA2AInvitesReply(t *testing.T) {
 				t.Errorf("invitesReply(%q) = %v, want %v", tc.reply, got, tc.want)
 			}
 		})
+	}
+}
+
+// fakeGate answers the hand-off check with a fixed choice, or fails.
+type fakeGate struct {
+	choice string
+	p      float64
+	err    error
+	asked  int
+}
+
+func (g *fakeGate) Enabled() bool { return true }
+func (g *fakeGate) Ask(ctx context.Context, state any, qs map[string]decide.Question) (decide.Result, error) {
+	g.asked++
+	if g.err != nil {
+		return decide.Result{}, g.err
+	}
+	return decide.Result{Answers: map[string]decide.Answer{"reply": {
+		Type: "choice", Choice: g.choice, Probabilities: map[string]float64{"needs_reply": g.p},
+	}}}, nil
+}
+
+func TestA2AGate(t *testing.T) {
+	const chatID = int64(-100123)
+	cases := []struct {
+		name          string
+		gate          *fakeGate
+		incomingDepth int
+		wantHandoff   bool
+	}{
+		{"an acknowledgement ends the exchange", &fakeGate{choice: "no_reply", p: 0.1}, 1, false},
+		{"a real ask hands off", &fakeGate{choice: "needs_reply", p: 0.9}, 1, true},
+		{"a weak yes is not enough", &fakeGate{choice: "needs_reply", p: 0.4}, 0, false},
+		{"gate down on the first hop after a person: hand off", &fakeGate{err: errors.New("timeout")}, 0, true},
+		{"gate down deeper in a chain: stop", &fakeGate{err: errors.New("timeout")}, 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, err := transcript.OpenTaskStore(filepath.Join(t.TempDir(), "task.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := &Bridge{
+				taskStore:        ts,
+				agentBotUsername: "Pikamini_bot",
+				peerAgents:       []config.PeerAgent{{Name: "Umbreon", BotUsername: "umbreon_mini_bot"}},
+			}
+			b.SetA2AMaxDepth(10)
+			b.SetA2AGate(tc.gate)
+			b.maybeEnqueueA2A(chatID, 0, "Got it, Umbreon, you take the plants.", tc.incomingDepth, "Umbreon")
+			evs, err := ts.ConsumeEvents("umbreon_mini_bot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(evs) == 1; got != tc.wantHandoff {
+				t.Errorf("handoff = %v, want %v", got, tc.wantHandoff)
+			}
+			if tc.gate.asked != 1 {
+				t.Errorf("gate asked %d times, want 1", tc.gate.asked)
+			}
+		})
+	}
+}
+
+func TestA2AGateNotAskedWhenNoPeerIsAddressed(t *testing.T) {
+	ts, err := transcript.OpenTaskStore(filepath.Join(t.TempDir(), "task.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGate{choice: "needs_reply", p: 1}
+	b := &Bridge{taskStore: ts, agentBotUsername: "Pikamini_bot",
+		peerAgents: []config.PeerAgent{{Name: "Umbreon", BotUsername: "umbreon_mini_bot"}}}
+	b.SetA2AGate(g)
+	b.maybeEnqueueA2A(-100123, 0, "Dinner is at six.", 0, "")
+	if g.asked != 0 {
+		t.Fatal("no hand-off candidate, so no model call")
 	}
 }
