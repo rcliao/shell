@@ -196,6 +196,74 @@ Verification:
 - A new trip idea in a DM routes to the area lane.
 - Stage changes flip the post's tag, and archiving closes it.
 
+## Part 2: agents make areas, and the post is the shared record
+
+Added 2026-09-27, after the first live request. The owner asked both agents
+in the main channel for a gaming area. Both checked the code, found that
+nothing could create a channel, and asked the owner for ids. They then
+spent five messages handing the registration back and forth, because each
+believed there was one registry. Owner decisions, the same day:
+- **Channels need a yes; posts don't.**
+- **The post is the shared record** between the two agents, rather than
+  one project registry shared by both.
+- The sidebar should show what the agents are tracking.
+
+**Who does what.**
+- *Explicit request.* A person asks for an area. Whichever agent answers
+  runs `project create --title 遊戲 --emoji 🎮 --kind area --place new`.
+  Shell finds or creates the area's text channel and its forum (with stage
+  tags) in the chat's Discord server, in the category of the chat's main
+  channel. It sets the channel topic to point at the forum, and registers
+  the area bound to that channel with `place_ref` = the forum. The agent
+  replies with both channels as mentions.
+- *The other agent.* It runs the same command. Creation is **find-or-create
+  by name**, so it reuses the channels and registers its own row. Nobody
+  hands off, and nobody asks for ids.
+- *Implicit.* An agent notices a kind of work that keeps coming back (the
+  router's recurring subjects), or active projects that have no place. It
+  **proposes** an area in chat or in its weekly review, and only a yes
+  creates it. Filing a new project into an existing area as a post needs no
+  yes: the agent does it and says so.
+- *The post as the shared record.*
+  - `create --area X --place auto` first looks for an open post with the
+    same title in the forum. If it finds one it **joins** it (binds to that
+    post) instead of opening a second one.
+  - An agent that is in a post it has no project for runs `project join`
+    on that thread. That registers its own row for the post: title from the
+    post, area from the forum, stage from the tag.
+  - The turn block hints at this whenever a Discord thread belongs to none
+    of the agent's projects.
+
+**Interfaces.**
+- RPC `create`: `place: "new"` for areas, plus optional `channel_name` and
+  `tags`.
+- RPC `join`: takes `message_thread_id` and returns the project it made or
+  found.
+- `rpc.Places` gains:
+  - `EnsureAreaPlaces(chatID, name, tags) (channelThread int64, placeRef string, err error)`
+  - `FindThread(chatID, placeRef, title) (threadID int64, ok bool, err error)`
+  - `ThreadInfo(chatID, threadID) (title, placeRef, tags, err)`
+
+  These are Discord only. On Telegram, `place: new` is refused (the family
+  has moved to Discord), and areas there bind a topic by hand as before.
+- The skill documents the rules above. The weekly review's evidence adds
+  the active projects that have no place and the areas that exist.
+
+**Not doing.**
+- A per-area pinned index. Each agent would pin its own, so every area
+  channel would show two lists that don't agree. The forum is the shared
+  index.
+- Creating a channel without a yes.
+- Deleting or renaming channels.
+- A shared registry (plan P4).
+
+**Verified by.**
+- Fake-API tests: a second `EnsureAreaPlaces` reuses both channels, and a
+  same-title create joins the existing post.
+- An RPC test for `join`.
+- Live: the owner's gaming request results in two channels, one area row
+  on each agent, and no ids asked for.
+
 ## Evidence
 
 - `store.Project` today has no parent or kind. `MessageThreadID` is
