@@ -1,6 +1,6 @@
 # Design: project areas (umbrella projects), travel first
 
-2026-09-27. **Proposal for the owner's review; nothing is built.** It was
+2026-09-27. **Approved by the owner 2026-09-27; plan steps 1–3 built (branch `areas-build`), migration pending.** It was
 asked for by the Discord session (shell-37) on the owner's behalf: travel
 spans many trips, each with its own sub-topics, and a flat project list does
 not fit it. It builds on `docs/DESIGN-DISCORD.md`, the lanes in

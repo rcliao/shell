@@ -61,7 +61,18 @@ func newProjectCmd() *cobra.Command {
 				if p.MessageThreadID != 0 {
 					fmt.Printf(" thread %d", p.MessageThreadID)
 				}
-				fmt.Printf("  %s\n", p.Title)
+				fmt.Printf("  %s", p.Title)
+				if p.Kind == store.ProjectKindArea {
+					fmt.Printf("  (area, places: %s)", orNone(p.PlaceRef))
+				}
+				if p.Area != "" {
+					fmt.Printf("  (in %s", p.Area)
+					if p.Stage != "" {
+						fmt.Printf(", %s", p.Stage)
+					}
+					fmt.Printf(")")
+				}
+				fmt.Println()
 				if p.DocPath != "" {
 					fmt.Printf("      doc: %s @ %s\n", p.DocPath, shortRev(p.DocRev))
 				}
@@ -181,6 +192,11 @@ func newProjectCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Project %s archived.\n", p.Slug)
+			if p.Area != "" && p.MessageThreadID != 0 {
+				// The CLI has no platform connection; the agent's
+				// `project archive` (RPC) closes the place too.
+				fmt.Printf("Its place (thread %d) is still open: close it on the platform, or archive through the agent.\n", p.MessageThreadID)
+			}
 
 			key := p.ScheduleDedupKey
 			if key == "" {
@@ -205,7 +221,7 @@ func newProjectCmd() *cobra.Command {
 	var bindChatFlag, bindThreadFlag int64
 	bindCmd := &cobra.Command{
 		Use:   "bind <slug> --chat <id> [--thread <id>]",
-		Short: "Re-bind a project to a chat (and optional forum topic)",
+		Short: "Re-bind a project to a chat (and optional thread: forum topic or Discord channel/post)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if bindChatFlag == 0 {
@@ -233,7 +249,7 @@ func newProjectCmd() *cobra.Command {
 		},
 	}
 	bindCmd.Flags().Int64Var(&bindChatFlag, "chat", 0, "target chat id")
-	bindCmd.Flags().Int64Var(&bindThreadFlag, "thread", 0, "Telegram forum topic id (0 = main chat)")
+	bindCmd.Flags().Int64Var(&bindThreadFlag, "thread", 0, "the project's thread: Telegram forum topic or Discord thread/post id (0 = the chat itself)")
 
 	var adoptTitle, adoptEmoji, adoptLang string
 	var adoptReplace bool
@@ -335,7 +351,7 @@ must be shared with the Notion integration first (page ••• menu → Connec
 	adoptCmd.Flags().StringVar(&adoptLang, "lang", "", "language for in-thread replies, e.g. zh-TW (when creating; an existing project keeps its own)")
 	adoptCmd.Flags().Int64Var(&adoptChat, "chat", 0, "chat id the project belongs to (when creating)")
 	adoptCmd.Flags().BoolVar(&adoptReplace, "replace", false, "replace an existing, different export binding (prints the old one)")
-	adoptCmd.Flags().Int64Var(&adoptThread, "thread", 0, "Telegram forum topic id (0 = main chat)")
+	adoptCmd.Flags().Int64Var(&adoptThread, "thread", 0, "the project's thread: Telegram forum topic or Discord thread/post id (0 = the chat itself)")
 
 	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd, adoptCmd)
 	return projectCmd
@@ -367,4 +383,11 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }

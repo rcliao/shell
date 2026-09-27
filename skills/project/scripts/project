@@ -8,6 +8,11 @@ CHAT_ID="${SHELL_CHAT_ID:-0}"
 
 usage() {
   echo "usage: project create --title <text> [--emoji <e> --chat <id> --thread <id> --export-ref <id> --doc-path <path> --instructions <text> --lang <code> --cadence daily|weekly|monthly]" >&2
+  echo "                        [--area <area slug> --place auto --stage <stage> --content <first message>]   (a project in an area)" >&2
+  echo "                        [--kind area --place-ref discord:<forum id>|telegram]                        (an area)" >&2
+  echo "       project move <slug> --area <area slug> [--stage <stage> --place auto --content <first message>]" >&2
+  echo "       project stage <slug> --stage <stage>" >&2
+  echo "       project archive <slug>" >&2
   echo "       project list [--chat <id>]" >&2
   echo "       project get <slug>" >&2
   echo "       project doc-read <slug>" >&2
@@ -30,12 +35,19 @@ CADENCE=""
 SLUG=""
 FILE=""
 ATTRIBUTION=""
+CHAT_EXPLICIT=""
+KIND=""
+PLACE_REF=""
+AREA=""
+PLACE=""
+STAGE=""
+CONTENT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --title)        TITLE="$2"; shift 2 ;;
     --emoji)        EMOJI="$2"; shift 2 ;;
-    --chat)         CHAT_ID="$2"; shift 2 ;;
+    --chat)         CHAT_ID="$2"; CHAT_EXPLICIT=1; shift 2 ;;
     --thread)       THREAD="$2"; shift 2 ;;
     --export-ref)   EXPORT_REF="$2"; shift 2 ;;
     --doc-path)     DOC_PATH="$2"; shift 2 ;;
@@ -44,6 +56,12 @@ while [ $# -gt 0 ]; do
     --cadence)      CADENCE="$2"; shift 2 ;;
     --file)         FILE="$2"; shift 2 ;;
     --attribution)  ATTRIBUTION="$2"; shift 2 ;;
+    --kind)         KIND="$2"; shift 2 ;;
+    --place-ref)    PLACE_REF="$2"; shift 2 ;;
+    --area)         AREA="$2"; shift 2 ;;
+    --place)        PLACE="$2"; shift 2 ;;
+    --stage)        STAGE="$2"; shift 2 ;;
+    --content)      CONTENT="$2"; shift 2 ;;
     --*)            echo "unknown arg: $1" >&2; usage ;;
     *)              SLUG="$1"; shift ;;
   esac
@@ -67,11 +85,17 @@ case "$VERB" in
       echo "create requires --title" >&2
       exit 1
     fi
+    # A project in an area lives in the area's chat: leave chat_id to the
+    # server unless --chat was given.
+    if [ -n "$AREA" ] && [ -z "$CHAT_EXPLICIT" ]; then CHAT_ID=0; fi
     BODY=$(TITLE="$TITLE" EMOJI="$EMOJI" CHAT_ID="$CHAT_ID" THREAD="$THREAD" \
       EXPORT_REF="$EXPORT_REF" DOC_PATH="$DOC_PATH" INSTRUCTIONS="$INSTRUCTIONS" \
-      LANG_CODE="$LANG_CODE" CADENCE="$CADENCE" python3 -c "
+      LANG_CODE="$LANG_CODE" CADENCE="$CADENCE" KIND="$KIND" PLACE_REF="$PLACE_REF" \
+      AREA="$AREA" PLACE="$PLACE" STAGE="$STAGE" CONTENT="$CONTENT" python3 -c "
 import json, os
 d = {'action': 'create', 'title': os.environ['TITLE'], 'chat_id': int(os.environ['CHAT_ID'] or 0)}
+for k in ('kind', 'place_ref', 'area', 'place', 'stage', 'content'):
+    if os.environ[k.upper()]: d[k] = os.environ[k.upper()]
 if os.environ['EMOJI']: d['emoji'] = os.environ['EMOJI']
 if os.environ['THREAD']: d['message_thread_id'] = int(os.environ['THREAD'])
 if os.environ['EXPORT_REF']: d['export_ref'] = os.environ['EXPORT_REF']
@@ -93,6 +117,42 @@ if r.get('doc_path'): print(f\"  doc: {r['doc_path']}\")
 if r.get('instructions'): print(f\"  instructions: {r['instructions']}\")
 print(f\"  ghost tag: {r['ghost_tag']}\")
 if r.get('cadence'): print(f\"  research cadence: {r['cadence']}\")
+if r.get('kind') == 'area': print(f\"  area; places: {r.get('place_ref') or '(none)'}\")
+if r.get('area'): print(f\"  in area: {r['area']}\")
+if r.get('stage'): print(f\"  stage: {r['stage']}\")
+if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (' (place created)' if r.get('place_created') else ''))
+if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
+" 2>/dev/null || echo "$RESP"
+    ;;
+
+  move|stage|archive)
+    if [ -z "$SLUG" ]; then
+      echo "$VERB requires a slug" >&2
+      exit 1
+    fi
+    if [ "$VERB" = "move" ] && [ -z "$AREA" ]; then
+      echo "move requires --area (--area '' is not supported here; use the CLI)" >&2
+      exit 1
+    fi
+    if [ "$VERB" = "stage" ] && [ -z "$STAGE" ]; then
+      echo "stage requires --stage" >&2
+      exit 1
+    fi
+    BODY=$(VERB="$VERB" SLUG="$SLUG" AREA="$AREA" PLACE="$PLACE" STAGE="$STAGE" CONTENT="$CONTENT" python3 -c "
+import json, os
+v = os.environ['VERB']
+d = {'action': 'status' if v == 'archive' else v, 'slug': os.environ['SLUG']}
+if v == 'archive': d['status'] = 'archived'
+for k in ('area', 'place', 'stage', 'content'):
+    if os.environ[k.upper()]: d[k] = os.environ[k.upper()]
+print(json.dumps(d))
+")
+    post "$BODY"
+    echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print(f\"Project {r['slug']} ({r['status']})\" + (f\" in area {r['area']}\" if r.get('area') else '') + (f\", stage {r['stage']}\" if r.get('stage') else ''))
+if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (' (place created)' if r.get('place_created') else ''))
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 " 2>/dev/null || echo "$RESP"
     ;;
@@ -108,7 +168,10 @@ if not projects:
 for p in projects:
     emoji = (p.get('emoji') + ' ') if p.get('emoji') else ''
     export = f\" | {p['export_kind']}:{p['export_ref']}\" if p.get('export_ref') else ''
-    print(f\"{emoji}{p['slug']} [{p['status']}] — {p['title']}{export}\")
+    kind = ' (area)' if p.get('kind') == 'area' else ''
+    area = f\" | in {p['area']}\" if p.get('area') else ''
+    stage = f\" | {p['stage']}\" if p.get('stage') else ''
+    print(f\"{emoji}{p['slug']} [{p['status']}]{kind} — {p['title']}{area}{stage}{export}\")
 " 2>/dev/null || echo "$RESP"
     ;;
 

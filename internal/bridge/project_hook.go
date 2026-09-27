@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"fmt"
 	"github.com/rcliao/shell/internal/decide"
 	"log/slog"
 	"os"
@@ -119,6 +120,7 @@ func (b *Bridge) renderScopedProject(own store.Project, others []string, header,
 	sb.WriteString(header + "\n")
 	sb.WriteString(advanceProjectLine + "\n")
 	sb.WriteString(projectRow(own))
+	sb.WriteString(b.areaLines(own))
 	if doc := b.readProjectDoc(own.DocPath); doc != "" {
 		for _, h := range []string{docDecisionsHeading, docToDecideHeading} {
 			if body := docSection(doc, h); body != "" {
@@ -214,6 +216,15 @@ func projectRow(p store.Project) string {
 	sb.WriteString(p.Slug)
 	sb.WriteString(" — ")
 	sb.WriteString(p.Title)
+	if p.Kind == store.ProjectKindArea {
+		sb.WriteString(" | area")
+	}
+	if p.Area != "" {
+		sb.WriteString(" | in area: " + p.Area)
+	}
+	if p.Stage != "" {
+		sb.WriteString(" | stage: " + p.Stage)
+	}
 	if p.ExportRef != "" {
 		sb.WriteString(" | ")
 		sb.WriteString(p.ExportKind)
@@ -262,4 +273,57 @@ func (b *Bridge) observeRouterShadow(chatID, threadID, msgID int64, userMsg stri
 		}
 	}
 	b.routerShadow.Observe(t)
+}
+
+// areaGuideLine tells the agent what an area's own place is for
+// (docs/DESIGN-PROJECT-AREAS.md): loose talk and new ideas here, each
+// project's work in the project's own place.
+const areaGuideLine = "This is an area: its doc holds what is true across all its projects (update it when a lasting constraint or lesson comes up). " +
+	"When a message is really about one of its projects, answer it and point people to that project's place. " +
+	"When a new effort of this kind keeps coming up, offer to start a project for it (project create --area <this area> --place auto)."
+
+// areaProjectsMax bounds the area index: the newest projects are the live ones.
+const areaProjectsMax = 12
+
+// areaLines adds area context to a scoped block: an area gets its guide line
+// and the index of its projects; a project in an area gets a pointer to the
+// area's doc (shared constraints). "" for plain projects.
+func (b *Bridge) areaLines(own store.Project) string {
+	if b.store == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if own.Kind == store.ProjectKindArea {
+		sb.WriteString("\n" + areaGuideLine)
+		kids, err := b.store.AreaProjects(own.Slug)
+		if err != nil || len(kids) == 0 {
+			return sb.String()
+		}
+		sb.WriteString("\nProjects in this area (newest first; on Discord mention a project's place as <#thread>):")
+		for i, k := range kids {
+			if i == areaProjectsMax {
+				sb.WriteString(fmt.Sprintf("\n- … %d older", len(kids)-i))
+				break
+			}
+			line := "\n- " + strings.TrimSpace(k.Emoji+" "+k.Slug) + " — " + k.Title + " | " + k.Status
+			if k.Stage != "" {
+				line += " | stage: " + k.Stage
+			}
+			if k.MessageThreadID > 0 {
+				line += fmt.Sprintf(" | thread: %d", k.MessageThreadID)
+			}
+			sb.WriteString(line)
+		}
+		return sb.String()
+	}
+	if own.Area != "" {
+		if a, err := b.store.GetProjectBySlug(own.Area); err == nil && a != nil {
+			line := "\nPart of area " + a.Slug + " (" + a.Title + ")"
+			if a.DocPath != "" {
+				line += "; its doc " + a.DocPath + " holds constraints shared by all its projects: read it before planning, and add lasting lessons there"
+			}
+			sb.WriteString(line + ".")
+		}
+	}
+	return sb.String()
 }
