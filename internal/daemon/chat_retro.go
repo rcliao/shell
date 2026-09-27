@@ -95,9 +95,11 @@ func (d chatRetroDeps) retroOne(ctx context.Context, chatID int64) (string, erro
 	started := time.Now().UTC()
 	since := time.Now().Add(-reviewWindow)
 	if d.judge != nil {
-		if err := d.judge(ctx, time.Now().Add(-recurringWindow)); err != nil {
-			slog.Warn("chat retro: judge failed", "error", err)
+		jctx, cancel := context.WithTimeout(ctx, judgeBudget)
+		if err := d.judge(jctx, time.Now().Add(-recurringWindow)); err != nil {
+			slog.Warn("chat retro: judge failed or ran out of time", "error", err)
 		}
+		cancel()
 	}
 	evidence, n := d.evidence(chatID, since)
 	if n == 0 {
