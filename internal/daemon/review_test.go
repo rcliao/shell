@@ -170,3 +170,27 @@ func TestReviewLaneEvidence(t *testing.T) {
 		t.Error("no routing, no section body")
 	}
 }
+
+func TestReviewRoutingMissesAndCandidateProjects(t *testing.T) {
+	st := openReviewStore(t)
+	st.SaveSession(7, 0, "c")
+	ss, _ := st.GetSession(7, 0)
+	st.LogMessage(ss.ID, "user", "lunch memo: noodles")
+	st.LogRouteDecision(store.RouteDecision{Source: "lane", ChatID: 7, MsgAt: time.Now(), TextHash: store.TextHash("lunch memo: noodles"), Backend: "jev-v2", Lane: "general"})
+	st.UpsertRouteLabel(store.RouteLabel{ChatID: 7, TextHash: store.TextHash("lunch memo: noodles"), Lane: "health", Source: "judge", Subject: "lunch log"})
+	judged := false
+	var prompt string
+	d := reviewDeps{store: st, agentName: "a", ownerChatID: 42,
+		judge:   func(context.Context, time.Time) error { judged = true; return nil },
+		runTurn: func(_ context.Context, p string) (string, error) { prompt = p; return "", nil },
+		notify:  func(int64, string) error { return nil }}
+	d.handle(context.Background(), scheduler.LeasedTask{})
+	if !judged {
+		t.Error("the review runs the judge first")
+	}
+	for _, want := range []string{"disagreed with an independent judge", "routed general, judge says health — lunch memo: noodles", "keep coming back with no project"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("evidence missing %q", want)
+		}
+	}
+}

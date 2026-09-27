@@ -108,9 +108,16 @@ func (b *Bridge) laneProjectBlock(own store.Project, all []store.Project) string
 		"other active projects in this chat")
 }
 
+// advanceProjectLine turns a project conversation into project progress
+// (router feedback loop 3): a decision said in chat lands in the doc in the
+// same turn instead of waiting for a research pass.
+const advanceProjectLine = "If this message settles a decision or raises a new open question for this project, update the doc's " +
+	docDecisionsHeading + " / " + docToDecideHeading + " sections in this same turn (read the doc, edit that section, project doc-write)."
+
 func (b *Bridge) renderScopedProject(own store.Project, others []string, header, othersLabel string) string {
 	var sb strings.Builder
 	sb.WriteString(header + "\n")
+	sb.WriteString(advanceProjectLine + "\n")
 	sb.WriteString(projectRow(own))
 	if doc := b.readProjectDoc(own.DocPath); doc != "" {
 		for _, h := range []string{docDecisionsHeading, docToDecideHeading} {

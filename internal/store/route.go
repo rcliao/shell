@@ -146,6 +146,7 @@ func (s *Store) RouteDecisions(source string, since time.Time) ([]RouteDecision,
 
 // RouteLabel is what a message was really about, according to one source.
 type RouteLabel struct {
+	Subject  string // judge only: the message's subject in 2–4 words
 	ChatID   int64
 	ThreadID int64
 	TextHash string
@@ -161,18 +162,19 @@ func (s *Store) UpsertRouteLabel(l RouteLabel) error {
 	if l.Sure {
 		sure = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO route_labels (chat_id, thread_id, text_hash, lane, source, sure, note, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO route_labels (chat_id, thread_id, text_hash, lane, source, sure, note, subject, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id, thread_id, text_hash, source) DO UPDATE SET
-			lane = excluded.lane, sure = excluded.sure, note = excluded.note, created_at = excluded.created_at`,
-		l.ChatID, l.ThreadID, l.TextHash, l.Lane, l.Source, sure, l.Note, time.Now().UTC())
+			lane = excluded.lane, sure = excluded.sure, note = excluded.note, subject = excluded.subject,
+			created_at = excluded.created_at`,
+		l.ChatID, l.ThreadID, l.TextHash, l.Lane, l.Source, sure, l.Note, l.Subject, time.Now().UTC())
 	return err
 }
 
 // BestRouteLabels returns, per message key, the label from the strongest
 // source. Key: fmt "%d/%d/%s" of chat, thread, text hash (see LabelKey).
 func (s *Store) BestRouteLabels() (map[string]RouteLabel, error) {
-	rows, err := s.db.Query(`SELECT chat_id, thread_id, text_hash, lane, source, sure, note FROM route_labels`)
+	rows, err := s.db.Query(`SELECT chat_id, thread_id, text_hash, lane, source, sure, note, subject FROM route_labels`)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +183,7 @@ func (s *Store) BestRouteLabels() (map[string]RouteLabel, error) {
 	for rows.Next() {
 		var l RouteLabel
 		var sure int
-		if err := rows.Scan(&l.ChatID, &l.ThreadID, &l.TextHash, &l.Lane, &l.Source, &sure, &l.Note); err != nil {
+		if err := rows.Scan(&l.ChatID, &l.ThreadID, &l.TextHash, &l.Lane, &l.Source, &sure, &l.Note, &l.Subject); err != nil {
 			return nil, err
 		}
 		l.Sure = sure == 1

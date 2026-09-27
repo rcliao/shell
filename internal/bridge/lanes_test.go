@@ -114,6 +114,9 @@ func TestScopedProjectWordingUnchanged(t *testing.T) {
 	if !strings.Contains(scoped, "(other active projects in this chat, not this thread: health)") {
 		t.Errorf("thread-bound block changed: %q", scoped)
 	}
+	if !strings.Contains(scoped, "update the doc's") {
+		t.Error("a project conversation is asked to record decisions in the doc")
+	}
 	if lane := b.laneProjectBlock(p, []store.Project{p, other}); !strings.Contains(lane, "routed to this project's lane") ||
 		!strings.Contains(lane, "(other active projects in this chat: health)") {
 		t.Errorf("lane block = %q", lane)

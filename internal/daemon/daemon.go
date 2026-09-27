@@ -1181,6 +1181,14 @@ func New(cfg config.Config) (*Daemon, error) {
 			// NotifyButtons (no buttons) because it returns the send error;
 			// Notify swallows it.
 			notify: func(chatID int64, text string) error { return tgTransport.NotifyButtons(chatID, 0, text, nil) },
+			judge: func(ctx context.Context, since time.Time) error {
+				_, _, err := route.RunJudge(ctx, st, cfg.Route.Judge(), since, false, cfg.Route.Excluded(),
+					func(ctx context.Context, model, prompt string) (string, error) {
+						return route.ClaudeCLI(ctx, model, prompt, 5*time.Minute)
+					})
+				return err
+			},
+			exclude: cfg.Route.Excluded(),
 		})
 		if cfg.Scheduler.Enabled {
 			registerReviewSchedule(st, cfg.Review.ReviewCron(), cfg.Scheduler.Timezone,
@@ -1203,6 +1211,14 @@ func New(cfg config.Config) (*Daemon, error) {
 				return resp.Text, nil
 			},
 			notify: func(chatID int64, text string) error { return tgTransport.NotifyButtons(chatID, 0, text, nil) },
+			judge: func(ctx context.Context, since time.Time) error {
+				_, _, err := route.RunJudge(ctx, st, cfg.Route.Judge(), since, false, cfg.Route.Excluded(),
+					func(ctx context.Context, model, prompt string) (string, error) {
+						return route.ClaudeCLI(ctx, model, prompt, 5*time.Minute)
+					})
+				return err
+			},
+			exclude: cfg.Route.Excluded(),
 		})
 		if cfg.Scheduler.Enabled {
 			registerChatRetroSchedule(st, cfg.Review.ChatRetroCadence(), cfg.Scheduler.Timezone,

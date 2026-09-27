@@ -738,6 +738,8 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(routeSchema); err != nil {
 		return err
 	}
+	// subject arrived after route_labels shipped (router feedback loops).
+	s.db.Exec(`ALTER TABLE route_labels ADD COLUMN subject TEXT NOT NULL DEFAULT ''`)
 
 	// events — external events for the heartbeat agenda (internal/store/events.go).
 	if _, err := s.db.Exec(eventsSchema); err != nil {

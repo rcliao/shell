@@ -37,6 +37,8 @@ type chatRetroDeps struct {
 	// chat's messages into another chat's suggestion.
 	runTurn func(ctx context.Context, chatID int64, prompt string) (string, error)
 	notify  func(chatID int64, text string) error
+	judge   func(ctx context.Context, since time.Time) error // router feedback loop; nil = skip
+	exclude map[int64]bool
 }
 
 // chatRetroSpacing: a chat that got a suggestion this recently is skipped —
@@ -92,6 +94,11 @@ func (d chatRetroDeps) retroOne(ctx context.Context, chatID int64) (string, erro
 	}
 	started := time.Now().UTC()
 	since := time.Now().Add(-reviewWindow)
+	if d.judge != nil {
+		if err := d.judge(ctx, time.Now().Add(-recurringWindow)); err != nil {
+			slog.Warn("chat retro: judge failed", "error", err)
+		}
+	}
 	evidence, n := d.evidence(chatID, since)
 	if n == 0 {
 		return "skipped: no messages this week", nil
@@ -186,6 +193,10 @@ func (d chatRetroDeps) evidence(chatID int64, since time.Time) (string, int) {
 			past = append(past, line)
 		}
 	}
+	if rec := recurringEvidence(d.store, time.Now().Add(-recurringWindow), chatID, d.exclude); rec != "" {
+		sb.WriteString("### Subjects that keep coming back here with no project behind them\n")
+		sb.WriteString(rec + "\n")
+	}
 	sb.WriteString("### Suggestions already made in this chat\n")
 	if len(past) == 0 {
 		sb.WriteString("(none yet)\n")
@@ -212,7 +223,8 @@ was routed to:
 
 2. SUGGEST, at most ONE thing to the people in that chat, and only if it would
    genuinely make working together easier for THEM (a habit, a shortcut, a
-   project worth starting, something you keep having to ask). File it with
+   project worth starting — a subject above that keeps coming back is the
+   natural candidate — something you keep having to ask). File it with
    shell_suggestion(action=create, for_chat=%d, title=…, evidence=…,
    change=…). Write the title and change in the chat's language, as a short,
    warm message to them, ending with how to answer (for example: reply 好 or
