@@ -64,9 +64,9 @@ func TestSplitInsideCodeBlockReopensFence(t *testing.T) {
 
 func TestOpenFence(t *testing.T) {
 	cases := map[string]bool{
-		"```py\nx":           true,
-		"```py\nx\n```":      false,
-		"inline ```x``` ok":  false,
+		"```py\nx":            true,
+		"```py\nx\n```":       false,
+		"inline ```x``` ok":   false,
 		"a\n```\nb\n```\n```": true,
 	}
 	for in, want := range cases {

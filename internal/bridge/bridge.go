@@ -118,6 +118,7 @@ type Bridge struct {
 	laneTurnSess sync.Map        // R1: "chat/telegramMsgID" → session id that answered (message map)
 	agentName    string          // commit author / notice name for own-skill changes
 	workspaceDir string          // persistent agent scratch space
+	platformNote string          // how the family's messaging platform renders replies (environment prompt)
 	routerShadow *decide.Shadow  // P3.7 shadow router; nil = off
 
 	// Agent identity prompt (prepended to system prompt)
@@ -392,6 +393,12 @@ func (b *Bridge) SetEnvironment(agentHomeDir, workspaceDir string) {
 	b.agentHomeDir = agentHomeDir
 	b.workspaceDir = workspaceDir
 }
+
+// SetPlatformNote states, in the environment prompt, what the family's
+// messaging platform can render (mentions that notify, local-time
+// timestamps). Set before ReconcilePromptFingerprint so a change rotates
+// sessions onto it once.
+func (b *Bridge) SetPlatformNote(note string) { b.platformNote = note }
 
 // ReloadSkills rescans all skill directories and rebuilds the registry.
 // Returns the number of skills loaded.

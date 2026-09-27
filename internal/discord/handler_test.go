@@ -35,6 +35,7 @@ type sent struct {
 	channel, id, content string
 	files                int
 	buttons              int
+	pings                []string
 }
 
 func newFakeAPI() *fakeAPI {
@@ -46,7 +47,11 @@ func (f *fakeAPI) Send(ch string, m *discordgo.MessageSend) (*discordgo.Message,
 	defer f.mu.Unlock()
 	f.nextID++
 	id := strconv.FormatInt(f.nextID, 10)
-	f.sends = append(f.sends, sent{channel: ch, id: id, content: m.Content, files: len(m.Files), buttons: len(m.Components)})
+	var pings []string
+	if m.AllowedMentions != nil {
+		pings = m.AllowedMentions.Users
+	}
+	f.sends = append(f.sends, sent{channel: ch, id: id, content: m.Content, files: len(m.Files), buttons: len(m.Components), pings: pings})
 	return &discordgo.Message{ID: id, ChannelID: ch}, nil
 }
 func (f *fakeAPI) Edit(m *discordgo.MessageEdit) (*discordgo.Message, error) {
@@ -154,6 +159,7 @@ func newHarness(t *testing.T, reply string) *harness {
 		Guilds: map[string]config.DiscordGuildLink{"200000000000000900": {ChatID: -100200300}},
 	})
 	b := newBot(api, Options{
+		Mentions: NewMentions(map[string]string{"owner": linkedUser}),
 		Addresses: addr,
 		Bridge:    br,
 		Agent: AgentConfig{
@@ -418,5 +424,44 @@ func TestNewServerChannelJoinsTheFamilyChat(t *testing.T) {
 	}
 	if h.api.sends[0].channel != "200000000000000013" {
 		t.Fatalf("reply went to %s, want the new channel", h.api.sends[0].channel)
+	}
+}
+
+func TestReminderMentionPingsOnlyThatPerson(t *testing.T) {
+	h := newHarness(t, "")
+	h.bot.SendText(-100200300, 0, "@owner reminder: dinner at 6")
+	got := h.api.sends[len(h.api.sends)-1]
+	if got.content != "<@"+linkedUser+"> reminder: dinner at 6" {
+		t.Fatalf("content = %q", got.content)
+	}
+	if len(got.pings) != 1 || got.pings[0] != linkedUser {
+		t.Fatalf("pings = %v, want only the named person", got.pings)
+	}
+	h.bot.SendText(-100200300, 0, "a reminder for nobody in particular")
+	if p := h.api.sends[len(h.api.sends)-1].pings; len(p) != 0 {
+		t.Fatalf("an unnamed reminder must ping no one, got %v", p)
+	}
+}
+
+func TestReplyQuotesTheMessageRepliedTo(t *testing.T) {
+	h := newHarness(t, "ok")
+	m := msg("600000000000000070", dmChan, linkedUser, "yes, that one")
+	m.ReferencedMessage = &discordgo.Message{ID: "600000000000000069", Content: "Option A: the ramen place\nOption B: tacos",
+		Author: &discordgo.User{ID: selfBot, Bot: true}}
+	h.bot.handler.HandleMessage(context.Background(), m)
+	text := h.agent.turns[0].Text
+	if !strings.Contains(text, `[Replying to your earlier message: "Option A: the ramen place Option B: tacos"]`) {
+		t.Fatalf("turn text lacks the quote:\n%s", text)
+	}
+	if !strings.Contains(text, "yes, that one") {
+		t.Fatal("the reply itself was lost")
+	}
+
+	h2 := newHarness(t, "ok")
+	m2 := msg("600000000000000071", dmChan, linkedUser, "/help")
+	m2.ReferencedMessage = &discordgo.Message{ID: "600000000000000069", Content: "x", Author: &discordgo.User{ID: selfBot}}
+	h2.bot.handler.HandleMessage(context.Background(), m2)
+	if h2.agent.turnCount() != 0 {
+		t.Fatal("a command sent as a reply must still run as a command")
 	}
 }

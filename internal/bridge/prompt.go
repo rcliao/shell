@@ -75,6 +75,9 @@ func (b *Bridge) environmentPrompt() string {
 		}
 		sb.WriteString(" — installed skills load from these; invoke their scripts by absolute path.\n")
 	}
+	if b.platformNote != "" {
+		sb.WriteString(b.platformNote)
+	}
 	sb.WriteString("- **Shared task store:** `~/.shell/shared/tasks.db` — use the shell-task skill, not raw SQL, to mutate it.\n")
 	// Calibration: state what the agent does NOT inherently know, so it
 	// reaches for a tool (or says so) instead of confabulating capability

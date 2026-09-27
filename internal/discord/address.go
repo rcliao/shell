@@ -54,8 +54,8 @@ type Addresses struct {
 // line should not take the family's agent offline.
 func NewAddresses(cfg config.DiscordConfig) *Addresses {
 	a := &Addresses{
-		chats:   map[string]Conv{},
-		reverse: map[Conv]string{},
+		chats:      map[string]Conv{},
+		reverse:    map[Conv]string{},
 		users:      map[string]int64{},
 		guilds:     map[string]int64{},
 		guildChats: map[int64]bool{},
