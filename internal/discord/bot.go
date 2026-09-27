@@ -31,6 +31,10 @@ type api interface {
 	Unpin(channelID, messageID string) error
 	// Channel returns channel metadata, from the gateway's cache when it has it.
 	Channel(channelID string) (*discordgo.Channel, error)
+	// StartForumThread creates a forum post (places.go).
+	StartForumThread(forumID string, t *discordgo.ThreadStart, m *discordgo.MessageSend) (*discordgo.Channel, error)
+	// EditChannel edits a channel, thread or post: tags, archived (places.go).
+	EditChannel(channelID string, e *discordgo.ChannelEdit) (*discordgo.Channel, error)
 }
 
 // Bot is one agent's Discord presence: inbound turns through Handler, and the
@@ -405,6 +409,12 @@ func (a sessionAPI) Unreact(ch, id, emoji string) error {
 func (a sessionAPI) Typing(ch string) error    { return a.s.ChannelTyping(ch) }
 func (a sessionAPI) Pin(ch, id string) error   { return a.s.ChannelMessagePin(ch, id) }
 func (a sessionAPI) Unpin(ch, id string) error { return a.s.ChannelMessageUnpin(ch, id) }
+func (a sessionAPI) StartForumThread(forum string, t *discordgo.ThreadStart, m *discordgo.MessageSend) (*discordgo.Channel, error) {
+	return a.s.ForumThreadStartComplex(forum, t, m)
+}
+func (a sessionAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.Channel, error) {
+	return a.s.ChannelEditComplex(id, e)
+}
 func (a sessionAPI) Channel(id string) (*discordgo.Channel, error) {
 	if c, err := a.s.State.Channel(id); err == nil {
 		return c, nil

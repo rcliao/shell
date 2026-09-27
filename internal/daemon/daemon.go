@@ -657,6 +657,7 @@ func New(cfg config.Config) (*Daemon, error) {
 	// transport. That is what makes a disposable test agent possible without
 	// registering a bot or touching the family's chats.
 	var bot outbound = headlessOutbound{}
+	var places daemonPlaces
 	if token == "" {
 		slog.Info("no telegram token — running headless (CLI transport only)")
 	} else if other, clash := tokenOwnedByAnotherAgent(cfg, token); clash {
@@ -690,6 +691,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			tgBot.SetProgressPhrasesPath(filepath.Join(workspaceDir, progress.PhrasesFile))
 		}
 		bot = tgBot
+		places.tg = tgBot
 	}
 
 	// Discord (docs/DESIGN-DISCORD.md): a second platform beside Telegram.
@@ -737,6 +739,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			return nil, err
 		}
 		bot = routedOutbound{telegram: bot, discord: dc}
+		places.dc = dc
 		chats, users, guilds := addr.Counts()
 		slog.Info("discord: enabled", "linked_chats", chats, "linked_users", users, "linked_guilds", guilds)
 	} else if cfg.Discord.Enabled {
@@ -865,6 +868,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		// doc repos live under <workspace>/projects/<slug>/.
 		WorkspaceDir:       workspaceDir,
 		ProjectHomeRefresh: projectHome.Refresh,
+		Places:             places,
 		OwnerChatID:        cfg.Agent.OwnerChatID,
 	})
 

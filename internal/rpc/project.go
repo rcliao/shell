@@ -27,13 +27,13 @@ import (
 
 // ProjectRequest is the request body for POST /project.
 type ProjectRequest struct {
-	Action string `json:"action"` // create | get | list | status | doc-read | doc-write
+	Action string `json:"action"` // create | get | list | status | stage | move | doc-read | doc-write | set-instructions
 	Slug   string `json:"slug"`
 	// create fields
 	Title           string `json:"title"`
 	Emoji           string `json:"emoji"`
 	ChatID          int64  `json:"chat_id"`
-	MessageThreadID int64  `json:"message_thread_id"` // Telegram forum topic ID (0 = main chat)
+	MessageThreadID int64  `json:"message_thread_id"` // the project's thread: Telegram forum topic or Discord thread/post (0 = the chat itself)
 	ExportKind      string `json:"export_kind"`
 	ExportRef       string `json:"export_ref"`
 	DocPath         string `json:"doc_path"`
@@ -42,6 +42,16 @@ type ProjectRequest struct {
 	// Cadence is the autonomous-research cadence registered at create:
 	// daily | weekly | monthly (default weekly, owner sign-off #1).
 	Cadence string `json:"cadence"`
+	// Areas (docs/DESIGN-PROJECT-AREAS.md). Kind "area" makes an umbrella;
+	// PlaceRef is where its projects get places ("discord:<forum id>" or
+	// "telegram"). Area files a project under an area; Place "auto" creates
+	// the project's own place there (Content is its first message). Stage is
+	// the project's lifecycle step, shown as a forum tag.
+	Kind     string `json:"kind"`
+	PlaceRef string `json:"place_ref"`
+	Area     string `json:"area"`
+	Place    string `json:"place"`
+	Stage    string `json:"stage"`
 	// status action
 	Status string `json:"status"` // active | paused | archived
 	// doc-write fields
@@ -125,8 +135,12 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		s.projectDocWrite(w, req)
 	case "set-instructions":
 		s.projectSetInstructions(w, req)
+	case "stage":
+		s.projectStage(w, req)
+	case "move":
+		s.projectMove(w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, doc-read, doc-write, or set-instructions")
+		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, stage, move, doc-read, doc-write, or set-instructions")
 	}
 }
 
@@ -158,8 +172,47 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusBadRequest, "title is required")
 		return
 	}
+	area, errMsg := s.areaFor(req)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	if area != nil {
+		// A project in an area lives in the area's chat unless told otherwise.
+		if req.ChatID == 0 {
+			req.ChatID = area.ChatID
+		}
+		if req.Lang == "" {
+			req.Lang = area.Lang
+		}
+	}
 	if req.ChatID == 0 {
 		writeError(w, http.StatusBadRequest, "chat_id is required")
+		return
+	}
+	if req.Kind == store.ProjectKindArea {
+		if req.Area != "" {
+			writeError(w, http.StatusBadRequest, "an area cannot belong to another area")
+			return
+		}
+		if !validPlaceRef(req.PlaceRef) {
+			writeError(w, http.StatusBadRequest, `place_ref must be "", "telegram", or "discord:<forum channel id>"`)
+			return
+		}
+	} else if req.PlaceRef != "" {
+		writeError(w, http.StatusBadRequest, "place_ref is for areas (kind=area)")
+		return
+	}
+	if req.Place != "" && req.Place != "auto" {
+		writeError(w, http.StatusBadRequest, `place must be "auto" or empty`)
+		return
+	}
+	if req.Place == "auto" && area != nil && req.ChatID != area.ChatID {
+		writeError(w, http.StatusBadRequest, "place=auto puts the project in its area's chat; drop chat_id or use the area's")
+		return
+	}
+	if req.Place == "auto" && req.MessageThreadID != 0 {
+		writeError(w, http.StatusBadRequest, "place=auto creates the thread; do not also pass message_thread_id")
 		return
 	}
 	cadence := req.Cadence
@@ -187,6 +240,10 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 		DocPath:         req.DocPath,
 		Instructions:    req.Instructions,
 		Lang:            req.Lang,
+		Kind:            req.Kind,
+		Area:            req.Area,
+		Stage:           req.Stage,
+		PlaceRef:        req.PlaceRef,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to create project: "+err.Error())
@@ -195,6 +252,18 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	slog.Info("rpc: project created", "slug", p.Slug, "chat_id", p.ChatID, "export_ref", p.ExportRef)
 	resp := projectJSON(*p)
 	resp["created"] = true
+
+	// The project's own place (a forum post or topic in its area). Failure
+	// leaves an unbound project and a warning; `move` with place=auto retries.
+	if req.Place == "auto" {
+		if thread, warn := s.createPlace(p, area, req.Content); warn != "" {
+			resp["warning"] = warn
+		} else {
+			p.MessageThreadID = thread
+			resp["message_thread_id"] = thread
+			resp["place_created"] = true
+		}
+	}
 
 	// Doc layer (P2): a project without an explicit --doc-path gets its own
 	// git repo and a scaffolded doc under the workspace. An explicit doc_path
@@ -400,7 +469,14 @@ func (s *Server) projectStatus(w http.ResponseWriter, req ProjectRequest) {
 	// the pinned home reflects the new list.
 	s.syncResearchSchedule(p, p.Status)
 	s.refreshProjectHome(p.ChatID)
-	writeJSON(w, projectJSON(*p))
+	resp := projectJSON(*p)
+	// An archived project in an area closes its own place.
+	if p.Status == "archived" {
+		if warn := s.closePlace(p); warn != "" {
+			resp["warning"] = warn
+		}
+	}
+	writeJSON(w, resp)
 }
 
 // scaffoldProjectDoc creates the per-project doc repo and initial doc for a
@@ -564,7 +640,8 @@ func projectJSON(p store.Project) map[string]any {
 		"doc_path": p.DocPath, "doc_rev": p.DocRev,
 		"export_kind": p.ExportKind, "export_ref": p.ExportRef,
 		"instructions": p.Instructions, "notify_policy": p.NotifyPolicy, "lang": p.Lang,
-		"ghost_tag":  p.GhostTag,
+		"ghost_tag": p.GhostTag,
+		"kind":      p.Kind, "area": p.Area, "stage": p.Stage, "place_ref": p.PlaceRef,
 		"created_at": p.CreatedAt.UTC().Format(time.RFC3339),
 		"updated_at": p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
