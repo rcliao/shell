@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -162,6 +163,7 @@ func (h *Handler) HandleMessage(ctx context.Context, m *discordgo.Message) {
 		h.handleCommand(ctx, w, text)
 		return
 	}
+	text = h.withReplyContext(m, text)
 
 	images, pdfs, text, ok := h.downloadAttachments(ctx, m, w, msgID, text)
 	if !ok {
@@ -225,6 +227,7 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 	defer stopTyping()
 
 	s := newStreamer(h.api, w.channelID, placeholder.ID, h.voice)
+	s.render = h.bot.mentions.Render
 	onEvent := func(ev process.StreamEvent) {
 		switch e := ev.(type) {
 		case process.TextDelta:
@@ -410,6 +413,46 @@ func (h *Handler) HandleReaction(ctx context.Context, r *discordgo.MessageReacti
 	}
 }
 
+// replyQuoteRunes caps how much of a replied-to message is quoted.
+const replyQuoteRunes = 300
+
+// withReplyContext prefixes the text with the message it replies to. Discord
+// shows replies prominently, so people answer a specific earlier message —
+// "yes, that one" — and without the quote the agent sees only "yes".
+func (h *Handler) withReplyContext(m *discordgo.Message, text string) string {
+	ref := m.ReferencedMessage
+	if ref == nil || ref.Author == nil {
+		return text
+	}
+	quoted := strings.TrimSpace(h.stripSelfMention(ref.Content))
+	if quoted == "" {
+		switch {
+		case len(ref.Attachments) > 0:
+			quoted = "(attachment)"
+		case len(ref.StickerItems) > 0:
+			quoted = "(sticker)"
+		default:
+			return text
+		}
+	}
+	if utf8.RuneCountInString(quoted) > replyQuoteRunes {
+		quoted = truncateRunes(quoted, replyQuoteRunes) + "…"
+	}
+	quoted = strings.ReplaceAll(quoted, "\n", " ")
+	who := ref.Author.Username
+	switch {
+	case ref.Author.ID == h.selfID:
+		who = "your earlier message"
+	case ref.Author.Bot:
+		who = ref.Author.Username + " (the other agent)"
+	default:
+		if id, ok := h.addr.User(ref.Author.ID); ok {
+			who = h.label(id, ref.Author)
+		}
+	}
+	return "[Replying to " + who + ": \"" + quoted + "\"]\n" + text
+}
+
 // shouldHandleGroup applies the group addressing rules: a mention of this bot
 // or a reply to it is always handled; a message for another bot, or opening
 // with the peer agent's name, is left to them; otherwise autonomous mode hands
@@ -563,7 +606,9 @@ func (h *Handler) reply(channelID, text string) {
 }
 
 func (h *Handler) editText(channelID, messageID, text string) {
-	content := truncateRunes(text, maxMessageLen)
+	// Edits never notify on Discord, so a reply's "@name" shows as a mention
+	// without pinging — the person is already in the conversation.
+	content, _ := h.bot.mentions.Render(truncateRunes(text, maxMessageLen))
 	if _, err := h.api.Edit(&discordgo.MessageEdit{ID: messageID, Channel: channelID, Content: &content, AllowedMentions: noPings()}); err != nil {
 		slog.Warn("discord: edit failed", "error", err, "message", messageID)
 	}
@@ -741,6 +786,7 @@ type streamer struct {
 	channelID string
 	messageID string
 	voice     *progress.Voice
+	render    func(string) (string, []string) // mentions; nil = as written
 
 	mu           sync.Mutex
 	text         strings.Builder
@@ -804,7 +850,11 @@ func (s *streamer) loop(every time.Duration) {
 			if cur == last || strings.TrimSpace(cur) == "" {
 				continue
 			}
-			if err := s.edit(streamView(cur, maxMessageLen)); err != nil {
+			view := streamView(cur, maxMessageLen)
+			if s.render != nil {
+				view, _ = s.render(view)
+			}
+			if err := s.edit(view); err != nil {
 				slog.Debug("discord: streaming edit failed", "error", err)
 				continue
 			}

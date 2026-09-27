@@ -517,6 +517,22 @@ func New(cfg config.Config) (*Daemon, error) {
 	}
 	br.SetEnvironment(agentHome, workspaceDir)
 
+	// Discord renders mentions and local-time timestamps; tell the agent
+	// before the prompt fingerprint is taken, so turning Discord on rotates
+	// sessions onto the note once. The mention names are the family's
+	// canonical ids, resolved to Discord users through the manual links.
+	var discordMentions *discord.Mentions
+	if cfg.Discord.Enabled {
+		byName := map[string]string{}
+		for dcID, tgID := range cfg.Discord.Users {
+			if canon := cfg.Telegram.UserCanonical[strconv.FormatInt(tgID, 10)]; canon != "" {
+				byName[canon] = dcID
+			}
+		}
+		discordMentions = discord.NewMentions(byName)
+		br.SetPlatformNote(discord.PlatformNote(discordMentions.Names()))
+	}
+
 	// Configure in-place compaction by token count.
 	if cfg.Claude.MaxSessionTokens > 0 {
 		br.SetMaxSessionTokens(cfg.Claude.MaxSessionTokens)
@@ -699,6 +715,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 		dc, err := discord.NewBot(dtoken, discord.Options{
 			ProgressPhrasesPath: phrases,
+			Mentions:            discordMentions,
 			Addresses:           addr,
 			Bridge:              br,
 			Agent: discord.AgentConfig{

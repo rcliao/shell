@@ -91,18 +91,21 @@ The ranking weighs how the family uses the agents against the cost of building.
 | B2 | **Native slash commands** with a menu and autocomplete (`/new`, `/status`, `/projects`, `/remember`, `/schedule`) | Makes the commands discoverable for non-technical family members. Today they are invisible and typed from memory. | 18 commands, no menu on either platform | M |
 | B3 | **Tap-to-answer buttons** when the agent asks a question (options become buttons) | Replying on a phone becomes one tap | About 70 replies a month end in a question | M |
 | B4 | **Regenerate and Remember buttons under replies** instead of hidden reaction codes | The reaction actions exist but are barely used | Reactions: 4 in 30 days | S–M |
-| B5 | **Mention the person a reminder is for** (`<@user>`) | Guarantees a push notification even when the server notifies on mentions only | 31 active schedules; replies currently never ping | S |
-| B6 | **Quote the replied-to message into the prompt** | Discord shows replies prominently, so the family will reply to specific answers and the agent should see what they replied to | Missing on both platforms | S |
+| B5 ✅ | **Mention the person a reminder is for** (`<@user>`) | Guarantees a push notification even when the server notifies on mentions only | 31 active schedules; replies currently never ping | S |
+| B6 ✅ | **Quote the replied-to message into the prompt** | Discord shows replies prominently, so the family will reply to specific answers and the agent should see what they replied to | Missing on both platforms | S |
 | B7 | **Forum channel for projects** (one post per project, tags for status) | A natural home for the project workspace, with the project doc pinned per post | 5 active projects | M |
 | B8 | **Discord Scheduled Events** for trips and appointments (with RSVP and a reminder) | Travel plans (Japan 2027) and appointments show in the server's event list | Travel and planning projects | M |
 | B9 | **Native polls** for family decisions (restaurants, dates) | #美食 and travel choices become a vote | Restaurant topic about 2,500 messages | S |
 | B10 | **Embeds** for listings and project cards (image, fields, link) | Housing listings and restaurant picks become readable cards | Housing project, restaurant topic | M |
 | B11 | **Voice messages → transcription** | Discord mobile makes voice notes easy. Neither platform handles them today. | Usage unknown: it was never supported | M |
-| B12 | **Localized timestamps** `<t:unix:R>` in schedules ("in 2 hours") | Clearer times, correct in any time zone while travelling | Schedules, travel | S |
-| B13 | **Let the agents see each other's replies** as observation only (transcript, not triggering turns) | Fits "blind until observed" | Owner decision 2026-09-23 | S, needs an owner call |
+| B12 ✅ | **Localized timestamps** `<t:unix:R>` in schedules ("in 2 hours") | Clearer times, correct in any time zone while travelling | Schedules, travel | S |
+| B13 ✅ | **Let the agents see each other's replies** as observation only (transcript, not triggering turns) | Fits "blind until observed" | Owner decision 2026-09-23 | S, needs an owner call |
 
 **Suggested next build:**
 1. ~~B1 (auto-join)~~ and ~~the sticker gap~~: done (PRs #53 and #55). Project areas (forum posts per
    project) are driven by the project/lanes session: docs/DESIGN-PROJECT-AREAS.md.
-2. B6 and B5, both small, with direct family value.
-3. B2 and B3 as the first interaction-based features.
+2. ~~B6, B5, B12~~: done (PR #56). B13 needed no code: both agents' Discord replies already land in the
+   shared transcript, which is injected into the other agent's context (verified 2026-09-27: 7 rows each
+   since the switch).
+3. Owner's order for the rest (2026-09-27): B10 cards, B4 reply buttons, B2 slash commands, B3 answer
+   buttons (experiment). Later: B8 events, B11 voice. B9 polls not picked.

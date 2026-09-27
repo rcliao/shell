@@ -701,3 +701,15 @@ func TestParseArtifacts_MissingFile(t *testing.T) {
 		t.Errorf("expected no photos for missing file, got %d", len(photos))
 	}
 }
+
+func TestPlatformNoteReachesTheEnvironmentPrompt(t *testing.T) {
+	b := testBridge(t)
+	b.SetEnvironment(t.TempDir(), "")
+	if strings.Contains(b.environmentPrompt(), "Where the family reads you") {
+		t.Fatal("no note set, none expected")
+	}
+	b.SetPlatformNote("- **Where the family reads you:** Discord.\n")
+	if !strings.Contains(b.environmentPrompt(), "Where the family reads you:** Discord") {
+		t.Fatal("the platform note must be in the environment prompt")
+	}
+}

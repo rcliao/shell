@@ -37,11 +37,12 @@ type api interface {
 // daemon's outbound sends (reminders, relays, the project home) through the
 // methods below.
 type Bot struct {
-	api     api
-	session *discordgo.Session // nil in tests
-	addr    *Addresses
-	handler *Handler
-	dedup   func(chatID, threadID int64, text string) bool
+	api      api
+	session  *discordgo.Session // nil in tests
+	addr     *Addresses
+	handler  *Handler
+	dedup    func(chatID, threadID int64, text string) bool
+	mentions *Mentions
 
 	// Edits and pins name a message but not its channel (the outbound
 	// interface was cut to Telegram, where chat + message id is enough). A
@@ -64,6 +65,9 @@ type Options struct {
 	// ProgressPhrasesPath is the agent's own progress-phrase file (the same
 	// one Telegram reads); "" uses the built-in phrases.
 	ProgressPhrasesPath string
+	// Mentions turns "@name" into a Discord mention that notifies that
+	// person; nil = no conversion.
+	Mentions *Mentions
 }
 
 // NewBot opens nothing yet: Start connects the gateway.
@@ -106,6 +110,7 @@ func newBot(a api, opts Options) *Bot {
 	b := &Bot{
 		api:         a,
 		addr:        opts.Addresses,
+		mentions:    opts.Mentions,
 		msgChannel:  map[int]string{},
 		msgCapacity: 5000,
 	}
@@ -190,7 +195,11 @@ func (b *Bot) remember(messageID int, channelID string) {
 
 // send posts one message and records where it went.
 func (b *Bot) send(channelID string, m *discordgo.MessageSend) (int, error) {
-	m.AllowedMentions = noPings()
+	// A new message is the only thing that notifies: only the people the
+	// agent named with "@name" are pinged.
+	var users []string
+	m.Content, users = b.mentions.Render(m.Content)
+	m.AllowedMentions = &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}, Users: users}
 	sent, err := b.api.Send(channelID, m)
 	if err != nil {
 		return 0, err
@@ -304,7 +313,7 @@ func (b *Bot) EditMessageButtons(chatID int64, messageID int, text string, butto
 	if err != nil {
 		return err
 	}
-	content := truncateRunes(text, maxMessageLen)
+	content, _ := b.mentions.Render(truncateRunes(text, maxMessageLen))
 	components := linkButtons(buttons)
 	if components == nil {
 		components = []discordgo.MessageComponent{} // clear old buttons
