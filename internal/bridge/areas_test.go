@@ -75,7 +75,7 @@ func TestLaneBlockPostNote(t *testing.T) {
 	b := &Bridge{}
 	withPost := store.Project{Slug: "trip", Title: "Trip", Status: "active", MessageThreadID: 900000000000000011}
 	block := b.laneProjectBlock(withPost, []store.Project{withPost})
-	if !strings.Contains(block, "shell_relay(message_thread_id=900000000000000011") || !strings.Contains(block, "Nothing settled, no note.") {
+	if !strings.Contains(block, "shell_relay(message_thread_id=900000000000000011, message=") || !strings.Contains(block, "Nothing settled, no note.") {
 		t.Fatalf("lane block = %q", block)
 	}
 	if !strings.Contains(block, "project stage trip") && !strings.Contains(block, "project stage <slug>") {

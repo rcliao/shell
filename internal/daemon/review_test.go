@@ -218,3 +218,29 @@ func TestStaleEvidence(t *testing.T) {
 		t.Fatalf("listed a fresh or area-less project: %q", got)
 	}
 }
+
+// A project the family talks about in its post is not stale, whatever its
+// Notion-edit field says.
+func TestStaleEvidenceCountsPostTalk(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	st.CreateProject(store.Project{Slug: "travel", Title: "Travel", ChatID: -100200300, Kind: store.ProjectKindArea})
+	st.CreateProject(store.Project{Slug: "busy", Title: "Busy trip", ChatID: -100200300, Area: "travel", MessageThreadID: 900000000000000011, LastHumanActivityAt: &old})
+	if err := st.SaveSession(-100200300, 900000000000000011, "claude-post"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.GetSession(-100200300, 900000000000000011)
+	if err != nil || sess == nil {
+		t.Fatalf("session: %v", err)
+	}
+	if err := st.LogMessage(sess.ID, "user", "book the hotel?"); err != nil {
+		t.Fatal(err)
+	}
+	if got := staleEvidence(st, nil, time.Now()); got != "" {
+		t.Fatalf("a project with talk in its post was listed stale: %q", got)
+	}
+}

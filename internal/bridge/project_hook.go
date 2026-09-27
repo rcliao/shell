@@ -124,7 +124,7 @@ func postNoteLine(p store.Project) string {
 	}
 	return fmt.Sprintf("This project has its own post <#%d>, and this message is not in it. Answer here as usual. "+
 		"Only if this message settles something for the project (a decision, a date, a booking, a changed plan), "+
-		"also leave ONE short line in the post so it stays the full record: shell_relay(message_thread_id=%d, text=\"📌 <what was settled> (from the chat)\"). "+
+		"also leave ONE short line in the post so it stays the full record: shell_relay(message_thread_id=%d, message=\"📌 <what was settled> (from the chat)\"). "+
 		"Nothing settled, no note.", p.MessageThreadID, p.MessageThreadID)
 }
 

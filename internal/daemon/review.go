@@ -497,9 +497,10 @@ func staleEvidence(st *store.Store, exclude map[int64]bool, now time.Time) strin
 		if p.Status != "active" || p.Area == "" || exclude[p.ChatID] {
 			continue
 		}
+		// No touch ever: count from creation, so a brand-new project is not stale.
 		last := p.CreatedAt
-		if p.LastHumanActivityAt != nil {
-			last = *p.LastHumanActivityAt
+		if t := st.LastHumanTouch(p); t != nil {
+			last = *t
 		}
 		if now.Sub(last) < staleAfter {
 			continue
