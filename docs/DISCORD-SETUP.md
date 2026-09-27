@@ -121,6 +121,8 @@ Discord alone. A send for a Telegram chat that was never linked is logged as dro
 - **Mentions:** the agent writes `@<canonical name>` (from `telegram.user_canonical`) to notify someone. It becomes
   a real mention, and only new messages ping: a reply that names you doesn't notify you again.
 - **Replies:** replying to an earlier message quotes it to the agent, so "yes, that one" makes sense.
+- **Reply buttons** (`"reply_buttons": true`): 🔄 Regenerate and 📌 Remember appear under each reply. A click does
+  exactly what that reaction does. A button shows only when the agent's reaction map has the action.
 - **Cards:** the agent can show a place, listing or project as a rich card by writing a fenced block with
   language `card` holding JSON (title, url, description, image, thumbnail, fields, footer). A block that doesn't
   parse is shown as written. On Telegram the block shows as plain JSON.

@@ -57,6 +57,7 @@ type Handler struct {
 	agent     AgentConfig
 	authorize func(userID, chatID int64, isGroup bool) bool
 	voice     *progress.Voice
+	buttons   bool // reply buttons under each reply
 	selfID    string
 	http      *http.Client
 
@@ -73,6 +74,7 @@ func newHandler(a api, b *Bot, opts Options) *Handler {
 		agent:     opts.Agent,
 		authorize: opts.Authorize,
 		voice:     progress.New(opts.ProgressPhrasesPath),
+		buttons:   opts.ReplyButtons,
 		http:      &http.Client{Timeout: 60 * time.Second},
 		locks:     map[Conv]*sync.Mutex{},
 	}
@@ -300,6 +302,9 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 			slog.Warn("discord: delete placeholder before chunked reply", "error", err)
 		}
 		botIDs, _ = h.bot.sendChunks(w.channelID, response, nil)
+	}
+	if h.buttons && len(botIDs) > 0 {
+		h.addReplyButtons(w.channelID, botIDs[len(botIDs)-1])
 	}
 	for _, id := range botIDs {
 		if err := h.bridge.SaveMessageMap(chat, thread, msgID, id, text, response); err != nil {

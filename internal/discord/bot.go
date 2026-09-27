@@ -35,6 +35,8 @@ type api interface {
 	StartForumThread(forumID string, t *discordgo.ThreadStart, m *discordgo.MessageSend) (*discordgo.Channel, error)
 	// EditChannel edits a channel, thread or post: tags, archived (places.go).
 	EditChannel(channelID string, e *discordgo.ChannelEdit) (*discordgo.Channel, error)
+	// Respond answers an interaction (a button click or slash command).
+	Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error
 }
 
 // Bot is one agent's Discord presence: inbound turns through Handler, and the
@@ -72,6 +74,8 @@ type Options struct {
 	// Mentions turns "@name" into a Discord mention that notifies that
 	// person; nil = no conversion.
 	Mentions *Mentions
+	// ReplyButtons puts Regenerate / Remember buttons under each reply.
+	ReplyButtons bool
 }
 
 // NewBot opens nothing yet: Start connects the gateway.
@@ -106,6 +110,9 @@ func NewBot(token string, opts Options) (*Bot, error) {
 	})
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.MessageReactionAdd) {
 		b.handler.HandleReaction(context.Background(), r.MessageReaction)
+	})
+	s.AddHandler(func(_ *discordgo.Session, i *discordgo.InteractionCreate) {
+		b.handler.HandleInteraction(context.Background(), i.Interaction)
 	})
 	return b, nil
 }
@@ -436,6 +443,9 @@ func (a sessionAPI) StartForumThread(forum string, t *discordgo.ThreadStart, m *
 }
 func (a sessionAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.Channel, error) {
 	return a.s.ChannelEditComplex(id, e)
+}
+func (a sessionAPI) Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error {
+	return a.s.InteractionRespond(i, r)
 }
 func (a sessionAPI) Channel(id string) (*discordgo.Channel, error) {
 	if c, err := a.s.State.Channel(id); err == nil {
