@@ -9,7 +9,8 @@ CHAT_ID="${SHELL_CHAT_ID:-0}"
 usage() {
   echo "usage: project create --title <text> [--emoji <e> --chat <id> --thread <id> --export-ref <id> --doc-path <path> --instructions <text> --lang <code> --cadence daily|weekly|monthly]" >&2
   echo "                        [--area <area slug> --place auto --stage <stage> --content <first message>]   (a project in an area)" >&2
-  echo "                        [--kind area --place-ref discord:<forum id>|telegram]                        (an area)" >&2
+  echo "                        [--kind area --place new [--channel-name N --forum-name F --tags a,b,c]]     (an area with its own channel + forum)" >&2
+  echo "       project join --thread <post id>   (track another agent's post as your own project)" >&2
   echo "       project move <slug> --area <area slug> [--stage <stage> --place auto --content <first message>]" >&2
   echo "       project stage <slug> --stage <stage>" >&2
   echo "       project archive <slug>" >&2
@@ -42,6 +43,9 @@ AREA=""
 PLACE=""
 STAGE=""
 CONTENT=""
+CHANNEL_NAME=""
+FORUM_NAME=""
+TAGS=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -62,6 +66,9 @@ while [ $# -gt 0 ]; do
     --place)        PLACE="$2"; shift 2 ;;
     --stage)        STAGE="$2"; shift 2 ;;
     --content)      CONTENT="$2"; shift 2 ;;
+    --channel-name) CHANNEL_NAME="$2"; shift 2 ;;
+    --forum-name)   FORUM_NAME="$2"; shift 2 ;;
+    --tags)         TAGS="$2"; shift 2 ;;
     --*)            echo "unknown arg: $1" >&2; usage ;;
     *)              SLUG="$1"; shift ;;
   esac
@@ -91,11 +98,13 @@ case "$VERB" in
     BODY=$(TITLE="$TITLE" EMOJI="$EMOJI" CHAT_ID="$CHAT_ID" THREAD="$THREAD" \
       EXPORT_REF="$EXPORT_REF" DOC_PATH="$DOC_PATH" INSTRUCTIONS="$INSTRUCTIONS" \
       LANG_CODE="$LANG_CODE" CADENCE="$CADENCE" KIND="$KIND" PLACE_REF="$PLACE_REF" \
-      AREA="$AREA" PLACE="$PLACE" STAGE="$STAGE" CONTENT="$CONTENT" python3 -c "
+      AREA="$AREA" PLACE="$PLACE" STAGE="$STAGE" CONTENT="$CONTENT" \
+      CHANNEL_NAME="$CHANNEL_NAME" FORUM_NAME="$FORUM_NAME" TAGS="$TAGS" python3 -c "
 import json, os
 d = {'action': 'create', 'title': os.environ['TITLE'], 'chat_id': int(os.environ['CHAT_ID'] or 0)}
-for k in ('kind', 'place_ref', 'area', 'place', 'stage', 'content'):
+for k in ('kind', 'place_ref', 'area', 'place', 'stage', 'content', 'channel_name', 'forum_name'):
     if os.environ[k.upper()]: d[k] = os.environ[k.upper()]
+if os.environ['TAGS']: d['tags'] = [t.strip() for t in os.environ['TAGS'].split(',') if t.strip()]
 if os.environ['EMOJI']: d['emoji'] = os.environ['EMOJI']
 if os.environ['THREAD']: d['message_thread_id'] = int(os.environ['THREAD'])
 if os.environ['EXPORT_REF']: d['export_ref'] = os.environ['EXPORT_REF']
@@ -110,7 +119,7 @@ print(json.dumps(d))
     echo "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
-print(f\"Project {r['slug']} created ({r['status']}), chat {r['chat_id']}\")
+print(f\"Project {r['slug']} {'created' if r.get('created', True) else 'already exists'} ({r['status']}), chat {r['chat_id']}\")
 if r.get('emoji'): print(f\"  emoji: {r['emoji']}\")
 if r.get('export_ref'): print(f\"  export: {r.get('export_kind','')}:{r['export_ref']}\")
 if r.get('doc_path'): print(f\"  doc: {r['doc_path']}\")
@@ -120,9 +129,34 @@ if r.get('cadence'): print(f\"  research cadence: {r['cadence']}\")
 if r.get('kind') == 'area': print(f\"  area; places: {r.get('place_ref') or '(none)'}\")
 if r.get('area'): print(f\"  in area: {r['area']}\")
 if r.get('stage'): print(f\"  stage: {r['stage']}\")
-if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (' (place created)' if r.get('place_created') else ''))
+if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (' (place created)' if r.get('place_created') else '') + (' (joined the existing post)' if r.get('place_joined') else ''))
+if r.get('channel_mention'): print(f\"  channel: {r['channel_mention']}  forum: {r.get('forum_mention','')}\" + (' (created now)' if r.get('places_created') else ' (already existed)'))
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 if r.get('place_warning'): print(f\"  PLACE NOT CREATED: {r['place_warning']}\")
+" 2>/dev/null || echo "$RESP"
+    ;;
+
+  join)
+    if [ -z "$THREAD" ]; then
+      echo "join requires --thread <post id>" >&2
+      exit 1
+    fi
+    BODY=$(CHAT_ID="$CHAT_ID" THREAD="$THREAD" STAGE="$STAGE" python3 -c "
+import json, os
+d = {'action': 'join', 'chat_id': int(os.environ['CHAT_ID'] or 0), 'message_thread_id': int(os.environ['THREAD'])}
+if os.environ['STAGE']: d['stage'] = os.environ['STAGE']
+print(json.dumps(d))
+")
+    post "$BODY"
+    echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('joined'):
+    print(f\"Project {r['slug']} joined: thread {r['message_thread_id']}, area {r.get('area','')}\" + (f\", stage {r['stage']}\" if r.get('stage') else ''))
+else:
+    print(r.get('result') or f\"Project {r['slug']} (already tracked)\")
+if r.get('doc_path'): print(f\"  doc: {r['doc_path']}\")
+if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 " 2>/dev/null || echo "$RESP"
     ;;
 
@@ -153,7 +187,8 @@ print(json.dumps(d))
 import sys, json
 r = json.load(sys.stdin)
 print(f\"Project {r['slug']} ({r['status']})\" + (f\" in area {r['area']}\" if r.get('area') else '') + (f\", stage {r['stage']}\" if r.get('stage') else ''))
-if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (' (place created)' if r.get('place_created') else ''))
+if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (' (place created)' if r.get('place_created') else '') + (' (joined the existing post)' if r.get('place_joined') else ''))
+if r.get('channel_mention'): print(f\"  channel: {r['channel_mention']}  forum: {r.get('forum_mention','')}\" + (' (created now)' if r.get('places_created') else ' (already existed)'))
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 if r.get('place_warning'): print(f\"  PLACE NOT CREATED: {r['place_warning']}\")
 " 2>/dev/null || echo "$RESP"

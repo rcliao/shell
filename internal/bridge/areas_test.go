@@ -45,3 +45,26 @@ func TestAreaBlocks(t *testing.T) {
 		t.Error("a project's block must not carry the area index")
 	}
 }
+
+// A Discord thread that is none of the agent's projects, in a chat with an
+// area, gets the join hint; its own post and non-Discord threads do not.
+func TestUnboundThreadHint(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	const chat, own, other = -100200300, 900000000000000011, 900000000000000012
+	b := &Bridge{store: st}
+	if b.unboundThreadHint(chat, other) != "" {
+		t.Fatal("no areas yet: no hint")
+	}
+	st.CreateProject(store.Project{Slug: "travel", Title: "Travel", ChatID: chat, Kind: store.ProjectKindArea, PlaceRef: "discord:900000000000000099"})
+	st.CreateProject(store.Project{Slug: "trip", Title: "Trip", ChatID: chat, MessageThreadID: own, Area: "travel"})
+	if h := b.unboundThreadHint(chat, other); !strings.Contains(h, "project join --thread 900000000000000012") {
+		t.Fatalf("hint = %q", h)
+	}
+	if b.unboundThreadHint(chat, own) != "" || b.unboundThreadHint(chat, 1419) != "" {
+		t.Fatal("own post or a Telegram topic got the hint")
+	}
+}

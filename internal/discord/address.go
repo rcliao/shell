@@ -176,6 +176,17 @@ func (a *Addresses) Outbound(chatID, threadID int64) (Target, bool) {
 	return Target{}, false
 }
 
+// GuildFor returns the Discord server whose channels join chatID (guild
+// auto-join), for creating an area's channels there.
+func (a *Addresses) GuildFor(chatID int64) (string, bool) {
+	for id, chat := range a.guilds {
+		if chat == chatID {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 // OnDiscord reports whether a chat is delivered on Discord: linked, joined by
 // a server, or in the derived range.
 func (a *Addresses) OnDiscord(chatID int64) bool {

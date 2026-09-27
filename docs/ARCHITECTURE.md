@@ -678,6 +678,18 @@ Archiving a project in an area closes its place. An area's own `[Project]`
 block adds a guide line and an index of its projects with their threads; a
 project in an area points at the area's doc for shared constraints.
 
+Agents make areas themselves (part 2 of the design). `create --kind area
+--place new` finds or creates the area's text channel and forum in the
+chat's Discord server by name (`Places.EnsureAreaPlaces`), so the second
+agent that runs it reuses the first agent's channels and registers its own
+row. **The post is the shared record** between the per-agent registries:
+`--place auto` joins an open post with the same title (`FindThread`), and
+`project join --thread <post>` registers an agent's own row for another
+agent's post (`ThreadInfo`: title, forum, tag). A turn in a Discord thread
+that is none of the agent's projects gets a one-line join hint. The weekly
+review lists the agent's areas and its active projects that have no area,
+so it can propose homes; a new area needs a person's yes, a post does not.
+
 **Needs you.** The pinned 📋 list marks each active project with `❓N`, the
 number of open items under its doc's 待決定 section — bulleted or numbered,
 not checked off, not struck through.

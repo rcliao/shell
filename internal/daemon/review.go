@@ -255,7 +255,8 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 		cancel()
 	}
 	section("Where routing disagreed with an independent judge (fix by sharpening that project's instructions)", d.missEvidence(since))
-	section("Subjects that keep coming back with no project behind them (candidate projects)", recurringEvidence(d.store, time.Now().Add(-recurringWindow), 0, d.exclude))
+	section("Subjects that keep coming back with no project behind them (candidate projects — or a candidate area, if several share a kind)", recurringEvidence(d.store, time.Now().Add(-recurringWindow), 0, d.exclude))
+	section("Your areas, and active projects with no area (propose a home for each; a new area needs a person's yes, filing into an existing one does not)", areaEvidence(d.store, d.exclude))
 
 	if refl, err := d.store.ListReflections(3); err == nil {
 		var lines []string
@@ -446,4 +447,34 @@ func (d reviewDeps) deliver(summary string) (int, error) {
 
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// areaEvidence lists the agent's areas and the active projects outside any
+// area (docs/DESIGN-PROJECT-AREAS.md, part 2): the channel list is how the
+// family sees what an agent tracks, so a project with no area is invisible.
+func areaEvidence(st *store.Store, exclude map[int64]bool) string {
+	projects, err := st.ListProjects(0)
+	if err != nil {
+		return ""
+	}
+	var areas, loose []string
+	for _, p := range projects {
+		if p.Status != "active" || exclude[p.ChatID] {
+			continue
+		}
+		switch {
+		case p.Kind == store.ProjectKindArea:
+			areas = append(areas, fmt.Sprintf("- area %s %s — %s (chat %d)", p.Emoji, p.Slug, p.Title, p.ChatID))
+		case p.Area == "":
+			last := "never"
+			if p.LastHumanActivityAt != nil {
+				last = p.LastHumanActivityAt.Local().Format("Jan 2")
+			}
+			loose = append(loose, fmt.Sprintf("- no area: %s — %s (chat %d, last human activity %s)", p.Slug, p.Title, p.ChatID, last))
+		}
+	}
+	if len(areas) == 0 && len(loose) == 0 {
+		return ""
+	}
+	return strings.Join(append(areas, loose...), "\n") + "\n"
 }

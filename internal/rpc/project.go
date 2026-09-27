@@ -52,6 +52,11 @@ type ProjectRequest struct {
 	Area     string `json:"area"`
 	Place    string `json:"place"`
 	Stage    string `json:"stage"`
+	// place=new (areas): the area's channel and forum names (default: the
+	// title, and title + "-projects") and the forum's stage tags.
+	ChannelName string   `json:"channel_name"`
+	ForumName   string   `json:"forum_name"`
+	Tags        []string `json:"tags"`
 	// status action
 	Status string `json:"status"` // active | paused | archived
 	// doc-write fields
@@ -139,8 +144,10 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		s.projectStage(w, req)
 	case "move":
 		s.projectMove(w, req)
+	case "join":
+		s.projectJoin(w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, stage, move, doc-read, doc-write, or set-instructions")
+		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, stage, move, join, doc-read, doc-write, or set-instructions")
 	}
 }
 
@@ -203,9 +210,35 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusBadRequest, "place_ref is for areas (kind=area)")
 		return
 	}
-	if req.Place != "" && req.Place != "auto" {
-		writeError(w, http.StatusBadRequest, `place must be "auto" or empty`)
+	if req.Place != "" && req.Place != "auto" && req.Place != "new" {
+		writeError(w, http.StatusBadRequest, `place must be "auto", "new" (areas), or empty`)
 		return
+	}
+	// place=new: an area that makes (or finds) its own channel and forum.
+	var placesCreated bool
+	if req.Place == "new" {
+		if req.Kind != store.ProjectKindArea {
+			writeError(w, http.StatusBadRequest, "place=new is for areas (kind=area); a project in an area uses place=auto")
+			return
+		}
+		if req.PlaceRef != "" || req.MessageThreadID != 0 {
+			writeError(w, http.StatusBadRequest, "place=new makes the channel and forum; do not also pass place_ref or message_thread_id")
+			return
+		}
+		existing, created, msg := s.ensureAreaPlaces(&req)
+		if msg != "" {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if existing != nil {
+			resp := projectJSON(*existing)
+			resp["created"] = false
+			resp["result"] = "You already have this area."
+			placeMentions(resp, existing)
+			writeJSON(w, resp)
+			return
+		}
+		placesCreated = created
 	}
 	if req.Place == "auto" && area != nil && req.ChatID != area.ChatID {
 		writeError(w, http.StatusBadRequest, "place=auto puts the project in its area's chat; drop chat_id or use the area's")
@@ -252,18 +285,23 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	slog.Info("rpc: project created", "slug", p.Slug, "chat_id", p.ChatID, "export_ref", p.ExportRef)
 	resp := projectJSON(*p)
 	resp["created"] = true
+	if req.Place == "new" {
+		resp["places_created"] = placesCreated
+		placeMentions(resp, p)
+	}
 
 	// The project's own place (a forum post or topic in its area). Failure
 	// leaves an unbound project and place_warning (its own field: the single
 	// warning slot is overwritten by later scaffold/emoji warnings); `move`
 	// with place=auto retries.
 	if req.Place == "auto" {
-		if thread, warn := s.createPlace(p, area, req.Content); warn != "" {
+		if thread, joined, warn := s.createPlace(p, area, req.Content); warn != "" {
 			resp["place_warning"] = warn
 		} else {
 			p.MessageThreadID = thread
 			resp["message_thread_id"] = thread
-			resp["place_created"] = true
+			resp["place_created"] = !joined
+			resp["place_joined"] = joined
 		}
 	}
 

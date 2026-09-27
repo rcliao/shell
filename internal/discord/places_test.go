@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/rcliao/shell/internal/config"
 )
 
 const forumChan = "700000000000000003"
@@ -81,4 +82,70 @@ func TestForumPostSurvivesTagFailure(t *testing.T) {
 	if pc := api.channels[strconv.FormatInt(post, 10)]; pc.AppliedTags == nil {
 		t.Fatal("cleared tags sent as null")
 	}
+}
+
+const testGuild = "700000000000000100"
+
+func areaBot(t *testing.T) (*Bot, *fakeAPI) {
+	api := newFakeAPI()
+	api.channels[groupChan] = &discordgo.Channel{ID: groupChan, GuildID: testGuild, Type: discordgo.ChannelTypeGuildText, ParentID: "700000000000000200"}
+	addr := NewAddresses(config.DiscordConfig{
+		Chats:  map[string]config.DiscordChatLink{groupChan: {ChatID: -100200300}},
+		Guilds: map[string]config.DiscordGuildLink{testGuild: {ChatID: -100200300}},
+	})
+	return newBot(api, Options{Addresses: addr}), api
+}
+
+// The second agent's identical request reuses the first one's channels.
+func TestEnsureAreaChannelsFindOrCreate(t *testing.T) {
+	b, api := areaBot(t)
+	first, err := b.EnsureAreaChannels(-100200300, "Gaming", "gaming projects", []string{"playing", "done"})
+	if err != nil || !first.Created {
+		t.Fatalf("first: %+v %v", first, err)
+	}
+	text, forum := api.channels[first.ChannelID], api.channels[first.ForumID]
+	if text.Name != "gaming" || forum.Name != "gaming-projects" || forum.Type != discordgo.ChannelTypeGuildForum {
+		t.Fatalf("names/types: %q %q %v", text.Name, forum.Name, forum.Type)
+	}
+	if text.ParentID != "700000000000000200" || text.Topic != "Projects: <#"+forum.ID+">" || len(forum.AvailableTags) != 2 {
+		t.Fatalf("category/topic/tags: %q %q %v", text.ParentID, text.Topic, forum.AvailableTags)
+	}
+	second, err := b.EnsureAreaChannels(-100200300, "gaming", "Gaming Projects", nil)
+	if err != nil || second.Created || second != (AreaChannels{ChannelID: first.ChannelID, ForumID: first.ForumID}) {
+		t.Fatalf("second: %+v %v", second, err)
+	}
+	if len(api.created) != 2 {
+		t.Fatalf("created %d channels, want 2", len(api.created))
+	}
+	if _, err := b.EnsureAreaChannels(42, "x", "y", nil); err == nil {
+		t.Fatal("a chat with no server must be refused")
+	}
+}
+
+// A same-title post is found (emoji and case ignored); info reads tags.
+func TestFindOpenPostAndInfo(t *testing.T) {
+	b, api := areaBot(t)
+	ac, _ := b.EnsureAreaChannels(-100200300, "travel", "trips", []string{"planning"})
+	post, err := b.CreateForumPost(ac.ForumID, "🎉 Japan 2027", "", []string{"planning"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := b.FindOpenPost(ac.ForumID, "japan 2027")
+	if err != nil || !ok || got != post {
+		t.Fatalf("find: %d %v %v, want %d", got, ok, err, post)
+	}
+	if _, ok, _ := b.FindOpenPost(ac.ForumID, "Japan 2028"); ok {
+		t.Fatal("different title matched")
+	}
+	info, err := b.PostInfo(post)
+	if err != nil || info.Title != "🎉 Japan 2027" || info.ForumID != ac.ForumID || len(info.Tags) != 1 || info.Tags[0] != "planning" {
+		t.Fatalf("info: %+v %v", info, err)
+	}
+	if err := b.ArchiveThread(post); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := b.FindOpenPost(ac.ForumID, "Japan 2027"); ok {
+		t.Fatal("an archived post is not open")
+	}
+	_ = api
 }

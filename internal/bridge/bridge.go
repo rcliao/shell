@@ -961,6 +961,9 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 			if laneRecent != "" {
 				projectsBlock = strings.TrimSpace(projectsBlock + "\n\n" + laneRecent)
 			}
+			if hint := b.unboundThreadHint(chatID, threadID); hint != "" {
+				projectsBlock = strings.TrimSpace(projectsBlock + "\n\n" + hint)
+			}
 		})
 		wg.Wait()
 	}

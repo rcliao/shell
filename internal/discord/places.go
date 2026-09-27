@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
+	"unicode"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -124,4 +126,155 @@ func tagID(tags []discordgo.ForumTag, name string) string {
 		}
 	}
 	return ""
+}
+
+// Area places (docs/DESIGN-PROJECT-AREAS.md, part 2): an area gets a text
+// channel for loose talk and a forum for its projects. Creation is
+// find-or-create by name, so the second agent that runs the same command
+// reuses the first agent's channels and nobody hands anything off.
+
+// AreaChannels are an area's two channels.
+type AreaChannels struct {
+	ChannelID string // text channel: the area's own place
+	ForumID   string // forum: one post per project
+	Created   bool   // at least one of them was created now
+}
+
+// discordName is how Discord stores a text channel or forum name: lower
+// case, spaces as dashes. CJK passes through.
+func discordName(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), "-"))
+}
+
+// EnsureAreaChannels finds or creates the text channel `name` and the forum
+// `forumName` (with tags) in the server chatID joins, next to the chat's
+// main channel. A new or topic-less text channel gets a topic that points
+// at the forum.
+func (b *Bot) EnsureAreaChannels(chatID int64, name, forumName string, tags []string) (AreaChannels, error) {
+	var out AreaChannels
+	guild, ok := b.addr.GuildFor(chatID)
+	if !ok {
+		return out, fmt.Errorf("discord: chat %d has no server (discord.guilds) to create channels in", chatID)
+	}
+	name, forumName = discordName(name), discordName(forumName)
+	if name == "" || forumName == "" || name == forumName {
+		return out, fmt.Errorf("discord: area needs two distinct channel names")
+	}
+	chans, err := b.api.GuildChannels(guild)
+	if err != nil {
+		return out, fmt.Errorf("discord: list channels: %w", err)
+	}
+	category := ""
+	if t, ok := b.addr.Outbound(chatID, 0); ok {
+		if main, err := b.api.Channel(t.ChannelID); err == nil {
+			category = main.ParentID
+		}
+	}
+	find := func(typ discordgo.ChannelType, n string) *discordgo.Channel {
+		for _, c := range chans {
+			if c.Type == typ && discordName(c.Name) == n {
+				return c
+			}
+		}
+		return nil
+	}
+
+	forum := find(discordgo.ChannelTypeGuildForum, forumName)
+	if forum == nil {
+		forum, err = b.api.CreateGuildChannel(guild, discordgo.GuildChannelCreateData{
+			Name: forumName, Type: discordgo.ChannelTypeGuildForum, ParentID: category})
+		if err != nil {
+			return out, fmt.Errorf("discord: create forum %s: %w", forumName, err)
+		}
+		out.Created = true
+		if len(tags) > 0 {
+			ft := make([]discordgo.ForumTag, 0, len(tags))
+			for _, t := range tags {
+				if t = truncateRunes(strings.TrimSpace(t), maxTagName); t != "" {
+					ft = append(ft, discordgo.ForumTag{Name: t})
+				}
+			}
+			if _, err := b.api.EditChannel(forum.ID, &discordgo.ChannelEdit{AvailableTags: &ft}); err != nil {
+				slog.Warn("discord: area forum created without tags", "forum", forum.ID, "error", err)
+			}
+		}
+	}
+	text := find(discordgo.ChannelTypeGuildText, name)
+	if text == nil {
+		text, err = b.api.CreateGuildChannel(guild, discordgo.GuildChannelCreateData{
+			Name: name, Type: discordgo.ChannelTypeGuildText, ParentID: category,
+			Topic: "Projects: <#" + forum.ID + ">"})
+		if err != nil {
+			return out, fmt.Errorf("discord: create channel %s: %w", name, err)
+		}
+		out.Created = true
+	} else if text.Topic == "" {
+		topic := "Projects: <#" + forum.ID + ">"
+		if _, err := b.api.EditChannel(text.ID, &discordgo.ChannelEdit{Topic: topic}); err != nil {
+			slog.Warn("discord: area channel topic not set", "channel", text.ID, "error", err)
+		}
+	}
+	out.ChannelID, out.ForumID = text.ID, forum.ID
+	return out, nil
+}
+
+// postTitleKey compares post titles without their leading emoji and case:
+// "🎉 日本行程 2027" and "日本行程 2027" are the same project.
+func postTitleKey(s string) string {
+	s = strings.TrimLeftFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
+// FindOpenPost returns an open post in the forum whose title matches, so a
+// second agent joins the first one's post instead of opening another.
+func (b *Bot) FindOpenPost(forumID, title string) (int64, bool, error) {
+	forum, err := b.api.Channel(forumID)
+	if err != nil {
+		return 0, false, fmt.Errorf("discord: forum %s: %w", forumID, err)
+	}
+	threads, err := b.api.ActiveThreads(forum.GuildID)
+	if err != nil {
+		return 0, false, fmt.Errorf("discord: list threads: %w", err)
+	}
+	want := postTitleKey(title)
+	for _, t := range threads {
+		if t.ParentID == forumID && postTitleKey(t.Name) == want && want != "" {
+			id, err := strconv.ParseInt(t.ID, 10, 64)
+			return id, err == nil, err
+		}
+	}
+	return 0, false, nil
+}
+
+// PostInfo describes a thread for `project join`: its title, the forum it is
+// in ("" when its parent is not a forum), and its tags by name.
+type PostInfo struct {
+	Title   string
+	ForumID string
+	Tags    []string
+}
+
+func (b *Bot) PostInfo(threadID int64) (PostInfo, error) {
+	var out PostInfo
+	post, err := b.api.Channel(strconv.FormatInt(threadID, 10))
+	if err != nil {
+		return out, fmt.Errorf("discord: thread %d: %w", threadID, err)
+	}
+	out.Title = post.Name
+	if post.ParentID == "" {
+		return out, nil
+	}
+	parent, err := b.api.Channel(post.ParentID)
+	if err != nil || parent.Type != discordgo.ChannelTypeGuildForum {
+		return out, nil
+	}
+	out.ForumID = parent.ID
+	for _, id := range post.AppliedTags {
+		for _, t := range parent.AvailableTags {
+			if t.ID == id {
+				out.Tags = append(out.Tags, t.Name)
+			}
+		}
+	}
+	return out, nil
 }

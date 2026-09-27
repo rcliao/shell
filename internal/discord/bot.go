@@ -35,6 +35,11 @@ type api interface {
 	StartForumThread(forumID string, t *discordgo.ThreadStart, m *discordgo.MessageSend) (*discordgo.Channel, error)
 	// EditChannel edits a channel, thread or post: tags, archived (places.go).
 	EditChannel(channelID string, e *discordgo.ChannelEdit) (*discordgo.Channel, error)
+	// Area places (places.go): list and create a server's channels, and list
+	// its open threads.
+	GuildChannels(guildID string) ([]*discordgo.Channel, error)
+	CreateGuildChannel(guildID string, d discordgo.GuildChannelCreateData) (*discordgo.Channel, error)
+	ActiveThreads(guildID string) ([]*discordgo.Channel, error)
 	// Respond answers an interaction (a button click or slash command).
 	Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error
 	// EditResponse fills a deferred interaction reply; Followup adds more.
@@ -452,6 +457,19 @@ func (a sessionAPI) StartForumThread(forum string, t *discordgo.ThreadStart, m *
 }
 func (a sessionAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.Channel, error) {
 	return a.s.ChannelEditComplex(id, e)
+}
+func (a sessionAPI) GuildChannels(guild string) ([]*discordgo.Channel, error) {
+	return a.s.GuildChannels(guild)
+}
+func (a sessionAPI) CreateGuildChannel(guild string, d discordgo.GuildChannelCreateData) (*discordgo.Channel, error) {
+	return a.s.GuildChannelCreateComplex(guild, d)
+}
+func (a sessionAPI) ActiveThreads(guild string) ([]*discordgo.Channel, error) {
+	l, err := a.s.GuildThreadsActive(guild)
+	if err != nil {
+		return nil, err
+	}
+	return l.Threads, nil
 }
 func (a sessionAPI) Respond(i *discordgo.Interaction, r *discordgo.InteractionResponse) error {
 	return a.s.InteractionRespond(i, r)

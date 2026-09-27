@@ -327,3 +327,40 @@ func (b *Bridge) areaLines(own store.Project) string {
 	}
 	return sb.String()
 }
+
+// discordThreadFloor: Discord thread and channel ids are snowflakes, far
+// above any Telegram topic id (mirrors discord.snowflakeFloor, which this
+// package cannot import).
+const discordThreadFloor = 100_000_000_000_000_000
+
+// unboundThreadHint tells the agent, in a Discord thread that is none of its
+// projects in a chat that has areas, how to take it on: the post is the
+// shared record between agents (docs/DESIGN-PROJECT-AREAS.md, part 2), so a
+// post another agent opened is joined, not duplicated. "" otherwise.
+func (b *Bridge) unboundThreadHint(chatID, threadID int64) string {
+	if b.store == nil || threadID < discordThreadFloor {
+		return ""
+	}
+	projects, err := b.store.ListProjects(chatID)
+	if err != nil {
+		return ""
+	}
+	hasArea := false
+	for _, p := range projects {
+		if p.Status != "active" {
+			continue
+		}
+		if p.MessageThreadID == threadID {
+			return ""
+		}
+		if p.Kind == store.ProjectKindArea {
+			hasArea = true
+		}
+	}
+	if !hasArea {
+		return ""
+	}
+	return fmt.Sprintf("[Thread] This thread (%d) is none of your projects. If it is a post in one of your areas' forums, "+
+		"another agent's project lives here: before doing project work in it, run `project join --thread %d` "+
+		"(it registers your own row for this post). Otherwise treat it as ordinary conversation.", threadID, threadID)
+}
