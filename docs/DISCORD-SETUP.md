@@ -48,13 +48,21 @@ You need:
 - the Discord channel that replaces each Telegram chat: the family channel for the family group, and the DM
   channel with each person for their Telegram DM.
 
-How to get a DM channel id: DM the bot once from that person's account. The unlinked-user reply names their
-user id. The daemon log line `discord: message from an unlinked user` shows the channel id.
+How to get a DM channel id: each bot has its own DM channel with each person, so a family member has one DM
+channel per agent. The bot can open the channel without sending anything:
+
+```bash
+curl -X POST -H "Authorization: Bot $TOKEN" -H "Content-Type: application/json" \
+  -d '{"recipient_id":"<discord user id>"}' https://discord.com/api/v10/users/@me/channels
+```
+
+The returned `id` is the DM channel. Run it once per bot for each person.
 
 ## 4. Link them in each agent's config
 
-Put the same `users` and `chats` in **both** agents' `config.json`. The shared transcript and agent-to-agent
-hand-offs rely on both agents agreeing on the ids.
+Put the same `users` and the same group-channel links in **both** agents' `config.json`. The shared transcript
+and agent-to-agent hand-offs rely on both agents agreeing on those ids. DM links differ per agent, because each
+bot has its own DM channel with each person. Both entries map to the same Telegram DM chat id.
 
 ```json
 "discord": {
