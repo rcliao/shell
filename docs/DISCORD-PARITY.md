@@ -23,7 +23,7 @@ Legend:
 | Text, forum topics as separate sessions | ✅ | ✅ | Channels and threads map to topics |
 | Photos, image files, PDFs | ✅ | ✅ | |
 | Albums (several images, one turn) | ✅ 500 ms debounce | ✅ | Discord puts them in one message by design |
-| Stickers | ✅ image + emoji + set name | ❌ | **A message with only a sticker is dropped silently.** Usage: 0 |
+| Stickers | ✅ image + emoji + set name | ✅ | The name plus the image (PNG/APNG/GIF); Lottie stickers get words only. Before this fix a sticker-only message was dropped silently |
 | Sender label `[From: …]` | ✅ | ✅ | Via linked Telegram id |
 | Reply-to context quoted into the prompt | ➖ | ➖ | Used for routing only on both. See backlog B6 |
 | Voice, audio, video, edits, forwards | ➖ | ➖ | Not handled on either |
@@ -64,7 +64,7 @@ Legend:
 | Command menu | ➖ none | ➖ none | See backlog B2 |
 | Reaction actions (🔄 📌 🗑 👍 👎 📋 🔁 ❌) | ✅ | ✅ | Usage: 4 |
 | Regenerate streams into the same message | ✅ | 🟡 | Discord posts a new message, not streamed |
-| ✅ / ❌ result mark after a reaction action | ✅ | ❌ | |
+| ✅ / ❌ result mark after a reaction action | ✅ | ✅ | On the reacted reply |
 | Hint for an unmapped emoji | ✅ | ➖ | Deliberately off: family members react to each other |
 
 ### Outbound and access
@@ -77,10 +77,9 @@ Legend:
 | Access control | pairing + allowlist | ✅ manual links + same allowlist | Pairing is deliberately not ported |
 
 **Parity gaps worth closing (in order):**
-1. Stickers. Today a sticker-only message is dropped silently. Small fix.
-2. ✅ / ❌ result marks on reaction actions. Small.
-3. Regenerate in place, with streaming. Medium.
-4. Coalescing, then absorb. Medium, and rarely used.
+1. ~~Stickers~~ and ~~result marks~~: done.
+2. Regenerate in place, with streaming. Medium.
+3. Coalescing, then absorb. Medium, and rarely used.
 
 ## 2. Discord-native backlog (needs building)
 
