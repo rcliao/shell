@@ -101,7 +101,7 @@ func (h *Handler) locate(channelID string) (where, error) {
 	if ch.IsThread() {
 		parent = ch.ParentID
 	}
-	conv, err := h.addr.Inbound(channelID, parent, isDM)
+	conv, err := h.addr.Inbound(channelID, parent, ch.GuildID, isDM)
 	if err != nil {
 		return where{}, err
 	}

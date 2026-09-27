@@ -275,6 +275,16 @@ type DiscordConfig struct {
 	// it takes over — the Telegram chat (and topic) it replaces. Both agents
 	// must carry the same map.
 	Chats map[string]DiscordChatLink `json:"chats"`
+	// Guilds maps a Discord server id to the internal chat its channels
+	// belong to. Any channel, forum, thread or post in that server that is
+	// not listed in Chats becomes its own topic of that chat (thread = its
+	// snowflake), so a channel created later needs no config edit.
+	Guilds map[string]DiscordGuildLink `json:"guilds"`
+}
+
+// DiscordGuildLink is the internal chat a Discord server's channels join.
+type DiscordGuildLink struct {
+	ChatID int64 `json:"chat_id"`
 }
 
 // DiscordChatLink is the internal conversation a Discord channel takes over.

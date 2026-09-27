@@ -720,8 +720,8 @@ func New(cfg config.Config) (*Daemon, error) {
 			return nil, err
 		}
 		bot = routedOutbound{telegram: bot, discord: dc}
-		chats, users := addr.Counts()
-		slog.Info("discord: enabled", "linked_chats", chats, "linked_users", users)
+		chats, users, guilds := addr.Counts()
+		slog.Info("discord: enabled", "linked_chats", chats, "linked_users", users, "linked_guilds", guilds)
 	} else if cfg.Discord.Enabled {
 		slog.Warn("discord: enabled but no token found", "token_env", cfg.Discord.TokenEnv)
 	}

@@ -42,9 +42,11 @@ type Target struct {
 // so the "negative = group" convention the bridge relies on holds — and both
 // agents derive the same id without talking to each other.
 type Addresses struct {
-	chats   map[string]Conv // discord channel/thread id → linked conv
-	reverse map[Conv]string // linked conv → discord channel/thread id
-	users   map[string]int64
+	chats      map[string]Conv // discord channel/thread id → linked conv
+	reverse    map[Conv]string // linked conv → discord channel/thread id
+	users      map[string]int64
+	guilds     map[string]int64 // discord server id → the chat its channels join
+	guildChats map[int64]bool
 }
 
 // NewAddresses builds the maps from config. Links with unparsable or
@@ -54,7 +56,9 @@ func NewAddresses(cfg config.DiscordConfig) *Addresses {
 	a := &Addresses{
 		chats:   map[string]Conv{},
 		reverse: map[Conv]string{},
-		users:   map[string]int64{},
+		users:      map[string]int64{},
+		guilds:     map[string]int64{},
+		guildChats: map[int64]bool{},
 	}
 	for id, link := range cfg.Chats {
 		if _, err := parseSnowflake(id); err != nil {
@@ -70,6 +74,14 @@ func NewAddresses(cfg config.DiscordConfig) *Addresses {
 		a.chats[id] = c
 		a.reverse[c] = id
 	}
+	for id, g := range cfg.Guilds {
+		if _, err := parseSnowflake(id); err != nil || g.ChatID == 0 {
+			slog.Warn("discord: guild link skipped", "guild", id, "error", err)
+			continue
+		}
+		a.guilds[id] = g.ChatID
+		a.guildChats[g.ChatID] = true
+	}
 	for id, tg := range cfg.Users {
 		if _, err := parseSnowflake(id); err != nil {
 			slog.Warn("discord: user link skipped", "discord_id", id, "error", err)
@@ -82,7 +94,9 @@ func NewAddresses(cfg config.DiscordConfig) *Addresses {
 
 // Counts reports how many links are loaded, for the startup log line that
 // makes a mismatch between the two agents' configs visible.
-func (a *Addresses) Counts() (chats, users int) { return len(a.chats), len(a.users) }
+func (a *Addresses) Counts() (chats, users, guilds int) {
+	return len(a.chats), len(a.users), len(a.guilds)
+}
 
 // User returns the Telegram user id linked to a Discord user.
 func (a *Addresses) User(discordUserID string) (int64, bool) {
@@ -93,35 +107,49 @@ func (a *Addresses) User(discordUserID string) (int64, bool) {
 // Inbound resolves where a Discord message lives.
 //
 // channelID is the channel the message was posted in; parentID is that
-// channel's parent when it is a thread, "" otherwise; isDM marks a direct
-// message channel. A thread first resolves its parent — so a thread inside the
-// linked family channel stays in the family chat — then takes its own id as the
-// thread, unless the thread itself is linked (a Telegram forum topic carried
-// over).
-func (a *Addresses) Inbound(channelID, parentID string, isDM bool) (Conv, error) {
+// channel's parent when it is a thread or forum post, "" otherwise; guildID is
+// the server ("" for a DM); isDM marks a direct message channel. In order:
+//
+//  1. A linked channel or thread takes over its configured conversation.
+//  2. A DM is +channel.
+//  3. In a server mapped in Guilds, the channel — or a thread's linked parent,
+//     so a thread in the family channel stays in the family chat — gives the
+//     chat, and the channel or thread's own snowflake is the topic. This is
+//     what lets a channel or forum created later join the family chat with no
+//     config edit.
+//  4. Otherwise the id is derived: −channel for a guild channel, and a thread
+//     sits in its parent's chat.
+func (a *Addresses) Inbound(channelID, parentID, guildID string, isDM bool) (Conv, error) {
 	if c, ok := a.chats[channelID]; ok {
 		return c, nil
 	}
-	if parentID == "" {
-		chat, err := derivedChat(channelID, isDM)
+	if isDM {
+		chat, err := derivedChat(channelID, true)
 		if err != nil {
 			return Conv{}, err
 		}
 		return Conv{ChatID: chat}, nil
 	}
-	thread, err := parseSnowflake(channelID)
+	own, err := parseSnowflake(channelID)
 	if err != nil {
 		return Conv{}, err
 	}
-	parent, ok := a.chats[parentID]
-	if !ok {
-		chat, err := derivedChat(parentID, false) // threads live in guild channels
-		if err != nil {
-			return Conv{}, err
+	if parentID != "" {
+		if parent, ok := a.chats[parentID]; ok {
+			return Conv{ChatID: parent.ChatID, ThreadID: own}, nil
 		}
-		parent = Conv{ChatID: chat}
 	}
-	return Conv{ChatID: parent.ChatID, ThreadID: thread}, nil
+	if chat, ok := a.guilds[guildID]; ok {
+		return Conv{ChatID: chat, ThreadID: own}, nil
+	}
+	if parentID == "" {
+		return Conv{ChatID: -own}, nil
+	}
+	parentChat, err := derivedChat(parentID, false)
+	if err != nil {
+		return Conv{}, err
+	}
+	return Conv{ChatID: parentChat, ThreadID: own}, nil
 }
 
 // Outbound resolves where a send for an internal conversation goes. ok is
@@ -148,10 +176,10 @@ func (a *Addresses) Outbound(chatID, threadID int64) (Target, bool) {
 	return Target{}, false
 }
 
-// OnDiscord reports whether a chat is delivered on Discord: linked, or in the
-// derived range.
+// OnDiscord reports whether a chat is delivered on Discord: linked, joined by
+// a server, or in the derived range.
 func (a *Addresses) OnDiscord(chatID int64) bool {
-	if abs(chatID) >= snowflakeFloor {
+	if abs(chatID) >= snowflakeFloor || a.guildChats[chatID] {
 		return true
 	}
 	_, ok := a.reverse[Conv{ChatID: chatID}]

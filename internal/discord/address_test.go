@@ -48,7 +48,7 @@ func TestInbound(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := a.Inbound(c.channel, c.parent, c.dm)
+			got, err := a.Inbound(c.channel, c.parent, "", c.dm)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -60,7 +60,7 @@ func TestInbound(t *testing.T) {
 }
 
 func TestInboundRejectsIDsBelowFloor(t *testing.T) {
-	if _, err := testAddresses().Inbound("12345", "", true); err == nil {
+	if _, err := testAddresses().Inbound("12345", "", "", true); err == nil {
 		t.Fatal("a small id would collide with Telegram ids; want an error")
 	}
 }
@@ -105,7 +105,7 @@ func TestRoundTrip(t *testing.T) {
 		{nativeChannel, "", false}, {nativeChannel, "", true}, {nativeThread, familyChannel, false},
 		{nativeThread, nativeChannel, false},
 	} {
-		conv, err := a.Inbound(ch.channel, ch.parent, ch.dm)
+		conv, err := a.Inbound(ch.channel, ch.parent, "", ch.dm)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,7 +124,7 @@ func TestUsersAndCounts(t *testing.T) {
 	if _, ok := a.User("7"); ok {
 		t.Fatal("an id below the floor must not be linked")
 	}
-	chats, users := a.Counts()
+	chats, users, _ := a.Counts()
 	if chats != 3 || users != 1 {
 		t.Fatalf("counts: chats=%d users=%d, want 3,1", chats, users)
 	}
@@ -150,5 +150,78 @@ func TestThreadLinkedWithoutItsChatRoutesToDiscord(t *testing.T) {
 func TestIsMessageID(t *testing.T) {
 	if IsMessageID(4812) || !IsMessageID(400000000000000001) {
 		t.Fatal("telegram ids are small, discord ids are snowflakes")
+	}
+}
+
+const familyGuild = "200000000000000900"
+
+func guildAddresses() *Addresses {
+	return NewAddresses(config.DiscordConfig{
+		Chats: map[string]config.DiscordChatLink{
+			familyChannel: {ChatID: tgGroup},
+			topicThread:   {ChatID: tgGroup, ThreadID: 12}, // a carried-over Telegram topic
+		},
+		Guilds: map[string]config.DiscordGuildLink{familyGuild: {ChatID: tgGroup}},
+	})
+}
+
+func TestGuildAutoJoin(t *testing.T) {
+	a := guildAddresses()
+	const newChannel, forum, post = "200000000000000010", "200000000000000011", "200000000000000012"
+	cases := []struct {
+		name                   string
+		channel, parent, guild string
+		dm                     bool
+		wantChat, wantThread   int64
+	}{
+		{"a channel created later joins the family chat as its own topic", newChannel, "", familyGuild, false, tgGroup, 200000000000000010},
+		{"a forum post joins the family chat as its own topic", post, forum, familyGuild, false, tgGroup, 200000000000000012},
+		{"explicit links still win", familyChannel, "", familyGuild, false, tgGroup, 0},
+		{"a carried-over topic keeps its telegram id", topicThread, "", familyGuild, false, tgGroup, 12},
+		{"a thread in the linked family channel stays in the family chat", post, familyChannel, familyGuild, false, tgGroup, 200000000000000012},
+		{"a server that isn't mapped keeps derived ids", newChannel, "", "200000000000000999", false, -200000000000000010, 0},
+		{"DMs are unchanged", newChannel, "", "", true, 200000000000000010, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := a.Inbound(c.channel, c.parent, c.guild, c.dm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ChatID != c.wantChat || got.ThreadID != c.wantThread {
+				t.Fatalf("got (%d,%d), want (%d,%d)", got.ChatID, got.ThreadID, c.wantChat, c.wantThread)
+			}
+		})
+	}
+}
+
+func TestGuildAutoJoinRoundTrip(t *testing.T) {
+	// A reminder the agent schedules from a new channel must come back to it.
+	a := guildAddresses()
+	for _, ch := range []struct{ channel, parent string }{
+		{"200000000000000010", ""},
+		{"200000000000000012", "200000000000000011"},
+	} {
+		conv, err := a.Inbound(ch.channel, ch.parent, familyGuild, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := a.Outbound(conv.ChatID, conv.ThreadID)
+		if !ok || got.ChannelID != ch.channel {
+			t.Fatalf("%s → (%d,%d) → %q,%v", ch.channel, conv.ChatID, conv.ThreadID, got.ChannelID, ok)
+		}
+	}
+}
+
+func TestGuildChatIsOnDiscordWithoutChannelLinks(t *testing.T) {
+	a := NewAddresses(config.DiscordConfig{Guilds: map[string]config.DiscordGuildLink{familyGuild: {ChatID: tgGroup}}})
+	if !a.OnDiscord(tgGroup) {
+		t.Fatal("a chat a server joins is delivered on Discord")
+	}
+	if got, ok := a.Outbound(tgGroup, 200000000000000010); !ok || got.ChannelID != "200000000000000010" {
+		t.Fatalf("got %q,%v", got.ChannelID, ok)
+	}
+	if _, _, guilds := a.Counts(); guilds != 1 {
+		t.Fatalf("guilds = %d", guilds)
 	}
 }
