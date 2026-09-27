@@ -100,6 +100,35 @@ func openFence(s string) (lang string, open bool) {
 	return lang, open
 }
 
+// fenceTables wraps Markdown tables in a code block. Discord does not render
+// tables, so a model's | a | b | table arrives as a wall of pipes; in a
+// code block the columns at least line up. Tables already inside a fence are
+// left alone.
+func fenceTables(text string) string {
+	lines := strings.Split(text, "\n")
+	var out []string
+	inFence, inTable := false, false
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "```") {
+			inFence = !inFence
+		}
+		isRow := !inFence && strings.HasPrefix(t, "|") && strings.Count(t, "|") >= 2
+		if isRow && !inTable {
+			out = append(out, "```")
+			inTable = true
+		} else if !isRow && inTable {
+			out = append(out, "```")
+			inTable = false
+		}
+		out = append(out, line)
+	}
+	if inTable {
+		out = append(out, "```")
+	}
+	return strings.Join(out, "\n")
+}
+
 // streamView is what a streaming edit shows: the text so far, or its tail
 // when it has outgrown one message. The final reply is chunked separately.
 func streamView(text string, max int) string {

@@ -272,8 +272,8 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 	}
 
 	var botIDs []int
-	if len([]rune(response)) <= maxMessageLen {
-		h.editText(w.channelID, placeholder.ID, response)
+	if len([]rune(fenceTables(response))) <= maxMessageLen {
+		h.editText(w.channelID, placeholder.ID, fenceTables(response))
 		if id, err := strconv.Atoi(placeholder.ID); err == nil {
 			h.bot.remember(id, w.channelID)
 			botIDs = []int{id}

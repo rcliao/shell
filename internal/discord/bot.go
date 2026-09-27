@@ -206,7 +206,7 @@ func (b *Bot) sendChunks(channelID, text string, buttons []bridge.LinkButton) ([
 	if text == "" {
 		text = "(empty response)"
 	}
-	chunks := splitMessage(text, maxMessageLen)
+	chunks := splitMessage(fenceTables(text), maxMessageLen)
 	var ids []int
 	var lastErr error
 	for i, c := range chunks {

@@ -119,3 +119,21 @@ func TestSplitLongFenceLineTerminates(t *testing.T) {
 		}
 	}
 }
+
+func TestFenceTables(t *testing.T) {
+	in := "Prices:\n| item | cost |\n|---|---|\n| milk | 3 |\nDone."
+	want := "Prices:\n```\n| item | cost |\n|---|---|\n| milk | 3 |\n```\nDone."
+	if got := fenceTables(in); got != want {
+		t.Fatalf("got\n%s", got)
+	}
+	inFence := "```\n| a | b |\n```"
+	if got := fenceTables(inFence); got != inFence {
+		t.Fatal("a table already in a code block must be left alone")
+	}
+	if got := fenceTables("| x | y |"); got != "```\n| x | y |\n```" {
+		t.Fatalf("table at end: %q", got)
+	}
+	if got := fenceTables("a|b is not a table"); got != "a|b is not a table" {
+		t.Fatal("prose with a pipe is not a table")
+	}
+}
