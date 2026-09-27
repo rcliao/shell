@@ -21,3 +21,26 @@ func TestOpenerText(t *testing.T) {
 		t.Fatalf("opener %d runes, over %d", n, OpenerMax)
 	}
 }
+
+// Every write path calls RefreshOpener; it edits only a project that has a
+// managed place in its area's chat.
+func TestRefreshOpener(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/shell.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.CreateProject(store.Project{Slug: "travel", Title: "Travel", ChatID: -100200300, Kind: store.ProjectKindArea, PlaceRef: "discord:900000000000000099"})
+	trip, _ := st.CreateProject(store.Project{Slug: "trip", Title: "Trip", ChatID: -100200300, MessageThreadID: 900000000000000011, Area: "travel"})
+	loose, _ := st.CreateProject(store.Project{Slug: "loose", Title: "Loose", ChatID: -100200300, MessageThreadID: 900000000000000012})
+	var calls []string
+	up := func(chatID, threadID int64, ref, text string) error {
+		calls = append(calls, ref+"|"+text[:strings.Index(text, "\n")])
+		return nil
+	}
+	RefreshOpener(st, "", trip, "## 待決定\n\n1. dates\n", up)
+	RefreshOpener(st, "", loose, "", up)
+	if len(calls) != 1 || calls[0] != "discord:900000000000000099|**Trip**" {
+		t.Fatalf("calls = %v", calls)
+	}
+}

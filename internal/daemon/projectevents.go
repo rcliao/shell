@@ -50,6 +50,9 @@ type projectResearchDeps struct {
 	deliver func(chatID, threadID int64, text string, buttons []bridge.LinkButton)
 	// refreshHome updates the chat's pinned 📋 Projects message.
 	refreshHome func(chatID int64)
+	// updateOpener edits a project post's first message (its live summary)
+	// after a doc write that bypasses the RPC; nil = no places.
+	updateOpener project.OpenerUpdater
 
 	// notion is the shared Notion client (Wave D): the poll consumer reads
 	// comments and page state through it, the revision consumer replies

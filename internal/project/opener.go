@@ -2,6 +2,7 @@ package project
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -62,4 +63,31 @@ func OpenerText(p store.Project, doc string, now time.Time) string {
 		text = string(r[:OpenerMax-len([]rune(footer))-1]) + "…"
 	}
 	return text + footer
+}
+
+// OpenerUpdater edits the first message of a project's own place.
+type OpenerUpdater func(chatID, threadID int64, placeRef, text string) error
+
+// RefreshOpener re-renders p's post opener from its doc (doc "" reads the
+// managed doc). It is called after EVERY doc write — the agent's doc-write
+// RPC, a stage change, and a human edit reconciled from Notion — so the post
+// stays the live summary. No-op for a project without a managed place (no
+// area, no thread, or an area without a place_ref in the same chat). Best
+// effort: another agent's post cannot be edited by this agent's bot.
+func RefreshOpener(st *store.Store, workspaceDir string, p *store.Project, doc string, update OpenerUpdater) {
+	if st == nil || update == nil || p == nil || p.Area == "" || p.MessageThreadID == 0 {
+		return
+	}
+	a, err := st.GetProjectBySlug(p.Area)
+	if err != nil || a == nil || a.PlaceRef == "" || a.ChatID != p.ChatID {
+		return
+	}
+	if doc == "" && workspaceDir != "" {
+		if dir, ok := ManagedDocDir(workspaceDir, p.Slug); ok {
+			doc, _ = ReadDoc(dir)
+		}
+	}
+	if err := update(p.ChatID, p.MessageThreadID, a.PlaceRef, OpenerText(*p, doc, time.Now())); err != nil {
+		slog.Info("project: post opener not updated", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
+	}
 }

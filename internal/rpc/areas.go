@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"time"
 
 	"github.com/rcliao/shell/internal/project"
 	"strings"
@@ -411,19 +410,10 @@ func (s *Server) ownProjectOn(chatID, thread int64, except string) string {
 }
 
 // refreshOpener re-renders the first message of p's post from its doc
-// (the live summary). Best effort: a post another agent opened cannot be
-// edited by this agent's bot, and that is fine.
+// (the live summary); see project.RefreshOpener.
 func (s *Server) refreshOpener(p *store.Project, doc string) {
-	a := s.placeOf(p)
-	if a == nil || s.places == nil {
+	if s.places == nil {
 		return
 	}
-	if doc == "" && s.workspaceDir != "" {
-		if dir, ok := project.ManagedDocDir(s.workspaceDir, p.Slug); ok {
-			doc, _ = project.ReadDoc(dir)
-		}
-	}
-	if err := s.places.UpdateOpener(p.ChatID, p.MessageThreadID, a.PlaceRef, project.OpenerText(*p, doc, time.Now())); err != nil {
-		slog.Info("rpc: post opener not updated", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
-	}
+	project.RefreshOpener(s.store, s.workspaceDir, p, doc, s.places.UpdateOpener)
 }
