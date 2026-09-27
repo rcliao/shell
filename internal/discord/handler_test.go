@@ -34,6 +34,8 @@ type fakeAPI struct {
 	slashReplies []string
 	deletes      []string
 	reacts       []string // "+emoji" / "-emoji"
+	created      []string // channels made by CreateGuildChannel
+	deleted      []string // channels removed by DeleteChannel
 }
 
 type sent struct {
@@ -100,10 +102,57 @@ func (f *fakeAPI) StartForumThread(forum string, t *discordgo.ThreadStart, m *di
 	defer f.mu.Unlock()
 	f.nextID++
 	id := strconv.FormatInt(f.nextID, 10)
-	th := &discordgo.Channel{ID: id, ParentID: forum, Name: t.Name, Type: discordgo.ChannelTypeGuildPublicThread, AppliedTags: t.AppliedTags}
+	guild := ""
+	if fc := f.channels[forum]; fc != nil {
+		guild = fc.GuildID
+	}
+	th := &discordgo.Channel{ID: id, GuildID: guild, ParentID: forum, Name: t.Name, Type: discordgo.ChannelTypeGuildPublicThread, AppliedTags: t.AppliedTags}
 	f.channels[id] = th
 	f.sends = append(f.sends, sent{channel: id, content: m.Content})
 	return th, nil
+}
+
+func (f *fakeAPI) GuildChannels(guild string) ([]*discordgo.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*discordgo.Channel
+	for _, c := range f.channels {
+		if c.GuildID == guild && !c.IsThread() {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeAPI) CreateGuildChannel(guild string, d discordgo.GuildChannelCreateData) (*discordgo.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	id := strconv.FormatInt(f.nextID, 10)
+	c := &discordgo.Channel{ID: id, GuildID: guild, Name: d.Name, Type: d.Type, ParentID: d.ParentID, Topic: d.Topic}
+	f.channels[id] = c
+	f.created = append(f.created, id)
+	return c, nil
+}
+
+func (f *fakeAPI) DeleteChannel(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.channels, id)
+	f.deleted = append(f.deleted, id)
+	return nil
+}
+
+func (f *fakeAPI) ActiveThreads(guild string) ([]*discordgo.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*discordgo.Channel
+	for _, c := range f.channels {
+		if c.GuildID == guild && c.IsThread() && (c.ThreadMetadata == nil || !c.ThreadMetadata.Archived) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.Channel, error) {
@@ -126,6 +175,9 @@ func (f *fakeAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.C
 	}
 	if e.AppliedTags != nil {
 		c.AppliedTags = *e.AppliedTags
+	}
+	if e.Topic != "" {
+		c.Topic = e.Topic
 	}
 	if e.Archived != nil {
 		if c.ThreadMetadata == nil {

@@ -24,8 +24,10 @@ never re-derive an id.
   when answered (record the answer in `決定`) · `更新紀錄` recent entries,
   older folded into one line.
 - Managed docs mirror to Notion by themselves — never edit that page by hand.
-- Areas (travel, home, school…) hold many projects; a project in an area gets
-  its own place with `create --area <slug> --place auto`. See "Areas" below.
+- Areas (travel, home, gaming…) hold many projects, one forum post each. Asked
+  for an area: `create --kind area --place new` yourself, never ask for ids;
+  the other agent keeps its own list, so run it even if it did. New areas
+  need a yes, posts don't. See "Areas" below.
 <!-- /hot -->
 
 A **project** is a named unit of multi-week research work (trip planning,
@@ -164,27 +166,36 @@ revision turn in the project's chat session with the comment text. Contract:
 ## Areas
 
 An **area** is an umbrella for one recurring kind of work (travel, home,
-school). Its doc holds what is true across all its projects (who travels, 2
-rooms, budget habits, lessons from past trips); each **project** in it (one
-trip) has its own doc and its own place. Sub-topics (flights, hotels,
-itinerary) are sections of the project doc, not more places.
+school, gaming). It has its own text channel for loose talk and a forum for
+its projects: **one post = one project**. Its doc holds what is true across
+all its projects (who comes along, budgets, lessons learned). Sub-topics
+(flights, hotels) are sections of a project's doc, not more places. The
+server's channel list is how the family sees what you track, so every
+active project should live in an area.
 
-- `project create --title 旅遊 --kind area --place-ref discord:<forum id>` —
-  an area; `--place-ref` is the forum where its projects get posts
-  (`telegram` = forum topics in the chat). Bind the area to its own
-  channel/topic with `--thread`.
-- `project create --title "<trip>" --emoji ✈️ --area <area> --stage 規劃中 --place auto --content "<first message>"`
-  — a project in the area. It lives in the area's chat, and `--place auto`
-  opens its post (or topic) and binds it; the receipt prints the thread.
-  Messages there get this project's `[Project]` block by themselves.
+**Making an area (it needs a person's yes).**
+- Asked for one ("make a gaming area"): do it yourself. Never ask for ids.
+  `project create --title 遊戲 --emoji 🎮 --kind area --place new [--channel-name gaming] [--tags 想玩,在玩,玩完]`
+  This finds or creates the channel and its forum, and registers the area.
+  Reply with the two mentions the receipt prints.
+- You have **your own** project list; the other agent has its own. If the
+  other agent already made the area, run the **same command** anyway: it
+  reuses the channels and registers your row. Never decide who does it, and
+  don't hand it off.
+- Not asked, but a kind of work keeps coming back (your review lists
+  recurring subjects and projects with no area)? **Propose** it in one line
+  and wait for a yes. Never create a channel unasked.
+
+**Projects in an area (no yes needed).**
+- `project create --title "<name>" --emoji E --area <area> --stage <s> --place auto --content "<first message>"`
+  opens the project's post, or **joins** an open post with the same title,
+  so the post stays the one shared record. Tell people where it is (`<#thread id>`).
+- `project join --thread <post id>` — you're in a post you don't track yet
+  (your block says so): register it as your own project before working on it.
 - `project move <slug> --area <area> [--stage <s>] [--place auto] [--content <text>]`
-  — file an existing project under an area (and give it a place).
-- `project stage <slug> --stage <s>` — the project's step (e.g. 規劃中 → 已訂 →
-  完成); on Discord it is the post's tag.
-- `project archive <slug>` — archive; its post/topic is closed too.
+  — file an existing project under an area.
+- `project stage <slug> --stage <s>` — its step, shown as the post's tag.
+- `project archive <slug>` — archive; its post is closed too.
 
 In an area's own channel your `[Project]` block lists its projects with
-their threads. Talk that belongs to one project: answer, then point to its
-place (on Discord write `<#thread id>`). A new effort that keeps coming up:
-offer to start a project for it; on yes, create it with `--place auto`.
-
+their threads: answer there, then point to the project's post.
