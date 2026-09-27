@@ -254,10 +254,12 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	resp["created"] = true
 
 	// The project's own place (a forum post or topic in its area). Failure
-	// leaves an unbound project and a warning; `move` with place=auto retries.
+	// leaves an unbound project and place_warning (its own field: the single
+	// warning slot is overwritten by later scaffold/emoji warnings); `move`
+	// with place=auto retries.
 	if req.Place == "auto" {
 		if thread, warn := s.createPlace(p, area, req.Content); warn != "" {
-			resp["warning"] = warn
+			resp["place_warning"] = warn
 		} else {
 			p.MessageThreadID = thread
 			resp["message_thread_id"] = thread

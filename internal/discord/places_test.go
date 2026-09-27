@@ -52,6 +52,33 @@ func TestForumPostRejectsNonForum(t *testing.T) {
 	api.channels[groupChan] = &discordgo.Channel{ID: groupChan, Type: discordgo.ChannelTypeGuildText}
 	b := newBot(api, Options{})
 	if _, err := b.CreateForumPost(groupChan, "x", "", []string{"planning"}); err == nil {
-		t.Fatal("tagging in a text channel should fail")
+		t.Fatal("a post in a text channel should fail")
+	}
+}
+
+// A tag the bot cannot add must not cost the project its post.
+type noTagEditAPI struct{ *fakeAPI }
+
+func (a noTagEditAPI) EditChannel(id string, e *discordgo.ChannelEdit) (*discordgo.Channel, error) {
+	if e.AvailableTags != nil {
+		return nil, discordgo.ErrUnauthorized
+	}
+	return a.fakeAPI.EditChannel(id, e)
+}
+
+func TestForumPostSurvivesTagFailure(t *testing.T) {
+	api := newFakeAPI()
+	api.channels[forumChan] = &discordgo.Channel{ID: forumChan, Type: discordgo.ChannelTypeGuildForum}
+	b := newBot(noTagEditAPI{api}, Options{})
+	post, err := b.CreateForumPost(forumChan, "Trip", "", []string{"new stage"})
+	if err != nil || api.channels[strconv.FormatInt(post, 10)] == nil {
+		t.Fatalf("post not created: %d %v", post, err)
+	}
+	// Clearing tags sends an empty list, not null.
+	if err := b.SetPostTags(post, nil); err != nil {
+		t.Fatal(err)
+	}
+	if pc := api.channels[strconv.FormatInt(post, 10)]; pc.AppliedTags == nil {
+		t.Fatal("cleared tags sent as null")
 	}
 }

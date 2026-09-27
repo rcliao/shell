@@ -135,7 +135,18 @@ func TestAreaValidation(t *testing.T) {
 	// A platform failure keeps the project, unbound, with a warning.
 	fp.fail = true
 	code, out := postProject(t, s, map[string]any{"action": "create", "title": "Y", "area": "travel", "place": "auto"})
-	if code != http.StatusOK || out["warning"] == nil || out["message_thread_id"] != float64(0) {
+	if code != http.StatusOK || out["place_warning"] == nil || out["message_thread_id"] != float64(0) {
 		t.Fatalf("failed place: %d %v", code, out)
+	}
+}
+
+// A failed place is reported in its own field, so a later emoji or scaffold
+// warning cannot hide it.
+func TestPlaceWarningNotOverwritten(t *testing.T) {
+	s, fp := newAreaServer(t)
+	fp.fail = true
+	_, out := postProject(t, s, map[string]any{"action": "create", "title": "Z", "emoji": "✈️", "area": "travel", "place": "auto"})
+	if out["place_warning"] == nil {
+		t.Fatalf("place failure hidden: %v", out)
 	}
 }

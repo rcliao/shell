@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/go-telegram/bot"
 )
@@ -32,9 +33,11 @@ func (b *Bot) CreateForumTopic(chatID int64, title, content string) (int64, erro
 	if err != nil {
 		return 0, fmt.Errorf("telegram: create forum topic: %w", err)
 	}
+	// The topic exists now: a failed first message must not orphan it (the
+	// caller would leave the project unbound and a retry would open another).
 	if content != "" {
 		if err := b.SendTextButtons(chatID, threadID, content, nil); err != nil {
-			return threadID, fmt.Errorf("telegram: first message in topic %d: %w", threadID, err)
+			slog.Warn("telegram: first message in new topic failed", "chat_id", chatID, "thread", threadID, "error", err)
 		}
 	}
 	return threadID, nil

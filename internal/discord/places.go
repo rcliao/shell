@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/bwmarrin/discordgo"
@@ -22,9 +23,20 @@ const (
 // and the named tags (created on the forum when missing). It returns the
 // post's snowflake, which is also its thread id.
 func (b *Bot) CreateForumPost(forumID, title, content string, tags []string) (int64, error) {
+	forum, err := b.api.Channel(forumID)
+	if err != nil {
+		return 0, fmt.Errorf("discord: forum %s: %w", forumID, err)
+	}
+	if forum.Type != discordgo.ChannelTypeGuildForum {
+		return 0, fmt.Errorf("discord: channel %s is not a forum", forumID)
+	}
+	// Tags are decoration: a tag the bot cannot add (no Manage Channels, or
+	// the forum's 20-tag limit) must not cost the project its post. `project
+	// stage` retries the tag later and reports the error there.
 	ids, err := b.forumTagIDs(forumID, tags)
 	if err != nil {
-		return 0, err
+		slog.Warn("discord: forum post created without tags", "forum", forumID, "tags", tags, "error", err)
+		ids = nil
 	}
 	if content == "" {
 		content = title
@@ -47,6 +59,9 @@ func (b *Bot) SetPostTags(postID int64, tags []string) error {
 	ids, err := b.forumTagIDs(post.ParentID, tags)
 	if err != nil {
 		return err
+	}
+	if ids == nil {
+		ids = []string{} // clear: Discord wants [], not null
 	}
 	_, err = b.api.EditChannel(post.ID, &discordgo.ChannelEdit{AppliedTags: &ids})
 	return err

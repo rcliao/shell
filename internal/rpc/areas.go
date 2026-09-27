@@ -183,7 +183,7 @@ func (s *Server) projectMove(w http.ResponseWriter, req ProjectRequest) {
 	resp := map[string]any{}
 	if req.Place == "auto" {
 		if thread, warn := s.createPlace(p, area, req.Content); warn != "" {
-			resp["warning"] = warn
+			resp["place_warning"] = warn
 		} else {
 			p.MessageThreadID = thread
 			resp["place_created"] = true
