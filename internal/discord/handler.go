@@ -168,8 +168,13 @@ func (h *Handler) HandleMessage(ctx context.Context, m *discordgo.Message) {
 		h.setStatus(w.channelID, m.ID, "", "❌")
 		return
 	}
+	images, text = h.stickerTurn(ctx, m, sender, text, images)
 	defer cleanupMedia(images, pdfs)
 	if text == "" {
+		// Say so: a message that silently vanishes (a sticker did, before
+		// stickers were handled) is invisible in every log.
+		slog.Info("discord: message has nothing to answer", "chat_id", w.conv.ChatID, "msg_id", msgID,
+			"attachments", len(m.Attachments), "stickers", len(m.StickerItems))
 		return
 	}
 	h.runTurn(ctx, w, m, msgID, sender, text, images, pdfs, isGroup)
@@ -394,8 +399,12 @@ func (h *Handler) HandleReaction(ctx context.Context, r *discordgo.MessageReacti
 	resp, err := h.bridge.HandleReaction(ctx, w.conv.ChatID, thread, msgID, emoji)
 	if err != nil {
 		slog.Error("discord: reaction failed", "error", err, "emoji", emoji)
+		h.mark(w.channelID, r.MessageID, "❌")
 		return
 	}
+	// The result mark tells the person their reaction did something: 📌 on
+	// a reply is otherwise silent when remembering succeeds.
+	h.mark(w.channelID, r.MessageID, "✅")
 	if resp != "" {
 		h.bot.sendChunks(w.channelID, resp, nil)
 	}
@@ -501,6 +510,14 @@ func (h *Handler) statusSetter(channelID, messageID string) func(string) {
 		defer mu.Unlock()
 		h.setStatus(channelID, messageID, current, emoji)
 		current = emoji
+	}
+}
+
+// mark adds a result reaction to a message (the agent's reply a person
+// reacted to).
+func (h *Handler) mark(channelID, messageID, emoji string) {
+	if err := h.api.React(channelID, messageID, emoji); err != nil {
+		slog.Debug("discord: result mark", "error", err)
 	}
 }
 
@@ -623,6 +640,51 @@ func (h *Handler) download(ctx context.Context, a *discordgo.MessageAttachment, 
 	return tmp.Name(), n, nil
 }
 
+// stickerURL is where Discord serves a sticker's image. A variable so tests
+// can point it at a local server.
+var stickerURL = func(id, ext string) string {
+	return "https://media.discordapp.net/stickers/" + id + "." + ext
+}
+
+// stickerTurn turns a sticker into something the agent can read, the way the
+// Telegram handler does: the sender and sticker name in words, and the image
+// when there is one. A sticker-only message used to arrive with empty text and
+// be dropped without a trace. Lottie stickers are vector animations with no
+// image form, so they are described in words only.
+func (h *Handler) stickerTurn(ctx context.Context, m *discordgo.Message, sender, text string, images []bridge.ImageInfo) ([]bridge.ImageInfo, string) {
+	for _, st := range m.StickerItems {
+		if st == nil {
+			continue
+		}
+		desc := "(sticker from " + sender + ": " + st.Name + ")"
+		if text == "" {
+			text = desc
+		} else {
+			text += " [sticker: " + st.Name + "]"
+		}
+		ext := ""
+		switch st.FormatType {
+		case discordgo.StickerFormatTypePNG, discordgo.StickerFormatTypeAPNG:
+			ext = "png"
+		case discordgo.StickerFormatTypeGIF:
+			ext = "gif"
+		default:
+			text += " [animated sticker, no image]"
+			continue
+		}
+		if len(images) > 0 {
+			continue // a photo in the same message says more than the sticker
+		}
+		path, size, err := h.download(ctx, &discordgo.MessageAttachment{URL: stickerURL(st.ID, ext), Filename: st.Name + "." + ext}, "dc-sticker-*."+ext)
+		if err != nil {
+			slog.Warn("discord: sticker image download failed, sending words only", "error", err, "sticker", st.ID)
+			continue
+		}
+		images = append(images, bridge.ImageInfo{Path: path, Size: size})
+	}
+	return images, text
+}
+
 // cleanupMedia removes downloaded temp files. Archived images were moved to
 // the media store (MediaID set) and are kept.
 func cleanupMedia(images []bridge.ImageInfo, pdfs []bridge.PDFInfo) {
@@ -651,6 +713,11 @@ func transcriptText(m *discordgo.Message) string {
 	}
 	if len(m.Attachments) > 0 {
 		return "(attachment)"
+	}
+	for _, st := range m.StickerItems {
+		if st != nil {
+			return "(sticker: " + st.Name + ")"
+		}
 	}
 	return ""
 }

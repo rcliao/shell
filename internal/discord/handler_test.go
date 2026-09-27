@@ -2,6 +2,8 @@ package discord
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -137,7 +139,7 @@ func newHarness(t *testing.T, reply string) *harness {
 	}
 	t.Cleanup(func() { s.Close() })
 	agent := &fakeAgent{Agent: process.NewManager(process.ManagerConfig{Binary: "echo"}), reply: reply}
-	br := bridge.New(agent, s, nil, nil, false, "", nil, nil, nil, nil)
+	br := bridge.New(agent, s, nil, nil, false, "", map[string]string{"❌": "cancel"}, nil, nil, nil)
 
 	api := newFakeAPI()
 	api.channels[dmChan] = &discordgo.Channel{ID: dmChan, Type: discordgo.ChannelTypeDM}
@@ -349,5 +351,56 @@ func TestStreamerShowsProgressUntilFirstWords(t *testing.T) {
 	s.close()
 	if got := api.edits["900000000000000001"]; got != "Here is the answer." {
 		t.Fatalf("a progress tick overwrote the streamed reply: %q", got)
+	}
+}
+
+func TestStickerOnlyMessageReachesTheAgent(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\nfake")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(png) }))
+	defer srv.Close()
+	old := stickerURL
+	stickerURL = func(id, ext string) string { return srv.URL + "/" + id + "." + ext }
+	defer func() { stickerURL = old }()
+
+	h := newHarness(t, "cute!")
+	m := msg("600000000000000040", dmChan, linkedUser, "")
+	m.StickerItems = []*discordgo.StickerItem{{ID: "700000000000000001", Name: "wave", FormatType: discordgo.StickerFormatTypePNG}}
+	h.bot.handler.HandleMessage(context.Background(), m)
+
+	if h.agent.turnCount() != 1 {
+		t.Fatal("a sticker-only message must start a turn, not vanish")
+	}
+	req := h.agent.turns[0]
+	if !strings.Contains(req.Text, "(sticker from The Owner: wave)") {
+		t.Fatalf("turn text %q should name the sender and sticker", req.Text)
+	}
+	if len(req.Images) != 1 {
+		t.Fatalf("want the sticker image attached, got %d images", len(req.Images))
+	}
+}
+
+func TestLottieStickerIsDescribedInWords(t *testing.T) {
+	h := newHarness(t, "ok")
+	m := msg("600000000000000041", dmChan, linkedUser, "")
+	m.StickerItems = []*discordgo.StickerItem{{ID: "700000000000000002", Name: "dance", FormatType: discordgo.StickerFormatTypeLottie}}
+	h.bot.handler.HandleMessage(context.Background(), m)
+	if h.agent.turnCount() != 1 || len(h.agent.turns[0].Images) != 0 {
+		t.Fatal("a Lottie sticker has no image form: words only")
+	}
+	if !strings.Contains(h.agent.turns[0].Text, "dance") {
+		t.Fatalf("turn text %q lost the sticker name", h.agent.turns[0].Text)
+	}
+}
+
+func TestReactionActionGetsAResultMark(t *testing.T) {
+	h := newHarness(t, "an answer")
+	h.bot.handler.HandleMessage(context.Background(), msg("600000000000000050", dmChan, linkedUser, "hi"))
+	reply := h.api.sends[0].id
+	h.api.reacts = nil
+	h.bot.handler.HandleReaction(context.Background(), &discordgo.MessageReaction{
+		UserID: linkedUser, MessageID: reply, ChannelID: dmChan, Emoji: discordgo.Emoji{Name: "❌"},
+	})
+	if got := strings.Join(h.api.reacts, " "); got != "+✅" {
+		t.Fatalf("result marks = %q, want ✅ on the reacted reply", got)
 	}
 }
