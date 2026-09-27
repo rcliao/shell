@@ -215,7 +215,7 @@ func (b *Bridge) CommitAgenda(a Agenda) {
 		}
 	}
 	for _, id := range a.eventIDs {
-		_ = b.store.MarkEvent(id, store.EventSeen, "")
+		_ = b.store.MarkEventSeen(id) // never downgrades one the agent closed this beat
 	}
 }
 

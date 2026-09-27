@@ -88,7 +88,14 @@ func TestHeartbeatAgenda(t *testing.T) {
 	if !shownAgain {
 		t.Error("an event not yet marked done/ignored stays on the agenda")
 	}
+	// The agent closes the event during the beat; the commit after the turn
+	// must not reopen it (live bug: done was overwritten with seen).
+	shown := b.HeartbeatAgenda(ctx)
 	st.MarkEvent(evID, store.EventDone, "handled")
+	b.CommitAgenda(shown)
+	if evs, _ := st.ListEvents(nil, 0); evs[0].Status != store.EventDone {
+		t.Fatalf("commit overwrote the agent's decision: %s", evs[0].Status)
+	}
 	for _, it := range b.HeartbeatAgenda(ctx).Items {
 		if it.Kind == "event" {
 			t.Error("a done event leaves the agenda")
