@@ -81,6 +81,9 @@ bot has its own DM channel with each person. Both entries map to the same Telegr
 
 - A linked channel takes over that Telegram chat's sessions, memory, schedules, projects and lanes. From then
   on, every reminder and proactive message for that chat goes to Discord.
+- **A Telegram forum topic can become its own channel.** Link a channel to `{ "chat_id": <group id>, "thread_id": <topic id> }`
+  and the topic's session, lane and project carry over. A thread works the same way. The bot needs no extra
+  permission for this; you create the channel.
 - A thread entry is optional. Link a thread only to carry over a Telegram forum topic's session. New threads
   in a linked channel stay in that chat automatically.
 - Channels you don't link still work, with ids derived from Discord. They start fresh.
@@ -106,6 +109,8 @@ Discord alone. A send for a Telegram chat that was never linked is logged as dro
 
 ## What differs from Telegram today
 
+- **Images:** several images attached to one Discord message arrive as one turn, like a Telegram album.
+- **Tables:** Markdown tables are shown in a code block, because Discord does not render tables.
 - **Replies:** they stream by editing one message about every 1.5 s. Anything over 2,000 characters arrives as
   several messages, and code blocks are closed and reopened across the split.
 - **Status reactions:** 👀 → ⏳ → ✅ or 🤔 on your message, one at a time.
@@ -113,7 +118,6 @@ Discord alone. A send for a Telegram chat that was never linked is logged as dro
   yet.
 - **Not yet supported:**
   - voice notes and stickers;
-  - albums (each image arrives as its own turn);
   - merging several quick messages into one turn;
   - buttons other than links.
 - **Bots:** messages from bots, including the other agent, are ignored. Agent-to-agent hand-offs still go

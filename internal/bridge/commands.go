@@ -152,7 +152,7 @@ func (b *Bridge) Status(chatID, threadID int64) (string, error) {
 
 func (b *Bridge) Help() string {
 	help := "## shell\n\n" +
-		"Telegram ↔ Claude Code bridge\n\n" +
+		"Messaging ↔ Claude Code bridge\n\n" +
 		"Send any message to chat with Claude Code.\n\n" +
 		"---\n\n" +
 		"### Commands\n\n" +
