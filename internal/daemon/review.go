@@ -12,6 +12,7 @@ import (
 
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/process"
+	"github.com/rcliao/shell/internal/route"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
 )
@@ -53,7 +54,23 @@ type reviewDeps struct {
 	runTurn func(ctx context.Context, prompt string) (string, error)
 	// notify delivers text to a chat and reports whether it was sent.
 	notify func(chatID int64, text string) error
+	// judge labels the window's messages (router feedback loop 1); nil = skip.
+	judge func(ctx context.Context, since time.Time) error
+	// exclude: test chats left out of routing evidence (route.exclude_chats).
+	exclude map[int64]bool
 }
+
+// recurringWindow and its bars: a subject that comes back this often, with
+// no project behind it, is a candidate project (router feedback loop 2).
+// judgeBudget bounds the judge inside a review or chat retro (the turn has
+// its own 20-minute budget; together they stay inside the queue lease).
+const judgeBudget = 8 * time.Minute
+
+const (
+	recurringWindow   = 14 * 24 * time.Hour
+	recurringMinCount = 3
+	recurringMinDays  = 2
+)
 
 // reviewScheduleMessage is the event-mode schedule envelope.
 func reviewScheduleMessage() string {
@@ -227,6 +244,17 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 	}
 
 	section("How your messages were routed to project lanes", d.laneEvidence(since))
+	if d.judge != nil {
+		// Bounded well inside the queue lease: labels are best-effort; a
+		// half-judged week just means fewer misses listed this time.
+		jctx, cancel := context.WithTimeout(ctx, judgeBudget)
+		if err := d.judge(jctx, since); err != nil {
+			slog.Warn("review: judge failed or ran out of time", "error", err)
+		}
+		cancel()
+	}
+	section("Where routing disagreed with an independent judge (fix by sharpening that project's instructions)", d.missEvidence(since))
+	section("Subjects that keep coming back with no project behind them (candidate projects)", recurringEvidence(d.store, time.Now().Add(-recurringWindow), 0, d.exclude))
 
 	if refl, err := d.store.ListReflections(3); err == nil {
 		var lines []string
@@ -294,6 +322,44 @@ func (d reviewDeps) laneEvidence(since time.Time) string {
 		fmt.Fprintf(&sb, "- messages you re-labelled with shell_lane: %d, of which routed differently: %d\n", len(mine), wrong)
 	}
 	sb.WriteString("- the router decides from each project's instructions; `project set-instructions <slug> --instructions \"…\"` sharpens them\n")
+	return sb.String()
+}
+
+// missEvidence lists acted-on routings the judge (or a human) disagrees with.
+func (d reviewDeps) missEvidence(since time.Time) string {
+	misses, err := route.Misses(d.store, since, d.exclude)
+	if err != nil || len(misses) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, m := range misses {
+		if i == 8 {
+			fmt.Fprintf(&sb, "- (and %d more)\n", len(misses)-8)
+			break
+		}
+		t := []rune(strings.Join(strings.Fields(m.Text), " "))
+		if len(t) > 90 {
+			t = append(t[:90], '…')
+		}
+		fmt.Fprintf(&sb, "- %s: routed %s, %s says %s — %s\n", m.At.Local().Format("Mon 15:04"), m.Routed, m.Source, m.Want, string(t))
+	}
+	return sb.String()
+}
+
+// recurringEvidence lists recurring subjects without a project (chat 0 = all chats).
+func recurringEvidence(st *store.Store, since time.Time, chatID int64, exclude map[int64]bool) string {
+	subs, err := route.RecurringSubjects(st, since, recurringMinCount, recurringMinDays, exclude)
+	if err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, s := range subs {
+		if chatID != 0 && s.ChatID != chatID {
+			continue
+		}
+		fmt.Fprintf(&sb, "- \"%s\" (chat %d): %d messages on %d days, last %s — e.g. %s\n",
+			s.Name, s.ChatID, s.Count, s.Days, s.Last.Local().Format("Mon Jan 2"), strings.Join(s.Examples, " / "))
+	}
 	return sb.String()
 }
 

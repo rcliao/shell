@@ -25,9 +25,10 @@ type JudgeItem struct {
 
 // JudgeLabel is the judge's answer for one item.
 type JudgeLabel struct {
-	N    int    `json:"n"`
-	Lane string `json:"lane"`
-	Sure bool   `json:"sure"`
+	N       int    `json:"n"`
+	Lane    string `json:"lane"`
+	Sure    bool   `json:"sure"`
+	Subject string `json:"subject"`
 }
 
 // JudgePrompt builds one batch prompt: the candidate lanes, then the
@@ -39,6 +40,9 @@ For each message, decide which lane it belongs to: one of the projects below, or
 everything that is not about a project (small talk, unrelated questions, other topics).
 Read the messages in order: a short follow-up belongs to the lane of what it follows up.
 "sure" is false when a reasonable person could file it either way.
+"subject" names what the message is about in 2–4 lowercase English words
+(for example "chiikawa restock hunt", "steakhouse dress code", "lunch log"),
+the same words for the same subject across messages.
 
 Lanes:
 - general: anything not about one of the projects below
@@ -64,7 +68,7 @@ Lanes:
 	}
 	sb.WriteString(`
 Answer with ONLY a JSON array, one object per message, no prose:
-[{"n": 1, "lane": "<lane>", "sure": true}, ...]`)
+[{"n": 1, "lane": "<lane>", "sure": true, "subject": "<2-4 words>"}, ...]`)
 	return sb.String()
 }
 
@@ -97,6 +101,9 @@ func ClaudeCLI(ctx context.Context, model, prompt string, timeout time.Duration)
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "claude", "-p", prompt, "--model", model, "--output-format", "text")
+	// A child that keeps stdout open must not hold Wait past the deadline:
+	// the caller's budget (judgeBudget) sits inside a queue lease.
+	cmd.WaitDelay = 10 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

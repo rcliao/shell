@@ -55,6 +55,18 @@ type RouteConfig struct {
 	// are its lanes (usually itself; a test chat can borrow another's).
 	// Empty = lanes off everywhere.
 	LaneChats map[string]int64 `json:"lane_chats"`
+	// ExcludeChats are left out of judging, reports and review evidence
+	// (test chats such as the CLI lane test chat).
+	ExcludeChats []int64 `json:"exclude_chats"`
+}
+
+// Excluded returns ExcludeChats as a set.
+func (r RouteConfig) Excluded() map[int64]bool {
+	out := map[int64]bool{}
+	for _, c := range r.ExcludeChats {
+		out[c] = true
+	}
+	return out
 }
 
 // LanesAllChats is the LaneChats key that turns lanes on for every chat,

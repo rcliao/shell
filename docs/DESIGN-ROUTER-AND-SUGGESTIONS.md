@@ -449,6 +449,34 @@ emoji (👍 go, 👎 stop, 🔄 regenerate).
 - CLI `shell suggestions [list|decide <id> accept|decline|done [--note]|review-now]`.
 - Config `review.enabled` (default on) and `review.cron`.
 
+## Router feedback loops (2026-09-26)
+
+The owner's goal: "so that router to project can be more beneficial to
+advance the project". The first live day showed the router is precise (every
+project pick right) but misses about half of project messages (meal memos
+routed general). There are four loops.
+
+1. **The judge runs weekly, inside the agent's review.** Before building the
+   evidence pack, the review labels the week's real messages with the judge
+   (the Opus call, at most one batch per thread). The pack lists where the
+   acted-on routing disagreed with it: "routed general; the judge: 健康紀錄 —
+   <message>". The agent fixes its own routing by sharpening that project's
+   instructions (`project set-instructions`). The harness never edits them.
+2. **Recurring subjects without a project.** The judge also names each
+   message's subject in 2–4 words. General-lane messages whose subject
+   recurs (3+ messages on 2+ days in 14 days, no matching project) are listed
+   in the owner review and in that chat's retro. The retro is where "want me
+   to track this as a project?" belongs.
+3. **Lanes advance their project.** The `[Project]` block of a project lane,
+   and of a project's own forum topic (also a conversation about exactly that
+   project), says: if this message settles a decision or raises a new question for the
+   project, update the doc's 決定 / 待決定 sections now (`project doc-write`).
+   So a decision said in chat lands in the project in the same turn.
+4. **Test chats are excluded.** `route.exclude_chats` (for example the CLI
+   test chat 42) is left out of judging, reports and evidence.
+
+`route_labels` gains a `subject` column (judge only).
+
 ## S1 build spec (2026-09-26)
 
 **What it is.** A weekly retro for a family chat, which ends in at most one

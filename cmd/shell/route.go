@@ -74,7 +74,7 @@ func newRouteCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			return runJudge(cmd.Context(), st, cfg.Route.Judge(), days, force)
+			return runJudge(cmd.Context(), st, cfg.Route.Judge(), days, force, cfg.Route.Excluded())
 		},
 	}
 	judge.Flags().BoolVar(&force, "force", false, "re-label messages the judge already labelled")
@@ -85,12 +85,12 @@ func newRouteCmd() *cobra.Command {
 		Use:   "report",
 		Short: "Score each backend against labels and the always-general baseline",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, st, err := open()
+			cfg, st, err := open()
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			return runRouteReport(st, source, days, sample)
+			return runRouteReport(st, source, days, sample, cfg.Route.Excluded())
 		},
 	}
 	report.Flags().StringVar(&source, "source", "replay", "replay | live")
@@ -134,22 +134,8 @@ func newRouteCmd() *cobra.Command {
 	return cmd
 }
 
-// laneCandidates returns, per chat, the lanes live routing would offer:
-// the chat's active projects. A chat with none is not routed (live only
-// asks which_project when the chat has projects).
 func laneCandidates(st *store.Store) (map[int64][]route.Candidate, error) {
-	all, err := st.ListProjects(0)
-	if err != nil {
-		return nil, err
-	}
-	out := map[int64][]route.Candidate{}
-	for _, p := range all {
-		if p.Status != "active" {
-			continue
-		}
-		out[p.ChatID] = append(out[p.ChatID], route.Candidate{Lane: p.Slug, Title: p.Title, Desc: p.Instructions})
-	}
-	return out, nil
+	return route.Candidates(st)
 }
 
 func chatKind(chatID int64) string {
@@ -203,82 +189,13 @@ func runReplay(ctx context.Context, st *store.Store, backends []route.Backend, s
 	return nil
 }
 
-// judgeBatch is the most messages one judge call labels.
-const judgeBatch = 30
-
-func runJudge(ctx context.Context, st *store.Store, model string, days int, force bool) error {
-	cands, err := laneCandidates(st)
+func runJudge(ctx context.Context, st *store.Store, model string, days int, force bool, exclude map[int64]bool) error {
+	labelled, calls, err := route.RunJudge(ctx, st, model, time.Now().AddDate(0, 0, -days), force, exclude,
+		func(ctx context.Context, model, prompt string) (string, error) {
+			return route.ClaudeCLI(ctx, model, prompt, 5*time.Minute)
+		})
 	if err != nil {
 		return err
-	}
-	msgs, err := st.UserMessagesSince(time.Now().AddDate(0, 0, -days))
-	if err != nil {
-		return err
-	}
-	have := map[string]bool{}
-	if !force {
-		best, err := st.BestRouteLabels()
-		if err != nil {
-			return err
-		}
-		for k := range best {
-			have[k] = true
-		}
-	}
-	// Group by thread, keep order: the judge reads a thread as a conversation.
-	type key struct{ chat, thread int64 }
-	threads := map[key][]store.UserMessage{}
-	var order []key
-	for _, m := range msgs {
-		if len(cands[m.ChatID]) == 0 {
-			continue
-		}
-		k := key{m.ChatID, m.ThreadID}
-		if _, ok := threads[k]; !ok {
-			order = append(order, k)
-		}
-		threads[k] = append(threads[k], m)
-	}
-	labelled, calls := 0, 0
-	for _, k := range order {
-		ms := threads[k]
-		for start := 0; start < len(ms); start += judgeBatch {
-			end := min(start+judgeBatch, len(ms))
-			batch := ms[start:end]
-			todo := false
-			items := make([]route.JudgeItem, len(batch))
-			for i, m := range batch {
-				items[i] = route.JudgeItem{N: i + 1, At: m.At, Text: m.Text}
-				if !have[store.LabelKey(m.ChatID, m.ThreadID, store.TextHash(m.Text))] {
-					todo = true
-				}
-			}
-			if !todo {
-				continue
-			}
-			out, err := route.ClaudeCLI(ctx, model, route.JudgePrompt(cands[k.chat], items), 5*time.Minute)
-			calls++
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "judge: chat %d thread %d batch %d: %v\n", k.chat, k.thread, start/judgeBatch, err)
-				continue
-			}
-			labels, err := route.ParseJudge(out, cands[k.chat])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "judge: chat %d thread %d batch %d: %v\n", k.chat, k.thread, start/judgeBatch, err)
-				continue
-			}
-			for _, l := range labels {
-				if l.N < 1 || l.N > len(batch) {
-					continue
-				}
-				m := batch[l.N-1]
-				if err := st.UpsertRouteLabel(store.RouteLabel{ChatID: m.ChatID, ThreadID: m.ThreadID,
-					TextHash: store.TextHash(m.Text), Lane: l.Lane, Source: "judge", Sure: l.Sure}); err != nil {
-					return err
-				}
-				labelled++
-			}
-		}
 	}
 	fmt.Printf("judge (%s): %d labels from %d calls\n", model, labelled, calls)
 	return nil
@@ -294,10 +211,16 @@ type backendScore struct {
 	latencies                        []int64
 }
 
-func runRouteReport(st *store.Store, source string, days, sample int) error {
-	rows, err := st.RouteDecisions(source, time.Now().AddDate(0, 0, -days-1))
+func runRouteReport(st *store.Store, source string, days, sample int, exclude map[int64]bool) error {
+	all, err := st.RouteDecisions(source, time.Now().AddDate(0, 0, -days-1))
 	if err != nil {
 		return err
+	}
+	var rows []store.RouteDecision // test chats (route.exclude_chats) never count
+	for _, r := range all {
+		if !exclude[r.ChatID] {
+			rows = append(rows, r)
+		}
 	}
 	labels, err := st.BestRouteLabels()
 	if err != nil {

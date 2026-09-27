@@ -104,8 +104,10 @@ func TestLaneFollowUpGoesToRealThread(t *testing.T) {
 	}
 }
 
-// With lanes off the thread-bound project block is unchanged (byte-identical
-// prompt); the lane block has its own wording.
+// The thread-bound project block keeps its wording (and, since the router
+// feedback loops, both it and the lane block ask the turn to record decisions
+// in the doc — a project's own topic is a project conversation too); the lane
+// block has its own header.
 func TestScopedProjectWordingUnchanged(t *testing.T) {
 	b := &Bridge{}
 	p := store.Project{Slug: "trip", Title: "Spring trip", Status: "active", MessageThreadID: 9}
@@ -113,6 +115,9 @@ func TestScopedProjectWordingUnchanged(t *testing.T) {
 	scoped := b.scopedProjectBlock([]store.Project{p, other}, 9)
 	if !strings.Contains(scoped, "(other active projects in this chat, not this thread: health)") {
 		t.Errorf("thread-bound block changed: %q", scoped)
+	}
+	if !strings.Contains(scoped, "update the doc's") {
+		t.Error("a project conversation is asked to record decisions in the doc")
 	}
 	if lane := b.laneProjectBlock(p, []store.Project{p, other}); !strings.Contains(lane, "routed to this project's lane") ||
 		!strings.Contains(lane, "(other active projects in this chat: health)") {
