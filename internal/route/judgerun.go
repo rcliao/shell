@@ -14,6 +14,9 @@ import (
 // Running the judge (R0 scoring; weekly in the review since the feedback
 // loops). Shared by `shell route judge` and the daemon's weekly review.
 
+// noSubject marks a judge label whose subject the model left out.
+const noSubject = "-"
+
 // judgeBatch is the most messages one judge call labels.
 const judgeBatch = 30
 
@@ -106,9 +109,13 @@ func RunJudge(ctx context.Context, st *store.Store, model string, since time.Tim
 					continue
 				}
 				m := batch[l.N-1]
+				subject := strings.ToLower(strings.TrimSpace(l.Subject))
+				if subject == "" {
+					subject = noSubject // labelled; never re-judged just for a missing subject
+				}
 				if err := st.UpsertRouteLabel(store.RouteLabel{ChatID: m.ChatID, ThreadID: m.ThreadID,
 					TextHash: store.TextHash(m.Text), Lane: l.Lane, Source: "judge", Sure: l.Sure,
-					Subject: strings.ToLower(strings.TrimSpace(l.Subject))}); err != nil {
+					Subject: subject}); err != nil {
 					return labels, calls, err
 				}
 				labels++
@@ -190,7 +197,7 @@ func RecurringSubjects(st *store.Store, since time.Time, minCount, minDays int, 
 			continue
 		}
 		l, ok := labels[store.LabelKey(m.ChatID, m.ThreadID, store.TextHash(m.Text))]
-		if !ok || l.Lane != General || l.Subject == "" {
+		if !ok || l.Lane != General || l.Subject == "" || l.Subject == noSubject {
 			continue
 		}
 		k := fmt.Sprintf("%d|%s", m.ChatID, l.Subject)

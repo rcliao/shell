@@ -104,8 +104,10 @@ func TestLaneFollowUpGoesToRealThread(t *testing.T) {
 	}
 }
 
-// With lanes off the thread-bound project block is unchanged (byte-identical
-// prompt); the lane block has its own wording.
+// The thread-bound project block keeps its wording (and, since the router
+// feedback loops, both it and the lane block ask the turn to record decisions
+// in the doc — a project's own topic is a project conversation too); the lane
+// block has its own header.
 func TestScopedProjectWordingUnchanged(t *testing.T) {
 	b := &Bridge{}
 	p := store.Project{Slug: "trip", Title: "Spring trip", Status: "active", MessageThreadID: 9}

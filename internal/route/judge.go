@@ -101,6 +101,9 @@ func ClaudeCLI(ctx context.Context, model, prompt string, timeout time.Duration)
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "claude", "-p", prompt, "--model", model, "--output-format", "text")
+	// A child that keeps stdout open must not hold Wait past the deadline:
+	// the caller's budget (judgeBudget) sits inside a queue lease.
+	cmd.WaitDelay = 10 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

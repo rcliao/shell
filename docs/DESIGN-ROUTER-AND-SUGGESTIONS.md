@@ -467,8 +467,9 @@ routed general). There are four loops.
    recurs (3+ messages on 2+ days in 14 days, no matching project) are listed
    in the owner review and in that chat's retro. The retro is where "want me
    to track this as a project?" belongs.
-3. **Lanes advance their project.** A project-lane turn's `[Project]` block
-   says: if this message settles a decision or raises a new question for the
+3. **Lanes advance their project.** The `[Project]` block of a project lane,
+   and of a project's own forum topic (also a conversation about exactly that
+   project), says: if this message settles a decision or raises a new question for the
    project, update the doc's 決定 / 待決定 sections now (`project doc-write`).
    So a decision said in chat lands in the project in the same turn.
 4. **Test chats are excluded.** `route.exclude_chats` (for example the CLI
