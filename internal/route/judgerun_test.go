@@ -54,11 +54,16 @@ func TestJudgeMissesAndRecurringSubjects(t *testing.T) {
 	}
 
 	// Same day, so 1 distinct day: the 2-day bar holds it back; 1 day lets it through.
+	st.UpsertRouteLabel(store.RouteLabel{ChatID: 7, TextHash: store.TextHash("any chiikawa restock?"), Lane: "general", Source: "human", Subject: "chitchat"})
 	if subs, _ := RecurringSubjects(st, time.Now().Add(-time.Hour), 3, 2, nil); len(subs) != 0 {
 		t.Errorf("one day of messages is not recurring yet: %+v", subs)
 	}
-	subs, _ := RecurringSubjects(st, time.Now().Add(-time.Hour), 3, 1, nil)
-	if len(subs) != 1 || subs[0].Name != "chiikawa restock hunt" || subs[0].Count != 3 || subs[0].ChatID != 7 {
+	// The human relabelled one message as chitchat, which never counts: 2 left.
+	if subs, _ := RecurringSubjects(st, time.Now().Add(-time.Hour), 3, 1, nil); len(subs) != 0 {
+		t.Fatalf("chitchat must not count toward a candidate project: %+v", subs)
+	}
+	subs, _ := RecurringSubjects(st, time.Now().Add(-time.Hour), 2, 1, nil)
+	if len(subs) != 1 || subs[0].Name != "chiikawa restock hunt" || subs[0].Count != 2 || subs[0].ChatID != 7 {
 		t.Fatalf("recurring = %+v (subjects are normalized to lower case)", subs)
 	}
 }

@@ -197,7 +197,7 @@ func RecurringSubjects(st *store.Store, since time.Time, minCount, minDays int, 
 			continue
 		}
 		l, ok := labels[store.LabelKey(m.ChatID, m.ThreadID, store.TextHash(m.Text))]
-		if !ok || l.Lane != General || l.Subject == "" || l.Subject == noSubject {
+		if !ok || l.Lane != General || l.Subject == "" || l.Subject == noSubject || l.Subject == "chitchat" {
 			continue
 		}
 		k := fmt.Sprintf("%d|%s", m.ChatID, l.Subject)

@@ -40,9 +40,11 @@ For each message, decide which lane it belongs to: one of the projects below, or
 everything that is not about a project (small talk, unrelated questions, other topics).
 Read the messages in order: a short follow-up belongs to the lane of what it follows up.
 "sure" is false when a reasonable person could file it either way.
-"subject" names what the message is about in 2–4 lowercase English words
-(for example "chiikawa restock hunt", "steakhouse dress code", "lunch log"),
-the same words for the same subject across messages.
+"subject" names the ongoing topic or effort the message belongs to, in 1–3
+lowercase English words, broad enough that related messages share it:
+"plant care" (not "butterwort watering"), "study abroad planning" (not "milan
+visa"), "meal log", "bathroom repair". Use "chitchat" for greetings, banter
+and one-off small talk. Use the same words for the same topic across messages.
 
 Lanes:
 - general: anything not about one of the projects below
