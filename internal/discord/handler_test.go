@@ -27,6 +27,7 @@ type fakeAPI struct {
 	nextID   int64
 	sends    []sent
 	edits    map[string]string // message id → latest content
+	embedsOn map[string]int    // message id → embeds on its latest edit
 	deletes  []string
 	reacts   []string // "+emoji" / "-emoji"
 }
@@ -36,10 +37,11 @@ type sent struct {
 	files                int
 	buttons              int
 	pings                []string
+	embeds               int
 }
 
 func newFakeAPI() *fakeAPI {
-	return &fakeAPI{channels: map[string]*discordgo.Channel{}, nextID: 400000000000000000, edits: map[string]string{}}
+	return &fakeAPI{channels: map[string]*discordgo.Channel{}, nextID: 400000000000000000, edits: map[string]string{}, embedsOn: map[string]int{}}
 }
 
 func (f *fakeAPI) Send(ch string, m *discordgo.MessageSend) (*discordgo.Message, error) {
@@ -51,7 +53,7 @@ func (f *fakeAPI) Send(ch string, m *discordgo.MessageSend) (*discordgo.Message,
 	if m.AllowedMentions != nil {
 		pings = m.AllowedMentions.Users
 	}
-	f.sends = append(f.sends, sent{channel: ch, id: id, content: m.Content, files: len(m.Files), buttons: len(m.Components), pings: pings})
+	f.sends = append(f.sends, sent{channel: ch, id: id, content: m.Content, files: len(m.Files), buttons: len(m.Components), pings: pings, embeds: len(m.Embeds)})
 	return &discordgo.Message{ID: id, ChannelID: ch}, nil
 }
 func (f *fakeAPI) Edit(m *discordgo.MessageEdit) (*discordgo.Message, error) {
@@ -59,6 +61,9 @@ func (f *fakeAPI) Edit(m *discordgo.MessageEdit) (*discordgo.Message, error) {
 	defer f.mu.Unlock()
 	if m.Content != nil {
 		f.edits[m.ID] = *m.Content
+	}
+	if m.Embeds != nil {
+		f.embedsOn[m.ID] = len(*m.Embeds)
 	}
 	return &discordgo.Message{ID: m.ID, ChannelID: m.Channel}, nil
 }
@@ -159,7 +164,7 @@ func newHarness(t *testing.T, reply string) *harness {
 		Guilds: map[string]config.DiscordGuildLink{"200000000000000900": {ChatID: -100200300}},
 	})
 	b := newBot(api, Options{
-		Mentions: NewMentions(map[string]string{"owner": linkedUser}),
+		Mentions:  NewMentions(map[string]string{"owner": linkedUser}),
 		Addresses: addr,
 		Bridge:    br,
 		Agent: AgentConfig{
@@ -463,5 +468,32 @@ func TestReplyQuotesTheMessageRepliedTo(t *testing.T) {
 	h2.bot.handler.HandleMessage(context.Background(), m2)
 	if h2.agent.turnCount() != 0 {
 		t.Fatal("a command sent as a reply must still run as a command")
+	}
+}
+
+func TestReplyWithACardBecomesAnEmbed(t *testing.T) {
+	h := newHarness(t, "Found one:\n\n"+listingCard)
+	h.bot.handler.HandleMessage(context.Background(), msg("600000000000000080", dmChan, linkedUser, "any listings?"))
+	placeholder := h.api.sends[0].id
+	if h.api.embedsOn[placeholder] != 1 {
+		t.Fatalf("the final reply should carry 1 card, got %d", h.api.embedsOn[placeholder])
+	}
+	if got := h.api.edits[placeholder]; strings.Contains(got, "```card") || !strings.Contains(got, "Found one:") {
+		t.Fatalf("reply text = %q", got)
+	}
+}
+
+func TestProactiveCardsRideTheLastChunk(t *testing.T) {
+	h := newHarness(t, "")
+	var cards strings.Builder
+	for i := 0; i < 12; i++ {
+		cards.WriteString("```card\n{\"title\": \"option\"}\n```\n")
+	}
+	h.bot.SendText(-100200300, 0, "Tonight's options:\n"+cards.String())
+	if len(h.api.sends) != 2 {
+		t.Fatalf("12 cards = text+10 cards, then 2 more; got %d messages", len(h.api.sends))
+	}
+	if h.api.sends[0].embeds != 10 || h.api.sends[1].embeds != 2 || h.api.sends[1].content != "" {
+		t.Fatalf("sends = %+v", h.api.sends)
 	}
 }

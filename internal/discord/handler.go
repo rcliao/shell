@@ -288,8 +288,9 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 	}
 
 	var botIDs []int
-	if len([]rune(fenceTables(response))) <= maxMessageLen {
-		h.editText(w.channelID, placeholder.ID, fenceTables(response))
+	body, embeds := extractCards(response)
+	if len([]rune(fenceTables(body))) <= maxMessageLen && len(embeds) <= maxEmbedsPerMessage {
+		h.editFinal(w.channelID, placeholder.ID, fenceTables(body), embeds)
 		if id, err := strconv.Atoi(placeholder.ID); err == nil {
 			h.bot.remember(id, w.channelID)
 			botIDs = []int{id}
@@ -605,6 +606,20 @@ func (h *Handler) reply(channelID, text string) {
 	}
 }
 
+// editFinal writes the finished reply into the placeholder, with any cards
+// as embeds under it.
+func (h *Handler) editFinal(channelID, messageID, text string, embeds []*discordgo.MessageEmbed) {
+	if len(embeds) == 0 {
+		h.editText(channelID, messageID, text)
+		return
+	}
+	content, _ := h.bot.mentions.Render(truncateRunes(text, maxMessageLen))
+	if _, err := h.api.Edit(&discordgo.MessageEdit{ID: messageID, Channel: channelID, Content: &content,
+		Embeds: &embeds, AllowedMentions: noPings()}); err != nil {
+		slog.Warn("discord: final edit with cards failed", "error", err, "message", messageID)
+	}
+}
+
 func (h *Handler) editText(channelID, messageID, text string) {
 	// Edits never notify on Discord, so a reply's "@name" shows as a mention
 	// without pinging — the person is already in the conversation.
@@ -850,7 +865,7 @@ func (s *streamer) loop(every time.Duration) {
 			if cur == last || strings.TrimSpace(cur) == "" {
 				continue
 			}
-			view := streamView(cur, maxMessageLen)
+			view := streamView(hideCards(cur), maxMessageLen)
 			if s.render != nil {
 				view, _ = s.render(view)
 			}

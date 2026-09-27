@@ -135,6 +135,7 @@ func PlatformNote(names []string) string {
 		}
 		sb.WriteString("; it becomes a real mention that pings their phone. Use it in reminders and scheduled messages for someone; don't mention people otherwise. ")
 	}
+	sb.WriteString("To show a place, listing, restaurant or project as a card (title link, picture, a few facts), add a fenced block with language `card` holding JSON: `{\"title\", \"url\", \"description\", \"image\", \"thumbnail\", \"fields\": [{\"name\", \"value\", \"inline\"}], \"footer\"}` (links must be http/https; up to 10 cards per reply) — it appears as a rich card under your text. Use cards for things worth scanning, not for ordinary answers. ")
 	sb.WriteString("For a specific moment, you may write `<t:UNIX:f>` (date and time) or `<t:UNIX:R>` (relative, \"in 2 hours\"), where UNIX is seconds since the epoch computed from the current time you are given each turn; Discord shows it in each reader's own time zone.\n")
 	return sb.String()
 }
