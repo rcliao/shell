@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rcliao/shell/internal/decide"
+	"github.com/rcliao/shell/internal/discord"
 	"github.com/rcliao/shell/internal/event"
 	"log/slog"
 	"os"
@@ -309,6 +310,9 @@ func New(cfg config.Config) (*Daemon, error) {
 		notionSecret = "NOTION_TOKEN"
 	}
 	stripEnv := append(config.ManagedSecretNames(), cfg.Telegram.TokenEnv, notionSecret, decide.KeyName)
+	if cfg.Discord.TokenEnv != "" {
+		stripEnv = append(stripEnv, cfg.Discord.TokenEnv)
+	}
 	passEnv := cfg.SecretPassthrough()
 	slog.Info("secrets: child env policy", "strip", len(stripEnv), "passthrough", sortedKeys(passEnv))
 
@@ -669,6 +673,51 @@ func New(cfg config.Config) (*Daemon, error) {
 			tgBot.SetProgressPhrasesPath(filepath.Join(workspaceDir, telegram.ProgressPhrasesFile))
 		}
 		bot = tgBot
+	}
+
+	// Discord (docs/DESIGN-DISCORD.md): a second platform beside Telegram.
+	// Linked channels take over their Telegram chat's internal id, so every
+	// send for that chat now goes to Discord; unlinked Telegram chats are
+	// untouched. People are linked by hand in discord.users and then pass the
+	// same allowlist and rate limit as on Telegram.
+	if dtoken := cfg.DiscordToken(); dtoken != "" {
+		if other, clash := discordTokenOwnedByAnotherAgent(cfg, dtoken); clash {
+			st.Close()
+			if mem != nil {
+				mem.Close()
+			}
+			return nil, fmt.Errorf("discord token env %q is already used by agent %q — "+
+				"two gateway sessions on one token would both answer every message; "+
+				"give each agent its own Discord bot", cfg.Discord.TokenEnv, other)
+		}
+		addr := discord.NewAddresses(cfg.Discord)
+		userLabels := parseUserLabels(cfg.Telegram.UserLabels)
+		dc, err := discord.NewBot(dtoken, discord.Options{
+			Addresses: addr,
+			Bridge:    br,
+			Agent: discord.AgentConfig{
+				Aliases:              append([]string(nil), cfg.Agent.Aliases...),
+				PeerAliases:          append([]string(nil), peerAliases...),
+				GroupMode:            cfg.Agent.GroupMode,
+				BroadcastProbability: cfg.Agent.BroadcastProbability,
+				UserLabels:           userLabels,
+			},
+			Authorize: func(userID, chatID int64, isGroup bool) bool {
+				return auth.Check(telegram.SenderInfo{UserID: userID, ChatID: chatID, IsGroup: isGroup}) == telegram.AuthAllowed
+			},
+		})
+		if err != nil {
+			st.Close()
+			if mem != nil {
+				mem.Close()
+			}
+			return nil, err
+		}
+		bot = routedOutbound{telegram: bot, discord: dc}
+		chats, users := addr.Counts()
+		slog.Info("discord: enabled", "linked_chats", chats, "linked_users", users)
+	} else if cfg.Discord.Enabled {
+		slog.Warn("discord: enabled but no token found", "token_env", cfg.Discord.TokenEnv)
 	}
 
 	// Wire transport: plan progress, relay photos → Telegram

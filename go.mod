@@ -3,6 +3,7 @@ module github.com/rcliao/shell
 go 1.25.0
 
 require (
+	github.com/bwmarrin/discordgo v0.29.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-telegram/bot v1.19.0
 	github.com/google/uuid v1.6.0

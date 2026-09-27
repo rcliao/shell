@@ -9,6 +9,7 @@ import (
 
 	"github.com/rcliao/shell/internal/bridge"
 	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/discord"
 )
 
 // Outbound delivery, abstracted away from Telegram.
@@ -132,6 +133,17 @@ func (headlessOutbound) Start(ctx context.Context) { <-ctx.Done() }
 // it was an agent inheriting the DEFAULT env name and therefore a different
 // agent's token, so comparing names would have missed it entirely.
 func tokenOwnedByAnotherAgent(cfg config.Config, token string) (string, bool) {
+	return tokenOwnedBy(cfg, token, config.Config.TelegramToken)
+}
+
+// discordTokenOwnedByAnotherAgent is the same guard for Discord. Two gateway
+// sessions on one token both receive every message, so the failure is the
+// mirror image of Telegram's: not a lost message but a doubled answer.
+func discordTokenOwnedByAnotherAgent(cfg config.Config, token string) (string, bool) {
+	return tokenOwnedBy(cfg, token, config.Config.DiscordToken)
+}
+
+func tokenOwnedBy(cfg config.Config, token string, tokenOf func(config.Config) string) (string, bool) {
 	agentsDir := filepath.Join(config.DefaultConfigDir(), "agents")
 	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
@@ -150,9 +162,95 @@ func tokenOwnedByAnotherAgent(cfg config.Config, token string) (string, bool) {
 		if err != nil {
 			continue // a broken sibling config is not this daemon's problem
 		}
-		if other.TelegramToken() == token {
+		if tokenOf(other) == token {
 			return e.Name(), true
 		}
 	}
 	return "", false
+}
+
+// discordOutbound is the Discord side of routedOutbound: the full outbound
+// surface plus the one question routing needs.
+type discordOutbound interface {
+	outbound
+	// Routes reports whether a conversation is delivered on Discord.
+	Routes(chatID, threadID int64) bool
+}
+
+// routedOutbound sends each message on the platform its conversation lives
+// on. A chat linked to Discord (or born there) goes to Discord; everything
+// else stays on Telegram. This is what lets the family move one conversation
+// at a time: linking a channel is the switch, and every proactive path —
+// reminders, relays, heartbeats, the project home, replays — follows it
+// without knowing Discord exists.
+type routedOutbound struct {
+	telegram outbound
+	discord  discordOutbound
+}
+
+// pick chooses by conversation: a thread can be linked on its own (a carried-
+// over forum topic) while its chat stays on Telegram.
+func (r routedOutbound) pick(chatID, threadID int64) outbound {
+	if r.discord.Routes(chatID, threadID) {
+		return r.discord
+	}
+	return r.telegram
+}
+
+// pickMsg chooses by message id for operations on an existing message (edit,
+// pin): the id says which platform sent it.
+func (r routedOutbound) pickMsg(messageID int) outbound {
+	if discord.IsMessageID(messageID) {
+		return r.discord
+	}
+	return r.telegram
+}
+
+func (r routedOutbound) SendText(chatID, threadID int64, text string) {
+	r.pick(chatID, threadID).SendText(chatID, threadID, text)
+}
+func (r routedOutbound) SendPhoto(chatID, threadID int64, data []byte, caption string) {
+	r.pick(chatID, threadID).SendPhoto(chatID, threadID, data, caption)
+}
+func (r routedOutbound) SendVideo(chatID, threadID int64, data []byte, caption string) {
+	r.pick(chatID, threadID).SendVideo(chatID, threadID, data, caption)
+}
+func (r routedOutbound) SendDocument(chatID, threadID int64, path, caption string) error {
+	return r.pick(chatID, threadID).SendDocument(chatID, threadID, path, caption)
+}
+func (r routedOutbound) SendMessageID(chatID, threadID int64, text string) (int, error) {
+	return r.pick(chatID, threadID).SendMessageID(chatID, threadID, text)
+}
+func (r routedOutbound) EditMessage(chatID int64, messageID int, text string) error {
+	return r.pickMsg(messageID).EditMessage(chatID, messageID, text)
+}
+func (r routedOutbound) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
+	return r.pick(chatID, threadID).SendTextButtons(chatID, threadID, text, buttons)
+}
+func (r routedOutbound) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
+	return r.pick(chatID, threadID).SendMessageIDButtons(chatID, threadID, text, buttons)
+}
+func (r routedOutbound) EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error {
+	return r.pickMsg(messageID).EditMessageButtons(chatID, messageID, text, buttons)
+}
+func (r routedOutbound) PinMessage(chatID int64, messageID int, silent bool) error {
+	return r.pickMsg(messageID).PinMessage(chatID, messageID, silent)
+}
+func (r routedOutbound) UnpinMessage(chatID int64, messageID int) error {
+	return r.pickMsg(messageID).UnpinMessage(chatID, messageID)
+}
+func (r routedOutbound) SetOutboundDedup(check func(chatID, threadID int64, text string) bool) {
+	r.telegram.SetOutboundDedup(check)
+	r.discord.SetOutboundDedup(check)
+}
+
+// Start runs both transports and returns when both have stopped.
+func (r routedOutbound) Start(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		r.discord.Start(ctx)
+		close(done)
+	}()
+	r.telegram.Start(ctx)
+	<-done
 }

@@ -14,6 +14,7 @@ import (
 
 type Config struct {
 	Telegram  TelegramConfig  `json:"telegram"`
+	Discord   DiscordConfig   `json:"discord"`
 	Claude    ClaudeConfig    `json:"claude"`
 	Store     StoreConfig     `json:"store"`
 	Daemon    DaemonConfig    `json:"daemon"`
@@ -243,6 +244,31 @@ type TelegramConfig struct {
 	// scope id recorded as source_scope on memories born in that chat, e.g.
 	// "-100200300": "family-chat". Unmapped chats record "chat:<id>".
 	ChatScopes map[string]string `json:"chat_scopes"`
+}
+
+// DiscordConfig wires Discord as a second messaging platform (docs/DESIGN-DISCORD.md).
+//
+// Conversations and people are keyed by the ids Telegram already gave them, so
+// the move to Discord keeps every session, memory and schedule. A Discord
+// channel either takes over an existing internal chat (Chats) or gets an id
+// derived from its snowflake. People are linked by hand, once (Users).
+type DiscordConfig struct {
+	Enabled  bool   `json:"enabled"`
+	TokenEnv string `json:"token_env"` // secret/env name holding the bot token
+	// Users maps a Discord user id to the Telegram user id the same person
+	// already has, so labels, canonical names, the allowlist and memory
+	// provenance carry over. An unlinked author is not answered.
+	Users map[string]int64 `json:"users"`
+	// Chats maps a Discord channel or thread id to the internal conversation
+	// it takes over — the Telegram chat (and topic) it replaces. Both agents
+	// must carry the same map.
+	Chats map[string]DiscordChatLink `json:"chats"`
+}
+
+// DiscordChatLink is the internal conversation a Discord channel takes over.
+type DiscordChatLink struct {
+	ChatID   int64 `json:"chat_id"`
+	ThreadID int64 `json:"thread_id"`
 }
 
 // UnmarshalJSON replaces (rather than merges) the ReactionMap when the user
@@ -708,6 +734,20 @@ func (c Config) TelegramToken() string {
 		}
 	}
 	return os.Getenv(c.Telegram.TokenEnv)
+}
+
+// DiscordToken resolves the Discord bot token; "" when Discord is disabled or
+// no token env is named.
+func (c Config) DiscordToken() string {
+	if !c.Discord.Enabled || c.Discord.TokenEnv == "" {
+		return ""
+	}
+	if globalSecretStore != nil {
+		if val, err := globalSecretStore.Get(c.Discord.TokenEnv); err == nil {
+			return val
+		}
+	}
+	return os.Getenv(c.Discord.TokenEnv)
 }
 
 func (c Config) GoogleAPIKey() string {
