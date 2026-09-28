@@ -242,6 +242,12 @@ func (b *Bot) send(channelID string, m *discordgo.MessageSend) (int, error) {
 // sendChunks sends text as one or more messages; buttons ride the last one.
 // Returns the ids of the messages that landed.
 func (b *Bot) sendChunks(channelID, text string, buttons []bridge.LinkButton) ([]int, error) {
+	// Scheduled and relayed messages ask questions too: their choices block
+	// becomes answer buttons, same as a live reply's.
+	var choices []string
+	if b.handler != nil && b.handler.choices {
+		text, choices = extractChoices(text)
+	}
 	text, embeds := extractCards(text)
 	if text == "" && len(embeds) == 0 {
 		text = "(empty response)"
@@ -273,7 +279,7 @@ func (b *Bot) sendChunks(channelID, text string, buttons []bridge.LinkButton) ([
 	for i, p := range plan {
 		m := &discordgo.MessageSend{Content: p.content, Embeds: p.embeds}
 		if i == len(plan)-1 {
-			m.Components = linkButtons(buttons)
+			m.Components = append(choiceRow(choices, false, ""), linkButtons(buttons)...)
 		}
 		id, err := b.send(channelID, m)
 		if err != nil {

@@ -71,3 +71,28 @@ func TestChoicesOffLeavesTheBlock(t *testing.T) {
 		t.Fatalf("with the experiment off the text is as written, got %q", got)
 	}
 }
+
+// A scheduled or relayed message goes out through SendText, not a live
+// turn; its choices block still becomes buttons instead of raw text.
+func TestOutboundSendTurnsChoicesIntoButtons(t *testing.T) {
+	h := newHarness(t, "")
+	h.bot.handler.choices = true
+	h.bot.SendText(-100200300, 0, "Set a reminder?\n\n```choices\n[\"Yes\", \"Not now\"]\n```")
+	if len(h.api.sends) != 1 {
+		t.Fatalf("sends = %+v", h.api.sends)
+	}
+	got := h.api.sends[0]
+	if strings.Contains(got.content, "```choices") || got.content != "Set a reminder?" {
+		t.Fatalf("choices block leaked into the text: %q", got.content)
+	}
+	if got.buttons != 1 {
+		t.Fatalf("want one button row, got %d", got.buttons)
+	}
+
+	// With the experiment off the text is left as written.
+	h2 := newHarness(t, "")
+	h2.bot.SendText(-100200300, 0, "Q?\n```choices\n[\"A\"]\n```")
+	if !strings.Contains(h2.api.sends[0].content, "```choices") || h2.api.sends[0].buttons != 0 {
+		t.Fatalf("experiment off: %+v", h2.api.sends[0])
+	}
+}
