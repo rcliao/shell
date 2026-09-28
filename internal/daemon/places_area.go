@@ -102,7 +102,7 @@ func linkSharedDocs(st *store.Store, root, workspaceDir, agent string) {
 		if p.Kind != store.ProjectKindArea && p.Area == "" {
 			continue
 		}
-		owner, err := project.LinkShared(root, workspaceDir, p.Slug, agent, p.MessageThreadID)
+		owner, err := project.LinkShared(root, workspaceDir, p.Slug, agent, p.MessageThreadID, p.ScheduleDedupKey != "")
 		if err != nil {
 			slog.Warn("shared doc: link failed", "slug", p.Slug, "error", err)
 			continue

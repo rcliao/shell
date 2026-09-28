@@ -346,7 +346,6 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	// dedup_key = project:<slug>, which is how archive/pause later finds it.
 	// A project that joined another agent's post has no schedule of its own:
 	// that agent already researches it, and two schedules double the cost.
-	s.linkShared(p) // after the scaffold: a scaffold-only doc leaves no notes
 	if placeJoined {
 		resp["cadence"] = "none (joined another agent's post)"
 	} else if ok, warn := s.registerResearchSchedule(p, cadence); ok {
@@ -359,6 +358,9 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 		}
 	}
 
+	// After the scaffold (a scaffold-only doc leaves no notes) and after the
+	// research schedule (ownership follows research).
+	s.linkShared(p)
 	s.refreshProjectHome(p.ChatID)
 	writeJSON(w, resp)
 }

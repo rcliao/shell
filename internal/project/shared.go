@@ -37,7 +37,11 @@ func NotesFile(agent string) string { return "notes-" + agent + ".md" }
 // LinkShared makes workspace/projects/<slug> a symlink to the post's shared
 // doc repo, creating or adopting it. Idempotent. It reports whether agent
 // owns the shared doc.
-func LinkShared(root, workspaceDir, slug, agent string, threadID int64) (owner bool, err error) {
+//
+// hasResearch says this agent runs the project's research. Ownership follows
+// research: an owner without it gives way to an agent with it, so which
+// daemon happens to link first can never leave a doc unresearched.
+func LinkShared(root, workspaceDir, slug, agent string, threadID int64, hasResearch bool) (owner bool, err error) {
 	if root == "" || workspaceDir == "" || slug == "" || agent == "" || threadID == 0 {
 		return false, fmt.Errorf("link shared doc: missing root, workspace, slug, agent or thread")
 	}
@@ -59,6 +63,7 @@ func LinkShared(root, workspaceDir, slug, agent string, threadID int64) (owner b
 	isLink := lerr == nil && fi.Mode()&os.ModeSymlink != 0
 	if isLink {
 		if target, _ := filepath.EvalSymlinks(ws); target == mustEval(sd) {
+			claimOwner(sd, agent, hasResearch)
 			return Owner(sd) == agent, nil
 		}
 	}
@@ -76,9 +81,7 @@ func LinkShared(root, workspaceDir, slug, agent string, threadID int64) (owner b
 				return false, err
 			}
 		}
-		if err := os.WriteFile(filepath.Join(sd, ownerFile), []byte(agent+"\n"), 0o644); err != nil {
-			return false, err
-		}
+		writeOwner(sd, agent, hasResearch)
 	} else if lerr == nil && !isLink {
 		// A later agent: keep its own doc's content as notes to fold in, and
 		// its repo as a backup; the shared doc is the doc from now on.
@@ -100,10 +103,46 @@ func LinkShared(root, workspaceDir, slug, agent string, threadID int64) (owner b
 			return false, fmt.Errorf("link doc: %w", err)
 		}
 	}
-	if Owner(sd) == "" {
-		_ = os.WriteFile(filepath.Join(sd, ownerFile), []byte(agent+"\n"), 0o644)
-	}
+	claimOwner(sd, agent, hasResearch)
 	return Owner(sd) == agent, nil
+}
+
+// claimOwner makes agent the owner when there is none, or when the owner
+// does not run research and agent does.
+func claimOwner(sd, agent string, hasResearch bool) {
+	o := Owner(sd)
+	switch {
+	case o == "":
+		writeOwner(sd, agent, hasResearch)
+	case o == agent:
+		if hasResearch != OwnerHasResearch(sd) {
+			writeOwner(sd, agent, hasResearch)
+		}
+	case hasResearch && !OwnerHasResearch(sd):
+		writeOwner(sd, agent, true)
+	}
+}
+
+func writeOwner(sd, agent string, hasResearch bool) {
+	body := agent + "\n"
+	if hasResearch {
+		body += "research\n"
+	}
+	_ = os.WriteFile(filepath.Join(sd, ownerFile), []byte(body), 0o644)
+}
+
+// OwnerHasResearch reports whether the owner runs the doc's research.
+func OwnerHasResearch(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, ownerFile))
+	return err == nil && strings.Contains(string(data), "\nresearch")
+}
+
+// MayResearch reports whether agent should run the doc's research pass: the
+// owner does; another agent does only if the owner has no research of its
+// own (a doc must never end up researched by nobody).
+func MayResearch(dir, agent string) bool {
+	o := Owner(dir)
+	return o == "" || o == agent || agent == "" || !OwnerHasResearch(dir)
 }
 
 // Owner returns the agent that owns a shared doc dir, "" for an unshared
@@ -113,7 +152,8 @@ func Owner(dir string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	first, _, _ := strings.Cut(string(data), "\n")
+	return strings.TrimSpace(first)
 }
 
 // IsShared reports whether a doc dir is a shared doc.

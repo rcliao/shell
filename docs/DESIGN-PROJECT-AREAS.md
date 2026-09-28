@@ -310,6 +310,22 @@ keeps its own notes" for docs; memories stay separate.
   (`summary.json` in the shared dir).
 - *Stage.* The weekly review lists area projects that have no stage.
 
+**Decided in review.**
+- *Ownership follows research.* The owner file says whether the owner runs
+  research. An agent that has research takes over from an owner that
+  doesn't, and a non-owner skips research only when the owner researches.
+  So the order the daemons start in can never leave a doc unresearched.
+- *Notion page edits are not folded into a shared doc.* Each agent's page
+  is re-rendered only on that agent's own writes, so reconciling a page
+  that lags the doc would roll back the other agent's changes. Notion
+  comments still work, because they go through doc-write and its checks.
+  Follow-up: track the rendered rev, and re-render before reconciling.
+- *"Seen" is per agent, not per session.* A research or comment prompt
+  counts as a read for the whole agent. Those turns run in the post's own
+  session, so this mostly matches. A stale write from another session of
+  the same agent is still possible; the lock prevents a race between the
+  two agents.
+
 **Not doing.**
 - Merging the two agents' memories.
 - Notion: each agent's project may still mirror to its own page; both pages

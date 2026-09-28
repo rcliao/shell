@@ -120,7 +120,7 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 	}
 
 	// A shared doc is researched once, by its owner (part 3).
-	if dir, ok := project.ManagedDocDir(d.workspaceDir, slug); ok && !project.MayRunAs(dir, d.agentName) {
+	if dir, ok := project.ManagedDocDir(d.workspaceDir, slug); ok && !project.MayResearch(dir, d.agentName) {
 		slog.Info("project research: shared doc owned by the other agent, skipping", "slug", slug, "owner", project.Owner(dir))
 		return "skipped: shared doc; research belongs to " + project.Owner(dir), nil
 	}

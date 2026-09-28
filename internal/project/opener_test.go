@@ -81,8 +81,8 @@ func TestRefreshOpenerOwnSummary(t *testing.T) {
 		dir, _ := EnsureDocRepo(ws, "trip")
 		ScaffoldDoc(dir, "Trip", "")
 	}
-	LinkShared(root, wsA, "trip", "a", post)
-	LinkShared(root, wsB, "trip", "b", post)
+	LinkShared(root, wsA, "trip", "a", post, true)
+	LinkShared(root, wsB, "trip", "b", post, false)
 
 	f := &fakeOpener{editErr: errors.New("403: not the author")}
 	RefreshOpener(st, wsA, "a", trip, "", f)

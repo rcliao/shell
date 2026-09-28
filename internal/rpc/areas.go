@@ -437,7 +437,10 @@ func (s *Server) linkShared(p *store.Project) {
 	if p.Kind != store.ProjectKindArea && p.Area == "" {
 		return
 	}
-	owner, err := project.LinkShared(s.sharedRoot, s.workspaceDir, p.Slug, s.agentName, p.MessageThreadID)
+	if fresh, err := s.store.GetProjectBySlug(p.Slug); err == nil && fresh != nil {
+		p.ScheduleDedupKey = fresh.ScheduleDedupKey // stamped when research registered
+	}
+	owner, err := project.LinkShared(s.sharedRoot, s.workspaceDir, p.Slug, s.agentName, p.MessageThreadID, p.ScheduleDedupKey != "")
 	if err != nil {
 		slog.Warn("rpc: shared doc link failed", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
 		return
