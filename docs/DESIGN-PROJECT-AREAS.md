@@ -264,6 +264,83 @@ believed there was one registry. Owner decisions, the same day:
 - Live: the owner's gaming request results in two channels, one area row
   on each agent, and no ids asked for.
 
+## Part 3: one doc per post, a summary the agent owns
+
+Added 2026-09-28, after a day of real use. The posts worked: 21 of 21
+project messages were written in the project's own post. Three things did
+not:
+- **Two docs per shared trip.** Each agent kept its own doc and ran its own
+  research on the same post: Japan was 13.9 KB with 7 commits on one agent
+  and 5.2 KB with 5 on the other; Taiwan 11 vs 13 commits. That is double the
+  cost, and the two versions drift apart.
+- **No live summary in a post a person opened.** Discord lets only a
+  message's author edit it.
+- **An agent told the family the summary would follow its doc.** It could
+  not: every edit it tried was refused.
+
+The owner approved one doc per post. This reverses part 2's "each agent
+keeps its own notes" for docs; memories stay separate.
+
+**Who does what.**
+- *Linking.* A project in an area with a Discord post, and an area bound to
+  its channel, keeps its doc in one git repo at
+  `~/.shell/shared/projects/post-<thread>/`. Each agent's
+  `workspace/projects/<slug>` is a symlink to it, so every reader and
+  writer that goes through the workspace (doc-read, doc-write, research,
+  Notion mirror, the [Project] block) works unchanged.
+  - The first agent to link **moves** its doc and history there and
+    becomes the post's **owner** (the `owner` file).
+  - A later agent's doc is backed up. If it has content of its own (more
+    than the scaffold commit), it is kept as `notes-<agent>.md`, and that
+    agent's turn block asks it to fold anything missing into the shared doc
+    and then delete the file.
+  - Linking happens when a place is created or joined, and for existing
+    projects at daemon startup, under a lock shared by both agents.
+- *Writing without lost updates.* Every path that shows an agent the doc
+  (doc-read, the research and comment prompts) records the rev this agent
+  saw. A doc-write to a shared doc is refused, under a lock shared by both
+  agents, when the doc moved since: "changed since you read it (now rev X);
+  doc-read again and redo your edit". A write with no read first is refused
+  the same way.
+- *Research once.* Only the owner runs a shared doc's research pass; the
+  other agent's schedule fires and skips.
+- *Summary.* The owner keeps the post's live summary. If it cannot edit the
+  post's first message (a person opened the post), it posts its own
+  "summary" message, pins it, and edits that one from then on
+  (`summary.json` in the shared dir).
+- *Stage.* The weekly review lists area projects that have no stage.
+
+**Decided in review.**
+- *Ownership follows research.* The owner file says whether the owner runs
+  research. An agent that has research takes over from an owner that
+  doesn't, and a non-owner skips research only when the owner researches.
+  So the order the daemons start in can never leave a doc unresearched.
+- *Notion page edits are not folded into a shared doc.* Each agent's page
+  is re-rendered only on that agent's own writes, so reconciling a page
+  that lags the doc would roll back the other agent's changes. Notion
+  comments still work, because they go through doc-write and its checks.
+  Follow-up: track the rendered rev, and re-render before reconciling.
+- *"Seen" is per agent, not per session.* A research or comment prompt
+  counts as a read for the whole agent. Those turns run in the post's own
+  session, so this mostly matches. A stale write from another session of
+  the same agent is still possible; the lock prevents a race between the
+  two agents.
+
+**Not doing.**
+- Merging the two agents' memories.
+- Notion: each agent's project may still mirror to its own page; both pages
+  feed the one doc.
+- Shared docs for projects that have no post (DM projects stay
+  single-agent).
+
+**Verified by.** Tests for:
+- link: first agent moves its doc, second agent keeps its notes;
+- the stale-write refusal;
+- only the owner doing research and the summary;
+- the summary falling back to an owned, pinned message.
+
+Live: Japan and Taiwan each end up with one doc after the restart.
+
 ## Evidence
 
 - `store.Project` today has no parent or kind. `MessageThreadID` is

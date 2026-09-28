@@ -258,6 +258,7 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 	section("Subjects that keep coming back with no project behind them (candidate projects — or a candidate area, if several share a kind)", recurringEvidence(d.store, time.Now().Add(-recurringWindow), 0, d.exclude))
 	section("Your areas, and active projects with no area (propose a home for each; a new area needs a person's yes, filing into an existing one does not)", areaEvidence(d.store, d.exclude))
 	section("Projects in an area that nobody has touched for 3+ weeks (ask the family in the project's post: keep, pause, or archive? Never archive unasked)", staleEvidence(d.store, d.exclude, time.Now()))
+	section("Projects in an area with no stage (set one with project stage, so the post's tag and summary show where it stands)", noStageEvidence(d.store, d.exclude))
 
 	if refl, err := d.store.ListReflections(3); err == nil {
 		var lines []string
@@ -514,6 +515,25 @@ func staleEvidence(st *store.Store, exclude map[int64]bool, now time.Time) strin
 			line += fmt.Sprintf(", post <#%d>", p.MessageThreadID)
 		}
 		lines = append(lines, line+")")
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// noStageEvidence lists active projects in an area that have no stage: the
+// post's tag and summary cannot show where such a project stands.
+func noStageEvidence(st *store.Store, exclude map[int64]bool) string {
+	projects, err := st.ListProjects(0)
+	if err != nil {
+		return ""
+	}
+	var lines []string
+	for _, p := range projects {
+		if p.Status == "active" && p.Area != "" && p.Stage == "" && !exclude[p.ChatID] {
+			lines = append(lines, fmt.Sprintf("- %s — %s (area %s)", p.Slug, p.Title, p.Area))
+		}
 	}
 	if len(lines) == 0 {
 		return ""

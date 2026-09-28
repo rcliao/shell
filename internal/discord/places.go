@@ -391,3 +391,25 @@ func (b *Bot) EditPostOpener(postID int64, text string) error {
 	_, err := b.api.Edit(&discordgo.MessageEdit{Channel: id, ID: id, Content: &text})
 	return err
 }
+
+// PostPinned posts a message in a thread and pins it; the post summary an
+// agent keeps when it cannot edit the post's first message.
+func (b *Bot) PostPinned(threadID int64, text string) (int64, error) {
+	ch := strconv.FormatInt(threadID, 10)
+	m, err := b.api.Send(ch, &discordgo.MessageSend{Content: truncateRunes(text, maxMessageLen), AllowedMentions: noPings()})
+	if err != nil {
+		return 0, err
+	}
+	if err := b.api.Pin(ch, m.ID); err != nil {
+		slog.Info("discord: summary not pinned", "thread", ch, "error", err)
+	}
+	return strconv.ParseInt(m.ID, 10, 64)
+}
+
+// EditIn edits one of the bot's messages in a thread.
+func (b *Bot) EditIn(threadID, msgID int64, text string) error {
+	ch, id := strconv.FormatInt(threadID, 10), strconv.FormatInt(msgID, 10)
+	text = truncateRunes(text, maxMessageLen)
+	_, err := b.api.Edit(&discordgo.MessageEdit{Channel: ch, ID: id, Content: &text})
+	return err
+}

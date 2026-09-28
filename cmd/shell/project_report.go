@@ -73,7 +73,10 @@ func newProjectReportCmd(openStore func() (config.Config, *store.Store, error)) 
 					truncateRunes(p.Slug, 28), p.Status, stage, inPost, elsewhere, docCommits(ws, p.Slug, since), last, stale)
 			}
 			for _, a := range areas {
-				fmt.Printf("\n%s %s (area, chat %d)  doc commits %d\n", a.Emoji, a.Slug, a.ChatID, docCommits(ws, a.Slug, since))
+				inCh, _ := st.HumanMessagesInThread(a.ChatID, a.MessageThreadID, since)
+				routed, _ := st.LaneRoutedElsewhere(a.ChatID, a.Slug, a.MessageThreadID, since)
+				fmt.Printf("\n%s %s (area, chat %d)  in its channel %d  routed from elsewhere %d  doc commits %d\n",
+					a.Emoji, a.Slug, a.ChatID, inCh, routed, docCommits(ws, a.Slug, since))
 				if len(byArea[a.Slug]) == 0 {
 					fmt.Println("  (no projects)")
 				}

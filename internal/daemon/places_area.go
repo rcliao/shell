@@ -2,8 +2,14 @@ package daemon
 
 import (
 	"fmt"
+	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/rcliao/shell/internal/config"
+	"github.com/rcliao/shell/internal/project"
+	"github.com/rcliao/shell/internal/store"
 )
 
 // Area places (docs/DESIGN-PROJECT-AREAS.md, part 2) are Discord only: the
@@ -52,4 +58,55 @@ func (p daemonPlaces) UpdateOpener(chatID, threadID int64, ref, text string) err
 		return nil // A Telegram topic's first message id is not known.
 	}
 	return p.dc.EditPostOpener(threadID, text)
+}
+
+func (p daemonPlaces) PostSummary(chatID, threadID int64, ref, text string) (int64, error) {
+	if !strings.HasPrefix(ref, "discord:") || p.dc == nil {
+		return 0, fmt.Errorf("post summaries need Discord")
+	}
+	return p.dc.PostPinned(threadID, text)
+}
+
+func (p daemonPlaces) EditSummary(chatID, threadID, msgID int64, ref, text string) error {
+	if !strings.HasPrefix(ref, "discord:") || p.dc == nil {
+		return fmt.Errorf("post summaries need Discord")
+	}
+	return p.dc.EditIn(threadID, msgID, text)
+}
+
+// sharedRootFor is where docs both agents share live: beside the shared
+// group transcript (~/.shell/shared by default), which both agents already
+// agree on.
+func sharedRootFor(cfg config.Config) string {
+	if p := cfg.Agent.TranscriptPath; p != "" {
+		return filepath.Dir(p)
+	}
+	return filepath.Join(config.DefaultConfigDir(), "shared")
+}
+
+// linkSharedDocs puts every project with its own Discord place (a post, or
+// an area's channel) on the doc both agents share (part 3). Run at startup:
+// it is how projects made before shared docs migrate, and it is idempotent.
+func linkSharedDocs(st *store.Store, root, workspaceDir, agent string) {
+	if st == nil || root == "" || workspaceDir == "" || agent == "" {
+		return
+	}
+	projects, err := st.ListProjects(0)
+	if err != nil {
+		return
+	}
+	for _, p := range projects {
+		if p.Status != "active" || p.MessageThreadID < 100_000_000_000_000_000 {
+			continue
+		}
+		if p.Kind != store.ProjectKindArea && p.Area == "" {
+			continue
+		}
+		owner, err := project.LinkShared(root, workspaceDir, p.Slug, agent, p.MessageThreadID, p.ScheduleDedupKey != "")
+		if err != nil {
+			slog.Warn("shared doc: link failed", "slug", p.Slug, "error", err)
+			continue
+		}
+		slog.Info("shared doc: linked", "slug", p.Slug, "thread", p.MessageThreadID, "owner", owner)
+	}
 }

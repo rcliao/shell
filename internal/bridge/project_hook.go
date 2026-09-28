@@ -141,6 +141,7 @@ func (b *Bridge) renderScopedProject(own store.Project, others []string, header,
 	sb.WriteString(advanceProjectLine + "\n")
 	sb.WriteString(projectRow(own))
 	sb.WriteString(b.areaLines(own))
+	sb.WriteString(b.sharedNotesLine(own))
 	if doc := b.readProjectDoc(own.DocPath); doc != "" {
 		for _, h := range []string{docDecisionsHeading, docToDecideHeading} {
 			if body := docSection(doc, h); body != "" {
@@ -383,4 +384,20 @@ func (b *Bridge) unboundThreadHint(chatID, threadID int64) string {
 	return fmt.Sprintf("[Thread] This thread (%d) is none of your projects. If it is a post in one of your areas' forums, "+
 		"another agent's project lives here: before doing project work in it, run `project join --thread %d` "+
 		"(it registers your own row for this post). Otherwise treat it as ordinary conversation.", threadID, threadID)
+}
+
+// sharedNotesLine asks the agent to fold its own notes into a doc it now
+// shares with the other agent (part 3): when the doc became shared, this
+// agent's earlier doc was kept as notes-<agent>.md beside it. "" otherwise.
+func (b *Bridge) sharedNotesLine(own store.Project) string {
+	if b.workspaceDir == "" || b.agentName == "" {
+		return ""
+	}
+	dir := filepath.Join(b.workspaceDir, "projects", own.Slug)
+	notes := filepath.Join(dir, "notes-"+b.agentName+".md")
+	if _, err := os.Stat(notes); err != nil {
+		return ""
+	}
+	return "\nThis doc is now shared with the other agent. Your own notes from before are in " + notes +
+		": read them, fold anything the doc is missing into it (project doc-read, then doc-write), then delete that file (rm)."
 }

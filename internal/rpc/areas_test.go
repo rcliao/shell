@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"fmt"
+	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/store"
 	"net/http"
 	"strings"
@@ -48,6 +49,14 @@ func (f *fakePlaces) UpdateOpener(chatID, threadID int64, ref, text string) erro
 	}
 	f.openers[threadID] = text
 	return nil
+}
+
+func (f *fakePlaces) PostSummary(chatID, threadID int64, ref, text string) (int64, error) {
+	return 0, fmt.Errorf("not in tests")
+}
+
+func (f *fakePlaces) EditSummary(chatID, threadID, msgID int64, ref, text string) error {
+	return fmt.Errorf("not in tests")
 }
 
 func (f *fakePlaces) ThreadInfo(chatID, threadID int64) (string, string, []string, error) {
@@ -319,5 +328,32 @@ func TestAreaCreateHealsPlaceRef(t *testing.T) {
 	p, _ := st.GetProjectBySlug(slug)
 	if p.PlaceRef != out["place_ref"] {
 		t.Fatalf("row place_ref = %s", p.PlaceRef)
+	}
+}
+
+// A project created in a post gets the shared doc; a write to it must start
+// from a read (no lost updates between the two agents).
+func TestSharedDocWriteNeedsRead(t *testing.T) {
+	s, _ := newAreaServer(t)
+	s.workspaceDir, s.sharedRoot, s.agentName = t.TempDir(), t.TempDir(), "a"
+	_, out := postProject(t, s, map[string]any{"action": "create", "title": "Zelda", "area": "travel", "place": "auto"})
+	slug := out["slug"].(string)
+	dir, ok := project.ManagedDocDir(s.workspaceDir, slug)
+	if !ok || project.Owner(dir) != "a" {
+		t.Fatalf("not linked: ok=%v owner=%q", ok, project.Owner(dir))
+	}
+	code, w := postProject(t, s, map[string]any{"action": "doc-write", "slug": slug, "content": "# Zelda\n\nnew\n"})
+	if code != http.StatusConflict {
+		t.Fatalf("write without read: %d %v", code, w)
+	}
+	if code, r := postProject(t, s, map[string]any{"action": "doc-read", "slug": slug}); code != http.StatusOK || r["shared"] == nil {
+		t.Fatalf("read: %d %v", code, r)
+	}
+	if code, w := postProject(t, s, map[string]any{"action": "doc-write", "slug": slug, "content": "# Zelda\n\nnew\n"}); code != http.StatusOK {
+		t.Fatalf("write after read: %d %v", code, w)
+	}
+	// Our own write counts as seen: a second write needs no re-read.
+	if code, w := postProject(t, s, map[string]any{"action": "doc-write", "slug": slug, "content": "# Zelda\n\nnewer\n"}); code != http.StatusOK {
+		t.Fatalf("second write: %d %v", code, w)
 	}
 }

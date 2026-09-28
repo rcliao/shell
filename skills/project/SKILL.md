@@ -16,6 +16,9 @@ never re-derive an id.
   `doc-write` prints `Doc <slug> committed: rev <hash>`. Without that line
   nothing was saved — say so and retry. Never invent a rev.
 - `doc-write` replaces the whole doc: `doc-read` first, edit, write it all.
+  A project in a post shares ONE doc with the other agent (doc-read says so):
+  if doc-write answers "changed since you read it", doc-read again and redo
+  your edit on top — never write your old copy over theirs.
 - The doc is a working page (24 KB budget, 8 KB for `更新紀錄`): replace stale
   content instead of appending. A refused write names the section to cut;
   shrinking is always accepted.

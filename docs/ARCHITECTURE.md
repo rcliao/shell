@@ -703,6 +703,11 @@ that is none of the agent's projects gets a one-line join hint. The weekly
 review lists the agent's areas and its active projects that have no area,
 so it can propose homes; a new area needs a person's yes, a post does not.
 
+**One doc per post** (part 3). A project with its own Discord place (a post, or an area's channel) keeps its doc in one git repo both agents share: `~/.shell/shared/projects/post-<thread>/`, beside the shared transcript. Each agent's `workspace/projects/<slug>` is a symlink to it.
+- `project.LinkShared` runs at create, move and join, and for every such project at daemon startup. The first agent moves its doc there and becomes the owner. A later agent's own content is kept as `notes-<agent>.md`, and its turn block asks it to fold that in.
+- Writes cannot lose each other's updates. Every read the agent sees (doc-read, the research and comment prompts) records the rev (`NoteSeen`). doc-write takes a lock both daemons share and refuses a shared doc that moved since (409: "doc-read again").
+- Only the owner runs research and keeps the post summary. When it cannot edit a post's first message, it keeps a pinned summary message of its own (`summary.json`).
+
 **Keeping places current.**
 - A project post's first message is its **live summary**. `project.OpenerText` renders it from the doc (目標, 決定, 待決定, stage, date), and it is edited in place after every doc write: the doc-write RPC, a stage change, and a human edit reconciled from Notion (`project.RefreshOpener` → `Places.UpdateOpener`). Only the bot that opened the post can edit it.
 - The pinned 📋 home becomes a **board grouped by area** once a chat has an area. Each area row links its channel, and each project row shows its stage and ❓N (open questions) and links its post. Projects with no area are listed last.

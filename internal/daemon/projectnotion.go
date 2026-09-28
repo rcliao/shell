@@ -497,6 +497,15 @@ func (d projectResearchDeps) runPageEditReconcile(ctx context.Context, p project
 	if !ok {
 		return "skipped: no managed doc", nil
 	}
+	// A shared doc (part 3) is written by both agents, but each agent's page
+	// is re-rendered only on its own writes: reconciling a page that lags
+	// the doc would roll back the other agent's changes as a "human edit".
+	// Until renders track the doc's rev, direct page edits to a shared doc
+	// are not folded in (comments still are: they go through doc-write).
+	if project.IsShared(dir) {
+		slog.Info("project page-edit: shared doc, page edits not reconciled", "slug", proj.Slug)
+		return "skipped: shared doc", nil
+	}
 	if d.notion == nil || !d.notion.Enabled() {
 		return "skipped: notion not configured", nil
 	}
@@ -532,7 +541,9 @@ func (d projectResearchDeps) runPageEditReconcile(ctx context.Context, p project
 	if d.refreshHome != nil {
 		d.refreshHome(proj.ChatID)
 	}
-	project.RefreshOpener(d.store, d.workspaceDir, proj, merged, d.updateOpener)
+	if d.updateOpener != nil {
+		project.RefreshOpener(d.store, d.workspaceDir, d.agentName, proj, merged, d.updateOpener)
+	}
 	slog.Info("project page-edit: reconciled into canonical", "slug", proj.Slug, "rev", rev)
 	return "reconciled: rev " + rev, nil
 }

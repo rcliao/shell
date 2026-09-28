@@ -69,6 +69,8 @@ type Server struct {
 	projectHomeRefresh func(chatID int64)
 	ownerChatID        int64
 	places             Places
+	sharedRoot         string
+	agentName          string
 }
 
 // KillSessionFunc terminates the live CLI subprocess for a chat (all threads
@@ -109,6 +111,11 @@ type Config struct {
 	// Places creates and manages projects' own places (forum posts or
 	// topics) for project areas. Nil disables --place auto.
 	Places Places
+	// SharedRoot holds docs both agents share (one per project post,
+	// <root>/projects/post-<thread>); AgentName says which agent this is.
+	// Empty SharedRoot keeps every doc per agent.
+	SharedRoot string
+	AgentName  string
 }
 
 // handleContext serves the live system-prompt manifest (GET /context?chat_id=N&full=1).
@@ -159,6 +166,8 @@ func New(cfg Config) *Server {
 
 		projectHomeRefresh: cfg.ProjectHomeRefresh,
 		places:             cfg.Places,
+		sharedRoot:         cfg.SharedRoot,
+		agentName:          cfg.AgentName,
 		ownerChatID:        cfg.OwnerChatID,
 	}
 }
