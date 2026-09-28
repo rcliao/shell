@@ -820,6 +820,9 @@ func New(cfg config.Config) (*Daemon, error) {
 	})
 
 	// Create RPC server for skill scripts.
+	// Projects with their own Discord place share one doc between the agents
+	// (part 3); this migrates older ones and is a no-op after.
+	linkSharedDocs(st, sharedRootFor(cfg), workspaceDir, cfg.Agent.Name)
 	rpcSrv := rpc.New(rpc.Config{
 		SocketPath: bridgeSockPath,
 		PMMgr:      pmMgr,
@@ -876,6 +879,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		WorkspaceDir:       workspaceDir,
 		ProjectHomeRefresh: projectHome.Refresh,
 		Places:             places,
+		SharedRoot:         sharedRootFor(cfg),
+		AgentName:          cfg.Agent.Name,
 		OwnerChatID:        cfg.Agent.OwnerChatID,
 	})
 
@@ -1163,7 +1168,8 @@ func New(cfg config.Config) (*Daemon, error) {
 				_ = tgTransport.NotifyButtons(chatID, threadID, text, buttons)
 			},
 			refreshHome:  projectHome.Refresh,
-			updateOpener: places.UpdateOpener,
+			updateOpener: places,
+			agentName:    cfg.Agent.Name,
 			notion:       notionClient,
 			notionID:     &notionIdentity{},
 		})

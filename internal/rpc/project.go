@@ -346,6 +346,7 @@ func (s *Server) projectCreate(w http.ResponseWriter, req ProjectRequest) {
 	// dedup_key = project:<slug>, which is how archive/pause later finds it.
 	// A project that joined another agent's post has no schedule of its own:
 	// that agent already researches it, and two schedules double the cost.
+	s.linkShared(p) // after the scaffold: a scaffold-only doc leaves no notes
 	if placeJoined {
 		resp["cadence"] = "none (joined another agent's post)"
 	} else if ok, warn := s.registerResearchSchedule(p, cadence); ok {
@@ -619,9 +620,12 @@ func (s *Server) projectDocRead(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusInternalServerError, "resolve rev: "+err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{
-		"slug": p.Slug, "doc_path": p.DocPath, "rev": rev, "content": content,
-	})
+	project.NoteSeen(dir, rev) // a write to a shared doc must start from here
+	resp := map[string]any{"slug": p.Slug, "doc_path": p.DocPath, "rev": rev, "content": content}
+	if project.IsShared(dir) {
+		resp["shared"] = "this doc is shared with the other agent (owner: " + project.Owner(dir) + ")"
+	}
+	writeJSON(w, resp)
 }
 
 func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
@@ -636,6 +640,19 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 	dir, err := s.projectDocDir(p)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Shared doc (part 3): both agents write it, so a write must start from
+	// the rev this agent last read, under a lock both daemons take.
+	unlock, lerr := project.LockDoc(dir)
+	if lerr != nil {
+		writeError(w, http.StatusInternalServerError, "lock doc: "+lerr.Error())
+		return
+	}
+	defer unlock()
+	if ferr := project.CheckFresh(dir); ferr != nil {
+		slog.Info("rpc: project doc write refused, stale", "slug", p.Slug, "error", ferr)
+		writeError(w, http.StatusConflict, ferr.Error())
 		return
 	}
 	// Doc budget (P3.5): this handler is the AGENT's write path — human edits
@@ -660,6 +677,7 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 		writeError(w, http.StatusInternalServerError, "doc write: "+err.Error())
 		return
 	}
+	project.NoteSeen(dir, rev)
 	if err := s.store.UpdateProjectFields(p.Slug, store.ProjectFieldUpdate{DocRev: &rev}); err != nil {
 		slog.Warn("rpc: doc_rev update failed", "slug", p.Slug, "error", err)
 	}

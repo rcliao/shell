@@ -52,7 +52,10 @@ type projectResearchDeps struct {
 	refreshHome func(chatID int64)
 	// updateOpener edits a project post's first message (its live summary)
 	// after a doc write that bypasses the RPC; nil = no places.
-	updateOpener project.OpenerUpdater
+	updateOpener project.OpenerPlaces
+	// agentName says which agent this daemon is: owner-only work on a
+	// shared doc (research, the post summary) runs on the owner alone.
+	agentName string
 
 	// notion is the shared Notion client (Wave D): the poll consumer reads
 	// comments and page state through it, the revision consumer replies
@@ -116,6 +119,11 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 		return "skipped: research already ran at " + proj.LastResearchAt.UTC().Format(time.RFC3339), nil
 	}
 
+	// A shared doc is researched once, by its owner (part 3).
+	if dir, ok := project.ManagedDocDir(d.workspaceDir, slug); ok && !project.MayRunAs(dir, d.agentName) {
+		slog.Info("project research: shared doc owned by the other agent, skipping", "slug", slug, "owner", project.Owner(dir))
+		return "skipped: shared doc; research belongs to " + project.Owner(dir), nil
+	}
 	prompt := project.ResearchPrompt(proj.Slug, proj.Title, proj.Instructions, proj.Lang, d.readManagedDoc(slug))
 	if proj.Kind == store.ProjectKindArea {
 		var children []string
@@ -181,6 +189,10 @@ func (d projectResearchDeps) readManagedDoc(slug string) string {
 	if err != nil {
 		slog.Warn("project event: doc read failed", "slug", slug, "error", err)
 		return ""
+	}
+	// The prompt shows the agent this rev: its doc-write starts from here.
+	if rev, err := project.Head(dir); err == nil {
+		project.NoteSeen(dir, rev)
 	}
 	return content
 }

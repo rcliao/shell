@@ -38,6 +38,10 @@ type Places interface {
 	// UpdateOpener replaces the first message of a project's own place with
 	// its live summary. An error means it could not (not ours, or gone).
 	UpdateOpener(chatID, threadID int64, placeRef, text string) error
+	// PostSummary posts and pins a summary message of the agent's own in a
+	// thread, for when it cannot edit the thread's first message.
+	PostSummary(chatID, threadID int64, placeRef, text string) (msgID int64, err error)
+	EditSummary(chatID, threadID, msgID int64, placeRef, text string) error
 }
 
 var discordPlaceRef = regexp.MustCompile(`^discord:[0-9]{17,20}$`)
@@ -222,6 +226,7 @@ func (s *Server) projectMove(w http.ResponseWriter, req ProjectRequest) {
 			resp["place_joined"] = joined
 		}
 	}
+	s.linkShared(p)
 	for k, v := range projectJSON(*p) {
 		resp[k] = v
 	}
@@ -357,6 +362,10 @@ func (s *Server) projectJoin(w http.ResponseWriter, req ProjectRequest) {
 		}
 	}
 	resp["joined"] = true
+	if fresh, err := s.store.GetProjectBySlug(p.Slug); err == nil && fresh != nil {
+		p = fresh
+	}
+	s.linkShared(p)
 	slog.Info("rpc: project joined a post", "slug", p.Slug, "thread", p.MessageThreadID, "area", area.Slug)
 	s.refreshProjectHome(p.ChatID)
 	writeJSON(w, resp)
@@ -415,5 +424,29 @@ func (s *Server) refreshOpener(p *store.Project, doc string) {
 	if s.places == nil {
 		return
 	}
-	project.RefreshOpener(s.store, s.workspaceDir, p, doc, s.places.UpdateOpener)
+	project.RefreshOpener(s.store, s.workspaceDir, s.agentName, p, doc, s.places)
+}
+
+// linkShared puts a project with its own Discord place (a post, or an
+// area's channel) on the one doc both agents share (part 3). Best effort:
+// a failed link leaves the agent's own doc in place.
+func (s *Server) linkShared(p *store.Project) {
+	if s.sharedRoot == "" || s.workspaceDir == "" || s.agentName == "" || p.MessageThreadID < 100_000_000_000_000_000 {
+		return
+	}
+	if p.Kind != store.ProjectKindArea && p.Area == "" {
+		return
+	}
+	owner, err := project.LinkShared(s.sharedRoot, s.workspaceDir, p.Slug, s.agentName, p.MessageThreadID)
+	if err != nil {
+		slog.Warn("rpc: shared doc link failed", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
+		return
+	}
+	if p.DocPath == "" {
+		path := "projects/" + p.Slug + "/doc.md"
+		if err := s.store.UpdateProjectFields(p.Slug, store.ProjectFieldUpdate{DocPath: &path}); err == nil {
+			p.DocPath = path
+		}
+	}
+	slog.Info("rpc: shared doc linked", "slug", p.Slug, "thread", p.MessageThreadID, "owner", owner)
 }

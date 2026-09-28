@@ -65,29 +65,58 @@ func OpenerText(p store.Project, doc string, now time.Time) string {
 	return text + footer
 }
 
-// OpenerUpdater edits the first message of a project's own place.
-type OpenerUpdater func(chatID, threadID int64, placeRef, text string) error
+// OpenerPlaces is what keeping a post's summary needs from the platform:
+// edit the post's first message, or post and edit a summary message of the
+// agent's own when it cannot (a person opened the post).
+type OpenerPlaces interface {
+	UpdateOpener(chatID, threadID int64, placeRef, text string) error
+	PostSummary(chatID, threadID int64, placeRef, text string) (msgID int64, err error)
+	EditSummary(chatID, threadID, msgID int64, placeRef, text string) error
+}
 
-// RefreshOpener re-renders p's post opener from its doc (doc "" reads the
+// RefreshOpener re-renders p's post summary from its doc (doc "" reads the
 // managed doc). It is called after EVERY doc write — the agent's doc-write
 // RPC, a stage change, and a human edit reconciled from Notion — so the post
-// stays the live summary. No-op for a project without a managed place (no
-// area, no thread, or an area without a place_ref in the same chat). Best
-// effort: another agent's post cannot be edited by this agent's bot.
-func RefreshOpener(st *store.Store, workspaceDir string, p *store.Project, doc string, update OpenerUpdater) {
-	if st == nil || update == nil || p == nil || p.Area == "" || p.MessageThreadID == 0 {
+// stays the live summary. For a shared doc only its owner keeps the summary.
+// It edits the post's first message when it can; otherwise it keeps a pinned
+// summary message of its own (summary.json in the doc dir). No-op for a
+// project without a managed place.
+func RefreshOpener(st *store.Store, workspaceDir, agent string, p *store.Project, doc string, pl OpenerPlaces) {
+	if st == nil || pl == nil || p == nil || p.Area == "" || p.MessageThreadID == 0 {
 		return
 	}
 	a, err := st.GetProjectBySlug(p.Area)
 	if err != nil || a == nil || a.PlaceRef == "" || a.ChatID != p.ChatID {
 		return
 	}
-	if doc == "" && workspaceDir != "" {
-		if dir, ok := ManagedDocDir(workspaceDir, p.Slug); ok {
-			doc, _ = ReadDoc(dir)
+	dir, managed := ManagedDocDir(workspaceDir, p.Slug)
+	if managed && !MayRunAs(dir, agent) {
+		return // the other agent owns this post's summary
+	}
+	if doc == "" && managed {
+		doc, _ = ReadDoc(dir)
+	}
+	text := OpenerText(*p, doc, time.Now())
+	err = pl.UpdateOpener(p.ChatID, p.MessageThreadID, a.PlaceRef, text)
+	if err == nil || !managed {
+		if err != nil {
+			slog.Info("project: post opener not updated", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
+		}
+		return
+	}
+	// Not our message to edit: keep a summary message of our own.
+	state := ReadSummary(dir)
+	if state.MessageID != 0 && state.Agent == agent {
+		if err := pl.EditSummary(p.ChatID, p.MessageThreadID, state.MessageID, a.PlaceRef, text); err == nil {
+			return
 		}
 	}
-	if err := update(p.ChatID, p.MessageThreadID, a.PlaceRef, OpenerText(*p, doc, time.Now())); err != nil {
-		slog.Info("project: post opener not updated", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
+	id, err := pl.PostSummary(p.ChatID, p.MessageThreadID, a.PlaceRef, text)
+	if err != nil {
+		slog.Info("project: post summary not posted", "slug", p.Slug, "thread", p.MessageThreadID, "error", err)
+		return
+	}
+	if err := WriteSummary(dir, SummaryState{Agent: agent, MessageID: id}); err != nil {
+		slog.Warn("project: post summary id not saved", "slug", p.Slug, "error", err)
 	}
 }
