@@ -710,7 +710,7 @@ so it can propose homes; a new area needs a person's yes, a post does not.
 
 **Doc health, deadlines, and measuring context** (part 4).
 - doc-write refuses content that isn't a doc (`project.CheckDocShape`): a JSON envelope, doc-read's header line, or an unconfirmed cut of 75% or more (`--confirm-shrink`).
-- When a doc becomes shared and this agent has notes, a one-time `notes.fold` project event runs a quiet turn in the post's session to fold them in. It is re-queued daily while the notes file still exists.
+- When a doc becomes shared and this agent has notes, a one-time `notes.fold` project event runs a quiet turn in the post's session to fold them in. While the notes file exists it is asked again whenever the doc is linked, including at every daemon start.
 - Open questions may end with `(by YYYY-MM-DD)`. The heartbeat agenda lists those due within 7 days, or overdue, at most every 3 days per item, and only to the doc's owner.
 - `shell project eval` samples replies in project posts and has the route judge grade each against the doc as it stood then (used / ignored / contradicted / reasked / na).
 

@@ -149,3 +149,27 @@ func TestAgendaDeadlines(t *testing.T) {
 		}
 	}
 }
+
+// Due today reads "today", not "overdue"; yesterday is 1 day overdue.
+func TestAgendaDeadlineDays(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	defer st.Close()
+	ws := t.TempDir()
+	today := time.Now().Format("2006-01-02")
+	yesterday := time.Now().Add(-24 * time.Hour).Format("2006-01-02")
+	doc := "## 待決定\n\n1. A (by " + today + ")\n2. B (by " + yesterday + ")\n"
+	os.MkdirAll(filepath.Join(ws, "projects", "p"), 0o755)
+	os.WriteFile(filepath.Join(ws, "projects", "p", "doc.md"), []byte(doc), 0o644)
+	st.CreateProject(store.Project{Slug: "p", Title: "P", ChatID: 42, DocPath: "projects/p/doc.md"})
+	b := &Bridge{store: st, workspaceDir: ws}
+	var texts []string
+	for _, it := range b.HeartbeatAgenda(context.Background()).Items {
+		if it.Kind == "deadline" {
+			texts = append(texts, it.Text)
+		}
+	}
+	all := strings.Join(texts, " | ")
+	if !strings.Contains(all, "(today)") || !strings.Contains(all, "(1 days overdue)") {
+		t.Fatalf("items = %v", texts)
+	}
+}

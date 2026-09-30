@@ -278,7 +278,7 @@ func (d projectResearchDeps) runNotesFold(ctx context.Context, p project.EventPa
 		return "", err
 	}
 	if project.NotesPath(dir, d.agentName) != "" {
-		slog.Info("project notes: fold turn ran but the notes file remains; asked again tomorrow", "slug", proj.Slug)
+		slog.Info("project notes: fold turn ran but the notes file remains; asked again at the next link (daemon start)", "slug", proj.Slug)
 		return "notes not folded yet", nil
 	}
 	slog.Info("project notes: folded", "slug", proj.Slug)

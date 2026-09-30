@@ -361,12 +361,14 @@ Added 2026-09-29. Evidence from the first day of shared docs:
    - an unconfirmed cut of 75% or more of a doc of at least 2 KB. The agent
      confirms a real rewrite with `--confirm-shrink`.
 
-   Budget trimming is unaffected: it removes far less than that.
+   A normal budget trim removes far less. A very large doc cut down to
+   budget can trip it once; the refusal tells the agent to confirm.
 2. *Folding notes is a task.* When a doc becomes shared and this agent has
    notes, a one-time `notes.fold` project event is queued. It runs a quiet
    turn in the post's session (nothing is sent to the chat): fold what the
-   doc lacks, then delete the notes. It is re-queued daily while the notes
-   file still exists.
+   doc lacks, then delete the notes. While the notes file still exists it
+   is asked again whenever the doc is linked, including at every daemon
+   start (at most once a day).
 3. *Deadlines on the agenda.*
    - An open question under 待決定 may end with `(by YYYY-MM-DD)`.
    - The heartbeat agenda lists items due within 7 days, or overdue, at

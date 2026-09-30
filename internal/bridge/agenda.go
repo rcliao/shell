@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -359,9 +360,18 @@ func (b *Bridge) deadlineItems(now time.Time, items []AgendaItem, keys []string)
 					continue
 				}
 			}
-			when := fmt.Sprintf("in %d days", int(left.Hours()/24)+1)
-			if left < 0 {
-				when = fmt.Sprintf("%d days overdue", int(-left.Hours()/24)+1)
+			// Whole calendar days, not durations: due today is "today",
+			// not "overdue", at any hour.
+			today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			days := int(math.Round(d.Due.Sub(today).Hours() / 24))
+			when := fmt.Sprintf("in %d days", days)
+			switch {
+			case days == 0:
+				when = "today"
+			case days == 1:
+				when = "tomorrow"
+			case days < 0:
+				when = fmt.Sprintf("%d days overdue", -days)
 			}
 			where := fmt.Sprintf("chat %d", p.ChatID)
 			if p.MessageThreadID >= discordThreadFloor {
