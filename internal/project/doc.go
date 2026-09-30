@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DocFile is the canonical document filename inside a project's repo.
@@ -184,4 +185,14 @@ func DocLog(dir string, n int) (string, error) {
 		n = 10
 	}
 	return git(dir, "log", "--oneline", "-n", strconv.Itoa(n))
+}
+
+// DocAt returns the doc as it stood at t (the last commit at or before t),
+// "" when the doc did not exist yet.
+func DocAt(dir string, t time.Time) (string, error) {
+	rev, err := git(dir, "rev-list", "-1", "--before="+t.Format(time.RFC3339), "HEAD")
+	if err != nil || strings.TrimSpace(rev) == "" {
+		return "", err
+	}
+	return git(dir, "show", strings.TrimSpace(rev)+":"+DocFile)
 }

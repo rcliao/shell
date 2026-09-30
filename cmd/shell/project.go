@@ -353,7 +353,7 @@ must be shared with the Notion integration first (page ••• menu → Connec
 	adoptCmd.Flags().BoolVar(&adoptReplace, "replace", false, "replace an existing, different export binding (prints the old one)")
 	adoptCmd.Flags().Int64Var(&adoptThread, "thread", 0, "the project's thread: Telegram forum topic or Discord thread/post id (0 = the chat itself)")
 
-	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd, adoptCmd, newProjectReportCmd(openStore))
+	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd, adoptCmd, newProjectReportCmd(openStore), newProjectEvalCmd(openStore))
 	return projectCmd
 }
 
