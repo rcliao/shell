@@ -62,6 +62,8 @@ type ProjectRequest struct {
 	// doc-write fields
 	Content     string `json:"content"`
 	Attribution string `json:"attribution"` // optional; recorded in the commit message
+	// ConfirmShrink allows a doc-write that removes 75%+ of the doc.
+	ConfirmShrink bool `json:"confirm_shrink"`
 }
 
 // cadenceCrons maps a research cadence to its cron expression. 09:00 in the
@@ -666,6 +668,11 @@ func (s *Server) projectDocWrite(w http.ResponseWriter, req ProjectRequest) {
 		// Treating an unreadable doc as empty would refuse the very write
 		// the budget promises to accept: one that shrinks an oversize doc.
 		writeError(w, http.StatusInternalServerError, "doc read before write: "+rerr.Error())
+		return
+	}
+	if serr := project.CheckDocShape(prev, req.Content, req.ConfirmShrink); serr != nil {
+		slog.Info("rpc: project doc write refused, not a doc", "slug", p.Slug, "error", serr)
+		writeError(w, http.StatusUnprocessableEntity, serr.Error())
 		return
 	}
 	if berr := project.CheckBudget(prev, req.Content, 0); berr != nil {

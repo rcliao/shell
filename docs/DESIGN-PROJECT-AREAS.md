@@ -341,6 +341,55 @@ keeps its own notes" for docs; memories stay separate.
 
 Live: Japan and Taiwan each end up with one doc after the restart.
 
+## Part 4: docs that stay whole, deadlines that act, context we can measure
+
+Added 2026-09-29. Evidence from the first day of shared docs:
+- **The Japan doc was broken for about 17 hours.** On 9/27 at 20:02 an
+  agent wrote doc-read's JSON output back as the doc. The next day the
+  other agent noticed, repaired it itself, and restored a rule that was
+  lost in between. Shell caught nothing.
+- **The turn-block hint to fold notes did not work.** All 4 notes files
+  were still there after the non-owner had worked on the doc.
+- **Open questions have deadlines only in prose.** Nothing turns "decide
+  before October" into a nudge.
+- **We cannot say whether project context helps a reply.**
+
+**What changes.**
+1. *The doc guard.* doc-write refuses:
+   - content that is a JSON envelope (`{"content": …}`);
+   - content that starts with doc-read's header line;
+   - an unconfirmed cut of 75% or more of a doc of at least 2 KB. The agent
+     confirms a real rewrite with `--confirm-shrink`.
+
+   A normal budget trim removes far less. A very large doc cut down to
+   budget can trip it once; the refusal tells the agent to confirm.
+2. *Folding notes is a task.* When a doc becomes shared and this agent has
+   notes, a one-time `notes.fold` project event is queued. It runs a quiet
+   turn in the post's session (nothing is sent to the chat): fold what the
+   doc lacks, then delete the notes. While the notes file still exists it
+   is asked again whenever the doc is linked, including at every daemon
+   start (at most once a day).
+3. *Deadlines on the agenda.*
+   - An open question under 待決定 may end with `(by YYYY-MM-DD)`.
+   - The heartbeat agenda lists items due within 7 days, or overdue, at
+     most once every 3 days per item. The agent decides whether to nudge
+     in the post or to update the doc.
+   - For a shared doc only the owner gets them, so the family is not
+     nudged twice.
+   - The skill, and the research and area prompts, ask for the date on new
+     questions that have one.
+4. *A context eval.* `shell project eval [--days 7] [--max 20]` samples the
+   agent's replies in project posts. For each one it shows the independent
+   judge (Opus via `claude -p`, as the router judge does) the message, the
+   reply, and the doc's 目標, 決定 and 待決定 as they stood at that moment
+   (from git). The judge answers used, ignored, contradicted, re-asked or
+   n/a. The weekly check reads the counts. The cost is about 20 judge calls
+   a week.
+
+**Not doing.** Blocking a write on anything subtler than the shapes above;
+per-session "seen" tracking; running the eval automatically inside the
+weekly review turn.
+
 ## Evidence
 
 - `store.Project` today has no parent or kind. `MessageThreadID` is

@@ -136,6 +136,7 @@ func ResearchPrompt(slug, title, instructions, lang, doc string) string {
 	if doc != "" {
 		b.WriteString(BudgetPromptLine(doc, 0))
 	}
+	b.WriteString("- An open question in 待決定 that has a real deadline ends with (by YYYY-MM-DD); your heartbeat surfaces it when it is close.\n")
 	b.WriteString("- Reply with the DELTA only: at most 3 short lines on what changed or was found. Never re-dump the doc.\n")
 	b.WriteString("- Text only — no images, files, or generated media.\n")
 	b.WriteString("- If nothing new was found, reply [noop].\n")

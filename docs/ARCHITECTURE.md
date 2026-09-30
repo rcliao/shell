@@ -708,6 +708,12 @@ so it can propose homes; a new area needs a person's yes, a post does not.
 - Writes cannot lose each other's updates. Every read the agent sees (doc-read, the research and comment prompts) records the rev (`NoteSeen`). doc-write takes a lock both daemons share and refuses a shared doc that moved since (409: "doc-read again").
 - Only the owner runs research and keeps the post summary. When it cannot edit a post's first message, it keeps a pinned summary message of its own (`summary.json`).
 
+**Doc health, deadlines, and measuring context** (part 4).
+- doc-write refuses content that isn't a doc (`project.CheckDocShape`): a JSON envelope, doc-read's header line, or an unconfirmed cut of 75% or more (`--confirm-shrink`).
+- When a doc becomes shared and this agent has notes, a one-time `notes.fold` project event runs a quiet turn in the post's session to fold them in. While the notes file exists it is asked again whenever the doc is linked, including at every daemon start.
+- Open questions may end with `(by YYYY-MM-DD)`. The heartbeat agenda lists those due within 7 days, or overdue, at most every 3 days per item, and only to the doc's owner.
+- `shell project eval` samples replies in project posts and has the route judge grade each against the doc as it stood then (used / ignored / contradicted / reasked / na).
+
 **Keeping places current.**
 - A project post's first message is its **live summary**. `project.OpenerText` renders it from the doc (目標, 決定, 待決定, stage, date), and it is edited in place after every doc write: the doc-write RPC, a stage change, and a human edit reconciled from Notion (`project.RefreshOpener` → `Places.UpdateOpener`). Only the bot that opened the post can edit it.
 - The pinned 📋 home becomes a **board grouped by area** once a chat has an area. Each area row links its channel, and each project row shows its stage and ❓N (open questions) and links its post. Projects with no area are listed last.
