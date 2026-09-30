@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/project"
@@ -108,5 +109,10 @@ func linkSharedDocs(st *store.Store, root, workspaceDir, agent string) {
 			continue
 		}
 		slog.Info("shared doc: linked", "slug", p.Slug, "thread", p.MessageThreadID, "owner", owner)
+		if created, err := project.EnqueueNotesFold(st, workspaceDir, agent, p, time.Now()); err != nil {
+			slog.Warn("shared doc: notes fold not queued", "slug", p.Slug, "error", err)
+		} else if created {
+			slog.Info("shared doc: notes fold queued", "slug", p.Slug)
+		}
 	}
 }

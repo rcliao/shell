@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -278,5 +279,47 @@ func TestProjectResearchDeltaCarriesDocButton(t *testing.T) {
 	}
 	if gotButtons[0].URL != "https://notion.so/abcd1111222243338444555566667777" {
 		t.Errorf("url = %q", gotButtons[0].URL)
+	}
+}
+
+// The notes-fold event runs one quiet turn with the notes and the shared
+// doc; nothing is delivered to the chat.
+func TestNotesFoldRunsQuietTurn(t *testing.T) {
+	st, ws := newResearchFixture(t)
+	root := t.TempDir()
+	const post = 900000000000000041
+	st.CreateProject(store.Project{Slug: "travel", Title: "Travel", ChatID: -100200300, Kind: store.ProjectKindArea, PlaceRef: "discord:900000000000000099"})
+	p, _ := st.CreateProject(store.Project{Slug: "trip", Title: "Trip", ChatID: -100200300, MessageThreadID: post, Area: "travel"})
+	otherWS := t.TempDir()
+	d1, _ := project.EnsureDocRepo(otherWS, "trip")
+	project.ScaffoldDoc(d1, "Trip", "")
+	project.LinkShared(root, otherWS, "trip", "owner", post, true)
+	d2, _ := project.EnsureDocRepo(ws, "trip")
+	project.ScaffoldDoc(d2, "Trip", "")
+	project.WriteDoc(d2, "# Trip\n\n## 決定\n\nmy hotel note\n", "")
+	project.LinkShared(root, ws, "trip", "me", post, false)
+
+	var prompt string
+	delivered := false
+	deps := projectResearchDeps{
+		store: st, workspaceDir: ws, agentName: "me",
+		runTurn: func(ctx context.Context, chatID, threadID int64, pr string) (string, error) {
+			prompt = pr
+			dir, _ := project.ManagedDocDir(ws, "trip")
+			os.Remove(project.NotesPath(dir, "me")) // the agent folds and deletes
+			return "[noop]", nil
+		},
+		deliver: func(int64, int64, string, []bridge.LinkButton) { delivered = true },
+	}
+	if created, err := project.EnqueueNotesFold(st, ws, "me", *p, time.Now()); err != nil || !created {
+		t.Fatalf("enqueue: %v %v", created, err)
+	}
+	payload := fmt.Sprintf(`{"event":"notes.fold","slug":"trip","chat_id":-100200300,"message_thread_id":%d}`, post)
+	res, err := deps.handleProjectEvent(context.Background(), scheduler.LeasedTask{ID: 9, Kind: project.EventKind, Payload: payload, Attempt: 1})
+	if err != nil || res != "notes folded" {
+		t.Fatalf("res=%q err=%v", res, err)
+	}
+	if !strings.Contains(prompt, "my hotel note") || !strings.Contains(prompt, "rm ") || delivered {
+		t.Fatalf("prompt/delivery wrong: delivered=%v prompt=%q", delivered, prompt)
 	}
 }

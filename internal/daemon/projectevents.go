@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -89,6 +90,8 @@ func (d projectResearchDeps) handleProjectEvent(ctx context.Context, t scheduler
 		return d.runCommentRevision(ctx, p)
 	case project.EventNotionPageEdited:
 		return d.runPageEditReconcile(ctx, p)
+	case project.EventNotesFold:
+		return d.runNotesFold(ctx, p)
 	default:
 		// A future producer emitting an event this build does not know is not
 		// an error worth retrying — record it and move on.
@@ -249,4 +252,35 @@ func (d projectResearchDeps) recordScheduleRun(dedupKey string, started time.Tim
 	}); err != nil {
 		slog.Warn("project event: job run record failed", "dedup_key", dedupKey, "error", err)
 	}
+}
+
+// runNotesFold runs the one-time quiet turn that folds this agent's notes
+// into a doc that became shared (part 4). Nothing is sent to the chat.
+func (d projectResearchDeps) runNotesFold(ctx context.Context, p project.EventPayload) (string, error) {
+	proj, err := d.store.GetProjectBySlug(p.Slug)
+	if err != nil || proj == nil {
+		return "skipped: project not found", nil
+	}
+	dir, ok := project.ManagedDocDir(d.workspaceDir, proj.Slug)
+	if !ok {
+		return "skipped: no managed doc", nil
+	}
+	notesPath := project.NotesPath(dir, d.agentName)
+	if notesPath == "" {
+		return "nothing to fold", nil
+	}
+	notes, err := os.ReadFile(notesPath)
+	if err != nil {
+		return "", err
+	}
+	prompt := project.NotesFoldPrompt(proj.Slug, proj.Title, notesPath, string(notes), d.readManagedDoc(proj.Slug))
+	if _, err := d.runProjectTurn(ctx, proj, prompt); err != nil {
+		return "", err
+	}
+	if project.NotesPath(dir, d.agentName) != "" {
+		slog.Info("project notes: fold turn ran but the notes file remains; asked again tomorrow", "slug", proj.Slug)
+		return "notes not folded yet", nil
+	}
+	slog.Info("project notes: folded", "slug", proj.Slug)
+	return "notes folded", nil
 }

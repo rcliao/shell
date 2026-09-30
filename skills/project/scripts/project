@@ -17,7 +17,7 @@ usage() {
   echo "       project list [--chat <id>]" >&2
   echo "       project get <slug>" >&2
   echo "       project doc-read <slug>" >&2
-  echo "       project doc-write <slug> [--file <path>] [--attribution <text>]   (content from --file or stdin)" >&2
+  echo "       project doc-write <slug> [--file <path>] [--attribution <text>] [--confirm-shrink]   (content from --file or stdin; the doc's text only)" >&2
   exit 1
 }
 
@@ -46,6 +46,7 @@ CONTENT=""
 CHANNEL_NAME=""
 FORUM_NAME=""
 TAGS=""
+CONFIRM_SHRINK=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -69,6 +70,7 @@ while [ $# -gt 0 ]; do
     --channel-name) CHANNEL_NAME="$2"; shift 2 ;;
     --forum-name)   FORUM_NAME="$2"; shift 2 ;;
     --tags)         TAGS="$2"; shift 2 ;;
+    --confirm-shrink) CONFIRM_SHRINK=1; shift ;;
     --*)            echo "unknown arg: $1" >&2; usage ;;
     *)              SLUG="$1"; shift ;;
   esac
@@ -259,12 +261,13 @@ print(r['content'])
     else
       CONTENT_SRC="-"  # stdin
     fi
-    BODY=$(SLUG="$SLUG" ATTRIBUTION="$ATTRIBUTION" CONTENT_SRC="$CONTENT_SRC" python3 -c "
+    BODY=$(SLUG="$SLUG" ATTRIBUTION="$ATTRIBUTION" CONTENT_SRC="$CONTENT_SRC" CONFIRM_SHRINK="$CONFIRM_SHRINK" python3 -c "
 import json, os, sys
 src = os.environ['CONTENT_SRC']
 content = sys.stdin.read() if src == '-' else open(src, encoding='utf-8').read()
 d = {'action': 'doc-write', 'slug': os.environ['SLUG'], 'content': content}
 if os.environ['ATTRIBUTION']: d['attribution'] = os.environ['ATTRIBUTION']
+if os.environ['CONFIRM_SHRINK']: d['confirm_shrink'] = True
 print(json.dumps(d))
 ")
     post "$BODY"

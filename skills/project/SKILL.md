@@ -24,7 +24,8 @@ never re-derive an id.
   shrinking is always accepted.
 - Heading roles: `目標`/`限制` keep · `決定` dated one-line decisions, never
   cut · `現況`/`選項` current state only · `待決定` open questions, remove
-  when answered (record the answer in `決定`) · `更新紀錄` recent entries,
+  when answered (record the answer in `決定`); a question with a deadline
+  ends with `(by YYYY-MM-DD)` so your heartbeat reminds you · `更新紀錄` recent entries,
   older folded into one line.
 - Managed docs mirror to Notion by themselves — never edit that page by hand.
 - Areas (travel, home, gaming…) hold many projects, one forum post each. Asked

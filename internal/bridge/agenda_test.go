@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -99,6 +100,52 @@ func TestHeartbeatAgenda(t *testing.T) {
 	for _, it := range b.HeartbeatAgenda(ctx).Items {
 		if it.Kind == "event" {
 			t.Error("a done event leaves the agenda")
+		}
+	}
+}
+
+// A dated open question close at hand reaches the agenda once, is repeated
+// only after agendaDueRepeat, and only the doc's owner gets a shared one.
+func TestAgendaDeadlines(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ws := t.TempDir()
+	soon := time.Now().Add(3 * 24 * time.Hour).Format("2006-01-02")
+	far := time.Now().Add(40 * 24 * time.Hour).Format("2006-01-02")
+	doc := "# Trip\n\n## 待決定\n\n1. Can the trip run into April? (by " + soon + ")\n2. Budget (by " + far + ")\n3. ~~Hotel (by " + soon + ")~~\n"
+	os.MkdirAll(filepath.Join(ws, "projects", "trip"), 0o755)
+	os.WriteFile(filepath.Join(ws, "projects", "trip", "doc.md"), []byte(doc), 0o644)
+	st.CreateProject(store.Project{Slug: "trip", Title: "Trip", ChatID: -100200300, MessageThreadID: 900000000000000011, DocPath: "projects/trip/doc.md"})
+	b := &Bridge{store: st, workspaceDir: ws, agentName: "me"}
+
+	a := b.HeartbeatAgenda(context.Background())
+	var got []string
+	for _, it := range a.Items {
+		if it.Kind == "deadline" {
+			got = append(got, it.Text)
+		}
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "run into April") || !strings.Contains(got[0], "<#900000000000000011>") {
+		t.Fatalf("deadline items = %v", got)
+	}
+	b.CommitAgenda(a)
+	for _, it := range b.HeartbeatAgenda(context.Background()).Items {
+		if it.Kind == "deadline" {
+			t.Fatal("repeated within agendaDueRepeat")
+		}
+	}
+	// Another agent owns the shared doc: no deadline items here.
+	os.WriteFile(filepath.Join(ws, "projects", "trip", "owner"), []byte("other\nresearch\n"), 0o644)
+	st2, _ := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	defer st2.Close()
+	st2.CreateProject(store.Project{Slug: "trip", Title: "Trip", ChatID: -100200300, DocPath: "projects/trip/doc.md"})
+	b2 := &Bridge{store: st2, workspaceDir: ws, agentName: "me"}
+	for _, it := range b2.HeartbeatAgenda(context.Background()).Items {
+		if it.Kind == "deadline" {
+			t.Fatal("non-owner got a shared doc's deadline")
 		}
 	}
 }

@@ -2,8 +2,12 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +25,7 @@ import (
 
 // AgendaItem is one thing for the agent to consider.
 type AgendaItem struct {
-	Kind string // conversation | schedule | tool | project | task | event
+	Kind string // conversation | schedule | tool | project | deadline | task | event
 	Text string
 }
 
@@ -31,8 +35,9 @@ type AgendaItem struct {
 // a failed turn loses nothing.
 type Agenda struct {
 	Items     []AgendaItem
-	watermark int64   // highest message id counted in this agenda
-	eventIDs  []int64 // events shown in this agenda
+	watermark int64    // highest message id counted in this agenda
+	eventIDs  []int64  // events shown in this agenda
+	dueKeys   []string // deadlines shown in this agenda (repeat at most every agendaDueRepeat)
 }
 
 // Empty: nothing needs the agent — the beat can be skipped.
@@ -157,6 +162,10 @@ func (b *Bridge) HeartbeatAgenda(ctx context.Context) Agenda {
 		}
 	}
 
+	// 4b. Open questions with a deadline close at hand (part 4 of the areas
+	// design): "(by YYYY-MM-DD)" under 待決定, due within a week or overdue.
+	a.Items, a.dueKeys = b.deadlineItems(now, a.Items, a.dueKeys)
+
 	// 5. Tasks waiting on this agent.
 	if b.taskStore != nil {
 		if pending, err := b.taskStore.PendingTasksFor(b.agentBotUsername); err == nil && len(pending) > 0 {
@@ -217,6 +226,9 @@ func (b *Bridge) CommitAgenda(a Agenda) {
 	for _, id := range a.eventIDs {
 		_ = b.store.MarkEventSeen(id) // never downgrades one the agent closed this beat
 	}
+	for _, k := range a.dueKeys {
+		_ = b.store.SetKV(k, time.Now().UTC().Format(time.RFC3339))
+	}
 }
 
 func clipRunes(s string, n int) string {
@@ -267,4 +279,114 @@ func (b *Bridge) runHeartbeatMaintenance(ctx context.Context, chatID int64) {
 // HeartbeatSkipped runs a skipped beat's housekeeping (no turn was taken).
 func (b *Bridge) HeartbeatSkipped(ctx context.Context, chatID int64) {
 	b.runHeartbeatMaintenance(ctx, chatID)
+}
+
+const (
+	agendaDueWindow = 7 * 24 * time.Hour  // surface deadlines this close
+	agendaDueRepeat = 3 * 24 * time.Hour  // at most this often per item
+	agendaDueStale  = 30 * 24 * time.Hour // long-overdue items are the doc's problem, not the agenda's
+)
+
+var dueTag = regexp.MustCompile(`[(（]\s*by\s+(\d{4}-\d{2}-\d{2})\s*[)）]`)
+
+// dueItem is one open question with a deadline.
+type dueItem struct {
+	Text string
+	Due  time.Time
+}
+
+// openDueItems returns the open top-level items under 待決定 that carry a
+// "(by YYYY-MM-DD)" deadline. Checked-off or struck-through items are done.
+func openDueItems(doc string) []dueItem {
+	var out []dueItem
+	for _, line := range strings.Split(docSection(doc, docToDecideHeading), "\n") {
+		item, ok := agendaListItem(line)
+		if !ok || strings.HasPrefix(item, "[x]") || strings.HasPrefix(item, "[X]") || strings.HasPrefix(item, "~~") {
+			continue
+		}
+		m := dueTag.FindStringSubmatch(item)
+		if m == nil {
+			continue
+		}
+		due, err := time.ParseInLocation("2006-01-02", m[1], time.Local)
+		if err != nil {
+			continue
+		}
+		out = append(out, dueItem{Text: item, Due: due})
+	}
+	return out
+}
+
+// agendaListItem mirrors project.listItem (not importable here): the text of
+// a top-level list item.
+func agendaListItem(line string) (string, bool) {
+	for _, p := range []string{"- ", "* ", "+ ", "▫️ ", "▫ "} {
+		if rest, ok := strings.CutPrefix(line, p); ok {
+			return strings.TrimSpace(rest), true
+		}
+	}
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == 0 || i+1 >= len(line) || (line[i] != '.' && line[i] != ')') || line[i+1] != ' ' {
+		return "", false
+	}
+	return strings.TrimSpace(line[i+2:]), true
+}
+
+// deadlineItems adds agenda items for deadlines within agendaDueWindow (or
+// overdue), each at most every agendaDueRepeat. A shared doc's deadlines go
+// to its owner only, so the family is never nudged twice.
+func (b *Bridge) deadlineItems(now time.Time, items []AgendaItem, keys []string) ([]AgendaItem, []string) {
+	projects, err := b.store.ListProjects(0)
+	if err != nil {
+		return items, keys
+	}
+	for _, p := range projects {
+		if p.Status != "active" || !b.ownsDoc(p.Slug) {
+			continue
+		}
+		for _, d := range openDueItems(b.readProjectDoc(p.DocPath)) {
+			left := d.Due.Sub(now)
+			if left > agendaDueWindow || -left > agendaDueStale {
+				continue
+			}
+			sum := sha256.Sum256([]byte(d.Text))
+			key := fmt.Sprintf("agenda_due:%s:%s:%x", p.Slug, d.Due.Format("2006-01-02"), sum[:4])
+			if v, ok, err := b.store.GetKV(key); err == nil && ok {
+				if t, perr := time.Parse(time.RFC3339, v); perr == nil && now.Sub(t) < agendaDueRepeat {
+					continue
+				}
+			}
+			when := fmt.Sprintf("in %d days", int(left.Hours()/24)+1)
+			if left < 0 {
+				when = fmt.Sprintf("%d days overdue", int(-left.Hours()/24)+1)
+			}
+			where := fmt.Sprintf("chat %d", p.ChatID)
+			if p.MessageThreadID >= discordThreadFloor {
+				where = fmt.Sprintf("its post <#%d>", p.MessageThreadID)
+			}
+			items = append(items, AgendaItem{"deadline", fmt.Sprintf(
+				"%s: «%s» is due %s (%s). Still open? Nudge the family in %s, or update the doc if it was settled.",
+				p.Slug, clipRunes(d.Text, 140), d.Due.Format("Jan 2"), when, where)})
+			keys = append(keys, key)
+		}
+	}
+	return items, keys
+}
+
+// ownsDoc: this agent handles owner-only work for the project's doc — always
+// for a doc it does not share (mirrors project.MayRunAs, not importable).
+func (b *Bridge) ownsDoc(slug string) bool {
+	if b.workspaceDir == "" {
+		return true
+	}
+	data, err := os.ReadFile(filepath.Join(b.workspaceDir, "projects", slug, "owner"))
+	if err != nil {
+		return true
+	}
+	first, _, _ := strings.Cut(string(data), "\n")
+	o := strings.TrimSpace(first)
+	return o == "" || o == b.agentName || b.agentName == ""
 }

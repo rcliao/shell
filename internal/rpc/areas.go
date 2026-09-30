@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/rcliao/shell/internal/project"
 	"strings"
@@ -452,4 +453,7 @@ func (s *Server) linkShared(p *store.Project) {
 		}
 	}
 	slog.Info("rpc: shared doc linked", "slug", p.Slug, "thread", p.MessageThreadID, "owner", owner)
+	if _, err := project.EnqueueNotesFold(s.store, s.workspaceDir, s.agentName, *p, time.Now()); err != nil {
+		slog.Warn("rpc: notes fold not queued", "slug", p.Slug, "error", err)
+	}
 }
