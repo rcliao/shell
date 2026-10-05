@@ -330,6 +330,11 @@ func (s *Scheduler) runJob(ctx context.Context, sc ScheduleEntry) {
 		if runErr == nil || !IsRetryable(runErr) {
 			return
 		}
+		if sc.Type == "heartbeat" && IsPreempted(runErr) {
+			// A heartbeat a person interrupted is not worth a second run: the
+			// next beat sees the same state, and a re-run costs a full turn.
+			return
+		}
 		if attempt == s.retry.MaxAttempts {
 			slog.Error("scheduler: retries exhausted", "id", sc.ID, "label", sc.Label,
 				"attempts", attempt, "error", runErr)

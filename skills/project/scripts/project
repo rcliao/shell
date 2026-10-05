@@ -82,8 +82,8 @@ post() {
     echo "no response from bridge — is the daemon running?" >&2
     exit 1
   fi
-  if echo "$RESP" | grep -q '"error"'; then
-    echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || echo "$RESP"
+  if printf '%s\n' "$RESP" | grep -q '"error"'; then
+    printf '%s\n' "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null || printf '%s\n' "$RESP"
     exit 1
   fi
 }
@@ -118,7 +118,7 @@ print(json.dumps(d))
 ")
     post "$BODY"
     # Read-back receipt: print what the SERVER stored, warning included.
-    echo "$RESP" | python3 -c "
+    printf '%s\n' "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 print(f\"Project {r['slug']} {'created' if r.get('created', True) else 'already exists'} ({r['status']}), chat {r['chat_id']}\")
@@ -135,7 +135,7 @@ if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (
 if r.get('channel_mention'): print(f\"  channel: {r['channel_mention']}  forum: {r.get('forum_mention','')}\" + (' (created now)' if r.get('places_created') else ' (already existed)'))
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 if r.get('place_warning'): print(f\"  PLACE NOT CREATED: {r['place_warning']}\")
-" 2>/dev/null || echo "$RESP"
+" 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   join)
@@ -150,7 +150,7 @@ if os.environ['STAGE']: d['stage'] = os.environ['STAGE']
 print(json.dumps(d))
 ")
     post "$BODY"
-    echo "$RESP" | python3 -c "
+    printf '%s\n' "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 if r.get('joined'):
@@ -159,7 +159,7 @@ else:
     print(r.get('result') or f\"Project {r['slug']} (already tracked)\")
 if r.get('doc_path'): print(f\"  doc: {r['doc_path']}\")
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
-" 2>/dev/null || echo "$RESP"
+" 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   move|stage|archive)
@@ -185,7 +185,7 @@ for k in ('area', 'place', 'stage', 'content'):
 print(json.dumps(d))
 ")
     post "$BODY"
-    echo "$RESP" | python3 -c "
+    printf '%s\n' "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 print(f\"Project {r['slug']} ({r['status']})\" + (f\" in area {r['area']}\" if r.get('area') else '') + (f\", stage {r['stage']}\" if r.get('stage') else ''))
@@ -193,12 +193,12 @@ if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (
 if r.get('channel_mention'): print(f\"  channel: {r['channel_mention']}  forum: {r.get('forum_mention','')}\" + (' (created now)' if r.get('places_created') else ' (already existed)'))
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 if r.get('place_warning'): print(f\"  PLACE NOT CREATED: {r['place_warning']}\")
-" 2>/dev/null || echo "$RESP"
+" 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   list)
     post "{\"action\": \"list\", \"chat_id\": $CHAT_ID}"
-    echo "$RESP" | python3 -c "
+    printf '%s\n' "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 projects = r.get('projects', [])
@@ -211,7 +211,7 @@ for p in projects:
     area = f\" | in {p['area']}\" if p.get('area') else ''
     stage = f\" | {p['stage']}\" if p.get('stage') else ''
     print(f\"{emoji}{p['slug']} [{p['status']}]{kind} — {p['title']}{area}{stage}{export}\")
-" 2>/dev/null || echo "$RESP"
+" 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   set-instructions)
@@ -221,7 +221,7 @@ for p in projects:
     fi
     BODY=$(SLUG="$SLUG" INSTR="$INSTRUCTIONS" python3 -c "import json, os; print(json.dumps({'action': 'set-instructions', 'slug': os.environ['SLUG'], 'instructions': os.environ['INSTR']}))")
     post "$BODY"
-    echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+    printf '%s\n' "$RESP" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   get)
@@ -231,7 +231,7 @@ for p in projects:
     fi
     BODY=$(SLUG="$SLUG" python3 -c "import json, os; print(json.dumps({'action': 'get', 'slug': os.environ['SLUG']}))")
     post "$BODY"
-    echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+    printf '%s\n' "$RESP" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   doc-read)
@@ -242,12 +242,12 @@ for p in projects:
     BODY=$(SLUG="$SLUG" python3 -c "import json, os; print(json.dumps({'action': 'doc-read', 'slug': os.environ['SLUG']}))")
     post "$BODY"
     # Doc content, prefixed with the rev it was served at.
-    echo "$RESP" | python3 -c "
+    printf '%s\n' "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 print(f\"rev {r['rev']} ({r['doc_path']})\")
 print(r['content'])
-" 2>/dev/null || echo "$RESP"
+" 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   doc-write)
@@ -272,11 +272,11 @@ print(json.dumps(d))
 ")
     post "$BODY"
     # Read-back receipt: the commit hash the server minted for this write.
-    echo "$RESP" | python3 -c "
+    printf '%s\n' "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 print(f\"Doc {r['slug']} committed: rev {r['rev']}\")
-" 2>/dev/null || echo "$RESP"
+" 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 
   *)

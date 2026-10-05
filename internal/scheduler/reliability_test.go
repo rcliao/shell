@@ -331,3 +331,48 @@ func TestNextRunsPreview(t *testing.T) {
 		t.Errorf("one-shot preview = %v, want [%s]", single, once)
 	}
 }
+
+// A prompt job a family message preempted before it delivered anything is run
+// again (9/30: the diary was preempted 4s in and never re-ran). A heartbeat
+// lost the same way is not: the next beat covers it.
+func TestPreemptedPromptRetriesHeartbeatDoesNot(t *testing.T) {
+	preempted := errors.New("claude: preempted by a user message before the turn finished: turn killed: context canceled")
+	cases := []struct {
+		name      string
+		entry     ScheduleEntry
+		wantCalls int
+	}{
+		{"prompt", ScheduleEntry{ID: 41, ChatID: 100, Message: "diary", Schedule: "@daily", Type: "cron", Mode: "prompt", Timezone: "UTC"}, 2},
+		{"heartbeat", ScheduleEntry{ID: 42, ChatID: 100, Message: "beat", Schedule: "30m", Type: "heartbeat", Mode: "prompt", Timezone: "UTC"}, 1},
+	}
+	for _, c := range cases {
+		st := newMockStore(nil)
+		var calls int
+		s := New(st, nil, func(context.Context, int64, string) error {
+			calls++
+			if calls == 1 {
+				return preempted
+			}
+			return nil
+		}, "UTC")
+		s.SetRetryPolicy(RetryPolicy{MaxAttempts: 3, InitialInterval: time.Millisecond, BackoffCoeff: 1, MaxInterval: time.Millisecond})
+		s.SetQuietHours(0, 0) // the heartbeat must fire whatever the wall clock says
+		s.runJob(context.Background(), c.entry)
+		if calls != c.wantCalls {
+			t.Errorf("%s: calls = %d, want %d", c.name, calls, c.wantCalls)
+		}
+	}
+}
+
+// Plain "context canceled" stays permanent: it also covers a preempted turn
+// whose result is still coming as a follow-up, which a re-run would double.
+func TestPreemptClassification(t *testing.T) {
+	if !IsPreempted(errors.New("claude: preempted by a user message before the turn finished: x")) {
+		t.Error("preempt error not recognised")
+	}
+	for _, m := range []string{"context canceled", "claude: turn abandoned: caller context ended while the turn was in flight: context canceled"} {
+		if IsRetryable(errors.New(m)) || IsPreempted(errors.New(m)) {
+			t.Errorf("%q must not be retried", m)
+		}
+	}
+}

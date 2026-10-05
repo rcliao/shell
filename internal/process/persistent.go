@@ -62,6 +62,14 @@ type persistentProc struct {
 // back to a second subprocess on this error — the session is still busy.
 var ErrTurnAbandoned = errors.New("turn abandoned: caller context ended while the turn was in flight")
 
+// ErrTurnKilled is the abandoned case where the process itself dies with the
+// caller: it was spawned for this send, so its lifetime is the caller's
+// context (spawnPersistent), and that context just ended. Nothing will arrive
+// as a follow-up — the turn is lost, and a caller that owns a retry may run it
+// again. (9/30: a scheduled diary preempted 4s in was logged "result will
+// arrive as follow-up" and never arrived.)
+var ErrTurnKilled = errors.New("turn killed: its process was spawned under the caller's context, which ended")
+
 // ErrStalledBehindCLITurn is returned when a send waited claimTurnMaxWait for
 // a CLI-initiated turn to finish and it never did. sendPersistent treats it
 // like a dead process: kill, clean up, fall back to a one-shot resume — the
@@ -303,33 +311,36 @@ const idleTimeout = 10 * time.Minute
 // getOrSpawn returns the persistent process for a (chat, thread) key,
 // spawning one if needed. Returns nil if persistent mode is not suitable
 // (will fall back to per-message).
-func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistentProc, error) {
+//
+// spawned reports whether this call started the process, in which case the
+// process lives only as long as ctx.
+func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (proc *persistentProc, spawned bool, err error) {
 	key := req.Key()
 	m.mu.Lock()
-	proc, ok := m.persistent[key]
+	existing, ok := m.persistent[key]
 	m.mu.Unlock()
 
-	if ok && proc.cmd.ProcessState == nil {
+	if ok && existing.cmd.ProcessState == nil {
 		// Check model mismatch — if the request wants a different model than
 		// the one used to spawn this process, fall back to per-message mode.
 		reqModel := req.Model
 		if reqModel == "" {
 			reqModel = m.model
 		}
-		if proc.model != reqModel {
-			return nil, fmt.Errorf("model mismatch: proc=%q req=%q", proc.model, reqModel)
+		if existing.model != reqModel {
+			return nil, false, fmt.Errorf("model mismatch: proc=%q req=%q", existing.model, reqModel)
 		}
 		// Process is still running — reset idle timer. Reset returns false
 		// when the AfterFunc already fired (or was stopped): the idle
 		// callback is closing stdin right now, and writing to this proc
 		// would hit "broken pipe" and fall back to a cold spawn after the
 		// fact. Treat it as dead and spawn fresh instead of racing it.
-		if proc.idleTimer.Reset(idleTimeout) {
-			return proc, nil
+		if existing.idleTimer.Reset(idleTimeout) {
+			return existing, false, nil
 		}
 		// Reset on an already-fired AfterFunc re-arms it; Stop so the old
 		// callback does not fire again in 10m against the replacement.
-		proc.idleTimer.Stop()
+		existing.idleTimer.Stop()
 		slog.Info("persistent process idle-expired during lookup, respawning",
 			"chat_id", key.ChatID, "thread_id", key.ThreadID)
 	}
@@ -342,16 +353,16 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (*persistent
 	}
 
 	// Spawn new persistent process.
-	proc, err := m.spawnPersistent(ctx, req)
+	proc, err = m.spawnPersistent(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	m.mu.Lock()
 	m.persistent[key] = proc
 	m.mu.Unlock()
 
-	return proc, nil
+	return proc, true, nil
 }
 
 // spawnPersistent starts a new long-lived Claude CLI process.
@@ -570,12 +581,31 @@ func (p *persistentProc) kill() {
 // sendPersistent tries to use a persistent process for the request.
 // Returns the result, or an error if the persistent process failed.
 func (m *Manager) sendPersistent(ctx context.Context, req AgentRequest, emit EventFunc) (SendResult, error) {
-	proc, err := m.getOrSpawn(ctx, req)
+	proc, spawned, err := m.getOrSpawn(ctx, req)
 	if err != nil {
 		return SendResult{}, err
 	}
 
 	result, err := proc.sendMessage(ctx, req, emit)
+	// The process can lose the race either way: the send sees ctx end first
+	// (ErrTurnAbandoned), or the terminated CLI's EOF first (an empty result).
+	// The empty shape used to fall back to a cold spawn under the dead ctx and
+	// fail as "start claude: context canceled" (umbreon 9/5).
+	lost := errors.Is(err, ErrTurnAbandoned) ||
+		(err == nil && result.Text == "" && result.Usage == nil && len(result.Artifacts) == 0)
+	if spawned && ctx.Err() != nil && lost {
+		// This send started the process under ctx, so ctx ending is
+		// terminating it (exec.CommandContext): the turn dies with it. Drop
+		// it from the map now so the next send spawns fresh instead of
+		// writing into a process that is exiting.
+		slog.Warn("persistent turn killed with its process: it was spawned under the caller's context", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
+		m.mu.Lock()
+		if m.persistent[req.Key()] == proc {
+			delete(m.persistent, req.Key())
+		}
+		m.mu.Unlock()
+		return SendResult{}, fmt.Errorf("%w: %v", ErrTurnKilled, ctx.Err())
+	}
 	if errors.Is(err, ErrTurnAbandoned) {
 		// The turn is still running in a healthy process; its result will be
 		// delivered as a follow-up. Do not kill, do not fall back.

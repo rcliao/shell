@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/rcliao/shell/internal/decide"
 	"log/slog"
@@ -150,7 +151,7 @@ type Bridge struct {
 
 	// Preemption: user messages can cancel running system (heartbeat/scheduler) sessions.
 	systemCancelMu sync.Mutex
-	systemCancel   map[process.SessionKey]context.CancelFunc
+	systemCancel   map[process.SessionKey]context.CancelCauseFunc
 
 	// Consolidation candidates from the last reflect cycle, keyed by chatID.
 	// Populated after heartbeat reflect, consumed by the next heartbeat enrichment.
@@ -189,7 +190,7 @@ func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner
 		pmMgr:                   pmMgr,
 		planRuns:                make(map[int64]*planRun),
 		reviewCache:             make(map[int64][]memory.ReviewEntry),
-		systemCancel:            make(map[process.SessionKey]context.CancelFunc),
+		systemCancel:            make(map[process.SessionKey]context.CancelCauseFunc),
 		identityChecked:         make(map[int64]bool),
 		consolidationCandidates: make(map[int64]string),
 	}
@@ -299,6 +300,15 @@ func isSystemSender(sender string) bool {
 	return sender == "heartbeat" || sender == "scheduler" || sender == "prewarm" || sender == ReviewTurnSender
 }
 
+// ErrPreempted is the cancel cause a user message puts on a running system
+// turn. A system turn that returns an error wrapping it was lost to the
+// preempt — killed with its process or stopped before it started — and
+// delivered nothing, so the scheduler may run it again ("preempted" is on its
+// retryable list). A preempted turn whose process lives on is NOT reported
+// this way: its result still arrives as a follow-up, and a re-run would post
+// twice.
+var ErrPreempted = errors.New("preempted by a user message before the turn finished")
+
 // preemptSystemSession cancels any running system (heartbeat/scheduler) session for the key
 // and waits briefly for it to release. Called before user messages to prevent busy conflicts.
 func (b *Bridge) preemptSystemSession(key process.SessionKey) {
@@ -309,7 +319,7 @@ func (b *Bridge) preemptSystemSession(key process.SessionKey) {
 		return
 	}
 	slog.Info("preempting system session for user message", "chat_id", key.ChatID, "thread_id", key.ThreadID)
-	cancel()
+	cancel(ErrPreempted)
 
 	// Wait for the system session to release (up to 3 seconds).
 	for i := 0; i < 30; i++ {
@@ -322,9 +332,16 @@ func (b *Bridge) preemptSystemSession(key process.SessionKey) {
 	slog.Warn("preempt: system session did not release in time", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 }
 
+// preemptLost reports whether a failed system turn was lost to a user-message
+// preempt: ctx was cancelled with ErrPreempted and the turn is not still
+// running (ErrTurnAbandoned means it lives on and will follow up).
+func preemptLost(ctx context.Context, err error) bool {
+	return errors.Is(context.Cause(ctx), ErrPreempted) && !errors.Is(err, process.ErrTurnAbandoned)
+}
+
 // registerSystemCancel stores a cancel function for the current system session,
 // allowing user messages to preempt it. Returns a cleanup function.
-func (b *Bridge) registerSystemCancel(key process.SessionKey, cancel context.CancelFunc) func() {
+func (b *Bridge) registerSystemCancel(key process.SessionKey, cancel context.CancelCauseFunc) func() {
 	b.systemCancelMu.Lock()
 	b.systemCancel[key] = cancel
 	b.systemCancelMu.Unlock()
@@ -1083,8 +1100,8 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 
 	// For system senders, register a cancellable context so user messages can preempt.
 	if isSystemSender(senderName) {
-		sysCtx, sysCancel := context.WithCancel(ctx)
-		defer sysCancel()
+		sysCtx, sysCancel := context.WithCancelCause(ctx)
+		defer sysCancel(nil)
 		cleanupCancel := b.registerSystemCancel(key, sysCancel)
 		defer cleanupCancel()
 		ctx = sysCtx
@@ -1171,6 +1188,9 @@ func (b *Bridge) HandleMessageStreamingEvents(ctx context.Context, chatID, threa
 	}
 	result, err := send()
 	if err != nil {
+		if preemptLost(ctx, err) {
+			return AgentResponse{}, fmt.Errorf("claude: %w: %v", ErrPreempted, err)
+		}
 		return AgentResponse{}, fmt.Errorf("claude: %w", err)
 	}
 	// The CLI reports an upstream API failure as a normal turn whose whole
