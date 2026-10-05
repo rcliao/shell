@@ -862,6 +862,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// browser_handoffs — live views of an agent's browser (internal/store/browser_handoffs.go).
+	if _, err := s.db.Exec(browserHandoffsSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 

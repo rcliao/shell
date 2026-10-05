@@ -17,6 +17,7 @@ import (
 
 	pm "github.com/rcliao/shell-pm"
 	tunnel "github.com/rcliao/shell-tunnel"
+	"github.com/rcliao/shell/internal/browserhandoff"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
@@ -50,6 +51,7 @@ type Server struct {
 	sockPath        string
 	pmMgr           *pm.Manager
 	tunnelMgr       *tunnel.Manager
+	browserMgr      *browserhandoff.Manager
 	store           *store.Store
 	memory          *memory.Memory
 	taskStore       *transcript.TaskStore // shared task store for delegation
@@ -83,6 +85,7 @@ type Config struct {
 	SocketPath    string
 	PMMgr         *pm.Manager
 	TunnelMgr     *tunnel.Manager
+	BrowserMgr    *browserhandoff.Manager // nil when browser handoffs are disabled
 	Store         *store.Store
 	Memory        *memory.Memory
 	TaskStore     *transcript.TaskStore // shared task store
@@ -149,6 +152,7 @@ func New(cfg Config) *Server {
 		sockPath:        cfg.SocketPath,
 		pmMgr:           cfg.PMMgr,
 		tunnelMgr:       cfg.TunnelMgr,
+		browserMgr:      cfg.BrowserMgr,
 		store:           cfg.Store,
 		memory:          cfg.Memory,
 		taskStore:       cfg.TaskStore,
@@ -228,6 +232,7 @@ func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /pm", s.handlePM)
 	mux.HandleFunc("POST /tunnel", s.handleTunnel)
+	mux.HandleFunc("POST /browser", s.handleBrowser)
 	mux.HandleFunc("POST /relay", s.handleRelay)
 	mux.HandleFunc("POST /schedule", s.handleSchedule)
 	mux.HandleFunc("POST /schedules", s.handleSchedules)
