@@ -43,8 +43,8 @@ func (b *Bridge) ArchiveInboundMedia(chatID, threadID int64, msgID int, caption 
 	// ~/.shell/media is shared across agent daemons (same convention as
 	// artifacts/): prefix with the agent name so files stay attributable and
 	// the two agents' copies of the same group photo don't collide.
-	dest := filepath.Join(dir, fmt.Sprintf("%s-%s-msg%d%s",
-		b.agentBotUsername, now.Format("20060102-150405"), msgID, filepath.Ext(img.Path)))
+	dest := archiveDest(dir, fmt.Sprintf("%s-%s-msg%d",
+		b.agentBotUsername, now.Format("20060102-150405"), msgID), filepath.Ext(img.Path))
 	if err := os.Rename(img.Path, dest); err != nil {
 		data, rerr := os.ReadFile(img.Path)
 		if rerr != nil || os.WriteFile(dest, data, 0o644) != nil {
@@ -104,4 +104,19 @@ func extractMediaNote(response string) (cleaned, note string) {
 	note = strings.TrimSpace(m[1])
 	cleaned = strings.TrimSpace(mediaNoteRe.ReplaceAllString(response, ""))
 	return cleaned, note
+}
+
+// archiveDest picks a free path for base+ext in dir. One message can carry
+// several photos (a Discord message with three attachments shares one message
+// ID and lands in the same second), and os.Rename silently replaces an
+// existing file — so later photos used to overwrite earlier ones. The first
+// photo keeps the plain name; the rest get -2, -3, ...
+func archiveDest(dir, base, ext string) string {
+	dest := filepath.Join(dir, base+ext)
+	for i := 2; ; i++ {
+		if _, err := os.Lstat(dest); os.IsNotExist(err) {
+			return dest
+		}
+		dest = filepath.Join(dir, fmt.Sprintf("%s-%d%s", base, i, ext))
+	}
 }
