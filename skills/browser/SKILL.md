@@ -3,9 +3,28 @@ name: browser
 description: Drive a real browser when there is no API or CLI — read pages, fill forms, click through flows, verify a business is open
 usage: ~/.shell/skills/browser/scripts/browser <url> [action...]
 allowed-tools: Bash
+tier: hot
 ---
 
 # Browser
+
+<!-- hot -->
+**Before you tell the family you can't read a site, or ask them to check it
+themselves, go down this ladder:**
+
+1. `WebFetch` failed, came back blank, or the page is a JS app or an image →
+   `~/.shell/skills/browser/scripts/browser <url> text` (or `snapshot`).
+2. Exit 4 / `[blocked: … bot wall]` → the same URL with `--session <task-name>`:
+   a real browser window gets past most walls.
+3. Still blocked, a captcha, "approve on your phone", or a login only they can
+   do → `shell_browser(action="handoff", session=<task-name>, reason=…)`, then
+   end your turn and continue when `[Browser handoff #N …]` arrives.
+4. Only then tell them what you tried and what stopped you.
+
+Flags go BEFORE the URL; each action is one quoted argument:
+`browser --session dmv https://example.gov/book snapshot 'click "e7"' text`.
+`-` as the URL stays on the session's current page. Exit 3 = a person holds the tab (wait).
+<!-- /hot -->
 
 **This is your fallback for anything the family asks that has no API, CLI, or
 skill.** Checking a shop's hours, reading a page behind a JS app, filling a
@@ -72,7 +91,8 @@ closes one; idle sessions are closed automatically.
 ## When a step needs a person: hand off
 
 Captcha, "approve on your phone", a login only they can do, a payment
-confirmation — do not guess and do not give up. Hand the tab over:
+confirmation, or a bot wall (`[blocked: … bot wall]`, exit 4) that `--session`
+does not get past — do not guess and do not give up. Hand the tab over:
 
 1. Get the page to the blocked step with `--session <name>`.
 2. Call `shell_browser(action="handoff", session="<name>", reason="<what to
