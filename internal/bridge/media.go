@@ -43,8 +43,12 @@ func (b *Bridge) ArchiveInboundMedia(chatID, threadID int64, msgID int, caption 
 	// ~/.shell/media is shared across agent daemons (same convention as
 	// artifacts/): prefix with the agent name so files stay attributable and
 	// the two agents' copies of the same group photo don't collide.
-	dest := filepath.Join(dir, fmt.Sprintf("%s-%s-msg%d%s",
-		b.agentBotUsername, now.Format("20060102-150405"), msgID, filepath.Ext(img.Path)))
+	dest, err := reserveMediaPath(dir, fmt.Sprintf("%s-%s-msg%d",
+		b.agentBotUsername, now.Format("20060102-150405"), msgID), filepath.Ext(img.Path))
+	if err != nil {
+		slog.Warn("media archive: reserve failed, keeping temp path", "error", err)
+		return
+	}
 	if err := os.Rename(img.Path, dest); err != nil {
 		data, rerr := os.ReadFile(img.Path)
 		if rerr != nil || os.WriteFile(dest, data, 0o644) != nil {
@@ -104,4 +108,30 @@ func extractMediaNote(response string) (cleaned, note string) {
 	note = strings.TrimSpace(m[1])
 	cleaned = strings.TrimSpace(mediaNoteRe.ReplaceAllString(response, ""))
 	return cleaned, note
+}
+
+// reserveMediaPath claims a fresh archive file named base+ext, or base-2+ext,
+// base-3+ext… when that name is taken. One message can carry several photos
+// (a Discord message with three attachments, a Telegram album item) and they
+// all share the message id and the same second, so without this each photo
+// would be renamed onto the previous one and only the last would survive.
+// The empty placeholder is created exclusively, so the rename that follows
+// overwrites only a file this call owns.
+func reserveMediaPath(dir, base, ext string) (string, error) {
+	for i := 1; i <= 100; i++ {
+		name := base + ext
+		if i > 1 {
+			name = fmt.Sprintf("%s-%d%s", base, i, ext)
+		}
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			f.Close()
+			return path, nil
+		}
+		if !os.IsExist(err) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("no free archive name for %s%s", base, ext)
 }
