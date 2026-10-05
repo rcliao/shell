@@ -866,6 +866,8 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(browserHandoffsSchema); err != nil {
 		return err
 	}
+	// note arrived after browser_handoffs shipped (Done carries a note).
+	s.db.Exec(`ALTER TABLE browser_handoffs ADD COLUMN note TEXT NOT NULL DEFAULT ''`)
 
 	return nil
 }

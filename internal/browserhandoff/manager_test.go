@@ -168,12 +168,12 @@ func TestHandoffDoneResumesSameChatAndThread(t *testing.T) {
 		t.Fatalf("second open err = %v; want ErrBusy", err)
 	}
 
-	h.sess.specs[0].OnDone("https://shop.example/paid", "Someone")
+	h.sess.specs[0].OnDone("https://shop.example/paid", "Someone", "take the blue one")
 	r := waitResume(t, h)
 	if r.chat != -100200300 || r.thread != 7 {
 		t.Fatalf("resume went to %d/%d", r.chat, r.thread)
 	}
-	for _, want := range []string{"#1 done", "Someone", "https://shop.example/paid", "--session shop -", "solve the captcha"} {
+	for _, want := range []string{"#1 done", "Someone", "https://shop.example/paid", "--session shop -", "solve the captcha", `"take the blue one"`, "Decide what follows"} {
 		if !strings.Contains(r.prompt, want) {
 			t.Errorf("resume prompt lacks %q: %s", want, r.prompt)
 		}
@@ -188,13 +188,13 @@ func TestHandoffDoneResumesSameChatAndThread(t *testing.T) {
 		t.Fatal("path still published or tab still held after Done")
 	}
 	row, _ := h.st.GetBrowserHandoff(ho.ID)
-	if row.Status != store.HandoffDone || row.EndedBy != "Someone" || row.FinalURL != "https://shop.example/paid" {
+	if row.Status != store.HandoffDone || row.EndedBy != "Someone" || row.FinalURL != "https://shop.example/paid" || row.Note != "take the blue one" {
 		t.Fatalf("row = %+v", row)
 	}
 
 	// Done again (double tap) and expiry after Done are no-ops.
-	h.sess.specs[0].OnDone("https://x/", "Other")
-	h.m.finish(ho.ID, store.HandoffExpired, "", "", "")
+	h.sess.specs[0].OnDone("https://x/", "Other", "")
+	h.m.finish(ho.ID, ending{status: store.HandoffExpired})
 	select {
 	case extra := <-h.resumes:
 		t.Fatalf("second resume: %s", extra.prompt)
@@ -211,7 +211,7 @@ func TestHandoffExpiryResumesAsExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-h.posts
-	h.m.finish(ho.ID, store.HandoffExpired, "", "", "") // what the timer does
+	h.m.finish(ho.ID, ending{status: store.HandoffExpired}) // what the timer does
 	r := waitResume(t, h)
 	if !strings.Contains(r.prompt, "expired") || !strings.Contains(r.prompt, "https://shop.example/checkout") {
 		t.Fatalf("prompt = %s", r.prompt)
@@ -312,7 +312,7 @@ func TestFinishTouchesSessionForReaper(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-h.posts
-	h.m.finish(ho.ID, store.HandoffDone, "", "", "")
+	h.m.finish(ho.ID, ending{status: store.HandoffDone})
 	h.sess.mu.Lock()
 	n := h.sess.touched["s"]
 	h.sess.mu.Unlock()
@@ -373,5 +373,20 @@ func TestRecoverRowExpiringDuringPublishIsCleanedUp(t *testing.T) {
 	}
 	if _, err := h.m.Open(context.Background(), OpenRequest{Session: "s", ChatID: 42}); err != nil {
 		t.Fatalf("session still blocked: %v", err)
+	}
+}
+
+func TestResumePromptDoesNotAssumeABlockedStep(t *testing.T) {
+	h := store.BrowserHandoff{ID: 4, Session: "gifts", Status: store.HandoffDone, FinalURL: "https://shop.example/cart",
+		Reason: "here are three options, pick one"}
+	p := ResumePrompt(h, "")
+	for _, want := range []string{"The person tapped Done", "left no note", "pick one", "or nothing"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("done prompt lacks %q: %s", want, p)
+		}
+	}
+	h.Status = store.HandoffExpired
+	if p := ResumePrompt(h, ""); strings.Contains(p, "blocked") || !strings.Contains(p, "Decide whether a follow-up") {
+		t.Errorf("expired prompt frames a blocked step: %s", p)
 	}
 }

@@ -13,6 +13,7 @@ Unstick agents at human steps
 - **Tailscale `serve` over a cloudflared quick tunnel**: the link cannot be opened from outside the tailnet, while a quick-tunnel URL is public (owner decision)[^E5]. Recipients need to be on the tailnet; the owner will invite them.
 - **Headful over headless**: captchas penalise headless Chrome (assumption; the owner accepts a visible window). One data point: a remote tap passed reCAPTCHA's checkbox without a challenge[^E10].
 - **Resume as a new turn over holding the turn open**: a human may take minutes. A turn kept open blocks the chat, and mid-turn injection refuses unless a turn is in flight[^E6].
+- **Handoff is the agent's call, not a last resort** (owner direction, 2026-10-05): besides steps only a person can do, the agent hands the tab over to show a find, to let someone check and finish, or when it has gone as far as it can. Done carries an optional note back, and the resume turn reports what happened without assuming a blocked step.
 - **The agent writes the chat message; the daemon posts it**: the wording stays with the agent and in the chat's language. Posting immediately, rather than in the agent's reply, also works mid-turn for watch mode.
 
 ## 3. Components
@@ -59,7 +60,7 @@ flowchart LR
 
 | thing | why |
 |---|---|
-| `browser_handoffs` (id, session, mode handoff/watch, chat_id, thread_id (real), reason, path, link, status open/done/expired/cancelled/failed, final_url, ended_by, expires_at, ended_at) in each agent's shell.db | Recover re-serves an open row at the SAME path after a restart, so the link already in the chat keeps working. `EndBrowserHandoff` only moves rows out of open, so Done and expiry cannot both resume. The path is stored as-is: tailscale's own serve config holds it anyway |
+| `browser_handoffs` (id, session, mode handoff/watch, chat_id, thread_id (real), reason, path, link, status open/done/expired/cancelled/failed, final_url, ended_by, note, expires_at, ended_at) in each agent's shell.db | Recover re-serves an open row at the SAME path after a restart, so the link already in the chat keeps working. `EndBrowserHandoff` only moves rows out of open, so Done and expiry cannot both resume. The path is stored as-is: tailscale's own serve config holds it anyway |
 | `<agent dir>/browser-sessions/<name>/` (profile/, target, lock.json, last_used, chrome.log) | Chrome locks its user-data-dir, so agents must not share one (they did before[^E2]). The CLI finds it through SHELL_BROWSER_SESSIONS |
 | `lock.json` {handoff_id, expires_at} | lets the CLI refuse while a person drives. An expired lock no longer holds, so a dead daemon cannot wedge the agent |
 
@@ -67,8 +68,8 @@ flowchart LR
 
 - **BrowserCLI** `browser --session <name> <url|-> [action…]` behaves as before; `-` stays on the current page. Exit 3 means the session is held by a person; wait for the resume turn. Also `--list-sessions`, `--session x --close-session`, and `--serve-live <addr>` (a standalone viewer for debugging).
 - **HandoffTool** `shell_browser(action="handoff"|"watch", session, reason, message?, ttl_min?)` returns text naming #N, the link and expiry, and for a handoff tells the agent to end its turn. `action="status"`, and `action="cancel", id` (no resume). Errors: not enabled (503), session already has a view (409, names it), session not running, tailscale serve disabled, no chat.
-- **LiveViewer** (relative to `/h/<token>/`): `GET ./`, `GET ./events` (SSE `frame`, `state`, `ended`), `POST ./input` and `POST ./done`. Input and Done accept JSON only (415 otherwise, so cross-site forms are blocked), are refused in watch mode (403), and address-bar URLs go through the browser domain policy (403). Several viewers may watch at once. An unknown token is a 404 from tailscale serve.
-- **ResumeTurn** sends `[Browser handoff #N done|expired|stopped …]` with sender `browser-handoff`. Expired is a normal outcome: the agent checks the page and tells the chat. Cancel and watch views never resume.
+- **LiveViewer** (relative to `/h/<token>/`): `GET ./`, `GET ./events` (SSE `frame`, `state`, `ended`), `POST ./input` and `POST ./done` (`{"note": "…"}`, optional, ≤2000 chars). Input and Done accept JSON only (415 otherwise, so cross-site forms are blocked), are refused in watch mode (403), and address-bar URLs go through the browser domain policy (403). Several viewers may watch at once. An unknown token is a 404 from tailscale serve.
+- **ResumeTurn** sends `[Browser handoff #N done|expired|stopped …]` with sender `browser-handoff`: who tapped Done, their note, where the tab is, and why it was shared; the agent decides what follows (continue, answer, or nothing). Expired is a normal outcome. Cancel and watch views never resume.
 
 ## 7. Plan
 

@@ -43,7 +43,7 @@ func (c *ChromeSessions) NewView(ctx context.Context, spec ViewSpec) (View, erro
 		ExpiresAt: spec.ExpiresAt, Policy: c.Policy,
 		OnDone: func(r liveview.Result) {
 			if onDone != nil {
-				onDone(r.URL, r.By)
+				onDone(r.URL, r.By, r.Note)
 			}
 		},
 	})

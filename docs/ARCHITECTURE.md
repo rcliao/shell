@@ -264,7 +264,9 @@ tab is streamed, never the desktop.
    the URL means "stay on the current page". The daemon puts that root in the
    child env as `SHELL_BROWSER_SESSIONS`, so the two agents never share a
    Chrome profile.
-2. Blocked on a human step, the agent calls `shell_browser(action="handoff",
+2. Whenever it judges a person should see or act on the tab (a step only they
+   can do, a find to look at, a cart to check, "I've gone as far as I can"),
+   the agent calls `shell_browser(action="handoff",
    session, reason, message)` → `POST /browser` → `browserhandoff.Manager.Open`:
    a `browser_handoffs` row, a shell-browser `liveview` (CDP screencast frames
    over SSE, taps/typing/navigation replayed through `Input.*`, address bar
@@ -272,7 +274,7 @@ tab is streamed, never the desktop.
    `tailscale serve --set-path /h/<token>` (tailnet only, never funnel), the
    agent's message + a link button posted to the chat/thread, and a hold
    (`lock.json`) that makes the skill exit 3 while the person drives.
-3. Done on the page (or the TTL, default 10 min) → the view is closed, the path
+3. Done on the page (with an optional note) or the TTL (default 10 min) → the view is closed, the path
    unpublished, the hold released, and a synthetic turn
    (`[Browser handoff #N done …]`, sender `browser-handoff`) is run in the same
    chat/thread with its reply delivered like an A2A turn.
@@ -388,7 +390,7 @@ Auto-retry on resume failure: falls back to fresh session.
 | `message_map` | telegram_msg_id → session_id, user_content, bot_content | Reaction routing |
 | `schedules` | chat_id, type, cron_expr, message, mode, next_run_at, enabled | Cron/once/heartbeat |
 | `tasks` | chat_id, description, status, created_at | Background task queue |
-| `browser_handoffs` | session, mode, chat_id, thread_id, path, link, status, expires_at, final_url, ended_by | Browser handoffs / live views (open → done/expired/cancelled/failed) |
+| `browser_handoffs` | session, mode, chat_id, thread_id, path, link, status, expires_at, final_url, ended_by, note | Browser handoffs / live views (open → done/expired/cancelled/failed) |
 
 ## File Paths
 

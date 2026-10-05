@@ -17,9 +17,16 @@ themselves, go down this ladder:**
 2. Exit 4 / `[blocked: … bot wall]` → the same URL with `--session <task-name>`:
    a real browser window gets past most walls.
 3. Still blocked, a captcha, "approve on your phone", or a login only they can
-   do → `shell_browser(action="handoff", session=<task-name>, reason=…)`, then
-   end your turn and continue when `[Browser handoff #N …]` arrives.
+   do → hand the tab over (below).
 4. Only then tell them what you tried and what stopped you.
+
+**Hand the tab over whenever you judge it helps — not only when stuck:**
+"I found these three, have a look and pick one", "it's in the cart, check and
+pay", "confirm this before I submit", "I've done what I can here, take a
+look". `shell_browser(action="handoff", session=<task-name>, reason=<what
+they'll see / should do>, message=<chat post, chat's language>)`, end your
+turn, and act on `[Browser handoff #N …]` — it carries where they left the
+page and any note they wrote.
 
 Flags go BEFORE the URL; each action is one quoted argument:
 `browser --session dmv https://example.gov/book snapshot 'click "e7"' text`.
@@ -88,20 +95,31 @@ Sessions open a real browser window on the host (captchas reject headless
 Chrome). `--list-sessions` shows them; `--session <name> --close-session`
 closes one; idle sessions are closed automatically.
 
-## When a step needs a person: hand off
+## Handing the tab to a person
 
-Captcha, "approve on your phone", a login only they can do, a payment
-confirmation, or a bot wall (`[blocked: … bot wall]`, exit 4) that `--session`
-does not get past — do not guess and do not give up. Hand the tab over:
+A handoff puts your tab in front of someone in the chat: they see it live,
+can tap, scroll and type, and tap Done (with an optional note) to give it
+back. Use it whenever you judge it is the best way forward — your call:
 
-1. Get the page to the blocked step with `--session <name>`.
-2. Call `shell_browser(action="handoff", session="<name>", reason="<what to
-   do, e.g. Tick the captcha and press Continue>", message="<what to post, in
-   the chat's language>")`. The link is posted to the chat.
-3. End your turn. While the person holds the tab the skill exits with status 3
+- **Something only they can do**: captcha, "approve on your phone", a login,
+  a payment, a bot wall (`[blocked: … bot wall]`, exit 4) that `--session`
+  does not get past.
+- **Show what you found**: "here are the three flights under $300 — pick
+  one", "this is the listing, does it look right?"
+- **Let them finish**: "everything is filled in and in the cart — check it
+  and pay", "confirm this before I submit".
+- **You've gone as far as you can**: "this is where I got to; take a look".
+
+1. Get the tab to the page you want them to see, with `--session <name>`.
+2. Call `shell_browser(action="handoff", session="<name>", reason="<what they
+   will see or should do; shown on the page>", message="<what to post, in the
+   chat's language>")`. The link is posted to the chat. `ttl_min` (default
+   10, max 60) gives them longer when there is no rush.
+3. End your turn. While they hold the tab the skill exits with status 3
    ("session is held by a human") — wait, do not retry.
-4. You get a `[Browser handoff #N done …]` (or `… expired …`) message. Look at
-   the page with `--session <name> - snapshot` and carry on.
+4. You get `[Browser handoff #N done …]` (with their note, if any) or
+   `… expired …`. Look at the page with `--session <name> - snapshot` and
+   decide what follows: continue, answer them, or nothing if they're set.
 
 To let someone watch without taking over, use `action="watch"`, keep working,
 and close it with `action="cancel"` when finished. Links open only on the

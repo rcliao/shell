@@ -32,7 +32,7 @@ import (
 type Store interface {
 	AddBrowserHandoff(store.BrowserHandoff) (int64, error)
 	SetBrowserHandoffLink(id int64, link string) error
-	EndBrowserHandoff(id int64, status, finalURL, endedBy string) (bool, error)
+	EndBrowserHandoff(id int64, status, finalURL, endedBy, note string) (bool, error)
 	GetBrowserHandoff(id int64) (*store.BrowserHandoff, error)
 	OpenBrowserHandoffs() ([]store.BrowserHandoff, error)
 }
@@ -57,7 +57,7 @@ type ViewSpec struct {
 	Title     string
 	Reason    string
 	ExpiresAt time.Time
-	OnDone    func(finalURL, by string)
+	OnDone    func(finalURL, by, note string)
 }
 
 // Sessions is the agent's browser sessions (package session in production).
@@ -193,7 +193,7 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*store.BrowserHand
 	}
 	h.Status = store.HandoffOpen
 	if err := m.start(ctx, &h); err != nil {
-		_, _ = m.cfg.Store.EndBrowserHandoff(h.ID, store.HandoffFailed, "", "")
+		_, _ = m.cfg.Store.EndBrowserHandoff(h.ID, store.HandoffFailed, "", "", "")
 		return nil, err
 	}
 
@@ -242,9 +242,9 @@ func defaultMessage(h store.BrowserHandoff) string {
 		return fmt.Sprintf("Live view of my browser (Tailscale only, until %s).", when)
 	}
 	if h.Reason != "" {
-		return fmt.Sprintf("I need a hand in the browser: %s\nOpen the link on a device signed in to Tailscale, then tap Done. It expires at %s.", h.Reason, when)
+		return fmt.Sprintf("Have a look in my browser: %s\nOpen the link on a device signed in to Tailscale and tap Done when you're finished (add a note if you like). It expires at %s.", h.Reason, when)
 	}
-	return fmt.Sprintf("I need a hand in the browser. Open the link on a device signed in to Tailscale, then tap Done. It expires at %s.", when)
+	return fmt.Sprintf("Have a look in my browser. Open the link on a device signed in to Tailscale and tap Done when you're finished. It expires at %s.", when)
 }
 
 // start brings up the view, server, tailnet path, hold and expiry timer for h
@@ -253,15 +253,15 @@ func (m *Manager) start(ctx context.Context, h *store.BrowserHandoff) error {
 	id := h.ID
 	title := "Live browser"
 	if h.Mode == store.HandoffModeHandoff {
-		title = "Your turn in the browser"
+		title = "Shared browser"
 	}
 	if m.cfg.AgentName != "" {
 		title += " · " + m.cfg.AgentName
 	}
 	view, err := m.cfg.Sessions.NewView(m.ctx, ViewSpec{
 		Session: h.Session, Mode: h.Mode, Title: title, Reason: h.Reason, ExpiresAt: h.ExpiresAt,
-		OnDone: func(finalURL, by string) {
-			go m.finish(id, store.HandoffDone, finalURL, by, "")
+		OnDone: func(finalURL, by, note string) {
+			go m.finish(id, ending{status: store.HandoffDone, url: finalURL, by: by, note: note})
 		},
 	})
 	if err != nil {
@@ -301,7 +301,7 @@ func (m *Manager) start(ctx context.Context, h *store.BrowserHandoff) error {
 	l := &live{h: *h, view: view, srv: srv}
 	m.mu.Lock()
 	m.active[id] = l
-	l.timer = time.AfterFunc(wait, func() { m.finish(id, store.HandoffExpired, "", "", "") })
+	l.timer = time.AfterFunc(wait, func() { m.finish(id, ending{status: store.HandoffExpired}) })
 	m.mu.Unlock()
 	return nil
 }
@@ -309,7 +309,18 @@ func (m *Manager) start(ctx context.Context, h *store.BrowserHandoff) error {
 // finish ends handoff id exactly once: the store decides who wins a
 // Done-vs-expiry race. Then it takes the view down and, for a handoff,
 // resumes the agent.
-func (m *Manager) finish(id int64, status, finalURL, by, detail string) {
+// ending is how a handoff ended: a final status, plus what the person left
+// (page, name, note) on Done, or why it failed.
+type ending struct {
+	status string
+	url    string // page the tab ended on ("" = ask the view)
+	by     string // who tapped Done (tailnet user), if known
+	note   string // what they typed for the agent, if anything
+	detail string // failure reason, for HandoffFailed
+}
+
+func (m *Manager) finish(id int64, e ending) {
+	status, finalURL := e.status, e.url
 	m.mu.Lock()
 	l := m.active[id]
 	m.mu.Unlock()
@@ -328,7 +339,7 @@ func (m *Manager) finish(id int64, status, finalURL, by, detail string) {
 		h = *row
 	}
 
-	ended, err := m.cfg.Store.EndBrowserHandoff(id, status, finalURL, by)
+	ended, err := m.cfg.Store.EndBrowserHandoff(id, status, finalURL, e.by, e.note)
 	if err != nil {
 		slog.Error("browser handoff: ending failed", "id", id, "status", status, "error", err)
 		return
@@ -363,8 +374,8 @@ func (m *Manager) finish(id int64, status, finalURL, by, detail string) {
 	slog.Info("browser handoff: ended", "id", id, "status", status)
 
 	if h.Mode == store.HandoffModeHandoff && status != store.HandoffCancelled {
-		h.Status, h.FinalURL, h.EndedBy = status, finalURL, by
-		prompt := ResumePrompt(h, detail)
+		h.Status, h.FinalURL, h.EndedBy, h.Note = status, finalURL, e.by, e.note
+		prompt := ResumePrompt(h, e.detail)
 		go m.cfg.Resume(h.ChatID, h.ThreadID, prompt)
 	}
 }
@@ -382,25 +393,33 @@ func endMessage(status string) string {
 }
 
 // ResumePrompt is the turn the agent gets when a handoff ends. It starts with
-// "[" like the other system-originated turns.
+// "[" like the other system-originated turns. It reports what happened and
+// leaves the next move to the agent: a handoff may have been a captcha to
+// clear, a find to look at, or "I've done what I can" — the follow-up may be
+// to continue, to answer, or nothing at all.
 func ResumePrompt(h store.BrowserHandoff, detail string) string {
 	at := h.FinalURL
 	if at == "" {
 		at = "(unknown page)"
 	}
-	cont := fmt.Sprintf("`browser --session %s - <actions>` (start with `snapshot` or `text`)", h.Session)
+	look := fmt.Sprintf("`browser --session %s - snapshot`", h.Session)
 	switch h.Status {
 	case store.HandoffDone:
 		who := h.EndedBy
 		if who == "" {
 			who = "The person"
 		}
-		return fmt.Sprintf("[Browser handoff #%d done: %s finished and handed the browser back. Session %q is now at %s. "+
-			"Check the page and continue the task with %s. You had handed off because: %s]", h.ID, who, h.Session, at, cont, orDash(h.Reason))
+		said := "They left no note."
+		if strings.TrimSpace(h.Note) != "" {
+			said = fmt.Sprintf("Their note to you: %q.", h.Note)
+		}
+		return fmt.Sprintf("[Browser handoff #%d done: %s tapped Done. %s The tab (session %q) is at %s. "+
+			"You shared it because: %s. Decide what follows — continue in the tab (%s), answer them, or nothing if they are set.]",
+			h.ID, who, said, h.Session, at, orDash(h.Reason), look)
 	case store.HandoffExpired:
-		return fmt.Sprintf("[Browser handoff #%d expired at %s without anyone tapping Done. Session %q is still open at %s. "+
-			"Check it with %s; if the step is still blocked, tell the chat and ask whether to try again.]",
-			h.ID, h.ExpiresAt.Local().Format("15:04"), h.Session, at, cont)
+		return fmt.Sprintf("[Browser handoff #%d expired at %s without anyone tapping Done. The tab (session %q) is still open at %s; "+
+			"%s shows what, if anything, they did. You shared it because: %s. Decide whether a follow-up is worth it.]",
+			h.ID, h.ExpiresAt.Local().Format("15:04"), h.Session, at, look, orDash(h.Reason))
 	}
 	return fmt.Sprintf("[Browser handoff #%d stopped: %s. Session %q may be closed. Tell the chat the live link no longer works.]",
 		h.ID, orDash(detail), h.Session)
@@ -425,7 +444,7 @@ func (m *Manager) Cancel(id int64) error {
 	if row.Status != store.HandoffOpen {
 		return fmt.Errorf("browser handoff #%d is already %s", id, row.Status)
 	}
-	m.finish(id, store.HandoffCancelled, "", "", "")
+	m.finish(id, ending{status: store.HandoffCancelled})
 	return nil
 }
 
@@ -457,18 +476,18 @@ func (m *Manager) Recover(ctx context.Context) {
 	for i := range rows {
 		h := rows[i]
 		if !m.cfg.Now().Before(h.ExpiresAt) {
-			m.finish(h.ID, store.HandoffExpired, "", "", "")
+			m.finish(h.ID, ending{status: store.HandoffExpired})
 			continue
 		}
 		if _, busy := m.reserve(h.Session); busy {
-			m.finish(h.ID, store.HandoffFailed, "", "", "another live view of the same session was already open")
+			m.finish(h.ID, ending{status: store.HandoffFailed, detail: "another live view of the same session was already open"})
 			continue
 		}
 		err := m.start(ctx, &h)
 		m.unreserve(h.Session)
 		if err != nil {
 			slog.Warn("browser handoff: recover failed", "id", h.ID, "error", err)
-			m.finish(h.ID, store.HandoffFailed, "", "", "the browser could not be reopened after a restart ("+err.Error()+")")
+			m.finish(h.ID, ending{status: store.HandoffFailed, detail: "the browser could not be reopened after a restart (" + err.Error() + ")"})
 			continue
 		}
 		slog.Info("browser handoff: recovered", "id", h.ID, "session", h.Session)
