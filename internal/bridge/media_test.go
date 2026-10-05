@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -44,6 +46,24 @@ func TestHumanAge(t *testing.T) {
 	} {
 		if got := humanAge(tt.d); got != tt.want {
 			t.Fatalf("humanAge(%v)=%q want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestArchiveDestAvoidsCollision(t *testing.T) {
+	dir := t.TempDir()
+	var got []string
+	for i := 0; i < 3; i++ {
+		p := archiveDest(dir, "bot-20261004-195350-msg1", ".png")
+		if err := os.WriteFile(p, []byte{byte(i)}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, filepath.Base(p))
+	}
+	want := []string{"bot-20261004-195350-msg1.png", "bot-20261004-195350-msg1-2.png", "bot-20261004-195350-msg1-3.png"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("photo %d: got %q, want %q", i, got[i], want[i])
 		}
 	}
 }
