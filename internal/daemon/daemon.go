@@ -1945,7 +1945,7 @@ func generateAgentSettings(agentNS, dbPath string, ghostEnv map[string]string) m
 		agentHooks[eventName] = agentEventList
 	}
 
-	return map[string]any{
+	settings := map[string]any{
 		"hooks": agentHooks,
 		// Structural tool enforcement: the claude.ai Notion CONNECTOR tools
 		// are banned for agents — the local skills/notion scripts do the same
@@ -1957,6 +1957,10 @@ func generateAgentSettings(agentNS, dbPath string, ghostEnv map[string]string) m
 			"deny": []string{"mcp__claude_ai_Notion__*"},
 		},
 	}
+	if sb := agentSandbox(globalSettings["sandbox"], homeDir); sb != nil {
+		settings["sandbox"] = sb
+	}
+	return settings
 }
 
 func sortedKeys(m map[string]string) []string {
