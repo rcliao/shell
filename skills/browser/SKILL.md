@@ -33,8 +33,9 @@ Actions:
 - `sleep "<duration>"` — e.g. `sleep "2s"`
 - `js "<expression>"` — evaluate JavaScript; **disabled unless `--allow-js`**
 
-Flags: `--render` (force Chrome), `--profile <name>` (persistent login
-profile), `--allow <domain>`, `--allow-js`, `--timeout`, `--headless=false`.
+Flags: `--session <name>` (keep the tab between runs, see below), `--render`
+(force Chrome), `--profile <name>` (persistent login profile), `--allow <domain>`,
+`--allow-js`, `--timeout`, `--headless=false`.
 
 ## Work by refs, not by guessing selectors
 
@@ -51,6 +52,40 @@ the main reason browser attempts fail:
 Refs are valid only within one run, so keep the whole flow in a single
 command. If a ref or selector misses, the error lists the closest candidates —
 use those instead of guessing again.
+
+## Sessions: keep the tab between runs
+
+Add `--session <name>` and Chrome stays open after the command returns: the
+same tab, cookies and page are there on the next run. Use one session per
+task (`--session dmv-appointment`). Pass `-` as the URL to keep working on the
+page the tab already shows:
+
+```bash
+~/.shell/skills/browser/scripts/browser --session dmv https://example.gov/book snapshot
+~/.shell/skills/browser/scripts/browser --session dmv - 'click "e7"' snapshot
+```
+
+Sessions open a real browser window on the host (captchas reject headless
+Chrome). `--list-sessions` shows them; `--session <name> --close-session`
+closes one; idle sessions are closed automatically.
+
+## When a step needs a person: hand off
+
+Captcha, "approve on your phone", a login only they can do, a payment
+confirmation — do not guess and do not give up. Hand the tab over:
+
+1. Get the page to the blocked step with `--session <name>`.
+2. Call `shell_browser(action="handoff", session="<name>", reason="<what to
+   do, e.g. Tick the captcha and press Continue>", message="<what to post, in
+   the chat's language>")`. The link is posted to the chat.
+3. End your turn. While the person holds the tab the skill exits with status 3
+   ("session is held by a human") — wait, do not retry.
+4. You get a `[Browser handoff #N done …]` (or `… expired …`) message. Look at
+   the page with `--session <name> - snapshot` and carry on.
+
+To let someone watch without taking over, use `action="watch"`, keep working,
+and close it with `action="cancel"` when finished. Links open only on the
+family's Tailscale devices and expire (default 10 minutes).
 
 ## Speed: the fast path is automatic
 

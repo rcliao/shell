@@ -98,7 +98,9 @@ init: build
 skills:
 	go build -o skills/web-search/scripts/web-search ./cmd/shell-search
 	go build -o skills/generate-image/scripts/generate-image ./cmd/shell-imagen
-	go build -o skills/browser/scripts/browser ./cmd/shell-browser
+	@# The real CLI lives in the shell-browser module (flags, refs, --session);
+	@# the old in-repo wrapper ignored every flag the SKILL.md documents.
+	go build -o skills/browser/scripts/browser github.com/rcliao/shell-browser/cmd/shell-browser
 
 # Install skills to ~/.shell/skills/
 install-skills: skills

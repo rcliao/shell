@@ -68,6 +68,18 @@ Bash — they die with the turn. Always use shell_pm.
 
 shell_tunnel — expose a local port to the internet via a Cloudflare quick tunnel.
 
+shell_browser — hand your browser tab to a person when a step needs a human
+(captcha, "approve on your phone", a login, a payment confirmation), or let
+them watch you. Drive the page first with the browser skill using a named
+session (browser --session <name> <url> …), then call
+shell_browser(action="handoff", session=<name>, reason=<what to do>,
+message=<what to post, in the chat's language>). The link is posted to this
+chat; end your turn and do not drive that session until a "[Browser handoff
+#N …]" message tells you the person finished or the link expired — then
+continue with browser --session <name> - <actions>. action="watch" shares a
+view-only link while you keep working. Links work only on the family's
+Tailscale devices.
+
 Typical web app workflow:
 1. Write app files
 2. shell_pm start → starts server in background
@@ -376,6 +388,47 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			return errResult(err.Error()), nil
 		}
 		return textResult(jsonText(result)), nil
+	})
+
+	// shell_browser — hand the agent's browser tab to a person / let them watch
+	server.AddTool(&gomcp.Tool{
+		Name: "shell_browser",
+		Description: "Hand your browser session's tab to a person in this chat (captcha, approval, login) or share a view-only live link. " +
+			"Requires a session you have been driving with `browser --session <name>`. Posts the link to the current chat. " +
+			"After action=handoff, end your turn; you get a \"[Browser handoff #N …]\" message when they tap Done or the link expires.",
+		InputSchema: schema([]string{"action"}, map[string]map[string]any{
+			"action":  prop("string", "handoff (person drives, then you resume), watch (view only, you keep driving), status, cancel"),
+			"session": prop("string", "The --session name you have been driving (handoff/watch)"),
+			"reason":  prop("string", "What the person should do, shown on the page, e.g. 'Tick the captcha and press Continue'"),
+			"message": prop("string", "Text posted to the chat with the link, written in the chat's language. Optional."),
+			"ttl_min": prop("integer", "Minutes the link stays open (default 10)"),
+			"id":      prop("integer", "Handoff id (status/cancel)"),
+		}),
+	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		var p struct {
+			Action  string `json:"action"`
+			Session string `json:"session"`
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+			TTLMin  int    `json:"ttl_min"`
+			ID      int64  `json:"id"`
+		}
+		if err := unmarshalArgs(req, &p); err != nil {
+			return errResult(err.Error()), nil
+		}
+		chat := currentChatID()
+		if (p.Action == "handoff" || p.Action == "watch") && chat == 0 {
+			return errResult("shell_browser needs a chat to post the link in; this turn has none"), nil
+		}
+		thread, _ := strconv.ParseInt(os.Getenv("SHELL_MESSAGE_THREAD_ID"), 10, 64)
+		result, err := client.call(ctx, "/browser", map[string]any{
+			"action": p.Action, "session": p.Session, "reason": p.Reason, "message": p.Message,
+			"ttl_min": p.TTLMin, "id": p.ID, "chat_id": chat, "thread_id": thread,
+		})
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		return textResult(fmt.Sprintf("%v", result["result"])), nil
 	})
 
 	// shell_relay — send messages/photos to other Telegram chats/topics

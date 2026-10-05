@@ -23,6 +23,7 @@ import (
 	tunnel "github.com/rcliao/shell-tunnel"
 	"github.com/rcliao/shell/internal/bench"
 	"github.com/rcliao/shell/internal/bridge"
+	"github.com/rcliao/shell/internal/browserhandoff"
 	"github.com/rcliao/shell/internal/config"
 	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/planner"
@@ -52,6 +53,11 @@ type Daemon struct {
 	tunnelMgr *tunnel.Manager      // nil if disabled
 	pmMgr     *pm.Manager          // nil if disabled
 	rpcServer *rpc.Server          // nil if no RPC endpoints
+
+	// browser is nil when browser handoffs are disabled. browserIdle closes
+	// a browser session's Chrome after this long unused (0 = never).
+	browser     *browserhandoff.Manager
+	browserIdle time.Duration
 
 	// pollCancel stops the Telegram long-poller. Handlers are detached from
 	// this context by turnContext (internal/telegram/bot.go); without that,
@@ -184,6 +190,9 @@ func New(cfg config.Config) (*Daemon, error) {
 	toolReg.Register(tool.Tool{Name: "shell_tunnel", Description: "HTTP tunnels", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_tunnel"}})
 	toolReg.Register(tool.Tool{Name: "shell_relay", Description: "Message relay", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_relay"}})
 	toolReg.Register(tool.Tool{Name: "shell_schedule", Description: "Schedules: create, describe, cancel", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_schedule"}})
+	if cfg.Browser.Enabled {
+		toolReg.Register(tool.Tool{Name: "shell_browser", Description: "Browser handoff / live view", Kind: tool.KindMCP, AllowedTools: []string{"mcp__shell-bridge__shell_browser"}})
+	}
 
 	// Register skill scripts.
 	if skillRegistry != nil {
@@ -315,6 +324,16 @@ func New(cfg config.Config) (*Daemon, error) {
 		stripEnv = append(stripEnv, cfg.Discord.TokenEnv)
 	}
 	passEnv := cfg.SecretPassthrough()
+
+	// Browser sessions (browser --session) live per agent: Chrome locks its
+	// profile dir, so two agents must never share one. The skill reads the
+	// root from SHELL_BROWSER_SESSIONS; the handoff manager uses the same dir.
+	browserSessionsDir := filepath.Join(pidDir, "browser-sessions")
+	childEnv := make(map[string]string, len(cfg.Claude.Env)+1)
+	for k, v := range cfg.Claude.Env {
+		childEnv[k] = v
+	}
+	childEnv["SHELL_BROWSER_SESSIONS"] = browserSessionsDir
 	slog.Info("secrets: child env policy", "strip", len(stripEnv), "passthrough", sortedKeys(passEnv))
 
 	proc := process.NewManager(process.ManagerConfig{
@@ -326,7 +345,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		AllowedTools:    allowedTools,
 		DisallowedTools: cfg.Claude.DisallowedTools,
 		ExtraArgs:       cfg.Claude.ExtraArgs,
-		Env:             cfg.Claude.Env,
+		Env:             childEnv,
 		StripEnv:        stripEnv,
 		PassEnv:         passEnv,
 		SettingSources:  cfg.Claude.SettingSources,
@@ -823,10 +842,18 @@ func New(cfg config.Config) (*Daemon, error) {
 	// Projects with their own Discord place share one doc between the agents
 	// (part 3); this migrates older ones and is a no-op after.
 	linkSharedDocs(st, sharedRootFor(cfg), workspaceDir, cfg.Agent.Name)
+	// Browser handoffs: the agent's browser tab, live, on the tailnet.
+	var browserMgr *browserhandoff.Manager
+	if cfg.Browser.Enabled {
+		browserMgr = newBrowserHandoffs(cfg.Browser, agentName, browserSessionsDir, st, bot, br)
+		slog.Info("browser handoffs: enabled", "sessions", browserSessionsDir)
+	}
+
 	rpcSrv := rpc.New(rpc.Config{
 		SocketPath: bridgeSockPath,
 		PMMgr:      pmMgr,
 		TunnelMgr:  tunnelMgr,
+		BrowserMgr: browserMgr,
 		Store:      st,
 		Memory:     mem,
 		Notify: func(chatID, threadID int64, msg string) {
@@ -1278,6 +1305,16 @@ func New(cfg config.Config) (*Daemon, error) {
 		tunnelMgr: tunnelMgr,
 		pmMgr:     pmMgr,
 		rpcServer: rpcSrv,
+		browser:   browserMgr,
+		browserIdle: func() time.Duration {
+			if cfg.Browser.IdleCloseMin < 0 {
+				return 0
+			}
+			if cfg.Browser.IdleCloseMin == 0 {
+				return 30 * time.Minute
+			}
+			return time.Duration(cfg.Browser.IdleCloseMin) * time.Minute
+		}(),
 	}
 
 	// Resolve source directory for reload and self-restart.
@@ -1410,6 +1447,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 				slog.Error("rpc server stopped", "error", err)
 			}
 		}()
+	}
+
+	// Browser handoffs: re-serve links that were open before a restart (or
+	// expire them), and close browser windows nobody has used in a while.
+	if d.browser != nil {
+		go d.browser.Recover(ctx)
+		if d.browserIdle > 0 {
+			go d.browser.RunReaper(ctx, 5*time.Minute, d.browserIdle)
+		}
 	}
 
 	// Start live reloader if enabled.
@@ -1567,6 +1613,11 @@ func (d *Daemon) Shutdown() {
 	}
 	if d.tunnelMgr != nil {
 		d.tunnelMgr.StopAll()
+	}
+	if d.browser != nil {
+		// Leaves open handoffs and their tailnet paths in place; the next
+		// daemon's Recover re-serves them at the same link.
+		d.browser.Shutdown()
 	}
 	d.proc.KillAll()
 	d.store.Close()

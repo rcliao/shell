@@ -20,7 +20,8 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 │  MCP Server        │  RPC Server                │
 │  shell_pm,         │  /pm, /tunnel, /relay,     │
 │  shell_tunnel,     │  /schedule, /memory, /task │
-│  shell_relay       │  (Unix socket)             │
+│  shell_relay,      │  /browser (Unix socket)    │
+│  shell_browser     │                            │
 ├────────────────────┴────────────────────────────┤
 │  Store (SQLite)     │  Memory (ghost)           │
 │  sessions, messages │  semantic search,         │
@@ -48,6 +49,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **config** | `internal/config/` | JSON config from `~/.shell/config.json` with all feature flags |
 | **daemon** | `internal/daemon/` | Initialization chain, PID file, signal handling, component wiring |
 | **memory** | `internal/memory/` | Semantic memory via ghost library. Namespaces, profiles, exchange logging |
+| **browserhandoff** | `internal/browserhandoff/` | Browser handoffs: live view of an agent's browser session on the tailnet, link posted to the chat, agent resumed on Done/expiry (see Browser handoffs) |
 | **planner** | `internal/planner/` | Plan execution: execute → test → review → decide (done/retry/blocked) |
 | **project** | `internal/project/` | First-class projects: per-project git doc, Notion render + block map, comment/edit ingestion, adoption, doc budget |
 | **decide** | `internal/decide/` | Typed decisions from a decision model (TypeSafe Jev): choice + probabilities, 0–1 beliefs. Shadow router records answers per turn, never acts |
@@ -104,6 +106,7 @@ Claude CLI ──MCP stdio──► shell mcp ──HTTP──► bridge RPC (Un
   shell_pm     → POST /pm     → pmMgr.Start/Stop/List
   shell_tunnel → POST /tunnel → tunnelMgr.Start/Stop/List
   shell_relay  → POST /relay  → bot.SendText/SendPhoto + bridge session
+  shell_browser → POST /browser → browserMgr.Open/Cancel/Status (when "browser.enabled")
 ```
 
 MCP tools are auto-approved via `--allowedTools mcp__shell-bridge__shell_*`.
@@ -121,6 +124,7 @@ HTTP server on `~/.shell/bridge.sock` for skill scripts and MCP server:
 | `POST /schedule` | Create schedules |
 | `POST /memory` | Store memories |
 | `POST /task` | Complete tasks |
+| `POST /browser` | Browser handoff / live view (`handoff`, `watch`, `status`, `cancel`) |
 
 ### Skill Scripts (Bash wrappers)
 
@@ -247,6 +251,35 @@ Inbound: `discord.Handler` runs turns through `bridge.HandleMessageStreamingEven
 handler, sharing the pending-turn ledger and message map (Discord message ids are global snowflakes and fit
 `int`). Bot-authored Discord messages are ignored (v1 loop guard).
 
+## Browser handoffs
+
+Design: `docs/DESIGN-BROWSER-HANDOFF.md`. Lets an agent hand its browser tab to
+a person (captcha, approval, login) or let them watch, without VNC: only the
+tab is streamed, never the desktop.
+
+1. The agent drives a **browser session** with the browser skill:
+   `browser --session <name> …` (shell-browser `session` package). Chrome
+   (a real window) is started detached with a loopback debug port under
+   `<agent dir>/browser-sessions/<name>/` and stays open between runs; `-` as
+   the URL means "stay on the current page". The daemon puts that root in the
+   child env as `SHELL_BROWSER_SESSIONS`, so the two agents never share a
+   Chrome profile.
+2. Blocked on a human step, the agent calls `shell_browser(action="handoff",
+   session, reason, message)` → `POST /browser` → `browserhandoff.Manager.Open`:
+   a `browser_handoffs` row, a shell-browser `liveview` (CDP screencast frames
+   over SSE, taps/typing/navigation replayed through `Input.*`, address bar
+   gated by the browser domain policy) on `127.0.0.1:<random>`, published with
+   `tailscale serve --set-path /h/<token>` (tailnet only, never funnel), the
+   agent's message + a link button posted to the chat/thread, and a hold
+   (`lock.json`) that makes the skill exit 3 while the person drives.
+3. Done on the page (or the TTL, default 10 min) → the view is closed, the path
+   unpublished, the hold released, and a synthetic turn
+   (`[Browser handoff #N done …]`, sender `browser-handoff`) is run in the same
+   chat/thread with its reply delivered like an A2A turn.
+4. `action="watch"`: view-only, no hold, no resume. A daemon restart keeps open
+   rows and their paths; `Recover` re-serves them on the same link (or ends
+   them as expired). Idle sessions' Chrome is closed after `idle_close_min`.
+
 ## Agent-to-agent hand-offs (A2A)
 
 In a group, when one agent's reply addresses the other (an @mention, the name followed by `,` `:` `?` `!` `—`,
@@ -355,6 +388,7 @@ Auto-retry on resume failure: falls back to fresh session.
 | `message_map` | telegram_msg_id → session_id, user_content, bot_content | Reaction routing |
 | `schedules` | chat_id, type, cron_expr, message, mode, next_run_at, enabled | Cron/once/heartbeat |
 | `tasks` | chat_id, description, status, created_at | Background task queue |
+| `browser_handoffs` | session, mode, chat_id, thread_id, path, link, status, expires_at, final_url, ended_by | Browser handoffs / live views (open → done/expired/cancelled/failed) |
 
 ## File Paths
 
@@ -790,6 +824,7 @@ value; `shell-secrets doctor` covers the store itself.
   "planner": { "enabled", "test_cmd", "conventions", "max_retries", "worktree" },
   "scheduler": { "enabled", "timezone", "quiet_hour_start", "quiet_hour_end" },
   "tunnel": { "enabled", "cloudflared_bin", "max_tunnels" },
+  "browser": { "enabled", "tailscale_bin", "handoff_ttl_min", "max_ttl_min", "idle_close_min" },
   "pm": { "enabled", "max_procs", "log_lines" },
   "reload": { "enabled", "source_dir", "debounce" },
   "secrets": { "enabled", "store_path" }

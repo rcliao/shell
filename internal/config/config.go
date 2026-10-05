@@ -25,6 +25,7 @@ type Config struct {
 	Google    GoogleConfig    `json:"google"`
 	Secrets   SecretsConfig   `json:"secrets"`
 	Tunnel    TunnelConfig    `json:"tunnel"`
+	Browser   BrowserConfig   `json:"browser"`
 	PM        PMConfig        `json:"pm"`
 	Skills    SkillsConfig    `json:"skills"`
 	Agent     AgentIdentity   `json:"agent"`
@@ -215,6 +216,17 @@ type TunnelConfig struct {
 	CloudflaredBin  string `json:"cloudflared_bin"`  // path to cloudflared binary, default "cloudflared"
 	MaxTunnels      int    `json:"max_tunnels"`      // max concurrent tunnels, default 5
 	DefaultProtocol string `json:"default_protocol"` // "http" or "https", default "http"
+}
+
+// BrowserConfig turns on browser handoffs: the agent's live browser view
+// published on the tailnet (docs/DESIGN-BROWSER-HANDOFF.md). Browser sessions
+// themselves (browser --session) work without it.
+type BrowserConfig struct {
+	Enabled       bool   `json:"enabled"`
+	TailscaleBin  string `json:"tailscale_bin"`   // default "tailscale"
+	HandoffTTLMin int    `json:"handoff_ttl_min"` // default link lifetime, default 10
+	MaxTTLMin     int    `json:"max_ttl_min"`     // cap on a requested lifetime, default 60
+	IdleCloseMin  int    `json:"idle_close_min"`  // close a session's Chrome after this idle time, default 30; <0 never
 }
 
 type SecretsConfig struct {
