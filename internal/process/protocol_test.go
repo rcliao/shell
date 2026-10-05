@@ -620,3 +620,17 @@ func TestParseBidirectionalEvents_TextSegmentsNoTools(t *testing.T) {
 		t.Fatalf("segments = %q, want one segment", result.TextSegments)
 	}
 }
+
+func TestReportsBotWall(t *testing.T) {
+	for in, want := range map[string]bool{
+		"step 2 (text):\n...\n[blocked: akamai bot wall (text: access denied), not the site's content. Next: retry with --session": true,
+		"[blocked: perimeterx bot wall (text: are you real?), not the site's content.":                                             true,
+		"step 1 (navigate): OK\nstep 2 (text): Example Domain":                                                                     false,
+		"the page said [blocked: by your administrator]":                                                                           false,
+		"": false,
+	} {
+		if got := reportsBotWall(in); got != want {
+			t.Errorf("reportsBotWall(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
