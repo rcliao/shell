@@ -40,6 +40,7 @@ type BrowserHandoff struct {
 	Status    string
 	FinalURL  string
 	EndedBy   string
+	Note      string // what the person typed for the agent on Done
 	CreatedAt time.Time
 	ExpiresAt time.Time
 	EndedAt   time.Time
@@ -90,15 +91,15 @@ func (s *Store) SetBrowserHandoffLink(id int64, link string) error {
 
 // EndBrowserHandoff moves an open handoff to a final status. ended is false
 // when it was already final — the caller lost a race (Done vs expiry) and must
-// not act on it a second time.
-func (s *Store) EndBrowserHandoff(id int64, status, finalURL, endedBy string) (ended bool, err error) {
+// not act on it a second time. note is the person's note on Done, if any.
+func (s *Store) EndBrowserHandoff(id int64, status, finalURL, endedBy, note string) (ended bool, err error) {
 	switch status {
 	case HandoffDone, HandoffExpired, HandoffCancelled, HandoffFailed:
 	default:
 		return false, fmt.Errorf("not a final browser handoff status: %q", status)
 	}
-	res, err := s.db.Exec(`UPDATE browser_handoffs SET status = ?, final_url = ?, ended_by = ?, ended_at = ?
-		WHERE id = ? AND status = ?`, status, finalURL, endedBy, time.Now().UTC(), id, HandoffOpen)
+	res, err := s.db.Exec(`UPDATE browser_handoffs SET status = ?, final_url = ?, ended_by = ?, note = ?, ended_at = ?
+		WHERE id = ? AND status = ?`, status, finalURL, endedBy, note, time.Now().UTC(), id, HandoffOpen)
 	if err != nil {
 		return false, err
 	}
@@ -130,7 +131,7 @@ func (s *Store) RecentBrowserHandoffs(limit int) ([]BrowserHandoff, error) {
 
 func (s *Store) queryBrowserHandoffs(where string, args ...any) ([]BrowserHandoff, error) {
 	rows, err := s.db.Query(`SELECT id, session, mode, chat_id, thread_id, reason, path, link, status,
-		final_url, ended_by, created_at, expires_at, ended_at FROM browser_handoffs `+where, args...)
+		final_url, ended_by, note, created_at, expires_at, ended_at FROM browser_handoffs `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +141,7 @@ func (s *Store) queryBrowserHandoffs(where string, args ...any) ([]BrowserHandof
 		var h BrowserHandoff
 		var created, expires, ended any
 		if err := rows.Scan(&h.ID, &h.Session, &h.Mode, &h.ChatID, &h.ThreadID, &h.Reason, &h.Path, &h.Link,
-			&h.Status, &h.FinalURL, &h.EndedBy, &created, &expires, &ended); err != nil {
+			&h.Status, &h.FinalURL, &h.EndedBy, &h.Note, &created, &expires, &ended); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, nil
 			}

@@ -66,6 +66,9 @@ func TestE2ERealChromeAndTailscale(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("link %s", h.Link)
+	// A failed run stops before Done; Shutdown keeps paths for a restart by
+	// design, so the test removes its own.
+	t.Cleanup(func() { _ = ts.Unpublish(context.Background(), h.Path) })
 	get := func(url string) (int, string) {
 		resp, err := http.Get(url)
 		if err != nil {
@@ -75,7 +78,7 @@ func TestE2ERealChromeAndTailscale(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	if code, body := get(h.Link); code != 200 || !strings.Contains(body, "Done, hand it back") {
+	if code, body := get(h.Link); code != 200 || !strings.Contains(body, `id="done"`) {
 		t.Fatalf("link: %d", code)
 	}
 	host, _ := ts.Host(ctx)
@@ -92,7 +95,7 @@ func TestE2ERealChromeAndTailscale(t *testing.T) {
 	}
 
 	// 3. Done through the published link, as the phone would.
-	req, _ := http.NewRequest(http.MethodPost, h.Link+"done", strings.NewReader("{}"))
+	req, _ := http.NewRequest(http.MethodPost, h.Link+"done", strings.NewReader(`{"note":"e2e: the first one"}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != http.StatusNoContent {
@@ -101,7 +104,7 @@ func TestE2ERealChromeAndTailscale(t *testing.T) {
 	resp.Body.Close()
 	select {
 	case p := <-resumes:
-		if !strings.Contains(p, "done") || !strings.Contains(p, "example.com") {
+		if !strings.Contains(p, "done") || !strings.Contains(p, "example.com") || !strings.Contains(p, "e2e: the first one") {
 			t.Fatalf("resume prompt: %s", p)
 		}
 		t.Logf("resume: %s", p)

@@ -103,8 +103,8 @@ func openedText(h *store.BrowserHandoff) string {
 			h.ID, until, h.Link, h.ID)
 	}
 	return fmt.Sprintf("Handoff #%d is open until %s and the link is posted in the chat: %s\n"+
-		"End your turn now: tell the chat briefly what you need them to do. Do NOT drive session %q until you receive "+
-		"the \"[Browser handoff #%d ...]\" message — the browser skill refuses while a person holds the tab.",
+		"End your turn now with a short line about what they'll find. Do NOT drive session %q until you receive "+
+		"the \"[Browser handoff #%d ...]\" message (it carries any note they leave) — the browser skill refuses while a person holds the tab.",
 		h.ID, until, h.Link, h.Session, h.ID)
 }
 

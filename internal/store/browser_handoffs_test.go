@@ -41,19 +41,19 @@ func TestBrowserHandoffLifecycle(t *testing.T) {
 		t.Fatalf("expires_at round-trip off by %v", d)
 	}
 
-	if _, err := s.EndBrowserHandoff(id, HandoffOpen, "", ""); err == nil {
+	if _, err := s.EndBrowserHandoff(id, HandoffOpen, "", "", ""); err == nil {
 		t.Fatal("ending into a non-final status accepted")
 	}
-	ended, err := s.EndBrowserHandoff(id, HandoffDone, "https://a.example/", "Someone")
+	ended, err := s.EndBrowserHandoff(id, HandoffDone, "https://a.example/", "Someone", "the blue one")
 	if err != nil || !ended {
 		t.Fatalf("first end = %v, %v", ended, err)
 	}
 	// Expiry firing after Done must not end it again.
-	if again, _ := s.EndBrowserHandoff(id, HandoffExpired, "", ""); again {
+	if again, _ := s.EndBrowserHandoff(id, HandoffExpired, "", "", ""); again {
 		t.Fatal("ended twice")
 	}
 	got, _ := s.GetBrowserHandoff(id)
-	if got == nil || got.Status != HandoffDone || got.FinalURL != "https://a.example/" || got.EndedBy != "Someone" || got.EndedAt.IsZero() {
+	if got == nil || got.Status != HandoffDone || got.FinalURL != "https://a.example/" || got.EndedBy != "Someone" || got.Note != "the blue one" || got.EndedAt.IsZero() {
 		t.Fatalf("after end = %+v", got)
 	}
 	if open, _ := s.OpenBrowserHandoffs(); len(open) != 0 {
