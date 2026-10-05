@@ -237,3 +237,40 @@ func TestSendPersistentSpawnedProcessDiesWithCaller(t *testing.T) {
 		t.Fatal("dying process left in the map: the next send would write into it")
 	}
 }
+
+// A reply the CLI flushes on SIGTERM still reaches the chat as a follow-up,
+// so the send must not report the turn as killed (the scheduler would re-run
+// it and post twice).
+func TestSendPersistentSpawnedProcessFlushOnTermIsNotKilled(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "fake-claude")
+	script := `#!/bin/sh
+trap 'echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}"; echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"num_turns\":1,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"; exit 0' TERM
+while :; do sleep 0.05; done
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(ManagerConfig{Binary: bin})
+	followUps := make(chan SendResult, 2)
+	m.SetUnsolicitedHandler(func(_ SessionKey, r SendResult) { followUps <- r })
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.sendPersistent(ctx, AgentRequest{ChatID: 44, Text: "diary"}, nil)
+		errCh <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("send did not return")
+	}
+	if errors.Is(err, ErrTurnKilled) || !errors.Is(err, ErrTurnAbandoned) {
+		t.Fatalf("err = %v, want ErrTurnAbandoned (the reply was delivered)", err)
+	}
+	if r := waitResult(t, followUps); r.Text != "done" {
+		t.Fatalf("follow-up = %+v", r)
+	}
+}

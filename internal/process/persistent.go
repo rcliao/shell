@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -52,6 +53,7 @@ type persistentProc struct {
 	turnOpen      bool            // a turn (ours or the CLI's) has started streaming
 	idle          chan struct{}   // closed while no turn is open; replaced when one opens
 	onUnsolicited func(SessionKey, SendResult)
+	followedUp    atomic.Bool   // a turn was handed to onUnsolicited (so it reached the chat)
 	claimWait     time.Duration // max wait behind a CLI-initiated turn (claimTurnMaxWait; tests shorten it)
 }
 
@@ -263,6 +265,7 @@ func (p *persistentProc) pump() {
 				// Off the pump: delivery does store writes and a Telegram
 				// send; blocking here would back up the reader and stall the
 				// CLI on stdout.
+				p.followedUp.Store(true)
 				go p.onUnsolicited(p.key, res)
 			}
 		}
@@ -525,6 +528,7 @@ func (p *persistentProc) sendMessage(ctx context.Context, req AgentRequest, emit
 			select {
 			case late := <-w:
 				if p.onUnsolicited != nil {
+					p.followedUp.Store(true)
 					go p.onUnsolicited(p.key, late)
 				}
 			default:
@@ -598,12 +602,26 @@ func (m *Manager) sendPersistent(ctx context.Context, req AgentRequest, emit Eve
 		// terminating it (exec.CommandContext): the turn dies with it. Drop
 		// it from the map now so the next send spawns fresh instead of
 		// writing into a process that is exiting.
-		slog.Warn("persistent turn killed with its process: it was spawned under the caller's context", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
 		m.mu.Lock()
 		if m.persistent[req.Key()] == proc {
 			delete(m.persistent, req.Key())
 		}
 		m.mu.Unlock()
+		go proc.kill() // reap it now; the idle timer would leave it for 10m
+		// The turn can still reach the chat on the way out: a result that
+		// landed together with ctx.Done, or a reply the CLI flushes on
+		// SIGTERM — both go to onUnsolicited. Only once the pump has seen EOF
+		// is "nothing was delivered" true; a retry before that could post
+		// twice.
+		select {
+		case <-proc.pumpDone:
+		case <-time.After(sigtermGrace + time.Second):
+		}
+		if proc.followedUp.Load() {
+			slog.Warn("persistent turn abandoned while its process exited; its reply was delivered as a follow-up", "chat_id", req.ChatID, "thread_id", req.MessageThreadID)
+			return SendResult{}, fmt.Errorf("%w: %v", ErrTurnAbandoned, ctx.Err())
+		}
+		slog.Warn("persistent turn killed with its process: it was spawned under the caller's context", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "error", err)
 		return SendResult{}, fmt.Errorf("%w: %v", ErrTurnKilled, ctx.Err())
 	}
 	if errors.Is(err, ErrTurnAbandoned) {

@@ -218,8 +218,10 @@ consumed it as its answer, shifting every reply one message behind. A send
 whose caller context ends mid-turn returns `ErrTurnAbandoned`; the process is
 kept, no fallback subprocess is spawned, and the late result also arrives as a
 follow-up. The exception is a process that send spawned itself: it lives under
-the caller's context, so it dies with it, and the send returns `ErrTurnKilled`
-and drops the process instead (nothing will follow up).
+the caller's context, so it dies with it: the send drops and reaps it, waits
+for its stdout to close, and returns `ErrTurnKilled` — unless a reply still
+reached the chat on the way out (a result racing the cancel, or one flushed on
+SIGTERM), in which case it stays `ErrTurnAbandoned`.
 
 A user message preempts a running system turn (heartbeat, scheduled prompt) in
 the same chat/thread by cancelling it with cause `bridge.ErrPreempted`. When
