@@ -68,6 +68,9 @@ type Sessions interface {
 	// the browser skill refuses to drive it meanwhile.
 	Hold(session string, handoffID int64, reason string, until time.Time) error
 	Release(session string)
+	// Touch marks the session used now, so the idle reaper counts from the
+	// end of a handoff rather than from the agent's last run before it.
+	Touch(session string)
 	// ReapIdle closes sessions unused for longer than idle, except busy ones.
 	ReapIdle(ctx context.Context, idle time.Duration, busy map[string]bool) []string
 }
@@ -114,6 +117,9 @@ type Manager struct {
 
 	mu     sync.Mutex
 	active map[int64]*live
+	// starting holds sessions whose view is being brought up (publish can
+	// take seconds), so a concurrent Open for the same session is refused.
+	starting map[string]bool
 }
 
 // New returns a Manager. Call Recover once at startup.
@@ -134,7 +140,7 @@ func New(cfg Config) *Manager {
 		cfg.Resume = func(int64, int64, string) {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{cfg: cfg, ctx: ctx, cancel: cancel, active: map[int64]*live{}}
+	return &Manager{cfg: cfg, ctx: ctx, cancel: cancel, active: map[int64]*live{}, starting: map[string]bool{}}
 }
 
 // ErrBusy is returned when the session already has an open view.
@@ -165,14 +171,13 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*store.BrowserHand
 		ttl = m.cfg.MaxTTL
 	}
 
-	m.mu.Lock()
-	for _, l := range m.active {
-		if l.h.Session == req.Session {
-			m.mu.Unlock()
+	if l, busy := m.reserve(req.Session); busy {
+		if l != nil {
 			return &l.h, fmt.Errorf("%w: #%d (%s) for session %q, link %s", ErrBusy, l.h.ID, l.h.Mode, req.Session, l.h.Link)
 		}
+		return nil, fmt.Errorf("%w: one is being opened for session %q right now", ErrBusy, req.Session)
 	}
-	m.mu.Unlock()
+	defer m.unreserve(req.Session)
 
 	tok, err := token()
 	if err != nil {
@@ -206,6 +211,29 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*store.BrowserHand
 	}
 	slog.Info("browser handoff: opened", "id", h.ID, "session", h.Session, "mode", h.Mode, "expires", h.ExpiresAt)
 	return &h, nil
+}
+
+// reserve claims session for an Open/Recover in progress. busy is true when
+// it already has a live view (returned) or another start is in flight.
+func (m *Manager) reserve(session string) (*live, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, l := range m.active {
+		if l.h.Session == session {
+			return l, true
+		}
+	}
+	if m.starting[session] {
+		return nil, true
+	}
+	m.starting[session] = true
+	return nil, false
+}
+
+func (m *Manager) unreserve(session string) {
+	m.mu.Lock()
+	delete(m.starting, session)
+	m.mu.Unlock()
 }
 
 func defaultMessage(h store.BrowserHandoff) string {
@@ -267,10 +295,13 @@ func (m *Manager) start(ctx context.Context, h *store.BrowserHandoff) error {
 	if wait < 0 {
 		wait = 0
 	}
-	timer := time.AfterFunc(wait, func() { m.finish(id, store.HandoffExpired, "", "", "") })
-
+	// Register before arming the timer: an expiry that fires at once (a
+	// recovered row that ran out during Publish) must find the entry, or it
+	// ends the row without closing the view and the entry is never removed.
+	l := &live{h: *h, view: view, srv: srv}
 	m.mu.Lock()
-	m.active[id] = &live{h: *h, view: view, srv: srv, timer: timer}
+	m.active[id] = l
+	l.timer = time.AfterFunc(wait, func() { m.finish(id, store.HandoffExpired, "", "", "") })
 	m.mu.Unlock()
 	return nil
 }
@@ -308,9 +339,15 @@ func (m *Manager) finish(id int64, status, finalURL, by, detail string) {
 
 	m.mu.Lock()
 	delete(m.active, id)
+	var timer *time.Timer
+	if l != nil {
+		timer = l.timer
+	}
 	m.mu.Unlock()
 	if l != nil {
-		l.timer.Stop()
+		if timer != nil {
+			timer.Stop()
+		}
 		l.view.Close(endMessage(status))
 		_ = l.srv.Close()
 	}
@@ -322,6 +359,7 @@ func (m *Manager) finish(id int64, status, finalURL, by, detail string) {
 	if h.Mode == store.HandoffModeHandoff {
 		m.cfg.Sessions.Release(h.Session)
 	}
+	m.cfg.Sessions.Touch(h.Session)
 	slog.Info("browser handoff: ended", "id", id, "status", status)
 
 	if h.Mode == store.HandoffModeHandoff && status != store.HandoffCancelled {
@@ -422,7 +460,13 @@ func (m *Manager) Recover(ctx context.Context) {
 			m.finish(h.ID, store.HandoffExpired, "", "", "")
 			continue
 		}
-		if err := m.start(ctx, &h); err != nil {
+		if _, busy := m.reserve(h.Session); busy {
+			m.finish(h.ID, store.HandoffFailed, "", "", "another live view of the same session was already open")
+			continue
+		}
+		err := m.start(ctx, &h)
+		m.unreserve(h.Session)
+		if err != nil {
 			slog.Warn("browser handoff: recover failed", "id", h.ID, "error", err)
 			m.finish(h.ID, store.HandoffFailed, "", "", "the browser could not be reopened after a restart ("+err.Error()+")")
 			continue
@@ -439,7 +483,9 @@ func (m *Manager) Shutdown() {
 	m.active = map[int64]*live{}
 	m.mu.Unlock()
 	for _, l := range all {
-		l.timer.Stop()
+		if l.timer != nil {
+			l.timer.Stop()
+		}
 		l.view.Close("The agent is restarting. Reload this page in a few seconds.")
 		_ = l.srv.Close()
 	}

@@ -27,6 +27,7 @@ type fakeSessions struct {
 	views   []*fakeView
 	specs   []ViewSpec
 	held    map[string]int64
+	touched map[string]int
 	failNew error
 }
 
@@ -52,6 +53,11 @@ func (f *fakeSessions) Release(s string) {
 	defer f.mu.Unlock()
 	delete(f.held, s)
 }
+func (f *fakeSessions) Touch(s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.touched[s]++
+}
 func (f *fakeSessions) ReapIdle(context.Context, time.Duration, map[string]bool) []string { return nil }
 func (f *fakeSessions) isHeld(s string) bool {
 	f.mu.Lock()
@@ -64,9 +70,11 @@ type fakePublisher struct {
 	mu        sync.Mutex
 	published map[string]int
 	fail      error
+	delay     time.Duration
 }
 
 func (p *fakePublisher) Publish(_ context.Context, path string, port int) (string, error) {
+	time.Sleep(p.delay)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.fail != nil {
@@ -110,7 +118,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close(); os.Remove(f.Name()) })
-	h := &harness{st: st, sess: &fakeSessions{held: map[string]int64{}},
+	h := &harness{st: st, sess: &fakeSessions{held: map[string]int64{}, touched: map[string]int{}},
 		pub: &fakePublisher{published: map[string]int{}}, resumes: make(chan resumeCall, 4), posts: make(chan string, 4)}
 	h.m = New(Config{
 		AgentName: "agent", Store: st, Publisher: h.pub, Sessions: h.sess,
@@ -294,5 +302,76 @@ func TestRecoverFailureResumesWithReason(t *testing.T) {
 	r := waitResume(t, h)
 	if !strings.Contains(r.prompt, "no browser running") || !strings.Contains(r.prompt, "stopped") {
 		t.Fatalf("prompt = %s", r.prompt)
+	}
+}
+
+func TestFinishTouchesSessionForReaper(t *testing.T) {
+	h := newHarness(t)
+	ho, err := h.m.Open(context.Background(), OpenRequest{Session: "s", ChatID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-h.posts
+	h.m.finish(ho.ID, store.HandoffDone, "", "", "")
+	h.sess.mu.Lock()
+	n := h.sess.touched["s"]
+	h.sess.mu.Unlock()
+	if n == 0 {
+		t.Fatal("handoff end did not touch the session: the idle reaper would close it before the agent resumes")
+	}
+}
+
+func TestConcurrentOpenSameSessionOnlyOneWins(t *testing.T) {
+	h := newHarness(t)
+	h.pub.delay = 200 * time.Millisecond // publish is slow in real life (tailscale serve)
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, err := h.m.Open(context.Background(), OpenRequest{Session: "s", ChatID: 42})
+			errs <- err
+		}()
+	}
+	var ok, busy int
+	for i := 0; i < 2; i++ {
+		switch err := <-errs; {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrBusy):
+			busy++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if ok != 1 || busy != 1 {
+		t.Fatalf("ok=%d busy=%d; want exactly one view of the session", ok, busy)
+	}
+	if n := len(h.m.Active()); n != 1 {
+		t.Fatalf("%d active views", n)
+	}
+}
+
+func TestRecoverRowExpiringDuringPublishIsCleanedUp(t *testing.T) {
+	h := newHarness(t)
+	h.pub.delay = 300 * time.Millisecond
+	// Expires while Publish is still running → the timer fires at once.
+	id, _ := h.st.AddBrowserHandoff(store.BrowserHandoff{Session: "s", Mode: store.HandoffModeHandoff, ChatID: 42,
+		Path: "/h/dddd", ExpiresAt: time.Now().Add(100 * time.Millisecond)})
+	h.m.Recover(context.Background())
+	r := waitResume(t, h)
+	if !strings.Contains(r.prompt, "expired") {
+		t.Fatalf("prompt = %s", r.prompt)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(h.m.Active()) != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := len(h.m.Active()); n != 0 {
+		t.Fatalf("%d stuck active views after expiry", n)
+	}
+	if row, _ := h.st.GetBrowserHandoff(id); row.Status != store.HandoffExpired {
+		t.Fatalf("status %s", row.Status)
+	}
+	if _, err := h.m.Open(context.Background(), OpenRequest{Session: "s", ChatID: 42}); err != nil {
+		t.Fatalf("session still blocked: %v", err)
 	}
 }

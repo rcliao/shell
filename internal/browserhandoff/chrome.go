@@ -69,6 +69,13 @@ func (c *ChromeSessions) Release(name string) {
 	}
 }
 
+// Touch implements Sessions.
+func (c *ChromeSessions) Touch(name string) {
+	if s, err := c.open(name); err == nil {
+		s.Touch()
+	}
+}
+
 // ReapIdle implements Sessions.
 func (c *ChromeSessions) ReapIdle(ctx context.Context, idle time.Duration, busy map[string]bool) []string {
 	all, err := session.List(c.Root)
