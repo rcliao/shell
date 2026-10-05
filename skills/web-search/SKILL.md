@@ -10,6 +10,12 @@ allowed-tools: Bash
 **Default: use the built-in `WebSearch` tool** (and `WebFetch` to read a page).
 It needs no key and is the reliable path.
 
+When `WebFetch` fails or gives you nothing usable (403, an empty or JS-only
+page, a menu that is an image), that is not the end: open the page with the
+browser skill (`--session` for walls), and hand it to a person if it needs one.
+Snippets are not the page — read the page before telling the family a fact
+they will act on.
+
 Use this script only when you need what it adds — a freshness filter (`-f`)
 and each result's age — which requires a Brave or Tavily key. Without one it
 falls back to DuckDuckGo, which often refuses automated requests. When that

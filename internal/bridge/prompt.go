@@ -82,7 +82,7 @@ func (b *Bridge) environmentPrompt() string {
 	// Calibration: state what the agent does NOT inherently know, so it
 	// reaches for a tool (or says so) instead of confabulating capability
 	// or freshness it doesn't have.
-	sb.WriteString("- **What you don't know without a tool:** anything after your training cutoff (news, prices, availability — use web search/browser), the current state of files/DBs (read them), and your peer agent's private sessions. If you can't verify something the user will act on, say so rather than guessing.\n")
+	sb.WriteString("- **What you don't know without a tool:** anything after your training cutoff (news, prices, availability — use web search/browser), the current state of files/DBs (read them), and your peer agent's private sessions. If a page won't load in WebFetch, read it with the browser skill (a `--session` window gets past bot walls; a person can take a captcha via shell_browser handoff). Only after that, if you still can't verify something the user will act on, say what you tried rather than guessing.\n")
 	return sb.String()
 }
 
