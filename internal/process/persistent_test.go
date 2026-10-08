@@ -274,3 +274,37 @@ while :; do sleep 0.05; done
 		t.Fatalf("follow-up = %+v", r)
 	}
 }
+
+// A photo Read echoes the image back as one stdout line over 1 MiB. That used to
+// trip the stdout scanner's token cap, which ended the stream: the turn read as
+// a dead process, came back empty, and was retried on a second process whose own
+// reader hit the same cap (10/8: four phone photos, reply never sent).
+func TestPersistentSurvivesStdoutLineOverOldCap(t *testing.T) {
+	f := newFakeCLI(t)
+	big := strings.Repeat("A", 3<<20)
+	go func() {
+		f.emit(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}`)
+		f.emit(fmt.Sprintf(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","data":%q}}]}]}}`, big))
+		f.turn("it is Lucy")
+	}()
+	res, err := f.send(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != "it is Lucy" {
+		t.Fatalf("reply lost after oversize tool_result line: %+v", res)
+	}
+}
+
+func TestLineScannerLongLinesAndUnterminatedTail(t *testing.T) {
+	long := strings.Repeat("x", 2<<20)
+	sc := newLineScanner(strings.NewReader("a\n" + long + "\r\n\nb"))
+	var got []int
+	for sc.Scan() {
+		got = append(got, len(sc.Bytes()))
+	}
+	want := []int{1, len(long), 0, 1}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("lines = %v, want %v", got, want)
+	}
+}

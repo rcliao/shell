@@ -1,7 +1,6 @@
 package process
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -112,8 +111,7 @@ func newPersistentProc(stdin io.WriteCloser, stdout io.Reader, key SessionKey, m
 // reuses its buffer) and queued for the pump. Closes lines on EOF.
 func (p *persistentProc) readLoop() {
 	defer close(p.lines)
-	sc := bufio.NewScanner(p.stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc := newLineScanner(p.stdout)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -123,9 +121,7 @@ func (p *persistentProc) readLoop() {
 		copy(cp, line)
 		p.lines <- cp
 	}
-	if err := sc.Err(); err != nil {
-		slog.Debug("persistent: stdout read ended", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID, "error", err)
-	}
+	slog.Debug("persistent: stdout read ended", "chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
 }
 
 // chanSource adapts the line channel to lineSource for parseEvents and
@@ -684,8 +680,7 @@ func (m *Manager) hasPersistent(key SessionKey) bool {
 // This handles the control_response for our initialize request and any
 // system events before we send the first user message.
 func drainInitEvents(stdout io.Reader, stdin io.Writer) string {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := newLineScanner(stdout)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()

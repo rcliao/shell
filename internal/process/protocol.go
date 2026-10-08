@@ -2,6 +2,7 @@ package process
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -209,10 +210,68 @@ func parseBidirectionalEvents(r io.Reader, stdin io.Writer, onUpdate StreamFunc)
 
 // parseEventsReader is parseEvents over an io.Reader.
 func parseEventsReader(r io.Reader, stdin io.Writer, emit EventFunc) SendResult {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	return parseEvents(scanner, stdin, emit, nil)
+	return parseEvents(newLineScanner(r), stdin, emit, nil)
 }
+
+// maxStdoutLine bounds one stdout line. A Read of a photo echoes the image back
+// as one base64 tool_result line of 1-1.3 MB (10/8: four phone photos, every
+// line over the old 1 MiB bufio.Scanner cap), so the cap has to sit well above
+// a screenshot-sized image.
+const maxStdoutLine = 64 << 20
+
+// lineScanner reads newline-delimited stdout lines with no fixed token limit.
+// bufio.Scanner stops the whole stream on a line past its cap (ErrTooLong), and
+// parseEvents then sees a clean EOF: a live process reads as dead and the turn
+// is retried on a second process. A line past maxStdoutLine is dropped instead,
+// and the stream carries on.
+type lineScanner struct {
+	r       *bufio.Reader
+	line    []byte
+	skipped int // lines dropped for exceeding maxStdoutLine
+}
+
+func newLineScanner(r io.Reader) *lineScanner {
+	return &lineScanner{r: bufio.NewReaderSize(r, 64*1024)}
+}
+
+// Scan advances to the next line, returning false at EOF or a read error.
+func (s *lineScanner) Scan() bool {
+	for {
+		s.line = s.line[:0]
+		tooLong := false
+		for {
+			chunk, err := s.r.ReadSlice('\n')
+			if !tooLong {
+				s.line = append(s.line, chunk...)
+				if len(s.line) > maxStdoutLine {
+					tooLong = true
+					s.line = s.line[:0]
+				}
+			}
+			if err == bufio.ErrBufferFull {
+				continue
+			}
+			if err != nil {
+				// EOF or a broken pipe: a final unterminated line still counts.
+				if len(s.line) == 0 || tooLong {
+					return false
+				}
+				break
+			}
+			break
+		}
+		if tooLong {
+			s.skipped++
+			slog.Warn("stdout line over limit dropped", "limit_bytes", maxStdoutLine)
+			continue
+		}
+		s.line = bytes.TrimRight(s.line, "\r\n")
+		return true
+	}
+}
+
+// Bytes returns the current line; valid until the next Scan.
+func (s *lineScanner) Bytes() []byte { return s.line }
 
 // turnObserver receives tool lifecycle callbacks from the parse loop. Used by
 // the persistent process to track whether a tool call is in flight — the
