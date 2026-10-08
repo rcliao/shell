@@ -110,6 +110,18 @@ var retryableFragments = []string{
 	"eof", // subprocess died mid-stream
 	"session busy",
 	"user busy",
+	preemptedFragment, // a family message stopped it before it delivered anything (bridge.ErrPreempted)
+}
+
+// preemptedFragment marks a turn lost to a user-message preempt. The bridge
+// only reports it when nothing was delivered and nothing is still running, so
+// a re-run cannot post twice. Plain "context canceled" stays permanent: it
+// also covers a turn whose result is still coming as a follow-up.
+const preemptedFragment = "preempted by a user message"
+
+// IsPreempted reports whether err is a turn lost to a user-message preempt.
+func IsPreempted(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), preemptedFragment)
 }
 
 // IsRetryable reports whether an error looks transient. Conservative by design:

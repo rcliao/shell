@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -170,5 +173,104 @@ func TestPersistentStallBehindCLITurnIsBounded(t *testing.T) {
 	_, err := f.send(context.Background())
 	if !errors.Is(err, ErrStalledBehindCLITurn) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A send that spawned its own process loses the turn with it when the caller
+// leaves (the process lives under the caller's context): sendPersistent
+// reports ErrTurnKilled, not "will arrive as follow-up", and drops the dying
+// process so the next send spawns fresh. A send onto a process someone else
+// spawned keeps the follow-up path (ErrTurnAbandoned, process kept).
+func TestSendPersistentKilledOnlyWhenSpawnedByCaller(t *testing.T) {
+	// spawned=false: an existing process in the map.
+	m := &Manager{persistent: map[SessionKey]*persistentProc{}}
+	f := newFakeCLI(t)
+	f.proc.idleTimer = time.AfterFunc(time.Hour, func() {})
+	f.proc.cmd = &exec.Cmd{} // ProcessState nil: reads as running
+	m.persistent[SessionKey{ChatID: 42}] = f.proc
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.sendPersistent(ctx, AgentRequest{ChatID: 42, Text: "hi", Model: "m"}, nil)
+		errCh <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	err := <-errCh
+	if !errors.Is(err, ErrTurnAbandoned) || errors.Is(err, ErrTurnKilled) {
+		t.Fatalf("existing process: err = %v, want ErrTurnAbandoned", err)
+	}
+	if m.persistent[SessionKey{ChatID: 42}] != f.proc {
+		t.Fatal("existing process must stay in the map: its turn is still running")
+	}
+}
+
+// spawned=true: the send starts the process itself. A fake CLI that reads
+// stdin and never answers stands in for a turn in flight.
+func TestSendPersistentSpawnedProcessDiesWithCaller(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "fake-claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n# Keeps stdout open (the reader must not see EOF) and never answers.\nwhile read -r line; do :; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(ManagerConfig{Binary: bin})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.sendPersistent(ctx, AgentRequest{ChatID: 43, Text: "diary"}, nil)
+		errCh <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrTurnKilled) {
+			t.Fatalf("err = %v, want ErrTurnKilled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("send did not return on ctx cancel")
+	}
+	m.mu.Lock()
+	_, still := m.persistent[SessionKey{ChatID: 43}]
+	m.mu.Unlock()
+	if still {
+		t.Fatal("dying process left in the map: the next send would write into it")
+	}
+}
+
+// A reply the CLI flushes on SIGTERM still reaches the chat as a follow-up,
+// so the send must not report the turn as killed (the scheduler would re-run
+// it and post twice).
+func TestSendPersistentSpawnedProcessFlushOnTermIsNotKilled(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "fake-claude")
+	script := `#!/bin/sh
+trap 'echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}"; echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"num_turns\":1,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"; exit 0' TERM
+while :; do sleep 0.05; done
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(ManagerConfig{Binary: bin})
+	followUps := make(chan SendResult, 2)
+	m.SetUnsolicitedHandler(func(_ SessionKey, r SendResult) { followUps <- r })
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.sendPersistent(ctx, AgentRequest{ChatID: 44, Text: "diary"}, nil)
+		errCh <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("send did not return")
+	}
+	if errors.Is(err, ErrTurnKilled) || !errors.Is(err, ErrTurnAbandoned) {
+		t.Fatalf("err = %v, want ErrTurnAbandoned (the reply was delivered)", err)
+	}
+	if r := waitResult(t, followUps); r.Text != "done" {
+		t.Fatalf("follow-up = %+v", r)
 	}
 }

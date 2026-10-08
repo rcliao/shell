@@ -221,7 +221,21 @@ this (2026-09-05) such a turn sat in the pipe and the next user message
 consumed it as its answer, shifting every reply one message behind. A send
 whose caller context ends mid-turn returns `ErrTurnAbandoned`; the process is
 kept, no fallback subprocess is spawned, and the late result also arrives as a
-follow-up.
+follow-up. The exception is a process that send spawned itself: it lives under
+the caller's context, so it dies with it: the send drops and reaps it, waits
+for its stdout to close, and returns `ErrTurnKilled` — unless a reply still
+reached the chat on the way out (a result racing the cancel, or one flushed on
+SIGTERM), in which case it stays `ErrTurnAbandoned`.
+
+A user message preempts a running system turn (heartbeat, scheduled prompt) in
+the same chat/thread by cancelling it with cause `bridge.ErrPreempted`. When
+the preempted turn was killed or never started, the bridge returns an error
+wrapping `ErrPreempted`, and the scheduler retries it under its normal retry
+policy ("preempted" is on the retryable list). A preempted turn that is still
+running (`ErrTurnAbandoned`) is not retried: it follows up by itself. A
+preempted heartbeat is never retried: the next beat covers it. Before this
+(2026-10-04) a scheduled prompt preempted mid-turn was recorded `turn_failed`
+and lost (the 9/30 diary).
 
 Environment variables set on Claude subprocess:
 - `SHELL_CHAT_ID` — current Telegram chat ID

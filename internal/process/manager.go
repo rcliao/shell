@@ -315,6 +315,11 @@ func (m *Manager) SendEvents(ctx context.Context, req AgentRequest, emit EventFu
 		// interleave two transcripts — the one thing worse than a late reply.
 		return stamp(result), err
 	}
+	if errors.Is(err, ErrTurnKilled) {
+		// The caller's context is gone; a fallback spawn under it would only
+		// fail to start. Report the loss as is — the caller decides on retry.
+		return stamp(result), err
+	}
 
 	// Fall back to spawn-per-message.
 	slog.Debug("falling back to spawn-per-message", "chat_id", req.ChatID, "thread_id", req.MessageThreadID, "reason", err)
