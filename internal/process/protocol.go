@@ -412,7 +412,7 @@ func parseEvents(scanner lineSource, stdin io.Writer, emit EventFunc, obs turnOb
 						// tool_result gap, the tool-infra latency signal).
 						for i := range result.ToolCalls {
 							if result.ToolCalls[i].ID == block.ToolUseID {
-								if block.IsError {
+								if block.IsError || reportsBotWall(block.Content) {
 									result.ToolCalls[i].Failed = true
 								}
 								if !result.ToolCalls[i].StartedAt.IsZero() {
@@ -548,4 +548,15 @@ func handleControlRequest(event stdoutEvent, stdin io.Writer) {
 	if err := writeJSON(stdin, resp); err != nil {
 		slog.Warn("bidirectional: failed to write control_response", "error", err)
 	}
+}
+
+// reportsBotWall reports whether a tool result carries the browser skill's
+// bot-wall line ("[blocked: <vendor> bot wall …"). The browser exits 4 on a
+// wall, but agents often pipe it through head/grep, which hides the exit
+// status; without this, the usage meter the agent reads in its own retro
+// counted a wall as a success (5 recorded failures vs 114 empty results over
+// 30 days, ~/.shell/evolve-reviews/browser-preferred-action-2026-10-05.md).
+func reportsBotWall(content string) bool {
+	i := strings.Index(content, "[blocked: ")
+	return i >= 0 && strings.Contains(content[i:min(len(content), i+120)], " bot wall")
 }

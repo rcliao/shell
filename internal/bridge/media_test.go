@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -44,6 +46,26 @@ func TestHumanAge(t *testing.T) {
 	} {
 		if got := humanAge(tt.d); got != tt.want {
 			t.Fatalf("humanAge(%v)=%q want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestReserveMediaPathDoesNotCollide(t *testing.T) {
+	dir := t.TempDir()
+	seen := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		p, err := reserveMediaPath(dir, "bot-20261004-195350-msg42", ".png")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[p] {
+			t.Fatalf("path %s handed out twice", p)
+		}
+		seen[p] = true
+	}
+	for _, want := range []string{"bot-20261004-195350-msg42.png", "bot-20261004-195350-msg42-2.png", "bot-20261004-195350-msg42-3.png"} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Fatalf("missing %s: %v", want, err)
 		}
 	}
 }

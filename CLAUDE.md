@@ -16,6 +16,7 @@ The daemon writes `~/.shell/mcp.json` and passes `--mcp-config` to Claude CLI.
 | `shell_pm` | Process manager: start, stop, list, logs, remove background processes |
 | `shell_tunnel` | HTTP tunnels: start, stop, list via Cloudflare quick tunnels |
 | `shell_relay` | Send messages/photos to other Telegram chats |
+| `shell_browser` | Hand a browser session's tab to a person (captcha/approval/login) or share a live view; tailnet-only link, agent resumed on Done |
 
 **NEVER run long-running processes directly via Bash** — always use `shell_pm`.
 
@@ -41,7 +42,7 @@ Skill scripts call the bridge RPC server on `~/.shell/bridge.sock` via curl.
 | `shell-task` | Mark background tasks complete via RPC |
 | `web-search` | Web search via Brave/Tavily APIs |
 | `generate-image` | Image generation via Google Gemini |
-| `browser` | Headless Chrome automation |
+| `browser` | Chrome automation; `--session <name>` keeps the tab between runs |
 
 ### Artifact Markers (text-based, passive)
 

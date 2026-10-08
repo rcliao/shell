@@ -862,6 +862,13 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// browser_handoffs — live views of an agent's browser (internal/store/browser_handoffs.go).
+	if _, err := s.db.Exec(browserHandoffsSchema); err != nil {
+		return err
+	}
+	// note arrived after browser_handoffs shipped (Done carries a note).
+	s.db.Exec(`ALTER TABLE browser_handoffs ADD COLUMN note TEXT NOT NULL DEFAULT ''`)
+
 	return nil
 }
 
