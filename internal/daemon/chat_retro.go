@@ -227,7 +227,7 @@ was routed to:
    genuinely make working together easier for THEM (a habit, a shortcut, a
    project worth starting — a subject above that keeps coming back is the
    natural candidate — something you keep having to ask). File it with
-   shell_suggestion(action=create, for_chat=%d, title=…, evidence=…,
+   shell_suggestion(action=create, for_chat="%d", title=…, evidence=…,
    change=…). Write the title and change in the chat's language, as a short,
    warm message to them, ending with how to answer (for example: reply 好 or
    不用). Never mention internals (lanes, routing, sessions, tools). Do not
