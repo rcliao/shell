@@ -38,7 +38,7 @@ type Agenda struct {
 	Items     []AgendaItem
 	watermark int64    // highest message id counted in this agenda
 	eventIDs  []int64  // events shown in this agenda
-	dueKeys   []string // deadlines shown in this agenda (repeat at most every agendaDueRepeat)
+	dueKeys   []string // deadlines and idle-project nudges shown (repeat at most every agendaDueRepeat)
 }
 
 // Empty: nothing needs the agent — the beat can be skipped.
@@ -143,14 +143,31 @@ func (b *Bridge) HeartbeatAgenda(ctx context.Context) Agenda {
 		}
 	}
 
-	// 4. A project decision waiting on people.
+	// 4. A project decision waiting on people. "No human activity" is the
+	// later of the Notion poll's stamp and the last real message in the
+	// project's own thread (only the poll wrote the stamp, so without the
+	// thread every project looked idle forever). Each project is nudged at
+	// most every agendaDueRepeat, and a shared doc only by its owner.
 	if projects, err := b.store.ListProjects(0); err == nil {
 		for _, p := range projects {
-			if p.Status != "active" {
+			if p.Status != "active" || !b.ownsDoc(p.Slug) {
 				continue
 			}
-			if p.LastHumanActivityAt != nil && now.Sub(*p.LastHumanActivityAt) < agendaProjectStale {
+			var last time.Time
+			if p.LastHumanActivityAt != nil {
+				last = *p.LastHumanActivityAt
+			}
+			if at, ok, err := b.store.LastHumanMessageAt(p.ChatID, p.MessageThreadID); err == nil && ok && at.After(last) {
+				last = at
+			}
+			if !last.IsZero() && now.Sub(last) < agendaProjectStale {
 				continue
+			}
+			key := "agenda_stale:" + p.Slug
+			if v, ok, err := b.store.GetKV(key); err == nil && ok {
+				if t, perr := time.Parse(time.RFC3339, v); perr == nil && now.Sub(t) < agendaDueRepeat {
+					continue
+				}
 			}
 			doc := b.readProjectDoc(p.DocPath)
 			pending := strings.TrimSpace(docSection(doc, docToDecideHeading))
@@ -158,8 +175,13 @@ func (b *Bridge) HeartbeatAgenda(ctx context.Context) Agenda {
 				continue
 			}
 			first := strings.TrimSpace(strings.SplitN(pending, "\n", 2)[0])
+			where := fmt.Sprintf("chat %d", p.ChatID)
+			if p.MessageThreadID >= discordThreadFloor {
+				where = fmt.Sprintf("its post <#%d>", p.MessageThreadID)
+			}
 			a.Items = append(a.Items, AgendaItem{"project", fmt.Sprintf(
-				"%s has an open decision and no human activity for 3+ days: %s — worth a gentle nudge in chat %d?", p.Slug, clipRunes(first, 120), p.ChatID)})
+				"%s has an open decision and no human activity for 3+ days: %s — worth a gentle nudge in %s?", p.Slug, clipRunes(first, 120), where)})
+			a.dueKeys = append(a.dueKeys, key)
 		}
 	}
 

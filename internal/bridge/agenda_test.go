@@ -173,3 +173,67 @@ func TestAgendaDeadlineDays(t *testing.T) {
 		t.Fatalf("items = %v", texts)
 	}
 }
+
+// An open 待決定 nudges only when nobody has written in the project's thread
+// for agendaProjectStale, at most every agendaDueRepeat, and only from the
+// doc's owner. Live bug: only the Notion poll stamped human activity, so every
+// project with an open decision was flagged on every beat.
+func TestAgendaIdleProjectNudge(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ws := t.TempDir()
+	doc := "# Garden\n\n## 待決定\n\n1. Which bed gets the tomatoes?\n"
+	os.MkdirAll(filepath.Join(ws, "projects", "garden"), 0o755)
+	os.WriteFile(filepath.Join(ws, "projects", "garden", "doc.md"), []byte(doc), 0o644)
+	const chat, thread = int64(-100200300), int64(77)
+	st.CreateProject(store.Project{Slug: "garden", Title: "Garden", ChatID: chat, MessageThreadID: thread, DocPath: "projects/garden/doc.md"})
+	b := &Bridge{store: st, workspaceDir: ws, agentName: "me"}
+	projectItems := func(a Agenda) []string {
+		var got []string
+		for _, it := range a.Items {
+			if it.Kind == "project" {
+				got = append(got, it.Text)
+			}
+		}
+		return got
+	}
+
+	// Someone wrote in the project's thread just now: no nudge.
+	st.SaveSession(chat, thread, "c")
+	sess, _ := st.GetSession(chat, thread)
+	st.LogMessage(sess.ID, "user", "let's plant next weekend")
+	if got := projectItems(b.HeartbeatAgenda(context.Background())); len(got) != 0 {
+		t.Fatalf("recent message in the project thread, still nudged: %v", got)
+	}
+
+	// A message elsewhere in the chat does not count for this thread.
+	st2, _ := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	defer st2.Close()
+	st2.CreateProject(store.Project{Slug: "garden", Title: "Garden", ChatID: chat, MessageThreadID: thread, DocPath: "projects/garden/doc.md"})
+	st2.SaveSession(chat, 0, "c")
+	other, _ := st2.GetSession(chat, 0)
+	st2.LogMessage(other.ID, "user", "unrelated chatter")
+	b2 := &Bridge{store: st2, workspaceDir: ws, agentName: "me"}
+	a := b2.HeartbeatAgenda(context.Background())
+	got := projectItems(a)
+	if len(got) != 1 || !strings.Contains(got[0], "Which bed") {
+		t.Fatalf("idle project thread: items = %v", got)
+	}
+	// Shown once, then not again within agendaDueRepeat.
+	b2.CommitAgenda(a)
+	if got := projectItems(b2.HeartbeatAgenda(context.Background())); len(got) != 0 {
+		t.Fatalf("nudged again within agendaDueRepeat: %v", got)
+	}
+
+	// Another agent owns the shared doc: no nudge here.
+	os.WriteFile(filepath.Join(ws, "projects", "garden", "owner"), []byte("other\n"), 0o644)
+	st3, _ := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	defer st3.Close()
+	st3.CreateProject(store.Project{Slug: "garden", Title: "Garden", ChatID: chat, MessageThreadID: thread, DocPath: "projects/garden/doc.md"})
+	if got := projectItems((&Bridge{store: st3, workspaceDir: ws, agentName: "me"}).HeartbeatAgenda(context.Background())); len(got) != 0 {
+		t.Fatalf("non-owner nudged a shared doc: %v", got)
+	}
+}
