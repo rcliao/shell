@@ -139,7 +139,7 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 	// Recent conversations, tagged with source chat id (load-bearing: see below)
 	if len(exchanges) > 0 {
 		sb.WriteString("[Recent conversation history — each line is tagged with the chat it came from]\n")
-		sb.WriteString("When you follow up on any of these, send the reply BACK TO THAT SAME chat id (shell_relay chat_id=<that id>, cross_chat=true). Never default to the group.\n")
+		sb.WriteString("When you follow up on any of these, send the reply BACK TO THAT SAME chat id (shell_relay chat_id=\"<that id>\" as a string, cross_chat=true). Never default to the group.\n")
 		for _, ex := range exchanges {
 			sb.WriteString("- ")
 			sb.WriteString(ex)

@@ -232,7 +232,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"cron":    prop("string", "Cron expression for a recurring schedule (create)"),
 			"mode":    prop("string", "notify = send the message verbatim; prompt = run it as a turn. Default notify."),
 			"tz":      prop("string", "Timezone override; defaults to the agent's configured zone"),
-			"chat_id": prop("integer", "Target chat; omit for the current chat"),
+			"chat_id": idProp("Target chat; omit for the current chat."),
 			"all":     prop("boolean", "list: include disabled and paused schedules"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -244,7 +244,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			Cron    string `json:"cron"`
 			Mode    string `json:"mode"`
 			TZ      string `json:"tz"`
-			ChatID  int64  `json:"chat_id"`
+			ChatID  idArg  `json:"chat_id"`
 			All     bool   `json:"all"`
 		}
 		if err := unmarshalArgs(req, &p); err != nil {
@@ -254,7 +254,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			p.Action = "create"
 		}
 		if p.ChatID == 0 {
-			p.ChatID = currentChatID()
+			p.ChatID = idArg(currentChatID())
 		}
 
 		if p.Action == "create" {
@@ -307,7 +307,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"status":   prop("string", "decide: accepted, declined or done"),
 			"note":     prop("string", "The owner's reason, in their words (decide), or yours (withdraw)"),
 			"all":      prop("boolean", "list: include decided suggestions"),
-			"for_chat": prop("integer", "create: address the suggestion to this chat (weekly chat retro) instead of your owner"),
+			"for_chat": idProp("create: address the suggestion to this chat (weekly chat retro) instead of your owner."),
 			"source":   prop("string", "create: \"steward\" when filing a project-steward proposal on a deep heartbeat; omit otherwise"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -320,7 +320,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			Status   string `json:"status"`
 			Note     string `json:"note"`
 			All      bool   `json:"all"`
-			ForChat  int64  `json:"for_chat"`
+			ForChat  idArg  `json:"for_chat"`
 			Source   string `json:"source"`
 		}
 		if err := unmarshalArgs(req, &p); err != nil {
@@ -441,17 +441,17 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 		Name:        "shell_relay",
 		Description: "Send a message or photo to a Telegram chat. Omit chat_id to send to the CURRENT chat (the one this conversation is happening in) — this is the safe default. Sending to a DIFFERENT chat requires both chat_id and cross_chat=true. Optional message_thread_id routes the reply into a specific forum topic (0 = main chat).",
 		InputSchema: schema([]string{}, map[string]map[string]any{
-			"chat_id":           prop("integer", "Target Telegram chat ID. Omit to send to the current chat."),
+			"chat_id":           idProp("Target chat ID. Omit to send to the current chat."),
 			"cross_chat":        prop("boolean", "Required (true) when chat_id is a different chat than the current one. Acknowledges the message is intentionally leaving this conversation."),
-			"message_thread_id": prop("integer", "Forum topic ID (0 = main chat). Optional."),
+			"message_thread_id": idProp("Forum topic or Discord thread ID (0 = main chat). Optional."),
 			"message":           prop("string", "Text message or photo caption"),
 			"image_path":        prop("string", "Path to image file to send as photo (optional)"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		var p struct {
-			ChatID          int64  `json:"chat_id"`
+			ChatID          idArg  `json:"chat_id"`
 			CrossChat       bool   `json:"cross_chat"`
-			MessageThreadID int64  `json:"message_thread_id"`
+			MessageThreadID idArg  `json:"message_thread_id"`
 			Message         string `json:"message"`
 			ImagePath       string `json:"image_path"`
 		}
@@ -466,8 +466,8 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			if currentChat == 0 {
 				return errResult("chat_id is required (no current chat in this context)"), nil
 			}
-			p.ChatID = currentChat
-		} else if currentChat != 0 && p.ChatID != currentChat && !p.CrossChat {
+			p.ChatID = idArg(currentChat)
+		} else if currentChat != 0 && int64(p.ChatID) != currentChat && !p.CrossChat {
 			return errResult(fmt.Sprintf("chat_id %d differs from the current chat %d — pass cross_chat=true if this is intentional, or omit chat_id to reply here", p.ChatID, currentChat)), nil
 		}
 		if p.Message == "" && p.ImagePath == "" {

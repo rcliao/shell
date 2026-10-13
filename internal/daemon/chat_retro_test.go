@@ -39,7 +39,7 @@ func TestChatRetroGroupsByLaneAndPostsOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Lane: health — 2 messages", "Lane: general — 1 messages", "for_chat=-100200300", "the family group", "(none yet)"} {
+	for _, want := range []string{"Lane: health — 2 messages", "Lane: general — 1 messages", `for_chat="-100200300"`, "the family group", "(none yet)"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
