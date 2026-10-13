@@ -228,6 +228,17 @@ func TestAgendaIdleProjectNudge(t *testing.T) {
 		t.Fatalf("nudged again within agendaDueRepeat: %v", got)
 	}
 
+	// A project on the main thread (0) does not borrow a topic's activity.
+	st4, _ := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	defer st4.Close()
+	st4.CreateProject(store.Project{Slug: "garden", Title: "Garden", ChatID: chat, DocPath: "projects/garden/doc.md"})
+	st4.SaveSession(chat, thread, "c")
+	topic, _ := st4.GetSession(chat, thread)
+	st4.LogMessage(topic.ID, "user", "chatter in another topic")
+	if got := projectItems((&Bridge{store: st4, workspaceDir: ws, agentName: "me"}).HeartbeatAgenda(context.Background())); len(got) != 1 {
+		t.Fatalf("main-thread project borrowed a topic's activity: %v", got)
+	}
+
 	// Another agent owns the shared doc: no nudge here.
 	os.WriteFile(filepath.Join(ws, "projects", "garden", "owner"), []byte("other\n"), 0o644)
 	st3, _ := store.Open(filepath.Join(t.TempDir(), "shell.db"))

@@ -241,17 +241,19 @@ func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
 
 // LastHumanMessageAt returns when a person last wrote in a chat thread, with
 // the same filters as UserMessagesSince (no synthetic turns, no scheduled
-// prompts) and lane sessions folded back into their real thread. threadID 0
-// means anywhere in the chat. ok is false when nobody has written there.
+// prompts) and lane sessions folded back into their real thread. The thread
+// matches exactly: 0 is the chat's main thread, not "anywhere" — a project on
+// a busy group's main thread must not borrow its topics' activity. ok is false
+// when nobody has written there.
 func (s *Store) LastHumanMessageAt(chatID, threadID int64) (at time.Time, ok bool, err error) {
 	err = s.db.QueryRow(`SELECT m.created_at
 		FROM messages m JOIN sessions s ON s.id = m.session_id
 		LEFT JOIN lane_sessions ls ON ls.chat_id = s.chat_id AND ls.session_thread_id = s.message_thread_id
 		WHERE m.role = 'user' AND s.chat_id = ?
-		  AND (? = 0 OR COALESCE(ls.thread_id, s.message_thread_id) = ?)
+		  AND COALESCE(ls.thread_id, s.message_thread_id) = ?
 		  AND substr(ltrim(m.content), 1, 1) != '['
 		  AND m.content NOT IN (SELECT message FROM schedules)
-		ORDER BY m.id DESC LIMIT 1`, chatID, threadID, threadID).Scan(&at)
+		ORDER BY m.id DESC LIMIT 1`, chatID, threadID).Scan(&at)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}
