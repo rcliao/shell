@@ -31,7 +31,7 @@ const (
 type Suggestion struct {
 	ID          int64
 	CreatedAt   time.Time
-	Source      string // "review" today
+	Source      string // "review", or "steward" (SuggestionSourceSteward)
 	Audience    string // "owner" today
 	Title       string
 	Evidence    string
@@ -232,6 +232,16 @@ func (s *Store) FeedbackCounts(kind string, since time.Time) (map[string]int, er
 
 // ChatAudience is the audience of a suggestion posted into a chat (S1).
 func ChatAudience(chatID int64) string { return "chat:" + strconv.FormatInt(chatID, 10) }
+
+// SuggestionSourceSteward marks a project steward proposal (filed on a deep
+// heartbeat and sent to the owner right after it, not with the weekly review).
+const SuggestionSourceSteward = "steward"
+
+// ProposedFrom returns owner-addressed proposed suggestions from one source.
+func (s *Store) ProposedFrom(source string) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE status = ? AND audience = 'owner' AND source = ? ORDER BY id`, SuggestionProposed, source)
+}
 
 // ProposedFor returns proposed (not yet delivered) suggestions for one
 // audience, oldest first.

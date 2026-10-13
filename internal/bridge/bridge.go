@@ -167,6 +167,7 @@ type Bridge struct {
 	// Kill switch: V2-H47 lesson-to-action block in deep heartbeats.
 	// false (default) = block included.
 	lessonToActionDisabled bool
+	stewardMode            string // scheduler.project_steward: "", "off" or "shadow"
 }
 
 func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {
