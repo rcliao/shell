@@ -187,6 +187,12 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		// skills never needed a pin to survive rotation; the pin duplicated
 		// the catalog and its refresh churned a dead row every deep beat.
 
+		// Project steward (shadow): proposals for moving active projects
+		// forward, filed as steward suggestions for the owner to rate.
+		if block := b.buildStewardBlock(time.Now()); block != "" {
+			sb.WriteString(block)
+		}
+
 		sb.WriteString("\n\n---\n**[Deep Reflection]**\n")
 		sb.WriteString("This is your deep-reflection heartbeat — the one turn where you think as hard as you can about getting better. ultrathink: don't settle for the first observation, trace root causes, weigh alternatives, and be honest about your own failures. Everything above is context, not a checklist — judge what most deserves this beat's attention and do that one thing well. Typical moves, any one of which can be the whole beat:\n")
 		sb.WriteString("- Complete a due task (scripts/shell-task complete --id <id>), or open a task row for in-flight multi-step work that has none (scripts/shell-task add --description \"<work>\") so it survives session rotation.\n")

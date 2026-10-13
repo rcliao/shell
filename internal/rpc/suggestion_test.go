@@ -80,3 +80,26 @@ func TestChatSuggestionDecidedOnlyInItsChat(t *testing.T) {
 		t.Errorf("stored = %+v", got)
 	}
 }
+
+// A steward proposal is filed with its source; any other source, or a
+// steward proposal addressed to a chat, is refused.
+func TestSuggestionStewardSource(t *testing.T) {
+	s, st := newProjectTestServer(t)
+	code, out := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "title": "garden: plant", "change": "DO: x", "evidence": "e"})
+	if code != http.StatusOK {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	got, err := st.GetSuggestion(int64(out["id"].(float64)))
+	if err != nil || got.Source != store.SuggestionSourceSteward || got.Audience != "owner" {
+		t.Fatalf("stored = %+v, %v", got, err)
+	}
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "bogus", "title": "t", "change": "c"}); code != http.StatusBadRequest {
+		t.Errorf("unknown source = %d, want 400", code)
+	}
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "for_chat": 42, "title": "t", "change": "c"}); code != http.StatusBadRequest {
+		t.Errorf("steward for a chat = %d, want 400", code)
+	}
+	if list, _ := st.ProposedFrom(store.SuggestionSourceSteward); len(list) != 1 {
+		t.Errorf("ProposedFrom(steward) = %d rows, want 1", len(list))
+	}
+}

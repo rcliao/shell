@@ -678,6 +678,16 @@ to the `reflections` table:
 - The skill-inventory retro block is not injected: its usage meter is only
   written by the `run-skill` wrapper, which the agent bypasses.
 
+**Project steward** (`scheduler.project_steward: "shadow"`, off by default;
+design `docs/DESIGN-AGENT-LOOPS.md`, step 1). A deep beat also lists the
+active projects whose doc this agent owns, with each project's 目標, its open
+待決定 count and top items, and when a person last wrote in its thread. The
+agent files up to two next-step proposals with
+`shell_suggestion(source="steward")`, each starting `DO:`, `ASK:` or
+`GOAL: … | done when: … | cadence: …`. Right after the beat the daemon sends
+them to the owner's DM only, and marks them delivered. The owner's
+accept/decline rates the steward before it may ask the family directly.
+
 Quiet hours (default 10 PM–7 AM) suppress heartbeat firing.
 
 ## Scheduler

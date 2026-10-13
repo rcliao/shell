@@ -27,6 +27,9 @@ type SuggestionRequest struct {
 	All      bool   `json:"all"`
 	// ForChat files a suggestion addressed to a chat (S1) instead of the owner.
 	ForChat int64 `json:"for_chat"`
+	// Source is who filed it: "" (the weekly review) or "steward" (the
+	// project steward on a deep beat, sent to the owner after that beat).
+	Source string `json:"source"`
 }
 
 func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
@@ -49,13 +52,27 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 		if req.ForChat != 0 {
 			sg.Audience = store.ChatAudience(req.ForChat)
 		}
+		reaches := "when this review ends"
+		switch req.Source {
+		case "":
+		case store.SuggestionSourceSteward:
+			if req.ForChat != 0 {
+				writeError(w, http.StatusBadRequest, "steward proposals go to the owner, not to a chat")
+				return
+			}
+			sg.Source = req.Source
+			reaches = "after this heartbeat"
+		default:
+			writeError(w, http.StatusBadRequest, "source must be empty or steward")
+			return
+		}
 		id, err := s.store.CreateSuggestion(sg)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, map[string]any{"id": id, "status": store.SuggestionProposed,
-			"result": fmt.Sprintf("Suggestion #%d filed; it reaches the owner when this review ends.", id)})
+			"result": fmt.Sprintf("Suggestion #%d filed; it reaches the owner %s.", id, reaches)})
 
 	case "list", "":
 		statuses := []string{store.SuggestionProposed, store.SuggestionDelivered, store.SuggestionAccepted}

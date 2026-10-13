@@ -984,6 +984,16 @@ func New(cfg config.Config) (*Daemon, error) {
 				return "", err // agenda not committed: the next beat sees it again
 			}
 			br.CommitAgenda(agenda)
+			// Project steward (shadow): send this beat's proposals to the owner.
+			if strings.HasPrefix(msg, "[Heartbeat:deep]") && br.StewardOn() {
+				if n, err := deliverSteward(st, agentName, cfg.Agent.OwnerChatID, func(chatID int64, text string) error {
+					return tgTransport.NotifyButtons(chatID, 0, text, nil)
+				}); err != nil {
+					slog.Warn("steward: delivery failed", "error", err)
+				} else if n > 0 {
+					slog.Info("steward: proposals sent to owner", "count", n)
+				}
+			}
 			if !bridge.IsSystemChat(chatID) {
 				for _, photo := range resp.Photos {
 					bot.SendPhoto(chatID, 0, photo.Data, photo.Caption)
@@ -1139,6 +1149,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			br.SetHeartbeatInterval(cfg.Scheduler.HeartbeatInterval)
 		}
 		br.SetLessonToActionDisabled(cfg.Scheduler.LessonToActionDisabled)
+		br.SetProjectSteward(cfg.Scheduler.ProjectSteward)
 		slog.Info("scheduler initialized",
 			"timezone", cfg.Scheduler.Timezone,
 			"quiet_hours", fmt.Sprintf("%d:00-%d:00", cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd),
