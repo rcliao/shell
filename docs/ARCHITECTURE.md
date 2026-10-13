@@ -475,7 +475,9 @@ Before each heartbeat the daemon builds an **agenda**
 - new real messages since the last beat, per chat (message-id watermark);
 - the agent's own schedules the scheduler auto-paused;
 - tools that failed 3+ times in 24 h;
-- active projects with an open 待決定 and no human activity for 3 days;
+- active projects with an open 待決定 and no human message in their own thread
+  (or Notion activity) for 3 days, each at most every 3 days and only from
+  the doc's owner;
 - pending delegated tasks;
 - new **events**.
 

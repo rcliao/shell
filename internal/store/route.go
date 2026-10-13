@@ -239,6 +239,30 @@ func (s *Store) UserMessagesSince(since time.Time) ([]UserMessage, error) {
 	return out, rows.Err()
 }
 
+// LastHumanMessageAt returns when a person last wrote in a chat thread, with
+// the same filters as UserMessagesSince (no synthetic turns, no scheduled
+// prompts) and lane sessions folded back into their real thread. The thread
+// matches exactly: 0 is the chat's main thread, not "anywhere" — a project on
+// a busy group's main thread must not borrow its topics' activity. ok is false
+// when nobody has written there.
+func (s *Store) LastHumanMessageAt(chatID, threadID int64) (at time.Time, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT m.created_at
+		FROM messages m JOIN sessions s ON s.id = m.session_id
+		LEFT JOIN lane_sessions ls ON ls.chat_id = s.chat_id AND ls.session_thread_id = s.message_thread_id
+		WHERE m.role = 'user' AND s.chat_id = ?
+		  AND COALESCE(ls.thread_id, s.message_thread_id) = ?
+		  AND substr(ltrim(m.content), 1, 1) != '['
+		  AND m.content NOT IN (SELECT message FROM schedules)
+		ORDER BY m.id DESC LIMIT 1`, chatID, threadID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return at, true, nil
+}
+
 // LastUserText returns the latest user-role message in a chat thread — the
 // message an agent is answering when it labels "this" message. It is NOT
 // filtered: skipping a synthetic turn (a relayed peer message, "[…") would
