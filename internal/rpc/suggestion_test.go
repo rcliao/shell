@@ -102,4 +102,11 @@ func TestSuggestionStewardSource(t *testing.T) {
 	if list, _ := st.ProposedFrom(store.SuggestionSourceSteward); len(list) != 1 {
 		t.Errorf("ProposedFrom(steward) = %d rows, want 1", len(list))
 	}
+	// The cap holds server-side: a second is fine, a third waits.
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "title": "t2", "change": "c"}); code != http.StatusOK {
+		t.Errorf("second steward proposal = %d, want 200", code)
+	}
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "title": "t3", "change": "c"}); code != http.StatusConflict {
+		t.Errorf("third steward proposal = %d, want 409", code)
+	}
 }

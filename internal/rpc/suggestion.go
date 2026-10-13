@@ -32,6 +32,10 @@ type SuggestionRequest struct {
 	Source string `json:"source"`
 }
 
+// stewardMaxOpen caps undelivered steward proposals; it matches
+// bridge.StewardMaxProposals (rpc cannot import bridge).
+const stewardMaxOpen = 2
+
 func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store not available")
@@ -58,6 +62,12 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 		case store.SuggestionSourceSteward:
 			if req.ForChat != 0 {
 				writeError(w, http.StatusBadRequest, "steward proposals go to the owner, not to a chat")
+				return
+			}
+			// The cap is enforced here, not only in the prompt: an extra
+			// proposal would wait, go stale, and take a weekly-review slot.
+			if open, err := s.store.ProposedFrom(store.SuggestionSourceSteward); err == nil && len(open) >= stewardMaxOpen {
+				writeError(w, http.StatusConflict, fmt.Sprintf("already %d steward proposals waiting for the owner; file nothing more this beat", len(open)))
 				return
 			}
 			sg.Source = req.Source

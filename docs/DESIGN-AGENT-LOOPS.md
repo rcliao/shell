@@ -39,7 +39,7 @@ Agent moves projects forward.
 | `job_runs` + `verdict`, `reason`, `evidence`, `judge_cost_usd` | one row per fire already exists, so it becomes the iteration record |
 | `suggestions` rows with `source = 'steward'` | proposals reuse the queue and the owner's decide path; owner-audience rows are not touched by the chat retro's withdraw[^E8] |
 | ghost memories tagged `lesson`, `project:<slug>`, `goal:<kind>` | lessons that reach the next fire for the same project or kind |
-| config `heartbeat.project_steward`: `off` / `shadow` / `on` | experiment switch; `on` lets the steward ask in the project's thread |
+| config `scheduler.project_steward`: `off` / `shadow` / `on` | experiment switch; `on` lets the steward ask in the project's thread |
 
 ## 6. Interfaces
 - `shell_schedule(create, …, goal, done_criteria, project?, max_runs?)` → id. **Errors:** a goal without criteria → refused; the project is not active → refused. Without `goal`, behaviour is unchanged.
