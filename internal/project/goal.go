@@ -65,6 +65,7 @@ func GoalPrompt(t GoalTurn) string {
 	b.WriteString(`
 Do ONE step toward the goal now (check, compare, look something up, update the doc), not the whole thing.
 Then call shell_schedule(action="progress", id=` + fmt.Sprint(t.ScheduleID) + `, evidence="<what you did and found, with numbers or links>", notes="<everything the next run needs: what was checked, current best, what to try next>"). notes replaces the old notes, so carry forward what still matters.
+When the done check is met, call shell_schedule(action="done", id=` + fmt.Sprint(t.ScheduleID) + `, evidence="<the proof: what shows each part of the done check, with numbers, names or links>") instead. A separate judge reads only that evidence: if it says not met, you get the reason back and the goal keeps running.
 Reply in this thread only when the family should know something now (a change, a find, a question). If nothing changed, reply [noop].
 `)
 	if t.Run >= t.MaxRuns {

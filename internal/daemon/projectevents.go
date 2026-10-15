@@ -207,10 +207,9 @@ func (d projectResearchDeps) runGoal(ctx context.Context, p project.EventPayload
 	if g.Runs >= g.MaxRuns {
 		return d.expireGoal(g, proj), nil
 	}
-	run, err := d.store.BumpGoalRun(g.ScheduleID)
-	if err != nil {
-		return "", fmt.Errorf("count goal run #%d: %w", g.ScheduleID, err)
-	}
+	// A run counts once its turn has run: a failed or interrupted turn that
+	// the queue retries does not use up the goal's runs.
+	run := g.Runs + 1
 	t := project.GoalTurn{ScheduleID: g.ScheduleID, Slug: proj.Slug, Title: proj.Title, Lang: proj.Lang,
 		Goal: g.Goal, DoneCriteria: g.DoneCriteria, Notes: g.Notes, Run: run, MaxRuns: g.MaxRuns}
 	if last, err := d.store.LastGoalRun(g.ScheduleID); err == nil && last != nil {
@@ -222,6 +221,11 @@ func (d projectResearchDeps) runGoal(ctx context.Context, p project.EventPayload
 	if err != nil {
 		d.recordScheduleRun(p.GoalKey, started, store.OutcomeTurnFailed, err.Error())
 		return "", fmt.Errorf("goal turn #%d: %w", g.ScheduleID, err)
+	}
+	if n, err := d.store.BumpGoalRun(g.ScheduleID); err != nil {
+		slog.Warn("goal: run count failed", "schedule_id", g.ScheduleID, "error", err)
+	} else if n > 0 {
+		run = n
 	}
 	reply := strings.TrimSpace(text)
 	delivered := false

@@ -61,8 +61,10 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		s.schedulesQueue(w, req)
 	case "progress":
 		s.schedulesProgress(w, req)
+	case "done":
+		s.schedulesDone(r.Context(), w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be list, describe, cancel, trigger, queue or progress")
+		writeError(w, http.StatusBadRequest, "action must be list, describe, cancel, trigger, queue, progress or done")
 	}
 }
 

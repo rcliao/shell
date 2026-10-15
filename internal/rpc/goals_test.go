@@ -1,10 +1,13 @@
 package rpc
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/rcliao/shell/internal/judge"
 	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
@@ -41,6 +44,8 @@ func TestGoalScheduleCreate(t *testing.T) {
 		"archived":        {"project": "old"},
 		"no cron":         {"cron": ""},
 		"quiet hours":     {"cron": "0 23 * * *"},
+		"fast cron":       {"cron": "*/5 * * * *"},
+		"weekly at 23":    {"cron": "0 23 * * 0"},
 		"too many runs":   {"max_runs": 61},
 	} {
 		if code, out := goal(tc); code != http.StatusBadRequest {
@@ -121,5 +126,77 @@ func TestGoalScheduleProgressAndCancel(t *testing.T) {
 	}
 	if code, out := postSchedules(t, s, map[string]any{"action": "progress", "id": id, "evidence": "e"}); code != http.StatusConflict || !strings.Contains(out["error"].(string), "cancelled") {
 		t.Errorf("progress on a cancelled goal = %d %v, want 409", code, out)
+	}
+}
+
+func TestGoalScheduleDoneThroughJudge(t *testing.T) {
+	s, st := newGoalServer(t)
+	mk := func(goal string) int64 {
+		_, out := postSchedule(t, s, map[string]any{"goal": goal, "done_criteria": "c", "project": "garden", "cron": "0 9 * * *"})
+		return int64(out["id"].(float64))
+	}
+	var next judge.Verdict
+	var nextErr error
+	calls := 0
+	s.goalJudge = func(_ context.Context, goal, criteria, evidence string) (judge.Verdict, error) {
+		calls++
+		return next, nextErr
+	}
+	done := func(id int64, evidence string) map[string]any {
+		code, out := postSchedules(t, s, map[string]any{"action": "done", "id": id, "evidence": evidence})
+		if code != http.StatusOK {
+			t.Fatalf("done: %d %v", code, out)
+		}
+		return out
+	}
+
+	// Empty evidence: not met, and the judge is not called.
+	a := mk("a")
+	if out := done(a, " "); out["verdict"] != judge.NotMet || calls != 0 {
+		t.Errorf("empty evidence: %v (%d calls)", out, calls)
+	}
+	// Not met: the reason comes back and the goal keeps running.
+	next = judge.Verdict{Verdict: judge.NotMet, Reason: "no link"}
+	if out := done(a, "B $38"); out["verdict"] != judge.NotMet || !strings.Contains(out["result"].(string), "no link") {
+		t.Errorf("not met: %v", out)
+	}
+	if g, _ := st.GetScheduleGoal(a); g.Status != store.GoalOpen || !g.Enabled {
+		t.Errorf("not met closed the goal: %+v", g)
+	}
+	// Judge failures default to not met; the third in a row asks for the owner.
+	next, nextErr = judge.Verdict{Verdict: judge.NotMet, Reason: "judge failed: timeout"}, errors.New("timeout")
+	for i := 1; i <= 3; i++ {
+		out := done(a, "B $38")
+		if out["verdict"] != judge.NotMet {
+			t.Fatalf("failure %d: %v", i, out)
+		}
+		if asks := strings.Contains(out["result"].(string), "tell the owner"); asks != (i == 3) {
+			t.Errorf("failure %d: owner ask = %t: %v", i, asks, out["result"])
+		}
+	}
+	// Met: the goal closes as done, the schedule stops, the ledger has it.
+	next, nextErr = judge.Verdict{Verdict: judge.Met, Reason: "kit B linked", CostUSD: 0.01}, nil
+	if out := done(a, "B $38 https://example.com/b"); out["verdict"] != judge.Met || out["status"] != store.GoalDone {
+		t.Errorf("met: %v", out)
+	}
+	g, _ := st.GetScheduleGoal(a)
+	last, _ := st.LastGoalRun(a)
+	if g.Status != store.GoalDone || g.Enabled || last.Verdict != judge.Met || last.CostUSD != 0.01 {
+		t.Errorf("after met: goal %+v last %+v", g, last)
+	}
+	if code, _ := postSchedules(t, s, map[string]any{"action": "done", "id": a, "evidence": "again"}); code != http.StatusConflict {
+		t.Errorf("done on a closed goal = %d, want 409", code)
+	}
+	// Impossible closes it too.
+	b := mk("b")
+	next = judge.Verdict{Verdict: judge.Impossible, Reason: "discontinued"}
+	if out := done(b, "the maker stopped selling it"); out["status"] != store.GoalImpossible {
+		t.Errorf("impossible: %v", out)
+	}
+	// No judge configured: not met.
+	s.goalJudge = nil
+	c := mk("c")
+	if out := done(c, "proof"); out["verdict"] != judge.NotMet {
+		t.Errorf("no judge: %v", out)
 	}
 }

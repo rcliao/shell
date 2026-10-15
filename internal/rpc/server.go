@@ -73,6 +73,7 @@ type Server struct {
 	stewardInThreads   bool
 	quietStart         int
 	quietEnd           int
+	goalJudge          GoalJudgeFunc
 	places             Places
 	sharedRoot         string
 	agentName          string
@@ -120,6 +121,9 @@ type Config struct {
 	// QuietHourStart/End are the scheduler's quiet hours (local hours); a
 	// goal schedule may not fire inside them. Equal values mean none.
 	QuietHourStart, QuietHourEnd int
+	// GoalJudge rules on a goal's done claim (docs/DESIGN-AGENT-LOOPS.md
+	// step 3). Nil: every done claim is not met.
+	GoalJudge GoalJudgeFunc
 	// Places creates and manages projects' own places (forum posts or
 	// topics) for project areas. Nil disables --place auto.
 	Places Places
@@ -185,6 +189,7 @@ func New(cfg Config) *Server {
 		stewardInThreads:   cfg.StewardInThreads,
 		quietStart:         cfg.QuietHourStart,
 		quietEnd:           cfg.QuietHourEnd,
+		goalJudge:          cfg.GoalJudge,
 	}
 }
 

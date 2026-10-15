@@ -721,14 +721,28 @@ row can carry a goal: `goal`, `done_criteria`, `goal_notes`, `goal_project`,
 cancelled). `shell_schedule(create, goal, done_criteria, project, cron,
 max_runs?)` makes one. It is an event-mode cron schedule with an explicit
 dedup key `goal:<slug>:<hash>`, so asking for the same goal twice returns the
-running schedule. Creation is refused if any of the next 48 fires lands in
-quiet hours, because each step posts in a family thread. Each fire
+running schedule. Creation is refused if any fire in the next 8 days lands in
+quiet hours (the scheduler's zone), because each step posts in a family thread. Each fire
 (`project.event` / `goal.due`) runs one step as a project turn in the
 project's thread. The prompt carries the goal, the done check, the notes and
 the last report. The step reports with `shell_schedule(progress, id,
 evidence, notes)`: the evidence goes into a `job_runs` row (trigger_context
 `goal`, verdict `progress`) that is not counted as a fire, and the notes
-replace the goal's notes for the next fire. A goal that uses its `max_runs`
+replace the goal's notes for the next fire. The step that believes the done check is met calls `shell_schedule(done, id,
+evidence)` instead. The **DoneJudge** (`internal/judge`) is a separate
+`claude -p --model sonnet --output-format json` call. It runs with no tools
+(`--tools ""`, and Bash, Write and Edit named as disallowed), no MCP servers,
+a scratch working directory and the process manager's child environment, and
+it reads only the goal, the criteria and the evidence. Met closes the goal as
+done, and impossible closes it as impossible; both disable the schedule.
+Anything else counts as not met: empty evidence, a timeout (45 s, inside the
+MCP client's 60 s limit), unparseable output or an unknown verdict. Not met
+returns its reason to the agent and the goal keeps running. Each ruling is a
+`job_runs` row with its verdict, reason, evidence and `judge_cost_usd`, and
+each call that reaches the model adds a `usage` row with source `judge`.
+After three judge failures in a row, the reply tells the agent to alert the
+owner. A run is counted only after its turn has run, so a failed turn that
+the queue retries does not use one up. A goal that uses its `max_runs`
 closes as expired, its schedule is disabled with paused_reason
 `goal_expired`, and one line goes to the thread. `cancel` closes the goal as
 cancelled. The steward listing shows each project's running goals. A

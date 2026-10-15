@@ -223,10 +223,10 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"action=list shows live schedules; action=describe id=N shows a schedule's next runs AND its recent run history — use it to confirm a schedule you created actually fires. " +
 			"action=cancel id=N disables one; action=trigger id=N runs it on the next tick. " +
 			"action=queue shows the durable execution queue behind all schedules — whether fires are waiting, running, replayed after a restart, or dropped as stale. " +
-			"A GOAL schedule (create with goal, done_criteria, project and cron) runs one step of the goal per fire in the project's thread until it is done or max_runs is used; each step reports with action=progress id=N evidence=… notes=…. " +
+			"A GOAL schedule (create with goal, done_criteria, project and cron) runs one step of the goal per fire in the project's thread until it is done or max_runs is used; each step reports with action=progress id=N evidence=… notes=…, and action=done id=N evidence=… asks a judge to close it. " +
 			"Creating the same schedule twice returns the existing one rather than a duplicate.",
 		InputSchema: schema([]string{}, map[string]map[string]any{
-			"action":        prop("string", "create (default), list, describe, cancel, trigger, queue, progress"),
+			"action":        prop("string", "create (default), list, describe, cancel, trigger, queue, progress, done"),
 			"id":            prop("integer", "Schedule id — required for describe, cancel, trigger"),
 			"message":       prop("string", "What to say or do when it fires (required for create)"),
 			"at":            prop("string", "One-shot time, e.g. '2026-08-01 09:00' or '+30m' (create)"),
@@ -239,7 +239,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"done_criteria": prop("string", "create with goal: the check that says the goal is reached"),
 			"project":       prop("string", "create with goal: the project's slug; steps run in its thread"),
 			"max_runs":      prop("integer", "create with goal: stop after this many steps (default 10, at most 60)"),
-			"evidence":      prop("string", "progress: what you did and found this step"),
+			"evidence":      prop("string", "progress: what you did and found this step; done: the proof that the done check is met"),
 			"notes":         prop("string", "progress: replaces the goal's notes — everything the next step needs"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {

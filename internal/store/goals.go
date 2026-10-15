@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -180,4 +181,27 @@ func (s *Store) LastGoalRun(id int64) (*GoalRun, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// GoalJudgeFailures counts the goal's latest ledger rows, newest first, whose
+// verdict came from a failed judge call, stopping at the first that did not.
+func (s *Store) GoalJudgeFailures(id int64) (int, error) {
+	rows, err := s.db.Query(`SELECT reason FROM job_runs WHERE schedule_id = ? AND trigger_context = ? AND outcome = 'judged'
+		ORDER BY id DESC LIMIT 10`, id, TriggerGoal)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var reason string
+		if err := rows.Scan(&reason); err != nil {
+			return n, err
+		}
+		if !strings.HasPrefix(reason, "judge failed") {
+			break
+		}
+		n++
+	}
+	return n, rows.Err()
 }

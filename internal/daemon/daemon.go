@@ -912,6 +912,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		StewardInThreads:   cfg.Scheduler.ProjectSteward == bridge.StewardInThreads,
 		QuietHourStart:     cfg.Scheduler.QuietHourStart,
 		QuietHourEnd:       cfg.Scheduler.QuietHourEnd,
+		GoalJudge:          goalJudge(st, proc.ChildEnv),
 	})
 
 	// Initialize scheduler if enabled.
