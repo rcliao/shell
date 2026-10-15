@@ -205,3 +205,44 @@ func (s *Store) GoalJudgeFailures(id int64) (int, error) {
 	}
 	return n, rows.Err()
 }
+
+// GoalWeek is one goal's line in the weekly review: the goal, and what its
+// ledger shows since the cutoff.
+type GoalWeek struct {
+	ScheduleGoal
+	Judged    int     // judged done claims since the cutoff
+	JudgeCost float64 // their judge cost, USD
+}
+
+// GoalsSince returns the goals that are open, or that were created or
+// wrote a ledger row at or after the cutoff, oldest first.
+func (s *Store) GoalsSince(since time.Time) ([]GoalWeek, error) {
+	since = since.UTC()
+	rows, err := s.db.Query(`SELECT `+goalColumns+` FROM schedules WHERE goal != '' AND (goal_status = ? OR created_at >= ?
+		OR id IN (SELECT schedule_id FROM job_runs WHERE trigger_context = ? AND fired_at >= ?)) ORDER BY id`,
+		GoalOpen, since, TriggerGoal, since)
+	if err != nil {
+		return nil, err
+	}
+	var out []GoalWeek
+	for rows.Next() {
+		g, err := scanGoal(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, GoalWeek{ScheduleGoal: *g})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(judge_cost_usd), 0) FROM job_runs
+			WHERE schedule_id = ? AND trigger_context = ? AND outcome = 'judged' AND fired_at >= ?`,
+			out[i].ScheduleID, TriggerGoal, since).Scan(&out[i].Judged, &out[i].JudgeCost); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
