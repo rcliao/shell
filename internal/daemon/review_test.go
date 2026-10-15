@@ -244,3 +244,57 @@ func TestStaleEvidenceCountsPostTalk(t *testing.T) {
 		t.Fatalf("a project with talk in its post was listed stale: %q", got)
 	}
 }
+
+func TestReviewStewardAndGoalEvidence(t *testing.T) {
+	st := openReviewStore(t)
+	since := time.Now().Add(-time.Hour)
+	if stewardEvidence(st, since) != "" || goalEvidence(st, since) != "" {
+		t.Error("no proposals or goals, no section body")
+	}
+	mk := func(title, project string) int64 {
+		id, err := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Audience: "chat:-100200300", Title: title, Project: project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	a := mk("ask about parking", "housing")
+	b := mk("swap slot 6", "teams")
+	mk("weekly check-in", "fitness")
+	st.DecideSuggestion(a, store.SuggestionAccepted, "family", "好")
+	st.DecideSuggestion(b, store.SuggestionDeclined, "family", "not now")
+	st.CreateSuggestion(store.Suggestion{Title: "a review suggestion"}) // not the steward's
+
+	got := stewardEvidence(st, since)
+	for _, want := range []string{"3 filed: 1 accepted or done, 1 declined, 0 withdrawn, 1 still waiting (2 of 3 answered).",
+		"[accepted] housing: ask about parking (by family: “好”)", "[declined] teams: swap slot 6", "[proposed] fitness: weekly check-in"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("steward evidence missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "review suggestion") {
+		t.Errorf("a review suggestion was counted as the steward's:\n%s", got)
+	}
+
+	goal := func(name string) int64 {
+		id, err := st.SaveSchedule(&store.Schedule{ChatID: -100200300, Label: name, Message: "m", Schedule: "0 9 * * *",
+			Type: "cron", NextRunAt: time.Now().Add(time.Hour), Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetScheduleGoal(id, name, "c", "garden", 4); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	open, done := goal("find a drip kit"), goal("pick a hose")
+	st.BumpGoalRun(open)
+	st.RecordGoalRun(done, store.GoalRun{Outcome: "judged", Verdict: store.VerdictMet, Reason: "ok", CostUSD: 0.04})
+	st.CloseGoal(done, store.GoalDone)
+	got = goalEvidence(st, since)
+	for _, want := range []string{"[open] garden: find a drip kit — run 1 of 4", "[done] garden: pick a hose — run 0 of 4, judged 1× ($0.04)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("goal evidence missing %q:\n%s", want, got)
+		}
+	}
+}

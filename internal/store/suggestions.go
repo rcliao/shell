@@ -298,3 +298,10 @@ func (s *Store) OpenThreadSuggestions(chatID, threadID int64, maxAge time.Durati
 		WHERE status = ? AND audience = ? AND delivered_at >= ? AND thread_id IN (0, ?) ORDER BY id`,
 		SuggestionDelivered, ChatAudience(chatID), time.Now().Add(-maxAge).UTC(), threadID)
 }
+
+// StewardSince returns the steward proposals filed at or after a cutoff,
+// oldest first (the weekly review's acceptance count, design step 6).
+func (s *Store) StewardSince(since time.Time) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE source = ? AND created_at >= ? ORDER BY id`, SuggestionSourceSteward, since.UTC())
+}

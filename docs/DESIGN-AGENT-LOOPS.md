@@ -1,6 +1,6 @@
 # Design: goal schedules and the project steward
 
-Status: draft v2, 2026-10-13; updated 2026-10-14. Step 0 shipped (PR #81). Step 1 shipped in shadow mode (PR #82). After one day of shadow proposals the owner asked for shorter ones, answered per project by the people of that project, so `on` mode now posts each proposal in its project's thread. Steps 2 (goal schedules, project goals only) and 3 (DoneJudge) are built. Step 4 (LessonStore) is built, recalled by project only: goals have no kind yet. Steps 5–6 are not built.
+Status: draft v2, 2026-10-13; updated 2026-10-14. Step 0 shipped (PR #81). Step 1 shipped in shadow mode (PR #82). After one day of shadow proposals the owner asked for shorter ones, answered per project by the people of that project, so `on` mode now posts each proposal in its project's thread. Steps 2 (goal schedules, project goals only) and 3 (DoneJudge) are built. Step 4 (LessonStore) is built, recalled by project only: goals have no kind yet. Step 6 (WeeklyReview) is built: the pack lists the week's steward proposals with the family's answers, and the open or active goals. Step 5 (pilot) is not done.
 v1 proposed a separate `loops` table. The owner redirected: extend the existing heartbeat/cron schedules instead, and let the agent create loops from a project's context.
 
 ## 1. Intent

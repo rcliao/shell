@@ -244,6 +244,9 @@ func (d reviewDeps) evidence(ctx context.Context, since, until time.Time) string
 		section("Your older proposals in loop:proposals — NOT in front of the owner; nobody has read them", "- "+strings.Join(p, "\n- "))
 	}
 
+	section("Your project steward proposals filed this week, and how the family answered", stewardEvidence(d.store, since))
+	section("Your goal schedules: open, or active this week", goalEvidence(d.store, since))
+
 	section("How your messages were routed to project lanes", d.laneEvidence(since))
 	if d.judge != nil {
 		// Bounded well inside the queue lease: labels are best-effort; a
@@ -385,7 +388,10 @@ Do three things, in this order.
    (they are committed and the owner is notified automatically), your memory,
    your schedules, and your projects' instructions — the router reads them to
    decide which messages belong to a project, so misrouted messages above are
-   yours to fix (project set-instructions). Only changes the evidence supports.
+   yours to fix (project set-instructions). Your steward proposals and goals
+   above show which asks the family takes up: remember (in your memory) the
+   kinds they accept and the kinds they decline or ignore, so your next deep
+   beats propose more of the first. Only changes the evidence supports.
 
 2. ASK — file at most %d suggestions for changes only a human can make: how
    the harness, your tools or your setup should change, or how you and your
@@ -539,4 +545,56 @@ func noStageEvidence(st *store.Store, exclude map[int64]bool) string {
 		return ""
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// stewardEvidence counts the week's steward proposals by outcome and lists
+// each one, so the agent sees which kinds of asks the family takes up
+// (docs/DESIGN-AGENT-LOOPS.md step 6).
+func stewardEvidence(st *store.Store, since time.Time) string {
+	rows, err := st.StewardSince(since)
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	counts := map[string]int{}
+	var lines []string
+	for _, r := range rows {
+		counts[r.Status]++
+		where := r.Project
+		if where == "" {
+			where = "owner DM"
+		}
+		line := fmt.Sprintf("- #%d [%s] %s: %s", r.ID, r.Status, where, oneLine(r.Title))
+		if r.DecidedBy != "" {
+			line += " (by " + r.DecidedBy
+			if r.Note != "" {
+				line += ": “" + oneLine(r.Note) + "”"
+			}
+			line += ")"
+		}
+		lines = append(lines, line)
+	}
+	answered := counts[store.SuggestionAccepted] + counts[store.SuggestionDone] + counts[store.SuggestionDeclined]
+	head := fmt.Sprintf("%d filed: %d accepted or done, %d declined, %d withdrawn, %d still waiting (%d of %d answered).",
+		len(rows), counts[store.SuggestionAccepted]+counts[store.SuggestionDone], counts[store.SuggestionDeclined],
+		counts[store.SuggestionWithdrawn], counts[store.SuggestionProposed]+counts[store.SuggestionDelivered],
+		answered, len(rows)-counts[store.SuggestionWithdrawn])
+	return head + "\n" + strings.Join(lines, "\n")
+}
+
+// goalEvidence lists the goals that are open or moved this week: status,
+// runs used, judged done claims and their cost.
+func goalEvidence(st *store.Store, since time.Time) string {
+	goals, err := st.GoalsSince(since)
+	if err != nil {
+		return ""
+	}
+	var lines []string
+	for _, g := range goals {
+		line := fmt.Sprintf("- #%d [%s] %s: %s — run %d of %d", g.ScheduleID, g.Status, g.Project, oneLine(g.Goal), g.Runs, g.MaxRuns)
+		if g.Judged > 0 {
+			line += fmt.Sprintf(", judged %d× ($%.2f)", g.Judged, g.JudgeCost)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
