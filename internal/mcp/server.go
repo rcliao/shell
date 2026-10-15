@@ -223,29 +223,42 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"action=list shows live schedules; action=describe id=N shows a schedule's next runs AND its recent run history — use it to confirm a schedule you created actually fires. " +
 			"action=cancel id=N disables one; action=trigger id=N runs it on the next tick. " +
 			"action=queue shows the durable execution queue behind all schedules — whether fires are waiting, running, replayed after a restart, or dropped as stale. " +
+			"A GOAL schedule (create with goal, done_criteria, project and cron) runs one step of the goal per fire in the project's thread until it is done or max_runs is used; each step reports with action=progress id=N evidence=… notes=…. " +
 			"Creating the same schedule twice returns the existing one rather than a duplicate.",
 		InputSchema: schema([]string{}, map[string]map[string]any{
-			"action":  prop("string", "create (default), list, describe, cancel, trigger, queue"),
-			"id":      prop("integer", "Schedule id — required for describe, cancel, trigger"),
-			"message": prop("string", "What to say or do when it fires (required for create)"),
-			"at":      prop("string", "One-shot time, e.g. '2026-08-01 09:00' or '+30m' (create)"),
-			"cron":    prop("string", "Cron expression for a recurring schedule (create)"),
-			"mode":    prop("string", "notify = send the message verbatim; prompt = run it as a turn. Default notify."),
-			"tz":      prop("string", "Timezone override; defaults to the agent's configured zone"),
-			"chat_id": idProp("Target chat; omit for the current chat."),
-			"all":     prop("boolean", "list: include disabled and paused schedules"),
+			"action":        prop("string", "create (default), list, describe, cancel, trigger, queue, progress"),
+			"id":            prop("integer", "Schedule id — required for describe, cancel, trigger"),
+			"message":       prop("string", "What to say or do when it fires (required for create)"),
+			"at":            prop("string", "One-shot time, e.g. '2026-08-01 09:00' or '+30m' (create)"),
+			"cron":          prop("string", "Cron expression for a recurring schedule (create)"),
+			"mode":          prop("string", "notify = send the message verbatim; prompt = run it as a turn. Default notify."),
+			"tz":            prop("string", "Timezone override; defaults to the agent's configured zone"),
+			"chat_id":       idProp("Target chat; omit for the current chat."),
+			"all":           prop("boolean", "list: include disabled and paused schedules"),
+			"goal":          prop("string", "create: what this schedule works toward (makes it a goal schedule; needs done_criteria, project, cron)"),
+			"done_criteria": prop("string", "create with goal: the check that says the goal is reached"),
+			"project":       prop("string", "create with goal: the project's slug; steps run in its thread"),
+			"max_runs":      prop("integer", "create with goal: stop after this many steps (default 10, at most 60)"),
+			"evidence":      prop("string", "progress: what you did and found this step"),
+			"notes":         prop("string", "progress: replaces the goal's notes — everything the next step needs"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		var p struct {
-			Action  string `json:"action"`
-			ID      int64  `json:"id"`
-			Message string `json:"message"`
-			At      string `json:"at"`
-			Cron    string `json:"cron"`
-			Mode    string `json:"mode"`
-			TZ      string `json:"tz"`
-			ChatID  idArg  `json:"chat_id"`
-			All     bool   `json:"all"`
+			Action       string `json:"action"`
+			ID           int64  `json:"id"`
+			Message      string `json:"message"`
+			At           string `json:"at"`
+			Cron         string `json:"cron"`
+			Mode         string `json:"mode"`
+			TZ           string `json:"tz"`
+			ChatID       idArg  `json:"chat_id"`
+			All          bool   `json:"all"`
+			Goal         string `json:"goal"`
+			DoneCriteria string `json:"done_criteria"`
+			Project      string `json:"project"`
+			MaxRuns      int    `json:"max_runs"`
+			Evidence     string `json:"evidence"`
+			Notes        string `json:"notes"`
 		}
 		if err := unmarshalArgs(req, &p); err != nil {
 			return errResult(err.Error()), nil
@@ -263,13 +276,17 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 				schedType = "once"
 			}
 			result, err := client.call(ctx, "/schedule", map[string]any{
-				"chat_id": p.ChatID,
-				"type":    schedType,
-				"at":      p.At,
-				"cron":    p.Cron,
-				"message": p.Message,
-				"mode":    p.Mode,
-				"tz":      p.TZ,
+				"chat_id":       p.ChatID,
+				"type":          schedType,
+				"at":            p.At,
+				"cron":          p.Cron,
+				"message":       p.Message,
+				"mode":          p.Mode,
+				"tz":            p.TZ,
+				"goal":          p.Goal,
+				"done_criteria": p.DoneCriteria,
+				"project":       p.Project,
+				"max_runs":      p.MaxRuns,
 			})
 			if err != nil {
 				return errResult(err.Error()), nil
@@ -278,10 +295,12 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 		}
 
 		result, err := client.call(ctx, "/schedules", map[string]any{
-			"action":  p.Action,
-			"id":      p.ID,
-			"chat_id": p.ChatID,
-			"all":     p.All,
+			"action":   p.Action,
+			"id":       p.ID,
+			"chat_id":  p.ChatID,
+			"all":      p.All,
+			"evidence": p.Evidence,
+			"notes":    p.Notes,
 		})
 		if err != nil {
 			return errResult(err.Error()), nil

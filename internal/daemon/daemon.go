@@ -910,6 +910,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		AgentName:          cfg.Agent.Name,
 		OwnerChatID:        cfg.Agent.OwnerChatID,
 		StewardInThreads:   cfg.Scheduler.ProjectSteward == bridge.StewardInThreads,
+		QuietHourStart:     cfg.Scheduler.QuietHourStart,
+		QuietHourEnd:       cfg.Scheduler.QuietHourEnd,
 	})
 
 	// Initialize scheduler if enabled.
