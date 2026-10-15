@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"fmt"
+	"github.com/rcliao/shell/internal/store"
 	"strings"
 	"time"
 )
@@ -78,7 +79,7 @@ func (b *Bridge) buildStewardBlock(now time.Time) string {
 			meta += ", lang " + p.Lang
 		}
 		fmt.Fprintf(&sb, "- %s (%s) — %s\n", p.Slug, meta, clipRunes(p.Title, 80))
-		if open, err := b.store.OpenStewardFor(p.Slug); err == nil && len(open) > 0 {
+		if open, err := b.store.OpenStewardFor(p.Slug, store.StewardOpenAge); err == nil && len(open) > 0 {
 			fmt.Fprintf(&sb, "  open proposal #%d still waiting for an answer — skip this project\n", open[0].ID)
 		}
 		if goal := firstLine(docSection(doc, "目標")); goal != "" {

@@ -83,14 +83,14 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, fmt.Sprintf("already %d steward proposals waiting to be sent; file nothing more this beat", len(open)))
 				return
 			}
-			if open, err := s.store.OpenStewardFor(p.Slug); err == nil && len(open) > 0 {
+			if open, err := s.store.OpenStewardFor(p.Slug, store.StewardOpenAge); err == nil && len(open) > 0 {
 				writeError(w, http.StatusConflict, fmt.Sprintf("project %s already has open steward proposal #%d; wait for its answer", p.Slug, open[0].ID))
 				return
 			}
 			sg.Source = req.Source
 			sg.Project = p.Slug
 			reaches = "the owner after this heartbeat"
-			if s.stewardInThreads {
+			if s.stewardInThreads && p.ChatID != 0 {
 				sg.Audience = store.ChatAudience(p.ChatID)
 				sg.ThreadID = p.MessageThreadID
 				reaches = "the project's thread after this heartbeat"

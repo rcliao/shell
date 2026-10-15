@@ -298,7 +298,7 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessT
 
 // openChatSuggestionAge is how long an unanswered chat suggestion stays in
 // the chat's turns.
-const openChatSuggestionAge = 14 * 24 * time.Hour
+const openChatSuggestionAge = store.StewardOpenAge
 
 // buildCarryForwardBlock returns the "Previously in this chat" + relevant-
 // memory-pack block for the first turn of a new generation. Returns empty

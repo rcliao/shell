@@ -115,9 +115,12 @@ func TestSuggestionStewardSource(t *testing.T) {
 	if code, _ := steward("nope", "t"); code != http.StatusBadRequest {
 		t.Errorf("steward for an unknown project = %d, want 400", code)
 	}
-	// One open question per project.
-	if code, _ := steward("garden", "again"); code != http.StatusConflict {
-		t.Errorf("second proposal for the same project = %d, want 409", code)
+	// A shadow row never holds its project.
+	if code, out := steward("garden", "again"); code != http.StatusOK {
+		t.Fatalf("second shadow proposal for garden = %d %v", code, out)
+	}
+	for _, sg := range mustProposed(t, st) {
+		st.MarkSuggestionsDelivered([]int64{sg.ID})
 	}
 
 	// "on": addressed to the project's chat and thread.
@@ -130,9 +133,16 @@ func TestSuggestionStewardSource(t *testing.T) {
 	if got.Audience != store.ChatAudience(-100200300) || got.ThreadID != 77 || got.Project != "trip" {
 		t.Fatalf("in threads stored = %+v", got)
 	}
+	// One open question per project.
+	if code, _ := steward("trip", "again"); code != http.StatusConflict {
+		t.Errorf("second proposal for trip = %d, want 409", code)
+	}
 	// The per-beat cap holds server-side: two waiting, a third waits.
-	if code, _ := steward("house", "t3"); code != http.StatusConflict {
-		t.Errorf("third steward proposal = %d, want 409", code)
+	if code, _ := steward("house", "t2"); code != http.StatusOK {
+		t.Errorf("second waiting proposal = %d, want 200", code)
+	}
+	if code, _ := steward("garden", "t3"); code != http.StatusConflict {
+		t.Errorf("third waiting proposal = %d, want 409", code)
 	}
 	if list, _ := st.ProposedFrom(store.SuggestionSourceSteward); len(list) != 2 {
 		t.Errorf("ProposedFrom(steward) = %d rows, want 2", len(list))
@@ -143,4 +153,13 @@ func TestSuggestionStewardSource(t *testing.T) {
 	if code, out := postSuggestion(t, s, map[string]any{"action": "decide", "id": got.ID, "status": "accepted", "chat_id": -100200300, "note": "好"}); code != http.StatusOK {
 		t.Errorf("decide from the project chat = %d %v", code, out)
 	}
+}
+
+func mustProposed(t *testing.T, st *store.Store) []store.Suggestion {
+	t.Helper()
+	list, err := st.ProposedFrom(store.SuggestionSourceSteward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return list
 }

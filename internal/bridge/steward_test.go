@@ -56,7 +56,7 @@ func TestStewardBlock(t *testing.T) {
 	if !b.StewardOn() {
 		t.Fatal("on is off")
 	}
-	id, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Title: "t", Change: "c"})
+	id, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Audience: store.ChatAudience(-100200300), ThreadID: 77, Title: "t", Change: "c"})
 	got = b.buildStewardBlock(time.Now())
 	for _, want := range []string{"each project's own thread", fmt.Sprintf("open proposal #%d still waiting for an answer — skip this project", id)} {
 		if !strings.Contains(got, want) {

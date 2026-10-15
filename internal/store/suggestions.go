@@ -248,13 +248,21 @@ func (s *Store) ProposedFrom(source string) ([]Suggestion, error) {
 		WHERE status = ? AND source = ? ORDER BY id`, SuggestionProposed, source)
 }
 
-// OpenStewardFor returns the project's steward proposals still waiting for an
-// answer: proposed, or delivered and undecided.
-func (s *Store) OpenStewardFor(project string) ([]Suggestion, error) {
+// OpenStewardFor returns the project's steward proposals posted in its
+// thread and still waiting for an answer: not yet sent, or sent within
+// maxAge and undecided. Past maxAge the thread's turns no longer show it
+// (OpenThreadSuggestions), so it stops holding the project. Owner-addressed
+// (shadow) rows never hold a project.
+func (s *Store) OpenStewardFor(project string, maxAge time.Duration) ([]Suggestion, error) {
 	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
-		WHERE source = ? AND project = ? AND status IN (?, ?) ORDER BY id`,
-		SuggestionSourceSteward, project, SuggestionProposed, SuggestionDelivered)
+		WHERE source = ? AND project = ? AND audience != 'owner'
+		  AND (status = ? OR (status = ? AND delivered_at >= ?)) ORDER BY id`,
+		SuggestionSourceSteward, project, SuggestionProposed, SuggestionDelivered, time.Now().Add(-maxAge).UTC())
 }
+
+// StewardOpenAge is how long an unanswered steward proposal holds its
+// project and shows in its thread's turns.
+const StewardOpenAge = 14 * 24 * time.Hour
 
 // ProposedFor returns proposed (not yet delivered) suggestions for one
 // audience, oldest first.
