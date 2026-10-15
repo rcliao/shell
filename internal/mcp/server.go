@@ -241,6 +241,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"max_runs":      prop("integer", "create with goal: stop after this many steps (default 10, at most 60)"),
 			"evidence":      prop("string", "progress: what you did and found this step; done: the proof that the done check is met"),
 			"notes":         prop("string", "progress: replaces the goal's notes — everything the next step needs"),
+			"lessons":       prop("string", "done, or progress on a goal's last run: up to 3 lessons, one per line, kept for the project's later goals"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		var p struct {
@@ -259,6 +260,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			MaxRuns      int    `json:"max_runs"`
 			Evidence     string `json:"evidence"`
 			Notes        string `json:"notes"`
+			Lessons      string `json:"lessons"`
 		}
 		if err := unmarshalArgs(req, &p); err != nil {
 			return errResult(err.Error()), nil
@@ -301,6 +303,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"all":      p.All,
 			"evidence": p.Evidence,
 			"notes":    p.Notes,
+			"lessons":  p.Lessons,
 		})
 		if err != nil {
 			return errResult(err.Error()), nil

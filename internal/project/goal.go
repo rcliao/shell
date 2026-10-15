@@ -41,6 +41,9 @@ type GoalTurn struct {
 	// LastVerdict and LastReason are the latest ledger row, if any.
 	LastVerdict, LastReason string
 	LastAt                  time.Time
+	// Lessons are what earlier closed goals in this project left behind,
+	// newest first (LessonStore, design step 4).
+	Lessons []string
 }
 
 // GoalPrompt renders the prompt for one goal fire: do one step, then report
@@ -62,14 +65,21 @@ func GoalPrompt(t GoalTurn) string {
 		}
 		fmt.Fprintf(&b, "Last report (%s): %s\n", t.LastAt.Local().Format("Jan 2 15:04"), line)
 	}
+	if len(t.Lessons) > 0 {
+		b.WriteString("Lessons from earlier goals in this project (use what applies):\n")
+		for _, l := range t.Lessons {
+			fmt.Fprintf(&b, "- %s\n", l)
+		}
+	}
 	b.WriteString(`
 Do ONE step toward the goal now (check, compare, look something up, update the doc), not the whole thing.
 Then call shell_schedule(action="progress", id=` + fmt.Sprint(t.ScheduleID) + `, evidence="<what you did and found, with numbers or links>", notes="<everything the next run needs: what was checked, current best, what to try next>"). notes replaces the old notes, so carry forward what still matters.
 When the done check is met, call shell_schedule(action="done", id=` + fmt.Sprint(t.ScheduleID) + `, evidence="<the proof: what shows each part of the done check, with numbers, names or links>") instead. A separate judge reads only that evidence: if it says not met, you get the reason back and the goal keeps running.
+With done, also pass lessons="<up to 3 lines, one lesson per line: what worked, what wasted a run, what to do first next time>". They are kept only if the goal closes, and later goals in this project start with them.
 Reply in this thread only when the family should know something now (a change, a find, a question). If nothing changed, reply [noop].
 `)
 	if t.Run >= t.MaxRuns {
-		b.WriteString("This is the last run: say in the thread where the goal stands and what you suggest next.\n")
+		b.WriteString("This is the last run: say in the thread where the goal stands and what you suggest next, and pass lessons=\"<up to 3 lines>\" with your progress call so the next goal here starts from them.\n")
 	}
 	if t.Lang != "" {
 		fmt.Fprintf(&b, "Reply in the project's language: %s.\n", t.Lang)

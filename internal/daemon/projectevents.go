@@ -58,6 +58,10 @@ type projectResearchDeps struct {
 	// shared doc (research, the post summary) runs on the owner alone.
 	agentName string
 
+	// goalLessons returns the newest lessons earlier goals left for a project
+	// (chat, ghost tag); nil = no LessonStore.
+	goalLessons func(ctx context.Context, chatID int64, tag string) []string
+
 	// notion is the shared Notion client (Wave D): the poll consumer reads
 	// comments and page state through it, the revision consumer replies
 	// through it. Sharing ONE client with the renderer keeps every Notion
@@ -214,6 +218,9 @@ func (d projectResearchDeps) runGoal(ctx context.Context, p project.EventPayload
 		Goal: g.Goal, DoneCriteria: g.DoneCriteria, Notes: g.Notes, Run: run, MaxRuns: g.MaxRuns}
 	if last, err := d.store.LastGoalRun(g.ScheduleID); err == nil && last != nil {
 		t.LastVerdict, t.LastReason, t.LastAt = last.Verdict, last.Reason, last.At
+	}
+	if d.goalLessons != nil {
+		t.Lessons = d.goalLessons(ctx, proj.ChatID, proj.GhostTag)
 	}
 
 	started := time.Now().UTC()

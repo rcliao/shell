@@ -125,7 +125,7 @@ func (s *Server) createGoalSchedule(w http.ResponseWriter, req ScheduleRequest) 
 
 // schedulesProgress records one step of a goal: the evidence goes in the
 // ledger, the notes replace the goal's working notes for the next fire.
-func (s *Server) schedulesProgress(w http.ResponseWriter, req SchedulesRequest) {
+func (s *Server) schedulesProgress(ctx context.Context, w http.ResponseWriter, req SchedulesRequest) {
 	if req.ID == 0 {
 		writeError(w, http.StatusBadRequest, "id is required for progress")
 		return
@@ -158,8 +158,13 @@ func (s *Server) schedulesProgress(w http.ResponseWriter, req SchedulesRequest) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"id": req.ID, "status": g.Status,
-		"result": fmt.Sprintf("Progress recorded for goal #%d (run %d of %d).", req.ID, g.Runs, g.MaxRuns)})
+	result := fmt.Sprintf("Progress recorded for goal #%d (run %d of %d).", req.ID, g.Runs, g.MaxRuns)
+	// The run in progress is g.Runs+1 (it is counted after the turn): on the
+	// last one the goal is about to expire, so its lessons are kept now.
+	if g.Runs+1 >= g.MaxRuns {
+		result += s.storeGoalLessons(ctx, g, req.Lessons)
+	}
+	writeJSON(w, map[string]any{"id": req.ID, "status": g.Status, "result": result})
 }
 
 // GoalJudgeFunc rules on a done claim. It returns a not-met verdict with an
@@ -224,6 +229,7 @@ func (s *Server) schedulesDone(ctx context.Context, w http.ResponseWriter, req S
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		result += s.storeGoalLessons(ctx, g, req.Lessons)
 	}
 	if jerr != nil {
 		slog.Warn("rpc: goal judge failed", "id", req.ID, "error", jerr)
@@ -233,6 +239,31 @@ func (s *Server) schedulesDone(ctx context.Context, w http.ResponseWriter, req S
 	}
 	slog.Info("rpc: goal judged", "id", req.ID, "verdict", v.Verdict, "cost_usd", v.CostUSD)
 	writeJSON(w, map[string]any{"id": req.ID, "verdict": v.Verdict, "reason": v.Reason, "status": status, "result": result})
+}
+
+// storeGoalLessons keeps a closing goal's lessons (LessonStore, design step
+// 4) in ghost under the project's tag, where the project's next goal fires
+// find them. It returns a sentence for the tool result: what was kept, or
+// why nothing was. A failure here never undoes the close.
+func (s *Server) storeGoalLessons(ctx context.Context, g *store.ScheduleGoal, raw string) string {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if strings.TrimSpace(raw) == "" {
+		return " No lessons were given, so none were kept."
+	}
+	if s.memory == nil {
+		return " Lessons not kept: memory is not enabled."
+	}
+	p, err := s.store.GetProjectBySlug(g.Project)
+	if err != nil || p == nil {
+		return " Lessons not kept: the goal's project is gone."
+	}
+	keys, err := s.memory.StoreGoalLessons(ctx, p.ChatID, p.GhostTag, g.ScheduleID, lines)
+	if err != nil {
+		slog.Warn("rpc: goal lessons not stored", "id", g.ScheduleID, "kept", len(keys), "error", err)
+		return fmt.Sprintf(" Kept %d lesson(s), then storing failed: %v.", len(keys), err)
+	}
+	slog.Info("rpc: goal lessons stored", "id", g.ScheduleID, "slug", p.Slug, "keys", keys)
+	return fmt.Sprintf(" Kept %d lesson(s) for the project's next goals: %s.", len(keys), strings.Join(keys, ", "))
 }
 
 // inQuietHours reports whether a local time is inside the configured quiet
