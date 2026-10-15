@@ -25,6 +25,7 @@ func TestDeliverSteward(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	st.CreateProject(store.Project{Slug: "garden", Title: "Garden", Emoji: "🍅", ChatID: -100200300, MessageThreadID: 77})
 	review, _ := st.CreateSuggestion(store.Suggestion{Title: "review item", Change: "c"})
 	inThread, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden",
 		Audience: store.ChatAudience(-100200300), ThreadID: 77, Title: "種番茄", Evidence: "DO — the owner-only detail", Change: "ASK: 這週末種番茄嗎？"})
@@ -56,7 +57,7 @@ func TestDeliverSteward(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatalf("deliver: n=%d err=%v", n, err)
 	}
-	if out[0].chat != -100200300 || out[0].thread != 77 || out[0].text != "🧭 種番茄\n這週末種番茄嗎？" {
+	if out[0].chat != -100200300 || out[0].thread != 77 || out[0].text != "🧭 🍅 Garden · 種番茄\n這週末種番茄嗎？" {
 		t.Fatalf("thread post = %+v", out[0])
 	}
 	if out[1].chat != 42 || !strings.Contains(out[1].text, "house · later") {
