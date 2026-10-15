@@ -32,7 +32,7 @@ type Suggestion struct {
 	ID          int64
 	CreatedAt   time.Time
 	Source      string // "review", or "steward" (SuggestionSourceSteward)
-	Audience    string // "owner" today
+	Audience    string // "owner", or "chat:<id>" (ChatAudience)
 	Title       string
 	Evidence    string
 	Change      string
@@ -41,6 +41,10 @@ type Suggestion struct {
 	DecidedAt   *time.Time
 	DecidedBy   string
 	Note        string
+	// Project and ThreadID place a steward proposal: the project it is for
+	// and the thread it is posted in (0 = the chat's main thread).
+	Project  string
+	ThreadID int64
 }
 
 const suggestionsSchema = `
@@ -84,9 +88,9 @@ func (s *Store) CreateSuggestion(sg Suggestion) (int64, error) {
 		sg.Audience = "owner"
 	}
 	res, err := s.db.Exec(`
-		INSERT INTO suggestions (created_at, source, audience, title, evidence, change, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		time.Now().UTC(), sg.Source, sg.Audience, sg.Title, sg.Evidence, sg.Change, SuggestionProposed)
+		INSERT INTO suggestions (created_at, source, audience, title, evidence, change, status, project, thread_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		time.Now().UTC(), sg.Source, sg.Audience, sg.Title, sg.Evidence, sg.Change, SuggestionProposed, sg.Project, sg.ThreadID)
 	if err != nil {
 		return 0, err
 	}
@@ -94,7 +98,7 @@ func (s *Store) CreateSuggestion(sg Suggestion) (int64, error) {
 }
 
 const suggestionColumns = `id, created_at, source, audience, title, evidence, change, status,
-	delivered_at, decided_at, decided_by, note`
+	delivered_at, decided_at, decided_by, note, project, thread_id`
 
 // ListSuggestions returns suggestions, newest first. Empty statuses = all.
 func (s *Store) ListSuggestions(statuses []string, limit int) ([]Suggestion, error) {
@@ -140,7 +144,7 @@ func (s *Store) querySuggestions(q string, args ...any) ([]Suggestion, error) {
 		var sg Suggestion
 		var delivered, decided sql.NullTime
 		if err := rows.Scan(&sg.ID, &sg.CreatedAt, &sg.Source, &sg.Audience, &sg.Title, &sg.Evidence, &sg.Change,
-			&sg.Status, &delivered, &decided, &sg.DecidedBy, &sg.Note); err != nil {
+			&sg.Status, &delivered, &decided, &sg.DecidedBy, &sg.Note, &sg.Project, &sg.ThreadID); err != nil {
 			return nil, err
 		}
 		if delivered.Valid {
@@ -237,11 +241,28 @@ func ChatAudience(chatID int64) string { return "chat:" + strconv.FormatInt(chat
 // heartbeat and sent to the owner right after it, not with the weekly review).
 const SuggestionSourceSteward = "steward"
 
-// ProposedFrom returns owner-addressed proposed suggestions from one source.
+// ProposedFrom returns proposed (not yet delivered) suggestions from one
+// source, whoever they are addressed to, oldest first.
 func (s *Store) ProposedFrom(source string) ([]Suggestion, error) {
 	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
-		WHERE status = ? AND audience = 'owner' AND source = ? ORDER BY id`, SuggestionProposed, source)
+		WHERE status = ? AND source = ? ORDER BY id`, SuggestionProposed, source)
 }
+
+// OpenStewardFor returns the project's steward proposals posted in its
+// thread and still waiting for an answer: not yet sent, or sent within
+// maxAge and undecided. Past maxAge the thread's turns no longer show it
+// (OpenThreadSuggestions), so it stops holding the project. Owner-addressed
+// (shadow) rows never hold a project.
+func (s *Store) OpenStewardFor(project string, maxAge time.Duration) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE source = ? AND project = ? AND audience != 'owner'
+		  AND (status = ? OR (status = ? AND delivered_at >= ?)) ORDER BY id`,
+		SuggestionSourceSteward, project, SuggestionProposed, SuggestionDelivered, time.Now().Add(-maxAge).UTC())
+}
+
+// StewardOpenAge is how long an unanswered steward proposal holds its
+// project and shows in its thread's turns.
+const StewardOpenAge = 14 * 24 * time.Hour
 
 // ProposedFor returns proposed (not yet delivered) suggestions for one
 // audience, oldest first.
@@ -256,4 +277,14 @@ func (s *Store) OpenChatSuggestions(chatID int64, maxAge time.Duration) ([]Sugge
 	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
 		WHERE status = ? AND audience = ? AND delivered_at >= ? ORDER BY id`,
 		SuggestionDelivered, ChatAudience(chatID), time.Now().Add(-maxAge).UTC())
+}
+
+// OpenThreadSuggestions is OpenChatSuggestions for one thread's turns: the
+// chat-wide ones (thread 0, e.g. the weekly chat retro) plus the ones posted
+// in this thread. A steward proposal posted in one project thread stays out
+// of the others.
+func (s *Store) OpenThreadSuggestions(chatID, threadID int64, maxAge time.Duration) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE status = ? AND audience = ? AND delivered_at >= ? AND thread_id IN (0, ?) ORDER BY id`,
+		SuggestionDelivered, ChatAudience(chatID), time.Now().Add(-maxAge).UTC(), threadID)
 }

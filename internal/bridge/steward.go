@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"fmt"
+	"github.com/rcliao/shell/internal/store"
 	"strings"
 	"time"
 )
@@ -9,12 +10,16 @@ import (
 // Project steward (docs/DESIGN-AGENT-LOOPS.md, step 1): on a deep heartbeat
 // the agent reviews its active projects and proposes what would move each
 // forward — something it can do itself, a question for the family, or a
-// goal-bound schedule. In "shadow" mode the proposals are filed as steward
-// suggestions and the daemon sends them only to the owner's DM after the
-// beat, so the owner can rate them before the family ever sees one.
+// goal-bound schedule. The proposals are filed as steward suggestions and
+// the daemon sends them after the beat: in "shadow" mode only to the owner's
+// DM, in "on" mode each into its own project's thread, where the people of
+// that project answer it.
 
-// StewardShadow is the only mode that runs today; "" and "off" disable it.
-const StewardShadow = "shadow"
+// Steward modes; "" and "off" disable it.
+const (
+	StewardShadow    = "shadow"
+	StewardInThreads = "on"
+)
 
 // stewardMaxProjects caps the listing so the deep beat's prompt stays small;
 // the agent reads a full doc itself (doc-read) for the one or two it picks.
@@ -30,7 +35,12 @@ func (b *Bridge) SetProjectSteward(mode string) {
 }
 
 // StewardOn reports whether deep beats run the steward pass.
-func (b *Bridge) StewardOn() bool { return b.stewardMode == StewardShadow }
+func (b *Bridge) StewardOn() bool {
+	return b.stewardMode == StewardShadow || b.stewardMode == StewardInThreads
+}
+
+// StewardMode returns the configured steward mode.
+func (b *Bridge) StewardMode() string { return b.stewardMode }
 
 // buildStewardBlock renders the steward pass for a deep beat: one compact
 // entry per active project whose doc this agent owns, then the instructions.
@@ -65,7 +75,13 @@ func (b *Bridge) buildStewardBlock(now time.Time) string {
 		if p.Stage != "" {
 			meta += ", stage " + p.Stage
 		}
+		if p.Lang != "" {
+			meta += ", lang " + p.Lang
+		}
 		fmt.Fprintf(&sb, "- %s (%s) — %s\n", p.Slug, meta, clipRunes(p.Title, 80))
+		if open, err := b.store.OpenStewardFor(p.Slug, store.StewardOpenAge); err == nil && len(open) > 0 {
+			fmt.Fprintf(&sb, "  open proposal #%d still waiting for an answer — skip this project\n", open[0].ID)
+		}
 		if goal := firstLine(docSection(doc, "目標")); goal != "" {
 			fmt.Fprintf(&sb, "  目標: %s\n", clipRunes(goal, 160))
 		}
@@ -91,19 +107,24 @@ func (b *Bridge) buildStewardBlock(now time.Time) string {
 	if n == 0 {
 		return ""
 	}
+	audience := "the owner, who rates them"
+	if b.stewardMode == StewardInThreads {
+		audience = "each project's own thread, where the people of that project read and answer it"
+	}
 	var out strings.Builder
-	out.WriteString("\n\n---\n**[Project steward — shadow]**\n")
+	out.WriteString("\n\n---\n**[Project steward]**\n")
 	out.WriteString("Before your reflection move: you own these projects, and nobody else is moving them forward between research passes. Your active projects:\n")
 	out.WriteString(sb.String())
-	fmt.Fprintf(&out, `Pick the one or two projects where a next step would matter most to the family (a goal not progressing, a decision stuck, a deadline, a thread gone quiet). Read a doc with the project skill's doc-read if the lines above are not enough. For each, file ONE proposal with shell_suggestion(action="create", source="steward", title=…, evidence=…, change=…):
-- title: "<project slug>: <the next step in a few words>"
-- evidence: what you saw in the doc or thread that makes this the next step
-- change: start with exactly one of
-  DO: <what you would do yourself, and what the family gets from it>
-  ASK: <the one question you would put to the family, with your recommended answer>
-  GOAL: <goal> | done when: <a check someone else could verify> | cadence: <how often you would work on it, and for how long at most>
-At most %d proposals this beat. Shadow mode: these go only to the owner, who rates them. Do not act on them, and do not message the family about them this beat. If no project needs a next step, file nothing and say so in one line of your journal.
-`, StewardMaxProposals)
+	fmt.Fprintf(&out, `Pick the one or two projects where a next step would matter most to the family (a goal not progressing, a decision stuck, a deadline, a thread gone quiet). Read a doc with the project skill's doc-read if the lines above are not enough. For each, file ONE proposal with shell_suggestion(action="create", source="steward", project="<slug>", title=…, evidence=…, change=…):
+- change: what the family reads. Write it in the project's language (lang above), to the people of that project, in at most 2 short sentences: the next step and why now, ending with a yes/no question they can answer in one word (好 / 不用, or yes / no). Kinds:
+  do — "I'll <do X> so you get <Y>. 要我做嗎？"
+  ask — the one question, with your recommendation: "<question>? 我建議 <answer>, 因為 <one reason>."
+  goal — "I'll <keep doing X> every <cadence> until <done check>. 要開始嗎？"
+  No labels, ids, phone numbers, emails or links in change.
+- title: a few words in the same language, no slug.
+- evidence: for the owner's ledger, not the family: start with DO, ASK or GOAL, then what you saw in the doc or thread that makes this the next step. Details and links go here.
+At most %d proposals this beat, one per project. They go to %s after this beat. Do not act on them now, and do not message anyone about them this beat. If no project needs a next step, file nothing and say so in one line of your journal.
+`, StewardMaxProposals, audience)
 	return out.String()
 }
 

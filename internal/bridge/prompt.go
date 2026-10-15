@@ -276,10 +276,16 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessT
 	// S1: a suggestion posted into this chat and not yet answered. The
 	// people here may answer it at any turn; the agent records it.
 	if chatID != 0 && b.store != nil {
-		if open, err := b.store.OpenChatSuggestions(chatID, openChatSuggestionAge); err == nil {
+		if open, err := b.store.OpenThreadSuggestions(chatID, threadID, openChatSuggestionAge); err == nil {
 			for _, sg := range open {
-				blocks = append(blocks, fmt.Sprintf("[Open suggestion #%d to this chat (%s): %s — if someone here answers it, record their answer with shell_suggestion(action=decide, id=%d, status=accepted|declined, note=their words)]",
-					sg.ID, sg.DeliveredAt.Local().Format("Mon Jan 2"), sg.Title, sg.ID))
+				line := fmt.Sprintf("[Open suggestion #%d to this chat (%s): %s — if someone here answers it, record their answer with shell_suggestion(action=decide, id=%d, status=accepted|declined, note=their words)",
+					sg.ID, sg.DeliveredAt.Local().Format("Mon Jan 2"), sg.Title, sg.ID)
+				if sg.Source == store.SuggestionSourceSteward {
+					// A steward proposal is a next step for a project: a yes
+					// is the go-ahead, not just a rating.
+					line += fmt.Sprintf(". It is your proposal for project %s: %q. On a yes, start it in this turn — do it, or create the schedule it describes — and say what you did", sg.Project, clipRunes(sg.Change, 300))
+				}
+				blocks = append(blocks, line+"]")
 			}
 		}
 	}
@@ -292,7 +298,7 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessT
 
 // openChatSuggestionAge is how long an unanswered chat suggestion stays in
 // the chat's turns.
-const openChatSuggestionAge = 14 * 24 * time.Hour
+const openChatSuggestionAge = store.StewardOpenAge
 
 // buildCarryForwardBlock returns the "Previously in this chat" + relevant-
 // memory-pack block for the first turn of a new generation. Returns empty

@@ -309,6 +309,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"all":      prop("boolean", "list: include decided suggestions"),
 			"for_chat": idProp("create: address the suggestion to this chat (weekly chat retro) instead of your owner."),
 			"source":   prop("string", "create: \"steward\" when filing a project-steward proposal on a deep heartbeat; omit otherwise"),
+			"project":  prop("string", "create with source=steward: the project's slug (required)"),
 		}),
 	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		var p struct {
@@ -322,6 +323,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			All      bool   `json:"all"`
 			ForChat  idArg  `json:"for_chat"`
 			Source   string `json:"source"`
+			Project  string `json:"project"`
 		}
 		if err := unmarshalArgs(req, &p); err != nil {
 			return errResult(err.Error()), nil
@@ -333,7 +335,7 @@ func registerTools(server *gomcp.Server, client *rpcClient) {
 			"source": p.Source,
 			"action": p.Action, "chat_id": currentChatID(), "id": p.ID, "title": p.Title,
 			"evidence": p.Evidence, "change": p.Change, "status": p.Status, "note": p.Note, "all": p.All,
-			"for_chat": p.ForChat,
+			"for_chat": p.ForChat, "project": p.Project,
 		})
 		if err != nil {
 			return errResult(err.Error()), nil

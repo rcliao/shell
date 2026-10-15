@@ -70,3 +70,30 @@ func TestFeedbackCounts(t *testing.T) {
 		t.Fatalf("counts = %v", got)
 	}
 }
+
+// A steward proposal posted in a project thread holds that project until it
+// is answered or ages out of the thread's turns; a shadow (owner) row never
+// holds it.
+func TestOpenStewardFor(t *testing.T) {
+	st, done := newTestStore(t)
+	defer done()
+	shadow, _ := st.CreateSuggestion(Suggestion{Source: SuggestionSourceSteward, Project: "garden", Title: "t", Change: "c"})
+	if open, _ := st.OpenStewardFor("garden", StewardOpenAge); len(open) != 0 {
+		t.Fatalf("shadow row holds the project: %+v", open)
+	}
+	id, _ := st.CreateSuggestion(Suggestion{Source: SuggestionSourceSteward, Project: "garden", Audience: ChatAudience(-100200300), ThreadID: 77, Title: "t", Change: "c"})
+	if open, _ := st.OpenStewardFor("garden", StewardOpenAge); len(open) != 1 || open[0].ID != id {
+		t.Fatalf("proposed thread row: %+v", open)
+	}
+	st.MarkSuggestionsDelivered([]int64{shadow, id})
+	if open, _ := st.OpenStewardFor("garden", StewardOpenAge); len(open) != 1 {
+		t.Fatalf("delivered thread row: %+v", open)
+	}
+	st.db.Exec(`UPDATE suggestions SET delivered_at = ? WHERE id = ?`, time.Now().Add(-15*24*time.Hour).UTC(), id)
+	if open, _ := st.OpenStewardFor("garden", StewardOpenAge); len(open) != 0 {
+		t.Fatalf("a 15-day-old unanswered row still holds the project: %+v", open)
+	}
+	if open, _ := st.OpenThreadSuggestions(-100200300, 77, StewardOpenAge); len(open) != 0 {
+		t.Fatalf("thread still shows it: %+v", open)
+	}
+}

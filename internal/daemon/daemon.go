@@ -909,6 +909,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		SharedRoot:         sharedRootFor(cfg),
 		AgentName:          cfg.Agent.Name,
 		OwnerChatID:        cfg.Agent.OwnerChatID,
+		StewardInThreads:   cfg.Scheduler.ProjectSteward == bridge.StewardInThreads,
 	})
 
 	// Initialize scheduler if enabled.
@@ -984,14 +985,17 @@ func New(cfg config.Config) (*Daemon, error) {
 				return "", err // agenda not committed: the next beat sees it again
 			}
 			br.CommitAgenda(agenda)
-			// Project steward (shadow): send this beat's proposals to the owner.
+			// Project steward: send this beat's proposals to their project
+			// threads ("on") or the owner ("shadow").
 			if strings.HasPrefix(msg, "[Heartbeat:deep]") && br.StewardOn() {
-				if n, err := deliverSteward(st, agentName, cfg.Agent.OwnerChatID, func(chatID int64, text string) error {
-					return tgTransport.NotifyButtons(chatID, 0, text, nil)
-				}); err != nil {
+				n, err := deliverSteward(st, agentName, cfg.Agent.OwnerChatID, func(chatID, threadID int64, text string) error {
+					return tgTransport.NotifyButtons(chatID, threadID, text, nil)
+				})
+				if err != nil {
 					slog.Warn("steward: delivery failed", "error", err)
-				} else if n > 0 {
-					slog.Info("steward: proposals sent to owner", "count", n)
+				}
+				if n > 0 {
+					slog.Info("steward: proposals sent", "count", n, "mode", br.StewardMode())
 				}
 			}
 			if !bridge.IsSystemChat(chatID) {

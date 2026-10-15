@@ -70,6 +70,7 @@ type Server struct {
 	// after create/status/doc-write. Nil when the daemon runs without it.
 	projectHomeRefresh func(chatID int64)
 	ownerChatID        int64
+	stewardInThreads   bool
 	places             Places
 	sharedRoot         string
 	agentName          string
@@ -111,6 +112,9 @@ type Config struct {
 	// OwnerChatID is the owner's DM (agent.owner_chat_id). Suggestion
 	// decisions are accepted only from that chat. 0 disables decide.
 	OwnerChatID int64
+	// StewardInThreads addresses steward proposals to their project's chat
+	// and thread (scheduler.project_steward "on") instead of the owner.
+	StewardInThreads bool
 	// Places creates and manages projects' own places (forum posts or
 	// topics) for project areas. Nil disables --place auto.
 	Places Places
@@ -173,6 +177,7 @@ func New(cfg Config) *Server {
 		sharedRoot:         cfg.SharedRoot,
 		agentName:          cfg.AgentName,
 		ownerChatID:        cfg.OwnerChatID,
+		stewardInThreads:   cfg.StewardInThreads,
 	}
 }
 

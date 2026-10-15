@@ -85,28 +85,81 @@ func TestChatSuggestionDecidedOnlyInItsChat(t *testing.T) {
 // steward proposal addressed to a chat, is refused.
 func TestSuggestionStewardSource(t *testing.T) {
 	s, st := newProjectTestServer(t)
-	code, out := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "title": "garden: plant", "change": "DO: x", "evidence": "e"})
+	for _, slug := range []string{"garden", "trip", "house"} {
+		if _, err := st.CreateProject(store.Project{Slug: slug, Title: slug, ChatID: -100200300, MessageThreadID: 77}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	steward := func(project, title string) (int, map[string]any) {
+		return postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "project": project, "title": title, "change": "要我做嗎？", "evidence": "DO — e"})
+	}
+
+	// Shadow: addressed to the owner, tagged with its project.
+	code, out := steward("garden", "plant")
 	if code != http.StatusOK {
 		t.Fatalf("create: %d %v", code, out)
 	}
 	got, err := st.GetSuggestion(int64(out["id"].(float64)))
-	if err != nil || got.Source != store.SuggestionSourceSteward || got.Audience != "owner" {
+	if err != nil || got.Source != store.SuggestionSourceSteward || got.Audience != "owner" || got.Project != "garden" {
 		t.Fatalf("stored = %+v, %v", got, err)
 	}
 	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "bogus", "title": "t", "change": "c"}); code != http.StatusBadRequest {
 		t.Errorf("unknown source = %d, want 400", code)
 	}
-	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "for_chat": 42, "title": "t", "change": "c"}); code != http.StatusBadRequest {
-		t.Errorf("steward for a chat = %d, want 400", code)
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "for_chat": 42, "project": "trip", "title": "t", "change": "c"}); code != http.StatusBadRequest {
+		t.Errorf("steward with for_chat = %d, want 400", code)
 	}
-	if list, _ := st.ProposedFrom(store.SuggestionSourceSteward); len(list) != 1 {
-		t.Errorf("ProposedFrom(steward) = %d rows, want 1", len(list))
+	if code, _ := steward("", "t"); code != http.StatusBadRequest {
+		t.Errorf("steward without project = %d, want 400", code)
 	}
-	// The cap holds server-side: a second is fine, a third waits.
-	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "title": "t2", "change": "c"}); code != http.StatusOK {
-		t.Errorf("second steward proposal = %d, want 200", code)
+	if code, _ := steward("nope", "t"); code != http.StatusBadRequest {
+		t.Errorf("steward for an unknown project = %d, want 400", code)
 	}
-	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "title": "t3", "change": "c"}); code != http.StatusConflict {
-		t.Errorf("third steward proposal = %d, want 409", code)
+	// A shadow row never holds its project.
+	if code, out := steward("garden", "again"); code != http.StatusOK {
+		t.Fatalf("second shadow proposal for garden = %d %v", code, out)
 	}
+	for _, sg := range mustProposed(t, st) {
+		st.MarkSuggestionsDelivered([]int64{sg.ID})
+	}
+
+	// "on": addressed to the project's chat and thread.
+	s.stewardInThreads = true
+	code, out = steward("trip", "book")
+	if code != http.StatusOK {
+		t.Fatalf("create in threads: %d %v", code, out)
+	}
+	got, _ = st.GetSuggestion(int64(out["id"].(float64)))
+	if got.Audience != store.ChatAudience(-100200300) || got.ThreadID != 77 || got.Project != "trip" {
+		t.Fatalf("in threads stored = %+v", got)
+	}
+	// One open question per project.
+	if code, _ := steward("trip", "again"); code != http.StatusConflict {
+		t.Errorf("second proposal for trip = %d, want 409", code)
+	}
+	// The per-beat cap holds server-side: two waiting, a third waits.
+	if code, _ := steward("house", "t2"); code != http.StatusOK {
+		t.Errorf("second waiting proposal = %d, want 200", code)
+	}
+	if code, _ := steward("garden", "t3"); code != http.StatusConflict {
+		t.Errorf("third waiting proposal = %d, want 409", code)
+	}
+	if list, _ := st.ProposedFrom(store.SuggestionSourceSteward); len(list) != 2 {
+		t.Errorf("ProposedFrom(steward) = %d rows, want 2", len(list))
+	}
+
+	// The project's people answer it from that chat.
+	st.MarkSuggestionsDelivered([]int64{got.ID})
+	if code, out := postSuggestion(t, s, map[string]any{"action": "decide", "id": got.ID, "status": "accepted", "chat_id": -100200300, "note": "好"}); code != http.StatusOK {
+		t.Errorf("decide from the project chat = %d %v", code, out)
+	}
+}
+
+func mustProposed(t *testing.T, st *store.Store) []store.Suggestion {
+	t.Helper()
+	list, err := st.ProposedFrom(store.SuggestionSourceSteward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return list
 }
