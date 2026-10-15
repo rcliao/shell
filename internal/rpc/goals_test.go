@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rcliao/shell/internal/judge"
+	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
@@ -198,5 +199,57 @@ func TestGoalScheduleDoneThroughJudge(t *testing.T) {
 	c := mk("c")
 	if out := done(c, "proof"); out["verdict"] != judge.NotMet {
 		t.Errorf("no judge: %v", out)
+	}
+}
+
+func TestGoalLessonsKeptOnClose(t *testing.T) {
+	t.Setenv("GHOST_EMBED_PROVIDER", "none")
+	s, _ := newGoalServer(t)
+	mem, err := memory.New(t.TempDir()+"/mem.db", 2000, nil, 500, nil, 3000,
+		map[string]memory.ProfileConfig{"p": {AgentNS: "agent:test"}}, map[int64]string{-100200300: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.memory = mem
+	ctx := context.Background()
+	lessons := func() []memory.GoalLesson {
+		ls, _ := mem.GoalLessons(ctx, -100200300, "project:garden", 10)
+		return ls
+	}
+	mk := func(goal string, maxRuns int) int64 {
+		_, out := postSchedule(t, s, map[string]any{"goal": goal, "done_criteria": "c", "project": "garden", "cron": "0 9 * * *", "max_runs": maxRuns})
+		return int64(out["id"].(float64))
+	}
+	var next judge.Verdict
+	s.goalJudge = func(context.Context, string, string, string) (judge.Verdict, error) { return next, nil }
+
+	// Not met: the goal stays open and its lessons are not kept.
+	a := mk("a", 5)
+	next = judge.Verdict{Verdict: judge.NotMet, Reason: "no link"}
+	postSchedules(t, s, map[string]any{"action": "done", "id": a, "evidence": "B", "lessons": "too early"})
+	// A progress step that is not the last run keeps none either.
+	postSchedules(t, s, map[string]any{"action": "progress", "id": a, "evidence": "B", "lessons": "also too early"})
+	if ls := lessons(); len(ls) != 0 {
+		t.Fatalf("lessons kept before close: %+v", ls)
+	}
+	// Met: up to 3 lessons are kept and the result names their keys.
+	next = judge.Verdict{Verdict: judge.Met, Reason: "ok"}
+	_, out := postSchedules(t, s, map[string]any{"action": "done", "id": a, "evidence": "B $38 link",
+		"lessons": "check the maker first\nFridays are cheaper\nskip shop C\na fourth"})
+	if ls := lessons(); len(ls) != 3 || !strings.Contains(out["result"].(string), "Kept 3 lesson(s)") {
+		t.Fatalf("met: lessons %+v result %v", ls, out["result"])
+	}
+	// The last run's progress keeps lessons: the goal is about to expire.
+	b := mk("b", 1)
+	_, out = postSchedules(t, s, map[string]any{"action": "progress", "id": b, "evidence": "nothing under $40", "lessons": "the $40 cap is too low"})
+	if ls := lessons(); len(ls) != 4 || !strings.Contains(out["result"].(string), "Kept 1 lesson(s)") {
+		t.Errorf("last run: lessons %+v result %v", ls, out["result"])
+	}
+	// A not-met done on the last run keeps its lessons: the goal expires next.
+	c := mk("c", 1)
+	next = judge.Verdict{Verdict: judge.NotMet, Reason: "no link"}
+	_, out = postSchedules(t, s, map[string]any{"action": "done", "id": c, "evidence": "B", "lessons": "ask for links up front"})
+	if ls := lessons(); len(ls) != 5 || !strings.Contains(out["result"].(string), "Kept 1 lesson(s)") {
+		t.Errorf("not met on last run: lessons %+v result %v", ls, out["result"])
 	}
 }

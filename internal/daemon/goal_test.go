@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rcliao/shell/internal/bridge"
+	"github.com/rcliao/shell/internal/memory"
 	"github.com/rcliao/shell/internal/project"
 	"github.com/rcliao/shell/internal/scheduler"
 	"github.com/rcliao/shell/internal/store"
@@ -124,5 +125,43 @@ func TestGoalFireNoopAndInactiveProject(t *testing.T) {
 	}
 	if g, _ := st.GetScheduleGoal(id); g.Runs != 1 {
 		t.Errorf("a skipped fire counted as a run: %+v", g)
+	}
+}
+
+// TestGoalLessonCarry: lessons a closed goal left for its project reach the
+// project's next goal fire, and another project's lessons do not.
+func TestGoalLessonCarry(t *testing.T) {
+	t.Setenv("GHOST_EMBED_PROVIDER", "none")
+	st, _, task := goalFixture(t, 3)
+	mem, err := memory.New(t.TempDir()+"/mem.db", 2000, nil, 500, nil, 3000,
+		map[string]memory.ProfileConfig{"p": {AgentNS: "agent:test"}}, map[int64]string{-100200300: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	keys, err := mem.StoreGoalLessons(ctx, -100200300, "project:garden", 99, []string{"check the maker's site first"})
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("store: %v %v", keys, err)
+	}
+	mem.StoreGoalLessons(ctx, -100200300, "project:kitchen", 98, []string{"measure the counter first"})
+
+	var prompt string
+	deps := projectResearchDeps{
+		store:       st,
+		runTurn:     func(_ context.Context, _, _ int64, p string) (string, error) { prompt = p; return "[noop]", nil },
+		deliver:     func(int64, int64, string, []bridge.LinkButton) {},
+		goalLessons: goalLessonRecall(mem),
+	}
+	if _, err := deps.handleProjectEvent(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Lessons from earlier goals") || !strings.Contains(prompt, "- check the maker's site first") {
+		t.Errorf("the fire's prompt lacks the lesson:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "measure the counter") {
+		t.Errorf("another project's lesson reached this fire:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "lessons=") {
+		t.Errorf("the prompt does not ask for lessons on close:\n%s", prompt)
 	}
 }

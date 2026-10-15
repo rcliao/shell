@@ -31,6 +31,9 @@ type SchedulesRequest struct {
 	// Evidence and Notes are a goal step's report (progress).
 	Evidence string `json:"evidence"`
 	Notes    string `json:"notes"`
+	// Lessons are a closing goal's lessons, one per line (done, or the
+	// last run's progress).
+	Lessons string `json:"lessons"`
 }
 
 func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +63,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	case "queue":
 		s.schedulesQueue(w, req)
 	case "progress":
-		s.schedulesProgress(w, req)
+		s.schedulesProgress(r.Context(), w, req)
 	case "done":
 		s.schedulesDone(r.Context(), w, req)
 	default:

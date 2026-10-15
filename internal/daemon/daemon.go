@@ -1213,6 +1213,7 @@ func New(cfg config.Config) (*Daemon, error) {
 				_ = tgTransport.NotifyButtons(chatID, threadID, text, buttons)
 			},
 			refreshHome:  projectHome.Refresh,
+			goalLessons:  goalLessonRecall(mem),
 			updateOpener: places,
 			agentName:    cfg.Agent.Name,
 			notion:       notionClient,
