@@ -61,11 +61,13 @@ func (m *Memory) StoreGoalLessons(ctx context.Context, chatID int64, projectTag 
 		}
 		key := fmt.Sprintf("lesson-goal-%d-%d-%d", scheduleID, stamp, len(keys)+1)
 		if _, err := m.store.Put(ctx, agentmemory.PutParams{
-			NS:         ns,
-			Key:        key,
-			Content:    l,
-			Kind:       "procedural",
-			Tags:       []string{GoalLessonTag, projectTag, fmt.Sprintf("goal:%d", scheduleID)},
+			NS:      ns,
+			Key:     key,
+			Content: l,
+			Kind:    "procedural",
+			// locked: ghost's reflect must not merge a lesson into a
+			// look-alike memory without these tags, or decay it away.
+			Tags:       []string{GoalLessonTag, projectTag, fmt.Sprintf("goal:%d", scheduleID), "locked"},
 			Importance: 0.7,
 			SourceKind: "self",
 		}); err != nil {

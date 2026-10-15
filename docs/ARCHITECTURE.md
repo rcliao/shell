@@ -752,8 +752,10 @@ call that closes a goal can carry `lessons`: up to 3 lines. That call is
 either a `done` the judge closes, or the `progress` of the last run before
 expiry. They are written to ghost in the agent namespace of the project's
 chat as `procedural` memories, tagged `lesson`, the project's ghost tag and
-`goal:<id>`. A lesson the project already has is skipped. Lessons sent while
-the goal stays open are dropped. Each goal fire lists the project's 5 newest
+`goal:<id>`, plus `locked` so ghost's reflect never merges or decays them
+away. A lesson the project already has is skipped. Lessons sent while the
+goal stays open are dropped, except on its last run (a not-met `done` there
+still keeps them, since the goal expires next). Each goal fire lists the project's 5 newest
 lessons in its prompt. They are fetched by tag, because per-turn recall is
 keyed on the latest message and would not find them.
 

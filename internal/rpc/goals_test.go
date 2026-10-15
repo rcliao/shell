@@ -245,4 +245,11 @@ func TestGoalLessonsKeptOnClose(t *testing.T) {
 	if ls := lessons(); len(ls) != 4 || !strings.Contains(out["result"].(string), "Kept 1 lesson(s)") {
 		t.Errorf("last run: lessons %+v result %v", ls, out["result"])
 	}
+	// A not-met done on the last run keeps its lessons: the goal expires next.
+	c := mk("c", 1)
+	next = judge.Verdict{Verdict: judge.NotMet, Reason: "no link"}
+	_, out = postSchedules(t, s, map[string]any{"action": "done", "id": c, "evidence": "B", "lessons": "ask for links up front"})
+	if ls := lessons(); len(ls) != 5 || !strings.Contains(out["result"].(string), "Kept 1 lesson(s)") {
+		t.Errorf("not met on last run: lessons %+v result %v", ls, out["result"])
+	}
 }

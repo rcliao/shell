@@ -230,6 +230,10 @@ func (s *Server) schedulesDone(ctx context.Context, w http.ResponseWriter, req S
 			return
 		}
 		result += s.storeGoalLessons(ctx, g, req.Lessons)
+	} else if g.Runs+1 >= g.MaxRuns {
+		// Not met on the last run: the goal expires after this turn, so its
+		// lessons are kept now, as the last run's progress would keep them.
+		result += s.storeGoalLessons(ctx, g, req.Lessons)
 	}
 	if jerr != nil {
 		slog.Warn("rpc: goal judge failed", "id", req.ID, "error", jerr)
