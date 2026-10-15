@@ -255,3 +255,25 @@ func TestOpenChatSuggestionLine(t *testing.T) {
 		t.Error("another chat must not see it")
 	}
 }
+
+// A steward GOAL proposal tells the agent, on a yes, to create the goal
+// schedule; a DO proposal does not.
+func TestOpenStewardGoalLine(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	goal, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Title: "t", Change: "每週查一次？",
+		Evidence: "GOAL — prices move weekly", Audience: store.ChatAudience(-100200300), ThreadID: 77})
+	do, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "trip", Title: "t2", Change: "要我做嗎？",
+		Evidence: "DO — x", Audience: store.ChatAudience(-100200300), ThreadID: 78})
+	st.MarkSuggestionsDelivered([]int64{goal, do})
+	b := &Bridge{store: st}
+	if got := b.buildPerTurnBlocks(context.Background(), -100200300, 77, 0, "好"); !strings.Contains(got, `shell_schedule(action=create, project="garden", goal=`) {
+		t.Errorf("goal proposal line = %q", got)
+	}
+	if got := b.buildPerTurnBlocks(context.Background(), -100200300, 78, 0, "好"); strings.Contains(got, "goal=") {
+		t.Errorf("a DO proposal names a goal schedule: %q", got)
+	}
+}

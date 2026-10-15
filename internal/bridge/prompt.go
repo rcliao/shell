@@ -284,6 +284,9 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessT
 					// A steward proposal is a next step for a project: a yes
 					// is the go-ahead, not just a rating.
 					line += fmt.Sprintf(". It is your proposal for project %s: %q. On a yes, start it in this turn — do it, or create the schedule it describes — and say what you did", sg.Project, clipRunes(sg.Change, 300))
+					if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sg.Evidence)), "GOAL") {
+						line += fmt.Sprintf(". It is a goal: create it with shell_schedule(action=create, project=%q, goal=…, done_criteria=<a check you can show evidence for>, cron=<cadence outside quiet hours>, max_runs=…)", sg.Project)
+					}
 				}
 				blocks = append(blocks, line+"]")
 			}

@@ -69,6 +69,11 @@ func TestStewardBlock(t *testing.T) {
 			t.Errorf("on block lacks %q:\n%s", want, got)
 		}
 	}
+	gid, _, _ := st.UpsertScheduleByKey(&store.Schedule{ChatID: -100200300, Label: "goal", Message: "{}", Schedule: "0 9 * * *", Type: "cron", Mode: "event", NextRunAt: time.Now(), Enabled: true, DedupKey: "goal:garden:x"})
+	st.SetScheduleGoal(gid, "find a drip kit", "kit in doc", "garden", 4)
+	if got := b.buildStewardBlock(time.Now()); !strings.Contains(got, fmt.Sprintf("goal schedule #%d running (run 0 of 4): find a drip kit", gid)) {
+		t.Errorf("block lacks the running goal:\n%s", got)
+	}
 	if strings.Contains(got, "went only to the owner's DM") {
 		t.Errorf("an open thread proposal outranks the shadow note:\n%s", got)
 	}

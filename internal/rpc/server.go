@@ -71,6 +71,9 @@ type Server struct {
 	projectHomeRefresh func(chatID int64)
 	ownerChatID        int64
 	stewardInThreads   bool
+	quietStart         int
+	quietEnd           int
+	goalJudge          GoalJudgeFunc
 	places             Places
 	sharedRoot         string
 	agentName          string
@@ -115,6 +118,12 @@ type Config struct {
 	// StewardInThreads addresses steward proposals to their project's chat
 	// and thread (scheduler.project_steward "on") instead of the owner.
 	StewardInThreads bool
+	// QuietHourStart/End are the scheduler's quiet hours (local hours); a
+	// goal schedule may not fire inside them. Equal values mean none.
+	QuietHourStart, QuietHourEnd int
+	// GoalJudge rules on a goal's done claim (docs/DESIGN-AGENT-LOOPS.md
+	// step 3). Nil: every done claim is not met.
+	GoalJudge GoalJudgeFunc
 	// Places creates and manages projects' own places (forum posts or
 	// topics) for project areas. Nil disables --place auto.
 	Places Places
@@ -178,6 +187,9 @@ func New(cfg Config) *Server {
 		agentName:          cfg.AgentName,
 		ownerChatID:        cfg.OwnerChatID,
 		stewardInThreads:   cfg.StewardInThreads,
+		quietStart:         cfg.QuietHourStart,
+		quietEnd:           cfg.QuietHourEnd,
+		goalJudge:          cfg.GoalJudge,
 	}
 }
 
@@ -416,6 +428,13 @@ type ScheduleRequest struct {
 	Message string `json:"message"` // schedule message/label; for mode=event: JSON {"kind": ..., "payload": {...}}
 	Mode    string `json:"mode"`    // "notify", "prompt", or "event" (default: notify)
 	TZ      string `json:"tz"`      // timezone override
+
+	// Goal schedule (docs/DESIGN-AGENT-LOOPS.md step 2): with goal set, the
+	// schedule is a project goal; see goals.go.
+	Goal         string `json:"goal"`
+	DoneCriteria string `json:"done_criteria"`
+	Project      string `json:"project"`
+	MaxRuns      int    `json:"max_runs"`
 }
 
 func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
@@ -427,6 +446,14 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	var req ScheduleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Goal) != "" {
+		s.createGoalSchedule(w, req)
+		return
+	}
+	if req.DoneCriteria != "" || req.MaxRuns != 0 {
+		writeError(w, http.StatusBadRequest, "done_criteria and max_runs belong to a goal: pass goal too")
 		return
 	}
 	if req.Message == "" {

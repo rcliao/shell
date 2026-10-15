@@ -61,6 +61,10 @@ type EventPayload struct {
 	// AnchorBlock is the block the discussion hangs off; empty for
 	// page-level comments.
 	AnchorBlock string `json:"anchor_block,omitempty"`
+
+	// GoalKey is the goal schedule's dedup key (EventGoalDue): the consumer
+	// finds its schedule row, and so its goal, by it.
+	GoalKey string `json:"goal_key,omitempty"`
 }
 
 // ResearchScheduleMessage builds the event-mode schedule message (the

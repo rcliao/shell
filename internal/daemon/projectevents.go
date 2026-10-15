@@ -92,6 +92,8 @@ func (d projectResearchDeps) handleProjectEvent(ctx context.Context, t scheduler
 		return d.runPageEditReconcile(ctx, p)
 	case project.EventNotesFold:
 		return d.runNotesFold(ctx, p)
+	case project.EventGoalDue:
+		return d.runGoal(ctx, p)
 	default:
 		// A future producer emitting an event this build does not know is not
 		// an error worth retrying — record it and move on.
@@ -178,6 +180,81 @@ func (d projectResearchDeps) runResearch(ctx context.Context, slug string) (stri
 	slog.Info("project research: pass completed",
 		"slug", slug, "delivered", delivered, "duration", time.Since(started).Round(time.Second))
 	return fmt.Sprintf("research pass done (delivered=%t)", delivered), nil
+}
+
+// runGoal executes one fire of a project goal schedule: one step of the
+// goal as a project turn in the project's thread. A goal that is no longer
+// open, or has used its runs, does not run.
+func (d projectResearchDeps) runGoal(ctx context.Context, p project.EventPayload) (string, error) {
+	sc, err := d.store.FindScheduleByDedupKey(p.GoalKey)
+	if err != nil || sc == nil {
+		return "skipped: goal schedule not found", nil
+	}
+	g, err := d.store.GetScheduleGoal(sc.ID)
+	if err != nil {
+		return "", fmt.Errorf("load goal #%d: %w", sc.ID, err)
+	}
+	if g == nil || g.Status != store.GoalOpen {
+		return "skipped: goal not open", nil
+	}
+	proj, err := d.store.GetProjectBySlug(g.Project)
+	if err != nil {
+		return "", fmt.Errorf("load project %q: %w", g.Project, err)
+	}
+	if proj == nil || proj.Status != "active" {
+		return "skipped: project not active", nil
+	}
+	if g.Runs >= g.MaxRuns {
+		return d.expireGoal(g, proj), nil
+	}
+	// A run counts once its turn has run: a failed or interrupted turn that
+	// the queue retries does not use up the goal's runs.
+	run := g.Runs + 1
+	t := project.GoalTurn{ScheduleID: g.ScheduleID, Slug: proj.Slug, Title: proj.Title, Lang: proj.Lang,
+		Goal: g.Goal, DoneCriteria: g.DoneCriteria, Notes: g.Notes, Run: run, MaxRuns: g.MaxRuns}
+	if last, err := d.store.LastGoalRun(g.ScheduleID); err == nil && last != nil {
+		t.LastVerdict, t.LastReason, t.LastAt = last.Verdict, last.Reason, last.At
+	}
+
+	started := time.Now().UTC()
+	text, err := d.runProjectTurn(ctx, proj, project.GoalPrompt(t))
+	if err != nil {
+		d.recordScheduleRun(p.GoalKey, started, store.OutcomeTurnFailed, err.Error())
+		return "", fmt.Errorf("goal turn #%d: %w", g.ScheduleID, err)
+	}
+	if n, err := d.store.BumpGoalRun(g.ScheduleID); err != nil {
+		slog.Warn("goal: run count failed", "schedule_id", g.ScheduleID, "error", err)
+	} else if n > 0 {
+		run = n
+	}
+	reply := strings.TrimSpace(text)
+	delivered := false
+	if reply != "" && !strings.Contains(reply, "[noop]") && d.deliver != nil {
+		d.deliver(proj.ChatID, proj.MessageThreadID, reply, nil)
+		delivered = true
+	}
+	d.recordScheduleRun(p.GoalKey, started, store.OutcomeFiredOK, "")
+	// The last run closes the goal as expired unless the turn closed it.
+	if run >= g.MaxRuns {
+		if fresh, err := d.store.GetScheduleGoal(g.ScheduleID); err == nil && fresh != nil && fresh.Status == store.GoalOpen {
+			d.expireGoal(fresh, proj)
+		}
+	}
+	slog.Info("goal: run completed", "schedule_id", g.ScheduleID, "slug", proj.Slug, "run", run, "max_runs", g.MaxRuns, "delivered", delivered)
+	return fmt.Sprintf("goal run %d/%d done (delivered=%t)", run, g.MaxRuns, delivered), nil
+}
+
+// expireGoal closes a goal that used its runs and says so in its thread.
+func (d projectResearchDeps) expireGoal(g *store.ScheduleGoal, proj *store.Project) string {
+	if err := d.store.CloseGoal(g.ScheduleID, store.GoalExpired); err != nil {
+		slog.Warn("goal: expire failed", "schedule_id", g.ScheduleID, "error", err)
+		return "skipped: expire failed"
+	}
+	if d.deliver != nil {
+		d.deliver(proj.ChatID, proj.MessageThreadID, project.GoalExpiredLine(g.Goal, proj.Lang, g.MaxRuns), nil)
+	}
+	slog.Info("goal: expired", "schedule_id", g.ScheduleID, "slug", proj.Slug, "runs", g.MaxRuns)
+	return fmt.Sprintf("goal #%d expired after %d runs", g.ScheduleID, g.MaxRuns)
 }
 
 // readManagedDoc returns the project's doc content when this daemon manages

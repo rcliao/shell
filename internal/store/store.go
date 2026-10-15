@@ -781,6 +781,20 @@ func (s *Store) migrate() error {
 		// due would report on a world that has moved on. Past this the task is
 		// dropped with a recorded outcome rather than run late. NULL = never.
 		"ALTER TABLE tasks ADD COLUMN expires_at DATETIME",
+		// Goal schedules (docs/DESIGN-AGENT-LOOPS.md step 2): any schedule
+		// may carry a goal and a done check; '' on every other row.
+		"ALTER TABLE schedules ADD COLUMN goal TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE schedules ADD COLUMN done_criteria TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE schedules ADD COLUMN goal_notes TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE schedules ADD COLUMN goal_project TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE schedules ADD COLUMN max_runs INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE schedules ADD COLUMN goal_runs INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE schedules ADD COLUMN goal_status TEXT NOT NULL DEFAULT ''",
+		// The iteration record: a goal's progress reports and judged claims.
+		"ALTER TABLE job_runs ADD COLUMN verdict TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE job_runs ADD COLUMN reason TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE job_runs ADD COLUMN evidence TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE job_runs ADD COLUMN judge_cost_usd REAL NOT NULL DEFAULT 0",
 	} {
 		s.db.Exec(col)
 	}

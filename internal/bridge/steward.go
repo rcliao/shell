@@ -86,6 +86,11 @@ func (b *Bridge) buildStewardBlock(now time.Time) string {
 				fmt.Fprintf(&sb, "  earlier proposal #%d went only to the owner's DM; the family never saw it, so it does not hold this project. If it is still the next step, file it again here (short, for the family)\n", old[len(old)-1].ID)
 			}
 		}
+		if goals, err := b.store.OpenGoals(p.Slug); err == nil {
+			for _, g := range goals {
+				fmt.Fprintf(&sb, "  goal schedule #%d running (run %d of %d): %s\n", g.ScheduleID, g.Runs, g.MaxRuns, clipRunes(g.Goal, 100))
+			}
+		}
 		if goal := firstLine(docSection(doc, "目標")); goal != "" {
 			fmt.Fprintf(&sb, "  目標: %s\n", clipRunes(goal, 160))
 		}

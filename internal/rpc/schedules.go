@@ -28,6 +28,9 @@ type SchedulesRequest struct {
 	All bool `json:"all"`
 	// Runs caps the run-history entries returned by describe.
 	Runs int `json:"runs"`
+	// Evidence and Notes are a goal step's report (progress).
+	Evidence string `json:"evidence"`
+	Notes    string `json:"notes"`
 }
 
 func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
@@ -56,8 +59,12 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		s.schedulesTrigger(w, req)
 	case "queue":
 		s.schedulesQueue(w, req)
+	case "progress":
+		s.schedulesProgress(w, req)
+	case "done":
+		s.schedulesDone(r.Context(), w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be list, describe, cancel, trigger or queue")
+		writeError(w, http.StatusBadRequest, "action must be list, describe, cancel, trigger, queue, progress or done")
 	}
 }
 
@@ -179,6 +186,15 @@ func (s *Server) schedulesDescribe(w http.ResponseWriter, req SchedulesRequest) 
 		history = append(history, entry)
 	}
 	detail["runs"] = history
+	if g, err := s.store.GetScheduleGoal(sc.ID); err == nil && g != nil {
+		goal := map[string]any{"goal": g.Goal, "done_criteria": g.DoneCriteria, "project": g.Project,
+			"status": g.Status, "runs": g.Runs, "max_runs": g.MaxRuns, "notes": g.Notes}
+		if last, err := s.store.LastGoalRun(sc.ID); err == nil && last != nil {
+			goal["last_report"] = map[string]any{"at": last.At.In(loc).Format("2006-01-02 15:04"),
+				"verdict": last.Verdict, "reason": last.Reason, "evidence": last.Evidence}
+		}
+		detail["goal"] = goal
+	}
 	writeJSON(w, detail)
 }
 
@@ -195,6 +211,12 @@ func (s *Server) schedulesCancel(w http.ResponseWriter, req SchedulesRequest) {
 	if sc == nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("no schedule with id %d", req.ID))
 		return
+	}
+	if g, _ := s.store.GetScheduleGoal(req.ID); g != nil && g.Status == store.GoalOpen {
+		if err := s.store.CloseGoal(req.ID, store.GoalCancelled); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if err := s.store.DisableSchedule(req.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
