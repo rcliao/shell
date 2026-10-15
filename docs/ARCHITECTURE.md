@@ -692,8 +692,10 @@ mode each goes into its own project's thread (suggestion audience
 `chat:<id>` plus `thread_id`) and is logged to that thread's session. That
 thread's turns then carry an open-suggestion line, so anyone there can answer
 it; the agent records the answer and, on a yes, starts the step in that turn.
-In `"shadow"` mode they go to the owner's DM as one digest. The weekly chat
-retro ignores steward rows.
+In `"shadow"` mode they go to the owner's DM as one digest. Owner-only rows
+never hold a project: in `"on"` mode the listing names them as unseen by the
+family, and filing a thread proposal for that project withdraws them. The
+weekly chat retro ignores steward rows.
 
 Quiet hours (default 10 PM–7 AM) suppress heartbeat firing.
 
