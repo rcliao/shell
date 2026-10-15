@@ -123,6 +123,11 @@ func TestSuggestionStewardSource(t *testing.T) {
 		st.MarkSuggestionsDelivered([]int64{sg.ID})
 	}
 
+	// An owner-only row for trip, which the thread proposal will replace.
+	_, out = steward("trip", "old")
+	shadowTrip := int64(out["id"].(float64))
+	st.MarkSuggestionsDelivered([]int64{shadowTrip})
+
 	// "on": addressed to the project's chat and thread.
 	s.stewardInThreads = true
 	code, out = steward("trip", "book")
@@ -132,6 +137,13 @@ func TestSuggestionStewardSource(t *testing.T) {
 	got, _ = st.GetSuggestion(int64(out["id"].(float64)))
 	if got.Audience != store.ChatAudience(-100200300) || got.ThreadID != 77 || got.Project != "trip" {
 		t.Fatalf("in threads stored = %+v", got)
+	}
+	// The family's proposal replaces the owner's copy.
+	if old, _ := st.GetSuggestion(shadowTrip); old.Status != store.SuggestionWithdrawn || old.DecidedBy != "steward" {
+		t.Errorf("owner-only trip row after re-file = %+v, want withdrawn by steward", old)
+	}
+	if old, _ := st.OwnerOnlyStewardFor("garden"); len(old) != 2 {
+		t.Errorf("garden's owner-only rows = %d, want 2 (untouched)", len(old))
 	}
 	// One open question per project.
 	if code, _ := steward("trip", "again"); code != http.StatusConflict {

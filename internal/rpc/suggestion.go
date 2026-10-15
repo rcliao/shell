@@ -3,6 +3,7 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/rcliao/shell/internal/store"
@@ -99,10 +100,21 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "source must be empty or steward")
 			return
 		}
+		// A thread proposal replaces the project's owner-only (shadow) ones:
+		// the family answers it, so the owner's copies are withdrawn.
+		var replaced []store.Suggestion
+		if sg.Source == store.SuggestionSourceSteward && sg.Audience != "owner" && sg.Audience != "" {
+			replaced, _ = s.store.OwnerOnlyStewardFor(sg.Project)
+		}
 		id, err := s.store.CreateSuggestion(sg)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		for _, old := range replaced {
+			if err := s.store.DecideSuggestion(old.ID, store.SuggestionWithdrawn, "steward", fmt.Sprintf("re-filed in the project's thread as #%d", id)); err != nil {
+				slog.Warn("steward: withdraw owner-only proposal", "id", old.ID, "error", err)
+			}
 		}
 		writeJSON(w, map[string]any{"id": id, "status": store.SuggestionProposed,
 			"result": fmt.Sprintf("Suggestion #%d filed; it reaches %s.", id, reaches)})

@@ -260,6 +260,16 @@ func (s *Store) OpenStewardFor(project string, maxAge time.Duration) ([]Suggesti
 		SuggestionSourceSteward, project, SuggestionProposed, SuggestionDelivered, time.Now().Add(-maxAge).UTC())
 }
 
+// OwnerOnlyStewardFor returns the project's undecided steward proposals
+// that were addressed to the owner (shadow mode): the family never saw
+// them. In "on" mode the steward may re-file one in the project's thread.
+func (s *Store) OwnerOnlyStewardFor(project string) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE source = ? AND project = ? AND audience = 'owner'
+		  AND status IN (?, ?) ORDER BY id`,
+		SuggestionSourceSteward, project, SuggestionProposed, SuggestionDelivered)
+}
+
 // StewardOpenAge is how long an unanswered steward proposal holds its
 // project and shows in its thread's turns.
 const StewardOpenAge = 14 * 24 * time.Hour

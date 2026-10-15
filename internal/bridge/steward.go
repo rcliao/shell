@@ -81,6 +81,10 @@ func (b *Bridge) buildStewardBlock(now time.Time) string {
 		fmt.Fprintf(&sb, "- %s (%s) — %s\n", p.Slug, meta, clipRunes(p.Title, 80))
 		if open, err := b.store.OpenStewardFor(p.Slug, store.StewardOpenAge); err == nil && len(open) > 0 {
 			fmt.Fprintf(&sb, "  open proposal #%d still waiting for an answer — skip this project\n", open[0].ID)
+		} else if b.stewardMode == StewardInThreads {
+			if old, err := b.store.OwnerOnlyStewardFor(p.Slug); err == nil && len(old) > 0 {
+				fmt.Fprintf(&sb, "  earlier proposal #%d went only to the owner's DM; the family never saw it, so it does not hold this project. If it is still the next step, file it again here (short, for the family)\n", old[len(old)-1].ID)
+			}
 		}
 		if goal := firstLine(docSection(doc, "目標")); goal != "" {
 			fmt.Fprintf(&sb, "  目標: %s\n", clipRunes(goal, 160))

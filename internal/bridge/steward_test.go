@@ -56,11 +56,20 @@ func TestStewardBlock(t *testing.T) {
 	if !b.StewardOn() {
 		t.Fatal("on is off")
 	}
+	// An owner-only (shadow) proposal is named, but does not hold the project.
+	shadow, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Title: "t", Change: "c"})
+	got = b.buildStewardBlock(time.Now())
+	if want := fmt.Sprintf("earlier proposal #%d went only to the owner's DM", shadow); !strings.Contains(got, want) || strings.Contains(got, "skip this project") {
+		t.Errorf("on block with a shadow row, want %q and no skip:\n%s", want, got)
+	}
 	id, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Audience: store.ChatAudience(-100200300), ThreadID: 77, Title: "t", Change: "c"})
 	got = b.buildStewardBlock(time.Now())
 	for _, want := range []string{"each project's own thread", fmt.Sprintf("open proposal #%d still waiting for an answer — skip this project", id)} {
 		if !strings.Contains(got, want) {
 			t.Errorf("on block lacks %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "went only to the owner's DM") {
+		t.Errorf("an open thread proposal outranks the shadow note:\n%s", got)
 	}
 }
