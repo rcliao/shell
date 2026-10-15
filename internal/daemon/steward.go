@@ -37,7 +37,7 @@ func deliverSteward(st *store.Store, agent string, ownerChatID int64, send func(
 			owner = append(owner, s)
 			continue
 		}
-		text := "🧭 " + oneLine(s.Title) + "\n" + stewardChange(s.Change)
+		text := "🧭 " + stewardLabel(st, s) + oneLine(s.Title) + "\n" + stewardChange(s.Change)
 		if err := send(chatID, s.ThreadID, text); err != nil {
 			errs = append(errs, fmt.Errorf("steward #%d to its project thread: %w", s.ID, err))
 			continue
@@ -66,6 +66,20 @@ func deliverSteward(st *store.Store, agent string, ownerChatID int64, send func(
 		errs = append(errs, err)
 	}
 	return len(delivered), errors.Join(errs...)
+}
+
+// stewardLabel names the proposal's project ("🍅 Garden · ") so a post is
+// clear on its own, even in a chat's main thread or a busy topic.
+func stewardLabel(st *store.Store, s store.Suggestion) string {
+	p, err := st.GetProjectBySlug(s.Project)
+	if err != nil || p == nil {
+		return ""
+	}
+	name := strings.TrimSpace(strings.TrimSpace(p.Emoji) + " " + oneLine(p.Title))
+	if name == "" {
+		return ""
+	}
+	return name + " · "
 }
 
 // stewardChat returns the chat a chat-addressed suggestion goes to.
