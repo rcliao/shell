@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ func TestStewardBlock(t *testing.T) {
 	write("garden", "# Garden\n\n## 目標\n\nTomatoes by July.\n\n## 待決定\n\n1. Which bed?\n2. ~~Seeds~~\n3. Drip or hand watering?\n   - nested note\n")
 	write("shared", "# Shared\n\n## 待決定\n\n- Something\n")
 	os.WriteFile(filepath.Join(ws, "projects", "shared", "owner"), []byte("other\n"), 0o644)
-	st.CreateProject(store.Project{Slug: "garden", Title: "Garden", ChatID: -100200300, MessageThreadID: 77, DocPath: "projects/garden/doc.md"})
+	st.CreateProject(store.Project{Slug: "garden", Title: "Garden", ChatID: -100200300, MessageThreadID: 77, DocPath: "projects/garden/doc.md", Lang: "zh"})
 	st.CreateProject(store.Project{Slug: "shared", Title: "Shared", ChatID: -100200300, DocPath: "projects/shared/doc.md"})
 	b := &Bridge{store: st, workspaceDir: ws, agentName: "me"}
 
@@ -37,14 +38,29 @@ func TestStewardBlock(t *testing.T) {
 	}
 	b.SetProjectSteward("shadow")
 	got := b.buildStewardBlock(time.Now())
-	for _, want := range []string{"[Project steward — shadow]", "- garden (project) — Garden", "目標: Tomatoes by July.",
+	for _, want := range []string{"[Project steward]", "- garden (project, lang zh) — Garden", "目標: Tomatoes by July.",
 		"待決定 (2 open): Which bed?; Drip or hand watering?", "last human message in its thread: never",
-		`source="steward"`, "DO:", "ASK:", "GOAL:", "At most 2 proposals"} {
+		`source="steward", project="<slug>"`, "start with DO, ASK or GOAL", "at most 2 short sentences",
+		"At most 2 proposals this beat, one per project", "the owner, who rates them"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("block lacks %q:\n%s", want, got)
 		}
 	}
 	if strings.Contains(got, "- shared") {
 		t.Error("a doc another agent owns is that agent's to steward")
+	}
+
+	// "on" names the project threads; a project with an open proposal is
+	// marked so the agent skips it.
+	b.SetProjectSteward(StewardInThreads)
+	if !b.StewardOn() {
+		t.Fatal("on is off")
+	}
+	id, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Title: "t", Change: "c"})
+	got = b.buildStewardBlock(time.Now())
+	for _, want := range []string{"each project's own thread", fmt.Sprintf("open proposal #%d still waiting for an answer — skip this project", id)} {
+		if !strings.Contains(got, want) {
+			t.Errorf("on block lacks %q:\n%s", want, got)
+		}
 	}
 }

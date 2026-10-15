@@ -86,7 +86,7 @@ func (d chatRetroDeps) handle(ctx context.Context, _ scheduler.LeasedTask) (stri
 }
 
 func (d chatRetroDeps) retroOne(ctx context.Context, chatID int64) (string, error) {
-	if recent, err := d.store.OpenChatSuggestions(chatID, chatRetroSpacing); err == nil && len(recent) > 0 {
+	if recent, err := d.store.OpenChatSuggestions(chatID, chatRetroSpacing); err == nil && len(retroOwn(recent)) > 0 {
 		return "skipped: a suggestion is already open this week", nil
 	}
 	if d.postedRecently(chatID) {
@@ -126,7 +126,7 @@ func (d chatRetroDeps) postedRecently(chatID int64) bool {
 	}
 	aud := store.ChatAudience(chatID)
 	for _, s := range all {
-		if s.Audience == aud && s.DeliveredAt != nil && time.Since(*s.DeliveredAt) < chatRetroSpacing {
+		if s.Audience == aud && s.Source != store.SuggestionSourceSteward && s.DeliveredAt != nil && time.Since(*s.DeliveredAt) < chatRetroSpacing {
 			return true
 		}
 	}
@@ -185,7 +185,7 @@ func (d chatRetroDeps) evidence(chatID int64, since time.Time) (string, int) {
 	var past []string
 	if all, err := d.store.ListSuggestions(nil, 50); err == nil {
 		for _, s := range all {
-			if s.Audience != aud {
+			if s.Audience != aud || s.Source == store.SuggestionSourceSteward {
 				continue
 			}
 			line := fmt.Sprintf("- #%d [%s] %s", s.ID, s.Status, s.Title)
@@ -248,6 +248,7 @@ func (d chatRetroDeps) deliver(chatID int64, started time.Time) string {
 		slog.Warn("chat retro: pending lookup failed", "chat_id", chatID, "error", err)
 		return "no suggestion (lookup failed)"
 	}
+	pending = retroOwn(pending)
 	var post *store.Suggestion
 	for i := range pending {
 		if !pending[i].CreatedAt.Before(started.Add(-time.Second)) {
@@ -271,4 +272,17 @@ func (d chatRetroDeps) deliver(chatID int64, started time.Time) string {
 		slog.Warn("chat retro: mark delivered failed", "chat_id", chatID, "id", post.ID, "error", err)
 	}
 	return fmt.Sprintf("suggestion #%d posted", post.ID)
+}
+
+// retroOwn drops steward proposals: they share a chat's audience but belong
+// to a project thread, so they neither block, count toward, nor get withdrawn
+// by the chat's weekly retro.
+func retroOwn(list []store.Suggestion) []store.Suggestion {
+	var out []store.Suggestion
+	for _, s := range list {
+		if s.Source != store.SuggestionSourceSteward {
+			out = append(out, s)
+		}
+	}
+	return out
 }

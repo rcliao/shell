@@ -733,6 +733,10 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(suggestionsSchema); err != nil {
 		return err
 	}
+	// project + thread_id arrived with steward proposals posted in project
+	// threads; duplicate-column errors on migrated DBs are ignored.
+	s.db.Exec(`ALTER TABLE suggestions ADD COLUMN project TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`ALTER TABLE suggestions ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`)
 
 	// route_decisions + route_labels — see internal/store/route.go (R0).
 	if _, err := s.db.Exec(routeSchema); err != nil {

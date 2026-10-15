@@ -30,6 +30,9 @@ type SuggestionRequest struct {
 	// Source is who filed it: "" (the weekly review) or "steward" (the
 	// project steward on a deep beat, sent to the owner after that beat).
 	Source string `json:"source"`
+	// Project is the slug a steward proposal is for (required with source
+	// "steward"); it places the proposal in that project's thread.
+	Project string `json:"project"`
 }
 
 // stewardMaxOpen caps undelivered steward proposals; it matches
@@ -56,22 +59,42 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 		if req.ForChat != 0 {
 			sg.Audience = store.ChatAudience(req.ForChat)
 		}
-		reaches := "when this review ends"
+		reaches := "the owner when this review ends"
 		switch req.Source {
 		case "":
 		case store.SuggestionSourceSteward:
 			if req.ForChat != 0 {
-				writeError(w, http.StatusBadRequest, "steward proposals go to the owner, not to a chat")
+				writeError(w, http.StatusBadRequest, "steward proposals are placed by project=<slug>, not for_chat")
 				return
 			}
-			// The cap is enforced here, not only in the prompt: an extra
-			// proposal would wait, go stale, and take a weekly-review slot.
+			if req.Project == "" {
+				writeError(w, http.StatusBadRequest, "project=<slug> is required for a steward proposal")
+				return
+			}
+			p, err := s.store.GetProjectBySlug(req.Project)
+			if err != nil || p == nil || p.Status != "active" {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("no active project %q", req.Project))
+				return
+			}
+			// The caps are enforced here, not only in the prompt: two per
+			// beat, and one open question per project — the family answers
+			// the first before the steward asks again.
 			if open, err := s.store.ProposedFrom(store.SuggestionSourceSteward); err == nil && len(open) >= stewardMaxOpen {
-				writeError(w, http.StatusConflict, fmt.Sprintf("already %d steward proposals waiting for the owner; file nothing more this beat", len(open)))
+				writeError(w, http.StatusConflict, fmt.Sprintf("already %d steward proposals waiting to be sent; file nothing more this beat", len(open)))
+				return
+			}
+			if open, err := s.store.OpenStewardFor(p.Slug); err == nil && len(open) > 0 {
+				writeError(w, http.StatusConflict, fmt.Sprintf("project %s already has open steward proposal #%d; wait for its answer", p.Slug, open[0].ID))
 				return
 			}
 			sg.Source = req.Source
-			reaches = "after this heartbeat"
+			sg.Project = p.Slug
+			reaches = "the owner after this heartbeat"
+			if s.stewardInThreads {
+				sg.Audience = store.ChatAudience(p.ChatID)
+				sg.ThreadID = p.MessageThreadID
+				reaches = "the project's thread after this heartbeat"
+			}
 		default:
 			writeError(w, http.StatusBadRequest, "source must be empty or steward")
 			return
@@ -82,7 +105,7 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"id": id, "status": store.SuggestionProposed,
-			"result": fmt.Sprintf("Suggestion #%d filed; it reaches the owner %s.", id, reaches)})
+			"result": fmt.Sprintf("Suggestion #%d filed; it reaches %s.", id, reaches)})
 
 	case "list", "":
 		statuses := []string{store.SuggestionProposed, store.SuggestionDelivered, store.SuggestionAccepted}

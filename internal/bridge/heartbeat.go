@@ -187,7 +187,7 @@ func (b *Bridge) enrichHeartbeatPrompt(ctx context.Context, chatID int64, msg st
 		// skills never needed a pin to survive rotation; the pin duplicated
 		// the catalog and its refresh churned a dead row every deep beat.
 
-		// Project steward (shadow): proposals for moving active projects
+		// Project steward: proposals for moving active projects
 		// forward, filed as steward suggestions for the owner to rate.
 		if block := b.buildStewardBlock(time.Now()); block != "" {
 			sb.WriteString(block)

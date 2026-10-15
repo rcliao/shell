@@ -576,7 +576,9 @@ type SchedulerConfig struct {
 	DeepReflectInterval   int    `json:"deep_reflect_interval"`   // every Nth heartbeat uses deep model for reflection (default: 6)
 	// ProjectSteward runs the project steward on deep beats
 	// (docs/DESIGN-AGENT-LOOPS.md): "" or "off" = never; "shadow" = it files
-	// next-step proposals for active projects, sent only to the owner's DM.
+	// next-step proposals for active projects, sent only to the owner's DM;
+	// "on" = each proposal is posted in its project's own thread, where the
+	// people of that project answer it.
 	ProjectSteward string `json:"project_steward"`
 	// Kill switch: V2-H47 lesson-to-action block in deep heartbeats.
 	// Default false = enabled (prompt-only feature, matches *_disabled pattern).
