@@ -129,6 +129,9 @@ func (b *Bridge) buildStewardBlock(now time.Time) string {
 - evidence: for the owner's ledger, not the family: start with DO, ASK or GOAL, then what you saw in the doc or thread that makes this the next step. Details and links go here.
 At most %d proposals this beat, one per project. They go to %s after this beat. Do not act on them now, and do not message anyone about them this beat. If no project needs a next step, file nothing and say so in one line of your journal.
 `, StewardMaxProposals, audience)
+	if b.stewardMode == StewardInThreads {
+		out.WriteString("Steward proposals addressed to the owner (audience owner in shell_suggestion list) only reached the owner's DM; the family never saw them, so they do not count as asked. If one is still the next step, file it again for its project's thread.\n")
+	}
 	return out.String()
 }
 
