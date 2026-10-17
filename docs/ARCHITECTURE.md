@@ -589,6 +589,14 @@ can be checked against the words it judged). Nothing reads those rows on the
 turn path.
 Pass criteria and the verdict schedule: plan § P3.7.
 
+Every Jev caller (this shadow, lanes, the A2A gate, `shell route replay`)
+asks one pinned model version: `route.jev_model` in config, default
+`decide.DefaultModel` (`jev-1.14.0`). It is a versioned id, never the
+`jev-latest` alias, so answers change only when config does. To switch back,
+set `"route": {"jev_model": "jev-1.13.0"}` and restart; `router_decisions.model`
+records which version answered. `shell route replay --model <id>` replays the
+recent messages on another version without touching config.
+
 ## Progress Voice
 
 While a turn runs, the placeholder message ticks every 2 s. Its wording comes

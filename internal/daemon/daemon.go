@@ -786,21 +786,21 @@ func New(cfg config.Config) (*Daemon, error) {
 		// R1: lanes pick the session in these chats only. Jev v2 is the
 		// router; without a key every message stays in general (safe).
 		var backend route.Backend
-		if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
+		if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }, cfg.Route.JevModel); jev.Enabled() {
 			backend = route.Jev{D: jev, Variant: "v2"}
 		}
 		br.SetLanes(lanes, backend)
 		br.SetLanesAll(cfg.Route.LanesAll())
 		slog.Info("lanes: enabled", "chats", len(lanes), "all_chats", cfg.Route.LanesAll(), "router", backend != nil)
 	}
-	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() && !cfg.Agent.A2AGateOff {
+	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }, cfg.Route.JevModel); jev.Enabled() && !cfg.Agent.A2AGateOff {
 		// Each A2A hand-off must need a reply, not just name the peer.
 		br.SetA2AGate(jev)
 		slog.Info("a2a gate: enabled", "backend", "jev")
 	}
-	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
+	if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }, cfg.Route.JevModel); jev.Enabled() {
 		br.SetRouterShadow(decide.NewShadow(jev, st))
-		slog.Info("router shadow: enabled", "backend", "jev")
+		slog.Info("router shadow: enabled", "backend", "jev", "model", jev.Model())
 	}
 
 	projectHome := project.NewHome(st, tgTransport)

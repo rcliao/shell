@@ -37,6 +37,7 @@ func newRouteCmd() *cobra.Command {
 
 	var noJev bool
 	var variants []string
+	var jevModel string
 	replay := &cobra.Command{
 		Use:   "replay",
 		Short: "Re-route the agent's real messages from the last N days through every backend",
@@ -48,8 +49,12 @@ func newRouteCmd() *cobra.Command {
 			defer st.Close()
 			config.OpenSecretStore(cfg.Secrets)
 			backends := []route.Backend{route.Keyword{}}
+			if jevModel == "" {
+				jevModel = cfg.Route.JevModel
+			}
 			if !noJev {
-				if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }); jev.Enabled() {
+				if jev := decide.NewJev(func() string { return cfg.Secret(decide.KeyName) }, jevModel); jev.Enabled() {
+					fmt.Fprintf(os.Stderr, "jev model: %s\n", jev.Model())
 					backends = append(backends, route.Jev{D: jev})
 					for _, v := range variants {
 						backends = append(backends, route.Jev{D: jev, Variant: v})
@@ -62,6 +67,7 @@ func newRouteCmd() *cobra.Command {
 		},
 	}
 	replay.Flags().BoolVar(&noJev, "no-jev", false, "keyword baseline only (sends nothing out)")
+	replay.Flags().StringVar(&jevModel, "model", "", "Jev model to replay with (default: route.jev_model, else "+decide.DefaultModel+")")
 	replay.Flags().StringSliceVar(&variants, "variant", nil, "also replay candidate question wordings (v2), scored side by side")
 
 	var force bool
