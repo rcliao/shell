@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -201,8 +202,16 @@ func newStewardEvalCmd() *cobra.Command {
 					c.Format = stewardeval.FormatCheck(c.Proposal.Change, p.Lang)
 					{
 						in := stewardeval.JudgeInput{Project: p, Doc: doc, At: c.At, P: c.Proposal}
-						in.Thread, _ = st.ThreadMessagesBetween(p.ChatID, p.MessageThreadID, c.At.Add(-30*24*time.Hour), c.At, 60)
-						asked, _ := st.StewardForProject(p.Slug, c.At.Add(-30*24*time.Hour), c.At)
+						var err error
+						if in.Thread, err = st.ThreadMessagesBetween(p.ChatID, p.MessageThreadID, c.At.Add(-30*24*time.Hour), c.At, 60); err != nil {
+							c.Error = "thread: " + err.Error()
+							goto done
+						}
+						asked, err := st.StewardForProject(p.Slug, c.At.Add(-30*24*time.Hour), c.At)
+						if err != nil {
+							c.Error = "history: " + err.Error()
+							goto done
+						}
 						for _, s := range asked {
 							if s.ID != c.FiledID {
 								in.Asked = append(in.Asked, s)
@@ -276,7 +285,13 @@ func slugFromTitle(title string, bySlug map[string]store.Project) string {
 // openSnapshot copies the agent's live shell.db (read-only) into dst and
 // opens the copy, so the eval never migrates or writes a live daemon's DB.
 func openSnapshot(src, dst string) (*store.Store, error) {
-	db, err := sql.Open("sqlite", "file:"+src+"?mode=ro&_pragma=busy_timeout(5000)")
+	as, _ := filepath.Abs(src)
+	ad, _ := filepath.Abs(dst)
+	if as == ad {
+		return nil, fmt.Errorf("snapshot would overwrite the live db %s; pick another --out", src)
+	}
+	uri := (&url.URL{Scheme: "file", Path: src, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()
+	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, err
 	}
