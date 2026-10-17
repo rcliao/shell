@@ -78,3 +78,60 @@ func TestStewardBlock(t *testing.T) {
 		t.Errorf("an open thread proposal outranks the shadow note:\n%s", got)
 	}
 }
+
+func TestStewardOptions(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p := store.Project{Slug: "garden", Title: "Garden", ChatID: -100200300, MessageThreadID: 77}
+	st.CreateProject(p)
+	st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Title: "t", Change: "dm only"})
+	asked, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Audience: store.ChatAudience(-100200300), ThreadID: 77, Title: "t", Change: "Which bed?\n我建議 north."})
+	st.MarkSuggestionsDelivered([]int64{asked})
+	now := time.Now().Add(time.Minute)
+
+	plain := StewardOptions{Mode: StewardInThreads}
+	if got := StewardEntry(st, p, "", now, plain); strings.Contains(got, "asked ") || !strings.Contains(got, "skip this project") {
+		t.Errorf("plain entry shows history or lost the hold:\n%s", got)
+	}
+	if got := StewardInstructions(plain, 2); strings.Contains(got, `"asked" lines`) || strings.Contains(got, "on your own") || strings.Contains(got, "Before filing") || strings.Contains(got, "characters;") {
+		t.Errorf("plain instructions carry an optional part:\n%s", got)
+	}
+	// Production keeps the hold and renders every part.
+	def := DefaultStewardOptions(StewardInThreads)
+	if got := StewardEntry(st, p, "", now, def); !strings.Contains(got, "asked today (no answer)") || !strings.Contains(got, "skip this project") {
+		t.Errorf("default entry lacks history or the hold:\n%s", got)
+	}
+	if got := StewardInstructions(def, 2); !strings.Contains(got, `"asked" lines`) || !strings.Contains(got, "Prefer do and goal") || !strings.Contains(got, "Before filing") || !strings.Contains(got, "under 200 characters") {
+		t.Errorf("default instructions lack a part:\n%s", got)
+	}
+
+	all := StewardOptions{Mode: StewardInThreads, History: true, Capabilities: true, SelfCheck: true, IgnoreOpen: true}
+	got := StewardEntry(st, p, "", now, all)
+	if !strings.Contains(got, "asked today (no answer): Which bed? 我建議 north.") {
+		t.Errorf("history line missing or not one line:\n%s", got)
+	}
+	if strings.Contains(got, "dm only") {
+		t.Errorf("an owner-only proposal is not something the family was asked:\n%s", got)
+	}
+	if strings.Contains(got, "skip this project") {
+		t.Errorf("IgnoreOpen kept the hold:\n%s", got)
+	}
+	ins := StewardInstructions(all, 1)
+	for _, want := range []string{`"asked" lines`, "Never say you will go ahead if nobody answers", "on your own", "Prefer do and goal", "Before filing", "At most 1 proposals"} {
+		if !strings.Contains(ins, want) {
+			t.Errorf("instructions lack %q", want)
+		}
+	}
+}
+
+func TestStewardMaxChars(t *testing.T) {
+	if ins := StewardInstructions(StewardOptions{MaxChars: 200}, 1); !strings.Contains(ins, "under 200 characters") {
+		t.Error("MaxChars line missing")
+	}
+	if ins := StewardInstructions(StewardOptions{}, 1); strings.Contains(ins, "characters;") {
+		t.Error("MaxChars line without the option")
+	}
+}

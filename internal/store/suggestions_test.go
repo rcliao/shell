@@ -97,3 +97,25 @@ func TestOpenStewardFor(t *testing.T) {
 		t.Fatalf("thread still shows it: %+v", open)
 	}
 }
+
+func TestStewardForProject(t *testing.T) {
+	st, done := newTestStore(t)
+	defer done()
+	a, _ := st.CreateSuggestion(Suggestion{Source: SuggestionSourceSteward, Project: "garden", Title: "t1", Change: "c"})
+	b, _ := st.CreateSuggestion(Suggestion{Source: SuggestionSourceSteward, Project: "garden", Audience: ChatAudience(-100200300), Title: "t2", Change: "c"})
+	st.CreateSuggestion(Suggestion{Source: SuggestionSourceSteward, Project: "kitchen", Title: "t3", Change: "c"})
+	st.CreateSuggestion(Suggestion{Project: "garden", Title: "review row", Change: "c"})
+	st.DecideSuggestion(a, SuggestionDeclined, "owner", "")
+	now := time.Now()
+	got, err := st.StewardForProject("garden", now.Add(-time.Hour), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != a || got[1].ID != b {
+		t.Fatalf("garden history = %+v, want both steward rows, any status, oldest first", got)
+	}
+	st.db.Exec(`UPDATE suggestions SET created_at = ? WHERE id = ?`, now.Add(10*time.Minute).UTC(), b)
+	if got, _ := st.StewardForProject("garden", now.Add(-time.Hour), now.Add(time.Minute)); len(got) != 1 || got[0].ID != a {
+		t.Fatalf("a row created after the cutoff leaked: %+v", got)
+	}
+}

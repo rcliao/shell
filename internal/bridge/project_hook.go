@@ -159,14 +159,20 @@ func (b *Bridge) renderScopedProject(own store.Project, others []string, header,
 // to the workspace ("projects/<slug>/doc.md") or, in older rows, prefixed
 // with "workspace/". Best effort: no workspace or no file means no quotes.
 func (b *Bridge) readProjectDoc(docPath string) string {
-	if b.workspaceDir == "" || docPath == "" {
+	return ReadProjectDoc(b.workspaceDir, docPath)
+}
+
+// ReadProjectDoc reads a project's doc.md from its workspace-relative path;
+// empty when it is missing or the path leaves the workspace.
+func ReadProjectDoc(workspaceDir, docPath string) string {
+	if workspaceDir == "" || docPath == "" {
 		return ""
 	}
 	rel := filepath.Clean(strings.TrimPrefix(docPath, "workspace/"))
 	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(b.workspaceDir, rel))
+	data, err := os.ReadFile(filepath.Join(workspaceDir, rel))
 	if err != nil {
 		return ""
 	}

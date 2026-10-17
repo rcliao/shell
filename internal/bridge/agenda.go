@@ -411,14 +411,21 @@ func (b *Bridge) deadlineItems(now time.Time, items []AgendaItem, keys []string)
 // ownsDoc: this agent handles owner-only work for the project's doc — always
 // for a doc it does not share (mirrors project.MayRunAs, not importable).
 func (b *Bridge) ownsDoc(slug string) bool {
-	if b.workspaceDir == "" {
+	return OwnsDoc(b.workspaceDir, b.agentName, slug)
+}
+
+// OwnsDoc reports whether agent owns a project's doc in workspaceDir: the
+// first line of projects/<slug>/owner names it, or the file is missing or
+// empty.
+func OwnsDoc(workspaceDir, agent, slug string) bool {
+	if workspaceDir == "" {
 		return true
 	}
-	data, err := os.ReadFile(filepath.Join(b.workspaceDir, "projects", slug, "owner"))
+	data, err := os.ReadFile(filepath.Join(workspaceDir, "projects", slug, "owner"))
 	if err != nil {
 		return true
 	}
 	first, _, _ := strings.Cut(string(data), "\n")
 	o := strings.TrimSpace(first)
-	return o == "" || o == b.agentName || b.agentName == ""
+	return o == "" || o == agent || agent == ""
 }

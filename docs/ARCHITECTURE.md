@@ -687,7 +687,13 @@ to the `reflections` table:
 default; design `docs/DESIGN-AGENT-LOOPS.md`, step 1). A deep beat also lists
 the active projects whose doc this agent owns, with each project's 目標, its
 open 待決定 count and top items, its language, and when a person last wrote in
-its thread. The agent files up to two next-step proposals with
+its thread, and the proposals it filed there in the last 30 days with how
+each ended ("asked 3 days ago (no answer): …"). The instructions also list
+what the agent can do alone once the family says yes, prefer do and goal
+over ask, add a self-check before filing, and cap `change` at 200
+characters (`bridge.DefaultStewardOptions`, the winner of the offline eval
+in `docs/DESIGN-STEWARD-EVAL.md`). The agent files up to two next-step
+proposals with
 `shell_suggestion(source="steward", project=<slug>)`: `change` is what the
 family reads (at most two short sentences in the project's language, ending
 in a yes/no question), and `evidence` (starting DO, ASK or GOAL) stays in the
@@ -832,6 +838,7 @@ so it can propose homes; a new area needs a person's yes, a post does not.
 - doc-write refuses content that isn't a doc (`project.CheckDocShape`): a JSON envelope, doc-read's header line, or an unconfirmed cut of 75% or more (`--confirm-shrink`).
 - When a doc becomes shared and this agent has notes, a one-time `notes.fold` project event runs a quiet turn in the post's session to fold them in. While the notes file exists it is asked again whenever the doc is linked, including at every daemon start.
 - Open questions may end with `(by YYYY-MM-DD)`. The heartbeat agenda lists those due within 7 days, or overdue, at most every 3 days per item, and only to the doc's owner.
+- `shell steward eval --config <agent config>` renders the steward prompt for each owned project per variant (`--variants base,a,b,c`), has the agent's model write one proposal, checks its format in code and has a judge grade it (new / agent_led / useful / concrete / grounded). `--baseline` grades the filed proposals instead. It works on a copy of shell.db, stops at `--budget`, and writes every cell to `~/.shell/steward-eval/<ts>-<agent>/cells.jsonl`.
 - `shell project eval` samples replies in project posts and has the route judge grade each against the doc as it stood then (used / ignored / contradicted / reasked / na).
 
 **Keeping places current.**

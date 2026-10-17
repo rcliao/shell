@@ -117,16 +117,22 @@ type cliResult struct {
 	} `json:"usage"`
 }
 
-// Parse reads the CLI's JSON output and the verdict JSON inside its result.
-// Anything else is an error (and so not met). Cost is filled in whenever
-// the CLI envelope parsed.
-func Parse(out []byte) (Verdict, error) {
+// Result returns the text and cost of one `claude -p --output-format json`
+// call, for callers that parse the text themselves.
+func Result(out []byte) (text string, costUSD float64, err error) {
+	r, err := envelope(out)
+	return r.Result, r.TotalCostUSD, err
+}
+
+// envelope reads the CLI's JSON output (one result object, or an event
+// array holding one); an errored call is an error with its cost kept.
+func envelope(out []byte) (cliResult, error) {
 	out = bytes.TrimSpace(out)
 	var r cliResult
 	if bytes.HasPrefix(out, []byte("[")) {
 		var events []cliResult
 		if err := json.Unmarshal(out, &events); err != nil {
-			return Verdict{}, fmt.Errorf("unparseable judge output: %w", err)
+			return r, fmt.Errorf("unparseable judge output: %w", err)
 		}
 		found := false
 		for _, e := range events {
@@ -135,14 +141,25 @@ func Parse(out []byte) (Verdict, error) {
 			}
 		}
 		if !found {
-			return Verdict{}, fmt.Errorf("judge output has no result event")
+			return r, fmt.Errorf("judge output has no result event")
 		}
 	} else if err := json.Unmarshal(out, &r); err != nil {
-		return Verdict{}, fmt.Errorf("unparseable judge output: %w", err)
+		return r, fmt.Errorf("unparseable judge output: %w", err)
 	}
-	v := Verdict{CostUSD: r.TotalCostUSD, InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}
 	if r.IsError {
-		return v, fmt.Errorf("judge call errored: %s", clip(r.Result, 200))
+		return r, fmt.Errorf("judge call errored: %s", clip(r.Result, 200))
+	}
+	return r, nil
+}
+
+// Parse reads the CLI's JSON output and the verdict JSON inside its result.
+// Anything else is an error (and so not met). Cost is filled in whenever
+// the CLI envelope parsed.
+func Parse(out []byte) (Verdict, error) {
+	r, err := envelope(out)
+	v := Verdict{CostUSD: r.TotalCostUSD, InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}
+	if err != nil {
+		return v, err
 	}
 	start, end := strings.Index(r.Result, "{"), strings.LastIndex(r.Result, "}")
 	if start < 0 || end <= start {

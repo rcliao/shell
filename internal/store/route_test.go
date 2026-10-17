@@ -137,3 +137,35 @@ func TestRecentOutsideSessionAndExactDelete(t *testing.T) {
 		t.Errorf("lane threads = %v", lt)
 	}
 }
+
+func TestThreadMessagesBetween(t *testing.T) {
+	s, done := newTestStore(t)
+	defer done()
+	sessID := func(thread int64) int64 {
+		if err := s.SaveSession(42, thread, "c"); err != nil {
+			t.Fatal(err)
+		}
+		ss, _ := s.GetSession(42, thread)
+		return ss.ID
+	}
+	lane, _ := s.LaneSessionThread(42, 7, "trip")
+	own, laneSess, other := sessID(7), sessID(lane), sessID(9)
+	s.LogMessage(own, "user", "which hotel?")
+	s.LogMessage(laneSess, "assistant", "I suggest the one by the station")
+	s.LogMessage(own, "user", "[Heartbeat] synthetic")
+	s.LogMessage(other, "user", "unrelated topic")
+	now := time.Now()
+	got, err := s.ThreadMessagesBetween(42, 7, now.Add(-time.Hour), now.Add(time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Text != "which hotel?" || got[1].Role != "assistant" {
+		t.Fatalf("thread 7 = %+v, want its own and its lane's message, oldest first", got)
+	}
+	if got, _ := s.ThreadMessagesBetween(42, 7, now.Add(-time.Hour), now.Add(-time.Minute), 10); len(got) != 0 {
+		t.Fatalf("messages after the cutoff leaked: %+v", got)
+	}
+	if got, _ := s.ThreadMessagesBetween(42, 7, now.Add(-time.Hour), now.Add(time.Minute), 1); len(got) != 1 || got[0].Role != "assistant" {
+		t.Fatalf("limit keeps the newest: %+v", got)
+	}
+}
