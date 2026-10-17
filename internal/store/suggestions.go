@@ -305,3 +305,12 @@ func (s *Store) StewardSince(since time.Time) ([]Suggestion, error) {
 	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
 		WHERE source = ? AND created_at >= ? ORDER BY id`, SuggestionSourceSteward, since.UTC())
 }
+
+// StewardForProject returns a project's steward proposals created in
+// [since, before), any status and audience, oldest first: what the steward
+// already put to the family (docs/DESIGN-STEWARD-EVAL.md, AskHistory).
+func (s *Store) StewardForProject(project string, since, before time.Time) ([]Suggestion, error) {
+	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE source = ? AND project = ? AND created_at >= ? AND created_at < ? ORDER BY id`,
+		SuggestionSourceSteward, project, since.UTC(), before.UTC())
+}

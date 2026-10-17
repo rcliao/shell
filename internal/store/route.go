@@ -406,3 +406,33 @@ func (s *Store) RouteLabelsBySource(source string, since time.Time) (map[string]
 	}
 	return out, rows.Err()
 }
+
+// ThreadMessagesBetween returns, oldest first, the last `limit` user and
+// assistant messages of a real thread (its own session and its lane
+// sessions) created in [since, before). Bracketed system turns are left out.
+func (s *Store) ThreadMessagesBetween(chatID, threadID int64, since, before time.Time, limit int) ([]ThreadMessage, error) {
+	rows, err := s.db.Query(`SELECT m.role, m.created_at, m.content FROM messages m JOIN sessions s ON s.id = m.session_id
+		WHERE s.chat_id = ?
+		  AND (s.message_thread_id = ? OR s.message_thread_id IN
+		       (SELECT session_thread_id FROM lane_sessions WHERE chat_id = ? AND thread_id = ?))
+		  AND m.role IN ('user', 'assistant')
+		  AND datetime(m.created_at) >= datetime(?) AND datetime(m.created_at) < datetime(?)
+		  AND substr(ltrim(m.content), 1, 1) != '['
+		ORDER BY m.id DESC LIMIT ?`, chatID, threadID, chatID, threadID, since.UTC(), before.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ThreadMessage
+	for rows.Next() {
+		var m ThreadMessage
+		if err := rows.Scan(&m.Role, &m.At, &m.Text); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
+}
