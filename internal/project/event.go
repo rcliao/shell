@@ -65,6 +65,9 @@ type EventPayload struct {
 	// GoalKey is the goal schedule's dedup key (EventGoalDue): the consumer
 	// finds its schedule row, and so its goal, by it.
 	GoalKey string `json:"goal_key,omitempty"`
+
+	// SuggestionID is the auto steward proposal to run (EventStewardAuto).
+	SuggestionID int64 `json:"suggestion_id,omitempty"`
 }
 
 // ResearchScheduleMessage builds the event-mode schedule message (the

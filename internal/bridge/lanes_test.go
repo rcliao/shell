@@ -277,3 +277,20 @@ func TestOpenStewardGoalLine(t *testing.T) {
 		t.Errorf("a DO proposal names a goal schedule: %q", got)
 	}
 }
+
+// A queued auto step asked nobody, so thread turns are not told it is an
+// open proposal to start on a yes (its own turn runs it).
+func TestOpenStewardAutoHidden(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	id, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Title: "比價", Change: "我查三家價格。",
+		Evidence: "AUTO. e", Audience: store.ChatAudience(-100200300), ThreadID: 77})
+	st.MarkSuggestionsDelivered([]int64{id})
+	b := &Bridge{store: st}
+	if got := b.buildPerTurnBlocks(context.Background(), -100200300, 77, 0, "好"); strings.Contains(got, "Open suggestion") {
+		t.Errorf("auto row shown as an open proposal: %q", got)
+	}
+}

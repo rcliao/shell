@@ -25,9 +25,23 @@ func TestFormatCheck(t *testing.T) {
 		{strings.Repeat("好", 201) + "？", "zh", "length"},
 	}
 	for _, c := range cases {
-		if got := strings.Join(FormatCheck(c.change, c.lang), ","); got != c.want {
+		if got := strings.Join(FormatCheck("do", c.change, c.lang), ","); got != c.want {
 			t.Errorf("FormatCheck(%q, %q) = %q, want %q", c.change, c.lang, got, c.want)
 		}
+	}
+}
+
+// An auto proposal asks nothing, so it needs no question; the other checks
+// still apply.
+func TestFormatCheckAuto(t *testing.T) {
+	if got := FormatCheck("auto", "我查三家番茄苗的價格，給你一張比價表。", "zh"); len(got) != 0 {
+		t.Errorf("auto without a question failed %v", got)
+	}
+	if got := FormatCheck("auto", "See https://example.com for the list.", "en"); strings.Join(got, ",") != "link_or_id" {
+		t.Errorf("auto with a link = %v", got)
+	}
+	if p, err := ParseProposal(`{"kind":"auto","title":"t","change":"我查價格。","evidence":"AUTO e"}`); err != nil || p.Kind != "auto" {
+		t.Errorf("auto proposal: %+v, %v", p, err)
 	}
 }
 
@@ -47,7 +61,7 @@ func TestParseProposal(t *testing.T) {
 }
 
 func TestFiledProposalKind(t *testing.T) {
-	for ev, want := range map[string]string{"DO: research": "do", "DO. Doc rev": "do", "GOAL — weekly": "goal", "ASK stuck": "ask", "Doc rev 3dbaf22": "ask", "": "ask"} {
+	for ev, want := range map[string]string{"DO: research": "do", "DO. Doc rev": "do", "GOAL — weekly": "goal", "AUTO. compare": "auto", "ASK stuck": "ask", "Doc rev 3dbaf22": "ask", "Autumn plan": "ask", "": "ask"} {
 		if got := FiledProposal(store.Suggestion{Evidence: ev, Change: "c"}).Kind; got != want {
 			t.Errorf("evidence %q → %q, want %q", ev, got, want)
 		}
@@ -55,7 +69,7 @@ func TestFiledProposalKind(t *testing.T) {
 }
 
 func TestParseGrade(t *testing.T) {
-	full := `{"new":{"pass":false,"why":"asked twice"},"agent_led":{"pass":true,"why":""},"useful":{"pass":true,"why":""},"concrete":{"pass":true,"why":""},"grounded":{"pass":true,"why":""}}`
+	full := `{"new":{"pass":false,"why":"asked twice"},"agent_led":{"pass":true,"why":""},"useful":{"pass":true,"why":""},"concrete":{"pass":true,"why":""},"grounded":{"pass":true,"why":""},"low_risk":{"pass":true,"why":"not auto"}}`
 	g, err := ParseGrade("```json\n" + full + "\n```")
 	if err != nil || g["new"].Pass || g["new"].Why != "asked twice" || !g["grounded"].Pass {
 		t.Fatalf("got %+v, %v", g, err)

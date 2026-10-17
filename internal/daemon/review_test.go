@@ -264,9 +264,16 @@ func TestReviewStewardAndGoalEvidence(t *testing.T) {
 	st.DecideSuggestion(a, store.SuggestionAccepted, "family", "好")
 	st.DecideSuggestion(b, store.SuggestionDeclined, "family", "not now")
 	st.CreateSuggestion(store.Suggestion{Title: "a review suggestion"}) // not the steward's
+	// An auto step asked nobody: counted apart, not in the answer rate.
+	auto, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Audience: "chat:-100200300", Title: "price table", Project: "housing", Evidence: "AUTO. e"})
+	st.MarkSuggestionsDelivered([]int64{auto})
+	st.DecideSuggestion(auto, store.SuggestionAccepted, store.DecidedByAuto, "")
+	st.DecideSuggestion(auto, store.SuggestionDone, store.DecidedByAuto, "查好了")
 
 	got := stewardEvidence(st, since)
-	for _, want := range []string{"3 filed: 1 accepted or done, 1 declined, 0 withdrawn, 1 still waiting (2 of 3 answered).",
+	for _, want := range []string{"3 asked: 1 accepted or done, 1 declined, 0 withdrawn, 1 still waiting (2 of 3 answered).",
+		"1 auto (done without asking): 1 done and reported, 0 dropped by their turn, 0 shadow (owner only), 0 waiting to run.",
+		"[auto done] housing: price table (by auto",
 		"[accepted] housing: ask about parking (by family: “好”)", "[declined] teams: swap slot 6", "[proposed] fitness: weekly check-in"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("steward evidence missing %q:\n%s", want, got)

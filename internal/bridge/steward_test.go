@@ -100,7 +100,7 @@ func TestStewardOptions(t *testing.T) {
 		t.Errorf("plain instructions carry an optional part:\n%s", got)
 	}
 	// Production keeps the hold and renders every part.
-	def := DefaultStewardOptions(StewardInThreads)
+	def := DefaultStewardOptions(StewardInThreads, "")
 	if got := StewardEntry(st, p, "", now, def); !strings.Contains(got, "asked today (no answer)") || !strings.Contains(got, "skip this project") {
 		t.Errorf("default entry lacks history or the hold:\n%s", got)
 	}
@@ -123,6 +123,36 @@ func TestStewardOptions(t *testing.T) {
 	for _, want := range []string{`"asked" lines`, "Never say you will go ahead if nobody answers", "on your own", "Prefer do and goal", "Before filing", "At most 1 proposals"} {
 		if !strings.Contains(ins, want) {
 			t.Errorf("instructions lack %q", want)
+		}
+	}
+}
+
+// The auto kind and its rules are offered only with Auto (steward_auto
+// "shadow" or "on"); history says how an earlier auto ended.
+func TestStewardAuto(t *testing.T) {
+	if d := DefaultStewardOptions(StewardInThreads, ""); d.Auto {
+		t.Error("auto on with steward_auto unset")
+	}
+	if d := DefaultStewardOptions(StewardInThreads, "shadow"); !d.Auto {
+		t.Error("auto off with steward_auto shadow")
+	}
+	off := StewardInstructions(StewardOptions{Mode: StewardInThreads}, 2)
+	if strings.Contains(off, "auto") || !strings.Contains(off, "start with DO, ASK or GOAL") {
+		t.Errorf("auto offered without the option:\n%s", off)
+	}
+	on := StewardInstructions(StewardOptions{Mode: StewardInThreads, Auto: true}, 2)
+	for _, want := range []string{"  auto — ", "start with DO, ASK, GOAL or AUTO", "buys nothing", "If you are unsure, it is a do"} {
+		if !strings.Contains(on, want) {
+			t.Errorf("auto instructions lack %q", want)
+		}
+	}
+	for s, want := range map[store.Suggestion]string{
+		{Evidence: "AUTO. x", Status: store.SuggestionDone, DecidedBy: store.DecidedByAuto}:        "you did it without asking",
+		{Evidence: "AUTO. x", Status: store.SuggestionWithdrawn, DecidedBy: store.DecidedByShadow}: "shadow",
+		{Evidence: "DO. x", Status: store.SuggestionDone}:                                          "they said yes",
+	} {
+		if got := stewardOutcome(s); !strings.Contains(got, want) {
+			t.Errorf("stewardOutcome(%s by %q) = %q, want %q", s.Status, s.DecidedBy, got, want)
 		}
 	}
 }

@@ -71,6 +71,7 @@ type Server struct {
 	projectHomeRefresh func(chatID int64)
 	ownerChatID        int64
 	stewardInThreads   bool
+	stewardAuto        string
 	quietStart         int
 	quietEnd           int
 	goalJudge          GoalJudgeFunc
@@ -118,6 +119,9 @@ type Config struct {
 	// StewardInThreads addresses steward proposals to their project's chat
 	// and thread (scheduler.project_steward "on") instead of the owner.
 	StewardInThreads bool
+	// StewardAuto is scheduler.steward_auto: "shadow" or "on" accept auto
+	// steward proposals (docs/DESIGN-STEWARD-AUTO.md); anything else refuses them.
+	StewardAuto string
 	// QuietHourStart/End are the scheduler's quiet hours (local hours); a
 	// goal schedule may not fire inside them. Equal values mean none.
 	QuietHourStart, QuietHourEnd int
@@ -187,6 +191,7 @@ func New(cfg Config) *Server {
 		agentName:          cfg.AgentName,
 		ownerChatID:        cfg.OwnerChatID,
 		stewardInThreads:   cfg.StewardInThreads,
+		stewardAuto:        cfg.StewardAuto,
 		quietStart:         cfg.QuietHourStart,
 		quietEnd:           cfg.QuietHourEnd,
 		goalJudge:          cfg.GoalJudge,

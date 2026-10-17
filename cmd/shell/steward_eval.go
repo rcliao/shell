@@ -60,7 +60,7 @@ func newStewardEvalCmd() *cobra.Command {
 	var baseline bool
 	cmd := &cobra.Command{
 		Use:   "eval",
-		Short: "Generate steward proposals per prompt variant and grade them (new / agent_led / useful / concrete / grounded / format)",
+		Short: "Generate steward proposals per prompt variant and grade them (new / agent_led / useful / concrete / grounded / low_risk / format)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := loadConfigFrom(configFlag)
 			agent := cfg.Agent.Name
@@ -117,7 +117,7 @@ func newStewardEvalCmd() *cobra.Command {
 				names := strings.Split(variantsFlag, ",")
 				for _, v := range names {
 					if _, ok := variants[v]; !ok {
-						return fmt.Errorf("unknown variant %q (base, a, b, c)", v)
+						return fmt.Errorf("unknown variant %q (base, a, b, c, d)", v)
 					}
 				}
 				for _, p := range projects {
@@ -199,7 +199,7 @@ func newStewardEvalCmd() *cobra.Command {
 							goto done
 						}
 					}
-					c.Format = stewardeval.FormatCheck(c.Proposal.Change, p.Lang)
+					c.Format = stewardeval.FormatCheck(c.Proposal.Kind, c.Proposal.Change, p.Lang)
 					{
 						in := stewardeval.JudgeInput{Project: p, Doc: doc, At: c.At, P: c.Proposal}
 						var err error
@@ -251,7 +251,7 @@ func newStewardEvalCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&configFlag, "config", "", "agent config path (e.g. ~/.shell/agents/<agent>/config.json)")
-	cmd.Flags().StringVar(&variantsFlag, "variants", "base,a,b", "prompt variants to compare (base, a, b, c)")
+	cmd.Flags().StringVar(&variantsFlag, "variants", "base,a,b", "prompt variants to compare (base, a, b, c, d)")
 	cmd.Flags().StringVar(&only, "project", "", "only this project slug")
 	cmd.Flags().StringVar(&genModel, "gen-model", "", "generator model (default: the agent's claude.model)")
 	cmd.Flags().StringVar(&judgeModel, "judge-model", "claude-sonnet-5-5", "judge model")
@@ -357,14 +357,14 @@ func printStewardTable(w *os.File, cells []*evalCell) {
 		}
 		return fmt.Sprintf("%d%%", a*100/b)
 	}
-	fmt.Fprintf(w, "%-7s %5s %4s %4s %-11s", "variant", "cells", "err", "none", "do/ask/goal")
+	fmt.Fprintf(w, "%-7s %5s %4s %4s %-14s", "variant", "cells", "err", "none", "do/ask/goal/au")
 	for _, k := range stewardeval.Checks {
 		fmt.Fprintf(w, " %9s", k)
 	}
 	fmt.Fprintf(w, " %7s %7s %7s\n", "format", "all", "cost")
 	for _, v := range names {
 		r := rows[v]
-		fmt.Fprintf(w, "%-7s %5d %4d %4d %-11s", v, r.n, r.errs, r.none, fmt.Sprintf("%d/%d/%d", r.kinds["do"], r.kinds["ask"], r.kinds["goal"]))
+		fmt.Fprintf(w, "%-7s %5d %4d %4d %-14s", v, r.n, r.errs, r.none, fmt.Sprintf("%d/%d/%d/%d", r.kinds["do"], r.kinds["ask"], r.kinds["goal"], r.kinds["auto"]))
 		for _, k := range stewardeval.Checks {
 			fmt.Fprintf(w, " %9s", pct(r.pass[k], r.graded))
 		}

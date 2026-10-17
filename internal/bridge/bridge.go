@@ -168,6 +168,7 @@ type Bridge struct {
 	// false (default) = block included.
 	lessonToActionDisabled bool
 	stewardMode            string // scheduler.project_steward: "", "off", "shadow" or "on"
+	stewardAuto            string // scheduler.steward_auto: "", "off", "shadow" or "on"
 }
 
 func New(proc process.Agent, store *store.Store, mem *memory.Memory, pl *planner.Planner, useWorktree bool, repoDir string, reactionMap map[string]string, tunnelMgr *tunnel.Manager, pmMgr *pm.Manager, skills *skill.Registry) *Bridge {

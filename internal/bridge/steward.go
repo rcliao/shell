@@ -42,6 +42,11 @@ func (b *Bridge) StewardOn() bool {
 // StewardMode returns the configured steward mode.
 func (b *Bridge) StewardMode() string { return b.stewardMode }
 
+// SetStewardAuto sets the auto mode from config (scheduler.steward_auto):
+// "shadow" offers the auto kind and reports what would run to the owner,
+// "on" runs it; anything else leaves it out of the prompt.
+func (b *Bridge) SetStewardAuto(mode string) { b.stewardAuto = strings.TrimSpace(mode) }
+
 // StewardOptions picks the optional parts of the steward prompt. The eval
 // (docs/DESIGN-STEWARD-EVAL.md) compares them; production renders
 // DefaultStewardOptions.
@@ -58,15 +63,20 @@ type StewardOptions struct {
 	SelfCheck bool
 	// MaxChars, when set, caps the length of change.
 	MaxChars int
+	// Auto offers the auto kind: a low-risk do the agent runs right after
+	// the beat without asking, and reports (docs/DESIGN-STEWARD-AUTO.md).
+	Auto bool
 	// IgnoreOpen drops the "open proposal, skip" hold (eval only: it runs a
 	// beat as if the hold had expired).
 	IgnoreOpen bool
 }
 
 // DefaultStewardOptions is what deep beats render: the variant that won the
-// 2026-10-16 eval (docs/DESIGN-STEWARD-EVAL.md, Results).
-func DefaultStewardOptions(mode string) StewardOptions {
-	return StewardOptions{Mode: mode, History: true, Capabilities: true, SelfCheck: true, MaxChars: StewardMaxChars}
+// 2026-10-16 eval (docs/DESIGN-STEWARD-EVAL.md, Results), plus the auto kind
+// when auto (scheduler.steward_auto) is "shadow" or "on".
+func DefaultStewardOptions(mode, auto string) StewardOptions {
+	return StewardOptions{Mode: mode, History: true, Capabilities: true, SelfCheck: true, MaxChars: StewardMaxChars,
+		Auto: auto == StewardShadow || auto == StewardInThreads}
 }
 
 // StewardMaxChars caps a proposal's change, the text the family reads.
@@ -86,7 +96,7 @@ func (b *Bridge) buildStewardBlock(now time.Time) string {
 	if err != nil {
 		return ""
 	}
-	opts := DefaultStewardOptions(b.stewardMode)
+	opts := DefaultStewardOptions(b.stewardMode, b.stewardAuto)
 	var sb strings.Builder
 	n := 0
 	for _, p := range projects {
@@ -175,6 +185,14 @@ func StewardEntry(st *store.Store, p store.Project, doc string, now time.Time, o
 
 // stewardOutcome says how an earlier proposal ended, for the history lines.
 func stewardOutcome(s store.Suggestion) string {
+	if store.StewardKind(s.Evidence) == "auto" {
+		switch s.DecidedBy {
+		case store.DecidedByAuto:
+			return "you did it without asking and reported"
+		case store.DecidedByShadow:
+			return "auto, shadow: only the owner saw it; not done"
+		}
+	}
 	switch s.Status {
 	case store.SuggestionProposed, store.SuggestionDelivered:
 		return "no answer"
@@ -199,16 +217,21 @@ func StewardInstructions(o StewardOptions, max int) string {
 	if o.Mode == StewardInThreads {
 		audience = "each project's own thread, where the people of that project read and answer it"
 	}
+	autoKind, kindWords := "", "DO, ASK or GOAL"
+	if o.Auto {
+		autoKind = "  auto — a do so safe you need no yes (rules below): it runs in the project's thread right after this beat and the family gets the result, not a question. change is the task: what you will do and what they get, in the project's language, no question.\n"
+		kindWords = "DO, ASK, GOAL or AUTO"
+	}
 	var out strings.Builder
 	fmt.Fprintf(&out, `Pick the one or two projects where a next step would matter most to the family (a goal not progressing, a decision stuck, a deadline, a thread gone quiet). Read a doc with the project skill's doc-read if the lines above are not enough. For each, file ONE proposal with shell_suggestion(action="create", source="steward", project="<slug>", title=…, evidence=…, change=…):
 - change: what the family reads. Write it in the project's language (lang above), to the people of that project, in at most 2 short sentences: the next step and why now, ending with a yes/no question they can answer in one word (好 / 不用, or yes / no). Kinds:
   do — "I'll <do X> so you get <Y>. 要我做嗎？"
   ask — the one question, with your recommendation: "<question>? 我建議 <answer>, 因為 <one reason>."
   goal — "I'll <keep doing X> every <cadence> until <done check>. 要開始嗎？"
-  No labels, ids, phone numbers, emails or links in change.
+%s  No labels, ids, phone numbers, emails or links in change.
 - title: a few words in the same language, no slug.
-- evidence: for the owner's ledger, not the family: start with DO, ASK or GOAL, then what you saw in the doc or thread that makes this the next step. Details and links go here.
-`)
+- evidence: for the owner's ledger, not the family: start with %s, then what you saw in the doc or thread that makes this the next step. Details and links go here.
+`, autoKind, kindWords)
 	if o.History {
 		out.WriteString(stewardHistoryRule)
 	}
@@ -217,6 +240,9 @@ func StewardInstructions(o StewardOptions, max int) string {
 	}
 	if o.SelfCheck {
 		out.WriteString(stewardSelfCheck)
+	}
+	if o.Auto {
+		out.WriteString(stewardAutoRule)
 	}
 	if o.MaxChars > 0 {
 		fmt.Fprintf(&out, "Keep change under %d characters; the reason it matters can be one clause.\n", o.MaxChars)
@@ -232,6 +258,9 @@ const stewardHistoryRule = `The "asked" lines are what you already put to the fa
 `
 
 const stewardCapabilities = `What you can do on your own once they say yes: research on the web, check prices, dates and availability, use a browser session (up to the payment or submit step), draft Google Docs and Sheets, draft emails and calendar events (sending still needs their yes), and run a goal schedule that keeps working on something every few days until a done check is met. Prefer do and goal: the family's one-word yes should be all you need. Use ask only for what only they can decide (money, taste, a date they commit to, consent), and then recommend an answer. A project with no open decision whose 目標 is not met usually wants a do or a goal.
+`
+
+const stewardAutoRule = `Use auto instead of do when the step is all of: free (buys nothing, starts no paid service); private (sends, emails, posts or submits nothing to anyone, and contacts no business or person; your report in the project's thread is the only message); undoable (books, cancels, deletes or edits nothing the family already has; a new draft doc or sheet is fine); one sitting (not a recurring schedule); and nothing the family turned down before. Research, price and date checks, comparisons and drafts usually qualify. If you are unsure, it is a do. Auto is for steps the family would obviously want; at most one auto per project a week runs.
 `
 
 const stewardSelfCheck = `Before filing, check each proposal and rewrite or drop it if one fails: it is not something already asked; after a one-word yes you can take the next step yourself; it says what the family gets; every fact in change is in the doc or thread; change is at most 2 sentences and ends in a yes/no question.
