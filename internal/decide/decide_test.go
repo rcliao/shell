@@ -30,7 +30,7 @@ func TestJevAskRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotAuth != "Bearer k-test" || gotBody["model"] != "jev-latest" {
+	if gotAuth != "Bearer k-test" || gotBody["model"] != DefaultModel {
 		t.Errorf("auth/model = %q / %v", gotAuth, gotBody["model"])
 	}
 	if a := res.Answers["which_project"]; a.Choice != "japan" || a.Confidence != 0.9 || a.Probabilities["japan"] != 0.93 {
@@ -53,7 +53,7 @@ func TestJevErrors(t *testing.T) {
 	if !errors.As(err, &ae) || ae.Status != 429 || !ae.Retryable {
 		t.Errorf("want retryable 429 APIError, got %v", err)
 	}
-	if _, err := NewJev(func() string { return "" }).Ask(context.Background(), "s", nil); err == nil {
+	if _, err := NewJev(func() string { return "" }, "").Ask(context.Background(), "s", nil); err == nil {
 		t.Error("no key must be an error, not a request")
 	}
 }
@@ -202,5 +202,26 @@ func TestJevRedactsKeyFromErrorBodies(t *testing.T) {
 	_, err := j.Ask(context.Background(), "s", map[string]Question{"q": {Type: "noul", Instructions: "x"}})
 	if err == nil || strings.Contains(err.Error(), "verysecret") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Errorf("key leaked into the error: %v", err)
+	}
+}
+
+// route.jev_model reaches the wire, so switching back is a config edit.
+func TestJevModelOverride(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Write([]byte(`{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.5}}}`))
+	}))
+	defer srv.Close()
+	j := NewJev(func() string { return "k" }, "jev-1.13.0")
+	j.httpc, j.url = srv.Client(), srv.URL
+	if _, err := j.Ask(context.Background(), "s", map[string]Question{"q": {Type: "noul", Instructions: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["model"] != "jev-1.13.0" || j.Model() != "jev-1.13.0" {
+		t.Errorf("model = %v / %s, want the override", gotBody["model"], j.Model())
+	}
+	if m := NewJev(nil, "").Model(); m != DefaultModel {
+		t.Errorf("empty model = %s, want %s", m, DefaultModel)
 	}
 }

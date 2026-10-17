@@ -64,8 +64,11 @@ type Decider interface {
 }
 
 const (
-	jevURL       = "https://api.typesafe.ai/v1/systemone"
-	jevModel     = "jev-latest"
+	jevURL = "https://api.typesafe.ai/v1/systemone"
+	// DefaultModel is a pinned version, not an alias: an alias moves when
+	// TypeSafe ships, changing answers with no change here. Override with
+	// route.jev_model in config; switching back is a config edit.
+	DefaultModel = "jev-1.14.0"
 	jevKeyEnv    = "TYPESAFE_API_KEY"
 	jevMaxChoice = 255
 )
@@ -75,16 +78,26 @@ type Jev struct {
 	httpc *http.Client
 	url   string
 	key   func() string
+	model string
 }
 
 // NewJev takes the key resolver the daemon uses for every other secret
 // (the encrypted store, then the environment), so the key lives where the
 // Notion and Telegram tokens live. Resolved at call time, never cached.
-func NewJev(key func() string) *Jev {
+// model is the Jev version to ask; "" means DefaultModel.
+func NewJev(key func() string, model string) *Jev {
 	if key == nil {
 		key = func() string { return os.Getenv(jevKeyEnv) }
 	}
-	return &Jev{httpc: &http.Client{Timeout: 10 * time.Second}, url: jevURL, key: key}
+	return &Jev{httpc: &http.Client{Timeout: 10 * time.Second}, url: jevURL, key: key, model: model}
+}
+
+// Model is the model id sent on each request.
+func (j *Jev) Model() string {
+	if j.model != "" {
+		return j.model
+	}
+	return DefaultModel
 }
 
 // KeyName is the secret / environment variable the key is read from.
@@ -117,7 +130,7 @@ func (j *Jev) Ask(ctx context.Context, state any, questions map[string]Question)
 			return Result{}, fmt.Errorf("jev: question %q has %d options, max %d", id, len(q.Criteria), jevMaxChoice)
 		}
 	}
-	body, err := json.Marshal(map[string]any{"state": state, "model": jevModel, "questions": questions})
+	body, err := json.Marshal(map[string]any{"state": state, "model": j.Model(), "questions": questions})
 	if err != nil {
 		return Result{}, fmt.Errorf("jev: encode: %w", err)
 	}

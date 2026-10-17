@@ -52,6 +52,10 @@ type RouteConfig struct {
 	StickyThreshold float64 `json:"sticky_threshold"`
 	// JudgeModel labels messages for scoring (shell route judge). Default Opus.
 	JudgeModel string `json:"judge_model"`
+	// JevModel is the TypeSafe Jev version every Jev caller asks (shadow
+	// router, lanes, A2A gate, replay). "" = decide.DefaultModel. Use a
+	// versioned id (jev-1.13.0), not the jev-latest alias.
+	JevModel string `json:"jev_model"`
 	// LaneChats turns lanes on (R1): chat id → chat whose active projects
 	// are its lanes (usually itself; a test chat can borrow another's).
 	// Empty = lanes off everywhere.
