@@ -3,9 +3,12 @@ package rpc
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rcliao/shell/internal/store"
 )
@@ -174,4 +177,71 @@ func mustProposed(t *testing.T, st *store.Store) []store.Suggestion {
 		t.Fatal(err)
 	}
 	return list
+}
+
+// Auto steward proposals are refused unless auto is on, after a recent "no"
+// in the project, or when the project already had one this week (shadow
+// included); each refusal points the agent at filing a do instead.
+func TestSuggestionStewardAuto(t *testing.T) {
+	s, st := newProjectTestServer(t)
+	s.stewardInThreads = true
+	for _, slug := range []string{"garden", "trip"} {
+		if _, err := st.CreateProject(store.Project{Slug: slug, Title: slug, ChatID: -100200300, MessageThreadID: 77}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	auto := func(project string) (int, map[string]any) {
+		return postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "project": project, "title": "t", "change": "我查三家價格。", "evidence": "AUTO. e"})
+	}
+	if code, out := auto("garden"); code != http.StatusConflict || !strings.Contains(fmt.Sprint(out), "DO") {
+		t.Fatalf("auto while off = %d %v, want 409 pointing at DO", code, out)
+	}
+	s.stewardAuto = "shadow"
+	code, out := auto("garden")
+	if code != http.StatusOK {
+		t.Fatalf("auto in shadow = %d %v", code, out)
+	}
+	id := int64(out["id"].(float64))
+	st.MarkSuggestionsDelivered([]int64{id})
+	st.DecideSuggestion(id, store.SuggestionWithdrawn, store.DecidedByShadow, "")
+	if code, out := auto("garden"); code != http.StatusConflict || !strings.Contains(fmt.Sprint(out), "this week") {
+		t.Errorf("second auto this week = %d %v, want 409", code, out)
+	}
+	// A do is still fine there.
+	if code, _ := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "project": "garden", "title": "t", "change": "要我做嗎？", "evidence": "DO. e"}); code != http.StatusOK {
+		t.Errorf("do after an auto = %d, want 200", code)
+	}
+
+	// trip: the family said no to something there, so nothing runs unasked.
+	s.stewardAuto = "on"
+	no, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "trip", Audience: store.ChatAudience(-100200300), Title: "t", Evidence: "DO. e", Change: "c"})
+	st.MarkSuggestionsDelivered([]int64{no})
+	st.DecideSuggestion(no, store.SuggestionDeclined, "family", "不用")
+	if code, out := auto("trip"); code != http.StatusConflict || !strings.Contains(fmt.Sprint(out), "said no") {
+		t.Errorf("auto after a no = %d %v, want 409", code, out)
+	}
+}
+
+// The decline window runs from the decision, not the filing; and an auto
+// proposal does not withdraw the project's owner-only rows.
+func TestSuggestionStewardAutoDeclineAndReplace(t *testing.T) {
+	s, st := newProjectTestServer(t)
+	s.stewardInThreads, s.stewardAuto = true, "on"
+	st.CreateProject(store.Project{Slug: "garden", Title: "garden", ChatID: -100200300, MessageThreadID: 77})
+	owner, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden", Audience: "owner", Title: "o", Evidence: "DO. e", Change: "c"})
+	st.MarkSuggestionsDelivered([]int64{owner})
+	code, out := postSuggestion(t, s, map[string]any{"action": "create", "source": "steward", "project": "garden", "title": "t", "change": "我查價格。", "evidence": "AUTO. e"})
+	if code != http.StatusOK {
+		t.Fatalf("auto = %d %v", code, out)
+	}
+	if g, _ := st.GetSuggestion(owner); g.Status != store.SuggestionDelivered {
+		t.Errorf("owner-only row after an auto = %s, want untouched", g.Status)
+	}
+	if d, _ := st.StewardDeclinedSince("garden", time.Now().Add(-time.Hour)); d != nil {
+		t.Fatalf("declined = %+v, want none", d)
+	}
+	st.DecideSuggestion(owner, store.SuggestionDeclined, "owner", "")
+	if d, _ := st.StewardDeclinedSince("garden", time.Now().Add(-time.Hour)); d == nil || d.ID != owner {
+		t.Errorf("declined since = %+v, want #%d", d, owner)
+	}
 }

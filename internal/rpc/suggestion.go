@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/rcliao/shell/internal/store"
 )
@@ -34,6 +35,42 @@ type SuggestionRequest struct {
 	// Project is the slug a steward proposal is for (required with source
 	// "steward"); it places the proposal in that project's thread.
 	Project string `json:"project"`
+}
+
+// Auto steward guardrails (docs/DESIGN-STEWARD-AUTO.md), enforced here and
+// not only in the prompt.
+const (
+	// stewardAutoWindow allows one auto step per project in this window,
+	// shadow ones included, so shadow shows what "on" would do.
+	stewardAutoWindow = 7 * 24 * time.Hour
+	// stewardDeclineWindow: after the family said no to a steward proposal
+	// in a project, nothing there runs without asking for this long.
+	stewardDeclineWindow = 30 * 24 * time.Hour
+)
+
+// autoRefusal says why an auto proposal for slug may not be filed now, or ""
+// when it may. Each refusal tells the agent to file it as a do instead.
+func (s *Server) autoRefusal(slug string, now time.Time) string {
+	if s.stewardAuto != "shadow" && s.stewardAuto != "on" {
+		return "auto is off for this agent; file it as DO (a yes/no proposal) instead"
+	}
+	declined, err := s.store.StewardDeclinedSince(slug, now.Add(-stewardDeclineWindow))
+	if err != nil {
+		return "could not check this project's earlier proposals; file it as DO instead"
+	}
+	if declined != nil {
+		return fmt.Sprintf("the family said no to proposal #%d in this project within 30 days; file it as DO (a yes/no proposal) instead", declined.ID)
+	}
+	past, err := s.store.StewardForProject(slug, now.Add(-stewardAutoWindow), now.Add(time.Second))
+	if err != nil {
+		return "could not check this project's earlier proposals; file it as DO instead"
+	}
+	for _, p := range past {
+		if store.StewardKind(p.Evidence) == "auto" {
+			return fmt.Sprintf("auto proposal #%d already ran (or was shadowed) in this project this week; file this one as DO instead", p.ID)
+		}
+	}
+	return ""
 }
 
 // stewardMaxOpen caps undelivered steward proposals; it matches
@@ -88,6 +125,12 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, fmt.Sprintf("project %s already has open steward proposal #%d; wait for its answer", p.Slug, open[0].ID))
 				return
 			}
+			if store.StewardKind(req.Evidence) == "auto" {
+				if msg := s.autoRefusal(p.Slug, time.Now()); msg != "" {
+					writeError(w, http.StatusConflict, msg)
+					return
+				}
+			}
 			sg.Source = req.Source
 			sg.Project = p.Slug
 			reaches = "the owner after this heartbeat"
@@ -103,7 +146,7 @@ func (s *Server) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 		// A thread proposal replaces the project's owner-only (shadow) ones:
 		// the family answers it, so the owner's copies are withdrawn.
 		var replaced []store.Suggestion
-		if sg.Source == store.SuggestionSourceSteward && sg.Audience != "owner" && sg.Audience != "" {
+		if sg.Source == store.SuggestionSourceSteward && sg.Audience != "owner" && sg.Audience != "" && store.StewardKind(sg.Evidence) != "auto" {
 			replaced, _ = s.store.OwnerOnlyStewardFor(sg.Project)
 		}
 		id, err := s.store.CreateSuggestion(sg)

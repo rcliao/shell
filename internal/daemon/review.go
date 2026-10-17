@@ -549,21 +549,39 @@ func noStageEvidence(st *store.Store, exclude map[int64]bool) string {
 
 // stewardEvidence counts the week's steward proposals by outcome and lists
 // each one, so the agent sees which kinds of asks the family takes up
-// (docs/DESIGN-AGENT-LOOPS.md step 6).
+// (docs/DESIGN-AGENT-LOOPS.md step 6). Auto ones (docs/DESIGN-STEWARD-AUTO.md)
+// asked nobody, so they are counted apart and stay out of the answer rate.
 func stewardEvidence(st *store.Store, since time.Time) string {
 	rows, err := st.StewardSince(since)
 	if err != nil || len(rows) == 0 {
 		return ""
 	}
-	counts := map[string]int{}
+	counts, autos := map[string]int{}, map[string]int{}
+	asked := 0
 	var lines []string
 	for _, r := range rows {
-		counts[r.Status]++
+		kind := ""
+		if store.StewardKind(r.Evidence) == "auto" {
+			kind = "auto "
+			switch {
+			case r.DecidedBy == store.DecidedByShadow:
+				autos["shadow"]++
+			case r.Status == store.SuggestionDone:
+				autos["done"]++
+			case r.Status == store.SuggestionWithdrawn:
+				autos["dropped"]++
+			default:
+				autos["waiting"]++
+			}
+		} else {
+			counts[r.Status]++
+			asked++
+		}
 		where := r.Project
 		if where == "" {
 			where = "owner DM"
 		}
-		line := fmt.Sprintf("- #%d [%s] %s: %s", r.ID, r.Status, where, oneLine(r.Title))
+		line := fmt.Sprintf("- #%d [%s%s] %s: %s", r.ID, kind, r.Status, where, oneLine(r.Title))
 		if r.DecidedBy != "" {
 			line += " (by " + r.DecidedBy
 			if r.Note != "" {
@@ -574,10 +592,14 @@ func stewardEvidence(st *store.Store, since time.Time) string {
 		lines = append(lines, line)
 	}
 	answered := counts[store.SuggestionAccepted] + counts[store.SuggestionDone] + counts[store.SuggestionDeclined]
-	head := fmt.Sprintf("%d filed: %d accepted or done, %d declined, %d withdrawn, %d still waiting (%d of %d answered).",
-		len(rows), counts[store.SuggestionAccepted]+counts[store.SuggestionDone], counts[store.SuggestionDeclined],
+	head := fmt.Sprintf("%d asked: %d accepted or done, %d declined, %d withdrawn, %d still waiting (%d of %d answered).",
+		asked, counts[store.SuggestionAccepted]+counts[store.SuggestionDone], counts[store.SuggestionDeclined],
 		counts[store.SuggestionWithdrawn], counts[store.SuggestionProposed]+counts[store.SuggestionDelivered],
-		answered, len(rows)-counts[store.SuggestionWithdrawn])
+		answered, asked-counts[store.SuggestionWithdrawn])
+	if n := len(rows) - asked; n > 0 {
+		head += fmt.Sprintf("\n%d auto (done without asking): %d done and reported, %d dropped by their turn, %d shadow (owner only), %d waiting to run.",
+			n, autos["done"], autos["dropped"], autos["shadow"], autos["waiting"])
+	}
 	return head + "\n" + strings.Join(lines, "\n")
 }
 

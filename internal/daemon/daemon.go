@@ -910,6 +910,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		AgentName:          cfg.Agent.Name,
 		OwnerChatID:        cfg.Agent.OwnerChatID,
 		StewardInThreads:   cfg.Scheduler.ProjectSteward == bridge.StewardInThreads,
+		StewardAuto:        cfg.Scheduler.StewardAuto,
 		QuietHourStart:     cfg.Scheduler.QuietHourStart,
 		QuietHourEnd:       cfg.Scheduler.QuietHourEnd,
 		GoalJudge:          goalJudge(st, proc.ChildEnv),
@@ -991,8 +992,16 @@ func New(cfg config.Config) (*Daemon, error) {
 			// Project steward: send this beat's proposals to their project
 			// threads ("on") or the owner ("shadow").
 			if strings.HasPrefix(msg, "[Heartbeat:deep]") && br.StewardOn() {
-				n, err := deliverSteward(st, agentName, cfg.Agent.OwnerChatID, func(chatID, threadID int64, text string) error {
+				autoOn := br.StewardMode() == bridge.StewardInThreads && cfg.Scheduler.StewardAuto == bridge.StewardInThreads
+				n, err := deliverSteward(st, agentName, cfg.Agent.OwnerChatID, autoOn, func(chatID, threadID int64, text string) error {
 					return tgTransport.NotifyButtons(chatID, threadID, text, nil)
+				}, func(s store.Suggestion) error {
+					p, err := st.GetProjectBySlug(s.Project)
+					if err != nil || p == nil {
+						return fmt.Errorf("no project %q: %v", s.Project, err)
+					}
+					_, err = project.EnqueueStewardAuto(st, *p, s.ID, time.Now())
+					return err
 				})
 				if err != nil {
 					slog.Warn("steward: delivery failed", "error", err)
@@ -1157,6 +1166,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		}
 		br.SetLessonToActionDisabled(cfg.Scheduler.LessonToActionDisabled)
 		br.SetProjectSteward(cfg.Scheduler.ProjectSteward)
+		br.SetStewardAuto(cfg.Scheduler.StewardAuto)
 		slog.Info("scheduler initialized",
 			"timezone", cfg.Scheduler.Timezone,
 			"quiet_hours", fmt.Sprintf("%d:00-%d:00", cfg.Scheduler.QuietHourStart, cfg.Scheduler.QuietHourEnd),
@@ -1201,6 +1211,8 @@ func New(cfg config.Config) (*Daemon, error) {
 		wireProjectEvents(sched, projectResearchDeps{
 			store:        st,
 			workspaceDir: workspaceDir,
+			stewardAutoOn: cfg.Scheduler.ProjectSteward == bridge.StewardInThreads &&
+				cfg.Scheduler.StewardAuto == bridge.StewardInThreads,
 			runTurn: func(ctx context.Context, chatID, threadID int64, prompt string) (string, error) {
 				resp, err := syntheticTurn(ctx, br, chatID, threadID, prompt, bridge.ProjectTurnSender)
 				if err != nil {

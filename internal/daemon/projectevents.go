@@ -54,6 +54,9 @@ type projectResearchDeps struct {
 	// updateOpener edits a project post's first message (its live summary)
 	// after a doc write that bypasses the RPC; nil = no places.
 	updateOpener project.OpenerPlaces
+	// stewardAutoOn is steward_auto "on" with the steward "on": an auto
+	// step queued before auto was turned off is withdrawn, not run.
+	stewardAutoOn bool
 	// agentName says which agent this daemon is: owner-only work on a
 	// shared doc (research, the post summary) runs on the owner alone.
 	agentName string
@@ -98,6 +101,8 @@ func (d projectResearchDeps) handleProjectEvent(ctx context.Context, t scheduler
 		return d.runNotesFold(ctx, p)
 	case project.EventGoalDue:
 		return d.runGoal(ctx, p)
+	case project.EventStewardAuto:
+		return d.runStewardAuto(ctx, p)
 	default:
 		// A future producer emitting an event this build does not know is not
 		// an error worth retrying — record it and move on.

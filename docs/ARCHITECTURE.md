@@ -708,6 +708,20 @@ never hold a project: in `"on"` mode the listing names them as unseen by the
 family, and filing a thread proposal for that project withdraws them. The
 weekly chat retro ignores steward rows.
 
+**Steward auto** (`scheduler.steward_auto`: `"on"` or `"shadow"`, off by
+default; design `docs/DESIGN-STEWARD-AUTO.md`). The steward may file a
+low-risk step as `AUTO` (evidence's first word): free, private, undoable,
+one sitting, and nothing the family declined. Such a step is done and
+reported, not asked about. The RPC refuses auto when it is off, within 30
+days of a declined steward proposal in the project, or when the project
+already had one in the last 7 days. With auto `"on"` (and the steward
+`"on"`), the daemon enqueues `project.event{steward.auto}`. That turn runs
+the step in the project's thread, posts what it did with one yes/no next
+step, and closes the row done by `auto`; `[noop]` withdraws it. Otherwise
+the owner's digest says "would do without asking" and the row is withdrawn
+by `shadow`. The weekly review counts auto rows apart from the family's
+answers.
+
 Quiet hours (default 10 PM–7 AM) suppress heartbeat firing.
 
 ## Scheduler
@@ -838,7 +852,7 @@ so it can propose homes; a new area needs a person's yes, a post does not.
 - doc-write refuses content that isn't a doc (`project.CheckDocShape`): a JSON envelope, doc-read's header line, or an unconfirmed cut of 75% or more (`--confirm-shrink`).
 - When a doc becomes shared and this agent has notes, a one-time `notes.fold` project event runs a quiet turn in the post's session to fold them in. While the notes file exists it is asked again whenever the doc is linked, including at every daemon start.
 - Open questions may end with `(by YYYY-MM-DD)`. The heartbeat agenda lists those due within 7 days, or overdue, at most every 3 days per item, and only to the doc's owner.
-- `shell steward eval --config <agent config>` renders the steward prompt for each owned project per variant (`--variants base,a,b,c`), has the agent's model write one proposal, checks its format in code and has a judge grade it (new / agent_led / useful / concrete / grounded). `--baseline` grades the filed proposals instead. It works on a copy of shell.db, stops at `--budget`, and writes every cell to `~/.shell/steward-eval/<ts>-<agent>/cells.jsonl`.
+- `shell steward eval --config <agent config>` renders the steward prompt for each owned project per variant (`--variants base,a,b,c,d`; d adds the auto kind), has the agent's model write one proposal, checks its format in code and has a judge grade it (new / agent_led / useful / concrete / grounded / low_risk). `--baseline` grades the filed proposals instead. It works on a copy of shell.db, stops at `--budget`, and writes every cell to `~/.shell/steward-eval/<ts>-<agent>/cells.jsonl`.
 - `shell project eval` samples replies in project posts and has the route judge grade each against the doc as it stood then (used / ignored / contradicted / reasked / na).
 
 **Keeping places current.**

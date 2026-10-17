@@ -34,13 +34,13 @@ func TestDeliverSteward(t *testing.T) {
 
 	// The thread send fails, the owner's works: only the owner's is delivered.
 	var out []sent
-	n, err := deliverSteward(st, "me", 42, func(c, th int64, text string) error {
+	n, err := deliverSteward(st, "me", 42, false, func(c, th int64, text string) error {
 		if c != 42 {
 			return errors.New("down")
 		}
 		out = append(out, sent{c, th, text})
 		return nil
-	})
+	}, nil)
 	if err == nil || n != 1 {
 		t.Fatalf("partial failure: n=%d err=%v", n, err)
 	}
@@ -53,7 +53,7 @@ func TestDeliverSteward(t *testing.T) {
 
 	// Next beat: the thread post goes out, short, with no label or evidence.
 	out = nil
-	n, err = deliverSteward(st, "me", 42, func(c, th int64, text string) error { out = append(out, sent{c, th, text}); return nil })
+	n, err = deliverSteward(st, "me", 42, false, func(c, th int64, text string) error { out = append(out, sent{c, th, text}); return nil }, nil)
 	if err != nil || n != 2 {
 		t.Fatalf("deliver: n=%d err=%v", n, err)
 	}
@@ -82,5 +82,86 @@ func TestDeliverSteward(t *testing.T) {
 	// And the chat's weekly retro neither counts nor withdraws it.
 	if got := retroOwn([]store.Suggestion{{ID: 1, Source: store.SuggestionSourceSteward}, {ID: 2, Source: "review"}}); len(got) != 1 || got[0].ID != 2 {
 		t.Errorf("retroOwn = %+v", got)
+	}
+}
+
+// An auto proposal is never posted as a question. With auto on it is queued
+// to run in its thread; otherwise the owner's digest says it would have run
+// and the row is withdrawn by "shadow", so nothing waits on it.
+func TestDeliverStewardAuto(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "shell.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.CreateProject(store.Project{Slug: "garden", Title: "Garden", ChatID: -100200300, MessageThreadID: 77})
+	auto := func() int64 {
+		id, _ := st.CreateSuggestion(store.Suggestion{Source: store.SuggestionSourceSteward, Project: "garden",
+			Audience: store.ChatAudience(-100200300), ThreadID: 77, Title: "比價", Evidence: "AUTO. three shops", Change: "我查三家番茄苗的價格，給你一張比價表。"})
+		return id
+	}
+	send := func(out *[]sent) func(c, th int64, text string) error {
+		return func(c, th int64, text string) error { *out = append(*out, sent{c, th, text}); return nil }
+	}
+
+	// Shadow: the owner sees what would run; the family sees nothing.
+	shadowID := auto()
+	var out []sent
+	var queued []int64
+	enqueue := func(s store.Suggestion) error { queued = append(queued, s.ID); return nil }
+	if n, err := deliverSteward(st, "me", 42, false, send(&out), enqueue); err != nil || n != 1 {
+		t.Fatalf("shadow: n=%d err=%v", n, err)
+	}
+	if len(queued) != 0 || len(out) != 1 || out[0].chat != 42 || !strings.Contains(out[0].text, "would do without asking") || strings.Contains(out[0].text, "Reply") {
+		t.Fatalf("shadow: queued=%v out=%+v", queued, out)
+	}
+	if g, _ := st.GetSuggestion(shadowID); g.Status != store.SuggestionWithdrawn || g.DecidedBy != store.DecidedByShadow {
+		t.Errorf("shadow row = %s by %q, want withdrawn by shadow", g.Status, g.DecidedBy)
+	}
+
+	// On: queued, marked delivered, nothing sent yet.
+	onID := auto()
+	out = nil
+	if n, err := deliverSteward(st, "me", 42, true, send(&out), enqueue); err != nil || n != 1 {
+		t.Fatalf("on: n=%d err=%v", n, err)
+	}
+	if len(out) != 0 || len(queued) != 1 || queued[0] != onID {
+		t.Fatalf("on: queued=%v out=%+v", queued, out)
+	}
+	if g, _ := st.GetSuggestion(onID); g.Status != store.SuggestionDelivered {
+		t.Errorf("on row = %s, want delivered", g.Status)
+	}
+
+	// A queue failure leaves it proposed for the next beat.
+	failID := auto()
+	if _, err := deliverSteward(st, "me", 42, true, send(&out), func(store.Suggestion) error { return errors.New("busy") }); err == nil {
+		t.Fatal("queue failure not reported")
+	}
+	if g, _ := st.GetSuggestion(failID); g.Status != store.SuggestionProposed {
+		t.Errorf("failed queue row = %s, want proposed", g.Status)
+	}
+	st.DecideSuggestion(failID, store.SuggestionWithdrawn, "test", "")
+
+	// The row is delivered by the time its turn can lease the task.
+	raceID := auto()
+	deliverSteward(st, "me", 42, true, send(&out), func(s store.Suggestion) error {
+		if g, _ := st.GetSuggestion(s.ID); g.Status != store.SuggestionProposed {
+			t.Errorf("enqueued after marking: %s", g.Status)
+		}
+		return nil
+	})
+	if g, _ := st.GetSuggestion(raceID); g.Status != store.SuggestionDelivered {
+		t.Errorf("queued row = %s, want delivered", g.Status)
+	}
+	st.DecideSuggestion(raceID, store.SuggestionWithdrawn, "test", "")
+
+	// No owner chat: a shadow step is dropped, not left proposed.
+	lone := auto()
+	out = nil
+	if _, err := deliverSteward(st, "me", 0, false, send(&out), enqueue); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := st.GetSuggestion(lone); len(out) != 0 || g.Status != store.SuggestionWithdrawn {
+		t.Errorf("no owner: sent=%d status=%s, want 0 and withdrawn", len(out), g.Status)
 	}
 }

@@ -278,6 +278,9 @@ func (b *Bridge) buildPerTurnBlocks(ctx context.Context, chatID, threadID, sessT
 	if chatID != 0 && b.store != nil {
 		if open, err := b.store.OpenThreadSuggestions(chatID, threadID, openChatSuggestionAge); err == nil {
 			for _, sg := range open {
+				if sg.Source == store.SuggestionSourceSteward && store.StewardKind(sg.Evidence) == "auto" {
+					continue // asked nobody; its own turn runs it
+				}
 				line := fmt.Sprintf("[Open suggestion #%d to this chat (%s): %s — if someone here answers it, record their answer with shell_suggestion(action=decide, id=%d, status=accepted|declined, note=their words)",
 					sg.ID, sg.DeliveredAt.Local().Format("Mon Jan 2"), sg.Title, sg.ID)
 				if sg.Source == store.SuggestionSourceSteward {

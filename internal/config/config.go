@@ -580,6 +580,12 @@ type SchedulerConfig struct {
 	// "on" = each proposal is posted in its project's own thread, where the
 	// people of that project answer it.
 	ProjectSteward string `json:"project_steward"`
+	// StewardAuto lets the steward do low-risk steps without asking
+	// (docs/DESIGN-STEWARD-AUTO.md): "" or "off" = never; "shadow" = it may
+	// file them, and the owner's DM says what would have run; "on" = each
+	// runs as a turn in its project's thread and reports there (needs
+	// project_steward "on"; otherwise it acts as "shadow").
+	StewardAuto string `json:"steward_auto"`
 	// Kill switch: V2-H47 lesson-to-action block in deep heartbeats.
 	// Default false = enabled (prompt-only feature, matches *_disabled pattern).
 	LessonToActionDisabled bool `json:"lesson_to_action_disabled"`

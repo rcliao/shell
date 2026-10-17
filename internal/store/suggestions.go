@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Suggestions and feedback (docs/DESIGN-ROUTER-AND-SUGGESTIONS.md, S0).
@@ -25,6 +26,13 @@ const (
 	SuggestionDeclined  = "declined"
 	SuggestionDone      = "done"
 	SuggestionWithdrawn = "withdrawn"
+)
+
+// Who closed an auto steward proposal (DecidedBy): the daemon ran it
+// (auto) or only reported it to the owner (shadow).
+const (
+	DecidedByAuto   = "auto"
+	DecidedByShadow = "shadow"
 )
 
 // Suggestion is one change an agent asked a human for.
@@ -313,4 +321,30 @@ func (s *Store) StewardForProject(project string, since, before time.Time) ([]Su
 	return s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
 		WHERE source = ? AND project = ? AND created_at >= ? AND created_at < ? ORDER BY id`,
 		SuggestionSourceSteward, project, since.UTC(), before.UTC())
+}
+
+// StewardDeclinedSince returns the project's newest steward proposal
+// declined since then (by decision time, whenever it was filed), or nil.
+func (s *Store) StewardDeclinedSince(project string, since time.Time) (*Suggestion, error) {
+	list, err := s.querySuggestions(`SELECT `+suggestionColumns+` FROM suggestions
+		WHERE source = ? AND project = ? AND status = ? AND decided_at >= ? ORDER BY decided_at DESC LIMIT 1`,
+		SuggestionSourceSteward, project, SuggestionDeclined, since.UTC())
+	if err != nil || len(list) == 0 {
+		return nil, err
+	}
+	return &list[0], nil
+}
+
+// StewardKind is a steward proposal's kind: the DO, ASK, GOAL or AUTO word
+// its evidence starts with, lowercased; "ask" when there is none. AUTO is a
+// do the agent runs without asking and reports (docs/DESIGN-STEWARD-AUTO.md).
+func StewardKind(evidence string) string {
+	word := strings.FieldsFunc(strings.TrimSpace(evidence), func(r rune) bool { return !unicode.IsLetter(r) })
+	if len(word) > 0 {
+		switch word[0] {
+		case "DO", "GOAL", "AUTO":
+			return strings.ToLower(word[0])
+		}
+	}
+	return "ask"
 }
