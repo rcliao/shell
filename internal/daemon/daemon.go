@@ -1236,6 +1236,7 @@ func New(cfg config.Config) (*Daemon, error) {
 		wireProjectRender(sched, projectRenderDeps{
 			store:        st,
 			workspaceDir: workspaceDir,
+			agentName:    cfg.Agent.Name,
 			renderer:     project.NewRenderer(notionClient, cfg.Notion.ProjectParentPageID),
 		})
 		// Notion comment loop (P3 Wave D): the ONE global poll schedule that

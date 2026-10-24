@@ -353,7 +353,51 @@ must be shared with the Notion integration first (page ••• menu → Connec
 	adoptCmd.Flags().BoolVar(&adoptReplace, "replace", false, "replace an existing, different export binding (prints the old one)")
 	adoptCmd.Flags().Int64Var(&adoptThread, "thread", 0, "the project's thread: Telegram forum topic or Discord thread/post id (0 = the chat itself)")
 
-	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd, adoptCmd, newProjectReportCmd(openStore), newProjectEvalCmd(openStore))
+	takeCmd := &cobra.Command{
+		Use:   "take <slug>",
+		Short: "Make the configured agent the owner of a doc it shares with the other agent",
+		Long: "The owner polls the doc's Notion page, runs its research and keeps its post summary " +
+			"(docs/DESIGN-PROJECT-WIKI.md). Run it with --config of the agent taking over.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if configFlag == "" {
+				return fmt.Errorf("--config is required: the agent taking over, e.g. ~/.shell/agents/<agent>/config.json")
+			}
+			cfg, st, err := openStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			p, err := st.GetProjectBySlug(args[0])
+			if err != nil {
+				return err
+			}
+			if p == nil {
+				return fmt.Errorf("project %q does not exist", args[0])
+			}
+			agentHome := filepath.Dir(configFlag)
+			agent := cfg.Agent.Name
+			if agent == "" {
+				agent = filepath.Base(agentHome)
+			}
+			dir, ok := project.ManagedDocDir(filepath.Join(agentHome, "workspace"), p.Slug)
+			if !ok {
+				return project.ErrNotShared
+			}
+			prev, err := project.TakeOwner(dir, agent, p.ScheduleDedupKey != "")
+			if err != nil {
+				return err
+			}
+			if prev == agent {
+				fmt.Printf("Project %s: already owner (%s)\n", p.Slug, agent)
+			} else {
+				fmt.Printf("Project %s: owner %s (was %s)\n", p.Slug, agent, prev)
+			}
+			return nil
+		},
+	}
+
+	projectCmd.AddCommand(listCmd, showCmd, archiveCmd, bindCmd, adoptCmd, takeCmd, newProjectReportCmd(openStore), newProjectEvalCmd(openStore))
 	return projectCmd
 }
 
