@@ -110,6 +110,7 @@ func NotionPageURL(p store.Project) string {
 // SyncStore is the slice of the store the renderer needs.
 type SyncStore interface {
 	UpdateProjectFields(slug string, u store.ProjectFieldUpdate) error
+	GetProjectBySlug(slug string) (*store.Project, error)
 }
 
 // Renderer owns the doc → Notion mirror for all projects. Warnings that
@@ -142,8 +143,9 @@ func (r *Renderer) warnOnce(slug, msg string, args ...any) {
 
 // SyncProjectPage brings the project's Notion page in line with docContent.
 //
-//   - No export_ref (kind empty or notion): create the page under the config
-//     parent, full render, persist export_kind/export_ref/block_map.
+//   - No export_ref (kind empty or notion): create the page under its area's
+//     Notion page (or the config parent when it has none), full render,
+//     persist export_kind/export_ref/block_map.
 //   - export_ref WITH a rendered block map: surgical re-render — only
 //     sections whose content hash changed are touched.
 //   - export_ref WITHOUT a rendered map: SKIP. We never mutate pages (or
@@ -163,11 +165,12 @@ func (r *Renderer) SyncProjectPage(ctx context.Context, st SyncStore, p *store.P
 	}
 
 	if p.ExportRef == "" {
-		if r.parent == "" {
+		parent := r.parentFor(st, p)
+		if parent == "" {
 			r.warnOnce(p.Slug, "notion render: no parent page configured (notion.project_parent_page_id), skipping page creation")
 			return nil
 		}
-		return r.createAndRender(ctx, st, p, docContent)
+		return r.createAndRender(ctx, st, p, parent, docContent)
 	}
 
 	bm := ParseBlockMap(p.BlockMap)
@@ -197,13 +200,31 @@ func (r *Renderer) SyncProjectPage(ctx context.Context, st SyncStore, p *store.P
 	return err
 }
 
-// createAndRender creates the page and renders every section.
-func (r *Renderer) createAndRender(ctx context.Context, st SyncStore, p *store.Project, doc string) error {
+// parentFor is where a new page goes: under its area's Notion page, so the
+// Notion tree mirrors area → project, or the config parent when the project
+// has no area or the area has no page yet.
+func (r *Renderer) parentFor(st SyncStore, p *store.Project) string {
+	if p.Area == "" || p.Area == p.Slug {
+		return r.parent
+	}
+	a, err := st.GetProjectBySlug(p.Area)
+	if err != nil {
+		slog.Warn("notion render: area lookup failed, using config parent", "slug", p.Slug, "area", p.Area, "error", err)
+		return r.parent
+	}
+	if a == nil || a.ExportRef == "" || (a.ExportKind != "" && a.ExportKind != "notion") {
+		return r.parent
+	}
+	return a.ExportRef
+}
+
+// createAndRender creates the page under parent and renders every section.
+func (r *Renderer) createAndRender(ctx context.Context, st SyncStore, p *store.Project, parent, doc string) error {
 	title, sections := ParseDoc(doc)
 	if title == "" {
 		title = p.Title
 	}
-	pageID, err := r.api.CreatePage(ctx, r.parent, title, p.Emoji)
+	pageID, err := r.api.CreatePage(ctx, parent, title, p.Emoji)
 	if err != nil {
 		return fmt.Errorf("create page for %q: %w", p.Slug, err)
 	}

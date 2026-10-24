@@ -795,7 +795,9 @@ it writes through the project skill (`doc-write` over RPC), each write is a
 commit in the project's own git repo (`workspace/projects/<slug>/`), and the
 commit hash is the receipt. A render task mirrors the new rev to a Notion
 page, touching only the sections whose hash changed (the `block_map` records
-section → block ids). A weekly **event** schedule fires one bounded research
+section → block ids). A new page is created under its area's page when the
+project has an area whose page exists, else under `notion.project_parent_page_id`,
+so the Notion tree reads root → area → project. A weekly **event** schedule fires one bounded research
 pass per project; the consumer runs the turn and delivers a ≤3-line delta to
 the project's chat. One shared poll job lists comments on every mapped block
 and turns each unanswered human thread into an event; the agent fixes the doc
