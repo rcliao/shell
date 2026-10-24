@@ -392,3 +392,46 @@ func TestSyncArchivedDeleteIsNotAConflict(t *testing.T) {
 		t.Fatalf("expected 1 surgical append, got %d (rebuild suspected)", got)
 	}
 }
+
+// A project in an area is created under the area's page, so Notion mirrors
+// area → project. No area, or an area without a page, falls back to the
+// config parent.
+func TestSyncCreatesPageUnderAreaPage(t *testing.T) {
+	st, _ := newSyncFixture(t)
+	ctx := context.Background()
+	api := &fakeNotion{enabled: true}
+	r := NewRenderer(api, "parent-page")
+
+	area, err := st.CreateProject(store.Project{Title: "Travel", Kind: "area", ChatID: -100200300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind, ref := "notion", "area-page"
+	if err := st.UpdateProjectFields(area.Slug, store.ProjectFieldUpdate{ExportKind: &kind, ExportRef: &ref}); err != nil {
+		t.Fatal(err)
+	}
+	bare, err := st.CreateProject(store.Project{Title: "Bare", Kind: "area", ChatID: -100200300})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct{ title, area, want string }{
+		{"In Area", area.Slug, "area-page"},
+		{"Area Without Page", bare.Slug, "parent-page"},
+		{"No Area", "", "parent-page"},
+		{"Missing Area", "no-such-area", "parent-page"},
+	}
+	for _, c := range cases {
+		p, err := st.CreateProject(store.Project{Title: c.title, Area: c.area, ChatID: -100200300})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.SyncProjectPage(ctx, st, p, sampleDoc); err != nil {
+			t.Fatal(err)
+		}
+		pg := api.pages[len(api.pages)-1]
+		if pg.parent != c.want {
+			t.Errorf("%s: parent = %q, want %q", c.title, pg.parent, c.want)
+		}
+	}
+}
