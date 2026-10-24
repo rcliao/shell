@@ -446,7 +446,16 @@ func (d projectResearchDeps) renderIfBehind(slug, dir string) {
 	if err != nil || b == nil || b.RenderedRev == head {
 		return
 	}
-	if created, err := project.EnqueueRender(d.store, slug, head); err != nil {
+	created, err := project.EnqueueRender(d.store, slug, head)
+	if err == nil && !created {
+		// The render for head ran and failed for good: its row (kept for
+		// days) would swallow the same key, so retry under this tick's key.
+		t, terr := d.store.GetTaskByIdempotencyKey(store.DeriveIdempotencyKey(project.RenderKind, slug, head))
+		if terr == nil && t != nil && t.State == store.TaskFailed {
+			created, err = project.EnqueueRenderRetry(d.store, slug, head, time.Now().UTC().Truncate(time.Hour).Format(time.RFC3339))
+		}
+	}
+	if err != nil {
 		slog.Warn("notion poll: catch-up render enqueue failed", "slug", slug, "error", err)
 	} else if created {
 		slog.Info("notion poll: page behind its doc, render queued", "slug", slug, "rendered", b.RenderedRev, "head", head)
@@ -560,7 +569,7 @@ func (d projectResearchDeps) runPageEditReconcile(ctx context.Context, p project
 	// it runs only while the page shows the doc's head — checked here, under
 	// the page lock then the doc lock, not where the event was enqueued.
 	if project.IsShared(dir) {
-		unlockPage, err := project.TryLockNotion(dir)
+		unlockPage, err := project.LockNotion(dir)
 		if err != nil {
 			return "", fmt.Errorf("page-edit %q: %w", p.Slug, err)
 		}

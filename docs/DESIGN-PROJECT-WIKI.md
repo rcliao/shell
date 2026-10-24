@@ -23,8 +23,8 @@ One doc, one page, one owner.
 1. BindingStore (owner) seeds DocBinding from its own row's page and block map the first time it loads a shared doc without one.
 2. BindingStore (any agent) overlays DocBinding on the row it loads, and rewrites the row's `export_ref` when it differs from DocBinding's `page_id`.
 3. Any agent's DocWrite commits the shared doc and enqueues a render on that agent's queue.
-4. Renderer takes `.notion.lock` without waiting, updates the bound page, and records `rendered_rev` and `rendered_at` in DocBinding.
-5. NotionPoll (owner only) sweeps the bound page, writes its watermark to DocBinding, and enqueues a render when `rendered_rev` is behind the doc's head.
+4. Renderer takes `.notion.lock` (waiting out the other daemon's render), updates the bound page, and — only if it reached Notion — records `rendered_rev` and `rendered_at` in DocBinding.
+5. NotionPoll (owner only) sweeps the bound page, writes its watermark to DocBinding, and enqueues a render when `rendered_rev` is behind the doc's head (under a fresh key if the render for head failed).
 6. EventHandlers (owner) answer a comment and mark its discussion handled in DocBinding.
 7. EventHandlers (owner) fold a page edit into the doc only if `rendered_rev` equals the doc's head when the handler runs.
 8. OwnerTake (receiving agent) rewrites OwnerFile with its own research flag; its next NotionPoll and research cover the doc.
@@ -33,7 +33,7 @@ One doc, one page, one owner.
 | thing | why |
 |---|---|
 | `post-<thread>/notion.json` `{page_id, block_map, rendered_rev, rendered_at, watermark, handled}` [NEW] | one binding per doc, readable by both daemons |
-| `post-<thread>/.notion.lock` [NEW] | one render or reconcile of the page at a time across daemons; tried, never waited on; lock order is `.notion.lock` then `.doc.lock` |
+| `post-<thread>/.notion.lock` [NEW] | one render or reconcile of the page at a time across daemons; waited on up to 6 min (longer than one render), since the queue retries with no backoff[^E7]; lock order is `.notion.lock` then `.doc.lock` |
 | `post-<thread>/.binding.lock` [NEW] | short read-modify-writes of `notion.json` (watermark, handled threads), so a long render never stalls a poll |
 | `post-<thread>/owner` `agent\n[research]` [KEEP] | OwnerTake rewrites it |
 | row `export_ref` [CHANGE] | equals DocBinding `page_id` in every agent's row |
@@ -42,7 +42,7 @@ One doc, one page, one owner.
 ## 6. Interfaces
 - `BindingStore.GetProjectBySlug(slug) → *Project` with DocBinding overlaid · errors: a malformed `notion.json` → returned; the caller skips this render or poll and never rebinds.
 - `BindingStore.UpdateProjectFields(slug, u)` → Notion fields to DocBinding, the rest to the row · errors: none beyond the store's.
-- Renderer on a shared doc · `.notion.lock` held by the other daemon → error; the task queue retries. No DocBinding and caller is not the owner → `skipped: waiting for the owner's binding` (not an error; the owner's poll catches up per step 5).
+- Renderer on a shared doc · `.notion.lock` still held after the wait → error; the owner's poll re-queues per step 5. No token → renders nothing and records nothing. No DocBinding and caller is not the owner → `skipped: waiting for the owner's binding` (not an error; the owner's poll catches up per step 5).
 - `project take <slug>` (skill, RPC) and `shell project take <slug>` (CLI, as the configured agent) → prints `owner: <agent>` · errors: not a shared doc. Already owner → prints `already owner` (not an error).
 
 ## 7. Plan
@@ -64,4 +64,5 @@ One doc, one page, one owner.
 [^E2]: The poll walks each agent's own rows · `internal/daemon/projectnotion.go:121-128` (`ListProjects(0)`, filtered on the row's `export_ref`). A comment on umbreon's copy never reaches pikamini.
 [^E3]: Page edits on shared docs are not reconciled today · `internal/daemon/projectnotion.go:500-508`: "reconciling a page that lags the doc would roll back the other agent's changes … Until renders track the doc's rev". `rendered_rev` closes this.
 [^E5]: Research follows the owner, and the owner follows research · `internal/daemon/projectevents.go:137` (`MayResearch`); `internal/project/shared.go:112` (`claimOwner`: an agent with research reclaims from an owner without it at every `LinkShared`, which runs at daemon start). All five duplicated docs: `cat ~/.shell/shared/projects/post-*/owner` → `pikamini` + `research`.
+[^E7]: No retry backoff · `internal/store/tasks.go` `FailTask` requeues with no delay; a fresh review's repro burned 3 attempts in 1.26 ms against a held lock (`TestWikiFailedRenderCaughtUpByOwnerPoll` now covers the recovery).
 [^E6]: Direct readers of the row's `export_ref` · `grep -rn "ExportRef\|NotionPageURL(" internal cmd | grep -v _test` → `bridge/project_hook.go:255`, `project/home.go:188`, `daemon/projectevents.go:178`, `rpc/project.go:499,729`, `cmd/shell/project.go:112`.

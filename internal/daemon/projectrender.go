@@ -93,7 +93,7 @@ func (d projectRenderDeps) handleProjectRender(ctx context.Context, t scheduler.
 	}
 	shared := state == project.SharedBound
 	if shared {
-		unlock, err := project.TryLockNotion(dir)
+		unlock, err := project.LockNotion(dir)
 		if err != nil {
 			return "", fmt.Errorf("render %q: %w", p.Slug, err)
 		}
@@ -110,7 +110,10 @@ func (d projectRenderDeps) handleProjectRender(ctx context.Context, t scheduler.
 	if err := d.renderer.SyncProjectPage(renderCtx, bs, proj, doc); err != nil {
 		return "", fmt.Errorf("render %q: %w", p.Slug, err)
 	}
-	if shared && proj.ExportRef != "" {
+	// Only a render that reached Notion moves rendered_rev: a no-op recorded
+	// as rendered would let a page-edit reconcile roll the doc back to a
+	// page that never showed this rev.
+	if shared && proj.ExportRef != "" && d.renderer.Enabled() {
 		if err := project.RecordRender(dir, rev); err != nil {
 			slog.Warn("project render: record rendered rev failed", "slug", p.Slug, "error", err)
 		}

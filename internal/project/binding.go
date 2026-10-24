@@ -87,8 +87,7 @@ func updateBinding(dir string, fn func(*DocBinding)) error {
 	return saveBinding(dir, *b)
 }
 
-// TryLockNotion takes the page lock without waiting: a render can take
-// minutes, and the other daemon's queue worker must not stall behind it.
+// TryLockNotion takes the page lock without waiting.
 // Lock order: the page lock, then the doc lock — never the reverse.
 func TryLockNotion(dir string) (func(), error) {
 	f, err := os.OpenFile(filepath.Join(mustEval(dir), notionLockFile), os.O_CREATE|os.O_RDWR, 0o644)
@@ -103,6 +102,26 @@ func TryLockNotion(dir string) (func(), error) {
 		return nil, err
 	}
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+// NotionLockWait bounds how long a render or reconcile waits for the other
+// daemon's. It outlasts one render (projectRenderTimeout, 5 min), so a busy
+// page is waited out rather than failed: the task queue retries a failure
+// with no backoff and would burn every attempt in milliseconds.
+var NotionLockWait = 6 * time.Minute
+
+const notionLockPoll = 250 * time.Millisecond
+
+// LockNotion takes the page lock, waiting up to NotionLockWait.
+func LockNotion(dir string) (func(), error) {
+	deadline := time.Now().Add(NotionLockWait)
+	for {
+		unlock, err := TryLockNotion(dir)
+		if !errors.Is(err, ErrNotionBusy) || time.Now().After(deadline) {
+			return unlock, err
+		}
+		time.Sleep(notionLockPoll)
+	}
 }
 
 // RecordRender notes that the page now shows rev.

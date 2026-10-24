@@ -129,6 +129,9 @@ func NewRenderer(api NotionAPI, parentPageID string) *Renderer {
 	return &Renderer{api: api, parent: parentPageID, warned: map[string]bool{}}
 }
 
+// Enabled reports whether renders reach Notion (a token is configured).
+func (r *Renderer) Enabled() bool { return r.api != nil && r.api.Enabled() }
+
 // warnOnce logs one WARN per (slug, reason) per process.
 func (r *Renderer) warnOnce(slug, msg string, args ...any) {
 	r.mu.Lock()

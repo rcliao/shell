@@ -42,6 +42,16 @@ type RenderQueue interface {
 // (kind, slug, docRev): the same rev never renders twice, however many
 // triggers fire for it (RPC doc-write + research consumer both do).
 func EnqueueRender(q RenderQueue, slug, docRev string) (created bool, err error) {
+	return enqueueRender(q, slug, docRev, store.DeriveIdempotencyKey(RenderKind, slug, docRev))
+}
+
+// EnqueueRenderRetry registers another render for a rev whose render failed
+// for good, keyed by attempt so the failed row does not swallow it.
+func EnqueueRenderRetry(q RenderQueue, slug, docRev, attempt string) (created bool, err error) {
+	return enqueueRender(q, slug, docRev, store.DeriveIdempotencyKey(RenderKind, slug, docRev, "retry", attempt))
+}
+
+func enqueueRender(q RenderQueue, slug, docRev, key string) (created bool, err error) {
 	if slug == "" || docRev == "" {
 		return false, fmt.Errorf("render enqueue needs slug and doc rev")
 	}
@@ -53,7 +63,7 @@ func EnqueueRender(q RenderQueue, slug, docRev string) (created bool, err error)
 	_, created, err = q.EnqueueTask(store.Task{
 		Kind:           RenderKind,
 		Source:         store.TaskSourceAgent,
-		IdempotencyKey: store.DeriveIdempotencyKey(RenderKind, slug, docRev),
+		IdempotencyKey: key,
 		PartitionKey:   RenderPartition(slug),
 		Payload:        string(payload),
 		ExpiresAt:      &exp,
