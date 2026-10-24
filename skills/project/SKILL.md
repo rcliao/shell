@@ -18,7 +18,10 @@ never re-derive an id.
 - `doc-write` replaces the whole doc: `doc-read` first, edit, write it all.
   A project in a post shares ONE doc with the other agent (doc-read says so):
   if doc-write answers "changed since you read it", doc-read again and redo
-  your edit on top — never write your old copy over theirs.
+  your edit on top — never write your old copy over theirs. It has one
+  Notion page, whoever writes; its owner (doc-read names it) runs research
+  and answers the page's comments. `project take <slug>` makes you the
+  owner — only when a person asks, or the owner has stopped keeping it up.
 - The doc is a working page (24 KB budget, 8 KB for `更新紀錄`): replace stale
   content instead of appending. A refused write names the section to cut;
   shrinking is always accepted.

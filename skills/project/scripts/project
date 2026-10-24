@@ -14,6 +14,7 @@ usage() {
   echo "       project move <slug> --area <area slug> [--stage <stage> --place auto --content <first message>]" >&2
   echo "       project stage <slug> --stage <stage>" >&2
   echo "       project archive <slug>" >&2
+  echo "       project take <slug>   (become the owner of a doc you share with the other agent)" >&2
   echo "       project list [--chat <id>]" >&2
   echo "       project get <slug>" >&2
   echo "       project doc-read <slug>" >&2
@@ -193,6 +194,24 @@ if r.get('message_thread_id'): print(f\"  thread: {r['message_thread_id']}\" + (
 if r.get('channel_mention'): print(f\"  channel: {r['channel_mention']}  forum: {r.get('forum_mention','')}\" + (' (created now)' if r.get('places_created') else ' (already existed)'))
 if r.get('warning'): print(f\"  WARNING: {r['warning']}\")
 if r.get('place_warning'): print(f\"  PLACE NOT CREATED: {r['place_warning']}\")
+" 2>/dev/null || printf '%s\n' "$RESP"
+    ;;
+
+  take)
+    if [ -z "$SLUG" ]; then
+      echo "take requires a slug" >&2
+      exit 1
+    fi
+    BODY=$(SLUG="$SLUG" python3 -c "
+import json, os
+print(json.dumps({'action': 'take', 'slug': os.environ['SLUG']}))
+")
+    post "$BODY"
+    printf '%s\n' "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('previous') == r['owner']: print(f\"Project {r['slug']}: already owner ({r['owner']})\")
+else: print(f\"Project {r['slug']}: owner {r['owner']} (was {r.get('previous','')})\")
 " 2>/dev/null || printf '%s\n' "$RESP"
     ;;
 

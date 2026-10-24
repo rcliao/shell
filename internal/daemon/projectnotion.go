@@ -122,10 +122,32 @@ func (d projectResearchDeps) runNotionPoll(ctx context.Context) (string, error) 
 	}
 
 	started := time.Now().UTC()
+	bs := d.bindings()
 	polled, deferred, comments, edits, failures := 0, 0, 0, 0, 0
 	for i := range projects {
 		p := &projects[i]
-		if p.Status != "active" || p.ExportKind != "notion" || p.ExportRef == "" {
+		if p.Status != "active" {
+			continue
+		}
+		// A shared doc's page is polled by its owner alone, so each comment
+		// gets one reply (docs/DESIGN-PROJECT-WIKI.md).
+		state, berr := bs.Overlay(p)
+		if berr != nil {
+			failures++
+			slog.Warn("notion poll: binding load failed", "slug", p.Slug, "error", berr)
+			continue
+		}
+		if state == project.SharedUnbound {
+			continue
+		}
+		if state == project.SharedBound {
+			dir, _ := bs.SharedDocDir(p.Slug)
+			if project.Owner(dir) != d.agentName {
+				continue
+			}
+			d.renderIfBehind(p.Slug, dir)
+		}
+		if p.ExportKind != "notion" || p.ExportRef == "" {
 			continue
 		}
 		bm := project.ParseBlockMap(p.BlockMap)
@@ -340,7 +362,7 @@ func (d projectResearchDeps) pollProject(ctx context.Context, p *store.Project, 
 		update.LastHumanActivityAt = &at
 	}
 	if update.NotionWatermark != nil || update.LastHumanActivityAt != nil {
-		if uerr := d.store.UpdateProjectFields(p.Slug, update); uerr != nil {
+		if uerr := d.bindings().UpdateProjectFields(p.Slug, update); uerr != nil {
 			slog.Warn("notion poll: project update failed", "slug", p.Slug, "error", uerr)
 		}
 	}
@@ -361,7 +383,7 @@ func (d projectResearchDeps) refreshAdoptedMap(ctx context.Context, p *store.Pro
 	if encoded == p.BlockMap {
 		return
 	}
-	if uerr := d.store.UpdateProjectFields(p.Slug, store.ProjectFieldUpdate{BlockMap: &encoded}); uerr != nil {
+	if uerr := d.bindings().UpdateProjectFields(p.Slug, store.ProjectFieldUpdate{BlockMap: &encoded}); uerr != nil {
 		slog.Warn("notion poll: adopted map update failed", "slug", p.Slug, "error", uerr)
 		return
 	}
@@ -391,6 +413,12 @@ func (d projectResearchDeps) enqueueProjectEvent(p project.EventPayload, idemKey
 // completed after the previous watermark — i.e. the page movement is our own
 // mirror write, not a human edit.
 func (d projectResearchDeps) renderExplains(p *store.Project, prev time.Time) bool {
+	// A shared doc's page may have been rendered by the other daemon, whose
+	// task is not in this store: its binding records every render.
+	if dir, ok := d.bindings().SharedDocDir(p.Slug); ok {
+		b, err := project.LoadBinding(dir)
+		return err == nil && b != nil && b.RenderedAt != nil && b.RenderedAt.After(prev.Add(-renderExplainSkew))
+	}
 	if p.DocRev == "" {
 		return false
 	}
@@ -401,6 +429,30 @@ func (d projectResearchDeps) renderExplains(p *store.Project, prev time.Time) bo
 	return t.DoneAt.After(prev.Add(-renderExplainSkew))
 }
 
+// bindings is the store as the Notion code sees it (docs/DESIGN-PROJECT-WIKI.md).
+func (d projectResearchDeps) bindings() project.BindingStore {
+	return project.BindingStore{Store: d.store, WorkspaceDir: d.workspaceDir, Agent: d.agentName}
+}
+
+// renderIfBehind enqueues a render when a shared doc moved past what its page
+// shows: a write the owner's binding did not exist for yet, or a render that
+// failed for good. Idempotent on the rev.
+func (d projectResearchDeps) renderIfBehind(slug, dir string) {
+	head, err := project.Head(dir)
+	if err != nil {
+		return
+	}
+	b, err := project.LoadBinding(dir)
+	if err != nil || b == nil || b.RenderedRev == head {
+		return
+	}
+	if created, err := project.EnqueueRender(d.store, slug, head); err != nil {
+		slog.Warn("notion poll: catch-up render enqueue failed", "slug", slug, "error", err)
+	} else if created {
+		slog.Info("notion poll: page behind its doc, render queued", "slug", slug, "rendered", b.RenderedRev, "head", head)
+	}
+}
+
 // runCommentRevision runs ONE bounded revision pass for one comment thread
 // and replies inside that thread. No Telegram delivery here by design — the
 // conversation happens in Notion (notify_policy=quiet default).
@@ -409,7 +461,10 @@ func (d projectResearchDeps) runCommentRevision(ctx context.Context, p project.E
 		// The same bytes will not grow a discussion id on retry.
 		return "", fmt.Errorf("notion.comment.created payload needs discussion_id")
 	}
-	proj, err := d.store.GetProjectBySlug(p.Slug)
+	// Through the bindings: a shared doc's handled set is shared too, so a
+	// thread is answered once even across an ownership change.
+	bs := d.bindings()
+	proj, err := bs.GetProjectBySlug(p.Slug)
 	if err != nil {
 		return "", fmt.Errorf("load project %q: %w", p.Slug, err)
 	}
@@ -459,7 +514,7 @@ func (d projectResearchDeps) runCommentRevision(ctx context.Context, p project.E
 		slog.Warn("project comment: turn produced no visible reply", "slug", proj.Slug)
 	}
 
-	if aerr := d.store.AppendHandledDiscussion(proj.Slug, p.DiscussionID); aerr != nil {
+	if aerr := bs.AppendHandledDiscussion(proj.Slug, p.DiscussionID); aerr != nil {
 		slog.Warn("project comment: handled-discussions append failed", "slug", proj.Slug, "error", aerr)
 	}
 	if !bm.Adopted {
@@ -478,7 +533,7 @@ func (d projectResearchDeps) runCommentRevision(ctx context.Context, p project.E
 // into the canonical doc as an attributed human-edit commit, then re-renders
 // (normalizing the page). Quiet by design: one log line, no chat message.
 func (d projectResearchDeps) runPageEditReconcile(ctx context.Context, p project.EventPayload) (string, error) {
-	proj, err := d.store.GetProjectBySlug(p.Slug)
+	proj, err := d.bindings().GetProjectBySlug(p.Slug)
 	if err != nil {
 		return "", fmt.Errorf("load project %q: %w", p.Slug, err)
 	}
@@ -497,17 +552,32 @@ func (d projectResearchDeps) runPageEditReconcile(ctx context.Context, p project
 	if !ok {
 		return "skipped: no managed doc", nil
 	}
-	// A shared doc (part 3) is written by both agents, but each agent's page
-	// is re-rendered only on its own writes: reconciling a page that lags
-	// the doc would roll back the other agent's changes as a "human edit".
-	// Until renders track the doc's rev, direct page edits to a shared doc
-	// are not folded in (comments still are: they go through doc-write).
-	if project.IsShared(dir) {
-		slog.Info("project page-edit: shared doc, page edits not reconciled", "slug", proj.Slug)
-		return "skipped: shared doc", nil
-	}
 	if d.notion == nil || !d.notion.Enabled() {
 		return "skipped: notion not configured", nil
+	}
+	// A shared doc is written by both agents. Reconciling a page that lags
+	// the doc would roll the other agent's write back as a "human edit", so
+	// it runs only while the page shows the doc's head — checked here, under
+	// the page lock then the doc lock, not where the event was enqueued.
+	if project.IsShared(dir) {
+		unlockPage, err := project.TryLockNotion(dir)
+		if err != nil {
+			return "", fmt.Errorf("page-edit %q: %w", p.Slug, err)
+		}
+		defer unlockPage()
+		unlockDoc, err := project.LockDoc(dir)
+		if err != nil {
+			return "", fmt.Errorf("page-edit %q: lock doc: %w", p.Slug, err)
+		}
+		defer unlockDoc()
+		head, err := project.Head(dir)
+		if err != nil {
+			return "", fmt.Errorf("page-edit %q: doc head: %w", p.Slug, err)
+		}
+		if b, err := project.LoadBinding(dir); err != nil || b == nil || b.RenderedRev != head {
+			slog.Info("project page-edit: page behind the shared doc, not reconciled", "slug", proj.Slug, "head", head)
+			return "skipped: page behind the shared doc", nil
+		}
 	}
 
 	blocks, err := d.notion.GetBlockChildren(ctx, proj.ExportRef)

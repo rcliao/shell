@@ -131,6 +131,37 @@ func writeOwner(sd, agent string, hasResearch bool) {
 	_ = os.WriteFile(filepath.Join(sd, ownerFile), []byte(body), 0o644)
 }
 
+// ErrNotShared means the doc has one agent; there is no ownership to take.
+var ErrNotShared = errors.New("not a shared doc: it has no other agent to take it from")
+
+// ErrTakeNeedsResearch refuses a take that would not stick: claimOwner hands
+// a doc back to the agent that runs its research, at every daemon start.
+var ErrTakeNeedsResearch = errors.New("the owner runs this doc's research and you don't: start its research schedule first, or the doc goes back to the owner at the next restart")
+
+// TakeOwner makes agent the shared doc's owner (docs/DESIGN-PROJECT-WIKI.md):
+// from then on it polls the page, runs research and keeps the post summary.
+// The taker writes its own research flag, so the take survives claimOwner.
+// It returns the previous owner (== agent when it already owned the doc).
+func TakeOwner(dir, agent string, hasResearch bool) (prev string, err error) {
+	if !IsShared(dir) {
+		return "", ErrNotShared
+	}
+	sd := mustEval(dir)
+	unlock, err := lockPath(filepath.Join(filepath.Dir(sd), ".link.lock"))
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	prev = Owner(sd)
+	if prev != agent && !hasResearch && OwnerHasResearch(sd) {
+		return prev, ErrTakeNeedsResearch
+	}
+	if prev != agent || hasResearch != OwnerHasResearch(sd) {
+		writeOwner(sd, agent, hasResearch)
+	}
+	return prev, nil
+}
+
 // OwnerHasResearch reports whether the owner runs the doc's research.
 func OwnerHasResearch(dir string) bool {
 	data, err := os.ReadFile(filepath.Join(dir, ownerFile))

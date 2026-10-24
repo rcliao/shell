@@ -148,8 +148,10 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		s.projectMove(w, req)
 	case "join":
 		s.projectJoin(w, req)
+	case "take":
+		s.projectTake(w, req)
 	default:
-		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, stage, move, join, doc-read, doc-write, or set-instructions")
+		writeError(w, http.StatusBadRequest, "action must be create, get, list, status, stage, move, join, take, doc-read, doc-write, or set-instructions")
 	}
 }
 
