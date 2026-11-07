@@ -661,31 +661,20 @@ func (h *Handler) downloadAttachments(ctx context.Context, m *discordgo.Message,
 		removeFiles(files)
 		return nil, nil, nil, text, false
 	}
-	for _, a := range m.Attachments {
-		ct := strings.ToLower(a.ContentType)
-		switch {
-		case strings.HasPrefix(ct, "image/"):
-			path, size, err := h.download(ctx, a, "dc-photo-*"+extFor(a.Filename, ".jpg"))
-			if err != nil {
-				slog.Error("discord: image download failed", "error", err)
-				return fail()
-			}
+	got, ok := h.downloadAll(ctx, m.Attachments)
+	if !ok {
+		return fail()
+	}
+	for i, a := range m.Attachments {
+		path, size := got[i].path, got[i].size
+		switch attachmentKind(a) {
+		case kindImage:
 			img := bridge.ImageInfo{Path: path, Width: a.Width, Height: a.Height, Size: size}
 			h.bridge.ArchiveInboundMedia(w.conv.ChatID, w.conv.ThreadID, msgID, text, &img)
 			images = append(images, img)
-		case ct == "application/pdf":
-			path, size, err := h.download(ctx, a, "dc-pdf-*.pdf")
-			if err != nil {
-				slog.Error("discord: pdf download failed", "error", err)
-				return fail()
-			}
+		case kindPDF:
 			pdfs = append(pdfs, bridge.PDFInfo{Path: path, Size: size})
-		case isTextFile(ct, a.Filename):
-			path, size, err := h.download(ctx, a, "dc-file-*"+extFor(a.Filename, ".txt"))
-			if err != nil {
-				slog.Error("discord: file download failed", "error", err, "file", a.Filename)
-				return fail()
-			}
+		case kindText:
 			files = append(files, path)
 			notes = append(notes, fmt.Sprintf("[attached file %q (%d bytes) saved at %s — Read it to see the contents]", a.Filename, size, path))
 		default:
@@ -709,6 +698,80 @@ func (h *Handler) downloadAttachments(ctx context.Context, m *discordgo.Message,
 		}
 	}
 	return images, pdfs, files, text, true
+}
+
+type attachKind int
+
+const (
+	kindOther attachKind = iota // named in the text as unsupported, not downloaded
+	kindImage
+	kindPDF
+	kindText
+)
+
+func attachmentKind(a *discordgo.MessageAttachment) attachKind {
+	ct := strings.ToLower(a.ContentType)
+	switch {
+	case strings.HasPrefix(ct, "image/"):
+		return kindImage
+	case ct == "application/pdf":
+		return kindPDF
+	case isTextFile(ct, a.Filename):
+		return kindText
+	}
+	return kindOther
+}
+
+type fetched struct {
+	path string
+	size int64
+	err  error
+}
+
+// downloadAll fetches every downloadable attachment of a message at once and
+// returns the results in attachment order. They used to be fetched one after
+// another, so a 3-photo message waited for three downloads in a row (about
+// 1–1.5 s each for 4 MB photos) before the turn could start. If any download
+// fails, the ones that succeeded are removed and ok is false.
+func (h *Handler) downloadAll(ctx context.Context, atts []*discordgo.MessageAttachment) ([]fetched, bool) {
+	out := make([]fetched, len(atts))
+	var wg sync.WaitGroup
+	for i, a := range atts {
+		var pattern string
+		switch attachmentKind(a) {
+		case kindImage:
+			pattern = "dc-photo-*" + extFor(a.Filename, ".jpg")
+		case kindPDF:
+			pattern = "dc-pdf-*.pdf"
+		case kindText:
+			pattern = "dc-file-*" + extFor(a.Filename, ".txt")
+		default:
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			path, size, err := h.download(ctx, a, pattern)
+			out[i] = fetched{path: path, size: size, err: err}
+		}()
+	}
+	wg.Wait()
+	ok := true
+	for i, f := range out {
+		if f.err != nil {
+			slog.Error("discord: attachment download failed", "error", f.err, "file", atts[i].Filename)
+			ok = false
+		}
+	}
+	if !ok {
+		for _, f := range out {
+			if f.path != "" {
+				os.Remove(f.path)
+			}
+		}
+		return nil, false
+	}
+	return out, true
 }
 
 // textFileExts are files the agent can Read as text when Discord sends no
