@@ -227,6 +227,15 @@ for its stdout to close, and returns `ErrTurnKilled` — unless a reply still
 reached the chat on the way out (a result racing the cancel, or one flushed on
 SIGTERM), in which case it stays `ErrTurnAbandoned`.
 
+A persistent process is closed after 10 minutes idle (`idleTimeout`). The
+timer's callback decides under the dispatch lock (`idleFire`): a turn in flight
+(a bridge send waiting, or any turn streaming) or a lookup within the last 10
+minutes re-arms it instead, up to `maxTurnBusy` (45m) busy, after which a
+wedged turn is killed. A lookup (`markUsed`) reuses the process unless the
+callback already chose to kill it. Before this (2026-11-06) the timer was reset
+only when a message arrived, so a turn still working at spawn+10m was killed
+and the person got no reply.
+
 A user message preempts a running system turn (heartbeat, scheduled prompt) in
 the same chat/thread by cancelling it with cause `bridge.ErrPreempted`. When
 the preempted turn was killed or never started, the bridge returns an error

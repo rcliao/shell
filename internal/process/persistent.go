@@ -46,11 +46,14 @@ type persistentProc struct {
 	lines    chan []byte   // fed by readLoop; closed on EOF
 	pumpDone chan struct{} // closed when pump exits (EOF)
 
-	dispatch      sync.Mutex      // guards waiter, emit, turnOpen, idle
+	dispatch      sync.Mutex      // guards waiter, emit, turnOpen, idle, lastUse, idleKilled
 	waiter        chan SendResult // the in-flight sendMessage, if any (buffered 1)
 	emit          EventFunc       // that turn's event sink; nil when idle
 	turnOpen      bool            // a turn (ours or the CLI's) has started streaming
 	idle          chan struct{}   // closed while no turn is open; replaced when one opens
+	lastUse       time.Time       // last lookup that handed this proc to a sender
+	idleKilled    bool            // the idle timer decided to kill; lookups must spawn fresh
+	busySince     time.Time       // first idle fire that saw a turn in flight; zero when not busy
 	onUnsolicited func(SessionKey, SendResult)
 	followedUp    atomic.Bool   // a turn was handed to onUnsolicited (so it reached the chat)
 	claimWait     time.Duration // max wait behind a CLI-initiated turn (claimTurnMaxWait; tests shorten it)
@@ -99,6 +102,7 @@ func newPersistentProc(stdin io.WriteCloser, stdout io.Reader, key SessionKey, m
 		lines:         make(chan []byte, 256),
 		pumpDone:      make(chan struct{}),
 		idle:          idle,
+		lastUse:       time.Now(),
 		onUnsolicited: onUnsolicited,
 		claimWait:     claimTurnMaxWait,
 	}
@@ -304,6 +308,71 @@ func (p *persistentProc) claimTurn(ctx context.Context, emit EventFunc) (chan Se
 	}
 }
 
+// markUsed records a lookup that is about to hand this proc to a sender and
+// re-arms the idle timer. It returns false when the idle callback has already
+// decided to kill the process; the caller must spawn a fresh one.
+func (p *persistentProc) markUsed() bool {
+	p.dispatch.Lock()
+	defer p.dispatch.Unlock()
+	if p.idleKilled {
+		return false
+	}
+	p.lastUse = time.Now()
+	if p.idleTimer != nil {
+		p.idleTimer.Reset(idleTimeout)
+	}
+	return true
+}
+
+// idleFire is the idle timer's decision: kill the process (true) or keep it
+// and re-arm (false). A turn in flight — one the bridge sent (waiter set) or
+// one streaming (turnOpen) — is never idle. Before this, a turn running past
+// 10 minutes was killed mid-work (2026-11-06: a group-thread turn died at
+// exactly spawn+10m and the person got no reply). A lookup within the last
+// idleTimeout also keeps it alive: that sender has the proc but may not have
+// claimed its turn yet.
+func (p *persistentProc) idleFire(now time.Time) bool {
+	p.dispatch.Lock()
+	defer p.dispatch.Unlock()
+	if p.idleKilled {
+		return false
+	}
+	busy := p.waiter != nil || p.turnOpen
+	if !busy {
+		p.busySince = time.Time{}
+	} else if p.busySince.IsZero() {
+		p.busySince = now
+	}
+	if busy && now.Sub(p.busySince) >= maxTurnBusy {
+		// A wedged turn (a tool that never returns, a caller that gave up
+		// and left turnOpen set) must not pin the process forever.
+		slog.Warn("persistent process busy past ceiling; killing",
+			"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID, "busy_for", now.Sub(p.busySince).Round(time.Second))
+		p.idleKilled = true
+		return true
+	}
+	if busy || now.Sub(p.lastUse) < idleTimeout {
+		wait := idleTimeout
+		if !busy {
+			wait = idleTimeout - now.Sub(p.lastUse)
+		} else {
+			slog.Info("persistent process idle timer fired mid-turn; keeping it alive",
+				"chat_id", p.key.ChatID, "thread_id", p.key.ThreadID)
+		}
+		if p.idleTimer != nil {
+			p.idleTimer.Reset(wait)
+		}
+		return false
+	}
+	p.idleKilled = true
+	return true
+}
+
+// maxTurnBusy bounds how long the idle timer keeps a busy process alive. Above
+// projectTurnTimeout (20m), the longest caller deadline, so only a turn nobody
+// is waiting on any more reaches it. Measured at idle-fire granularity.
+const maxTurnBusy = 45 * time.Minute
+
 // idleTimeout is how long a persistent process stays alive without messages.
 const idleTimeout = 10 * time.Minute
 
@@ -329,17 +398,14 @@ func (m *Manager) getOrSpawn(ctx context.Context, req AgentRequest) (proc *persi
 		if existing.model != reqModel {
 			return nil, false, fmt.Errorf("model mismatch: proc=%q req=%q", existing.model, reqModel)
 		}
-		// Process is still running — reset idle timer. Reset returns false
-		// when the AfterFunc already fired (or was stopped): the idle
-		// callback is closing stdin right now, and writing to this proc
-		// would hit "broken pipe" and fall back to a cold spawn after the
-		// fact. Treat it as dead and spawn fresh instead of racing it.
-		if existing.idleTimer.Reset(idleTimeout) {
+		// Process is still running — mark it used and re-arm the idle timer.
+		// The idle callback decides under the same lock (idleFire), so a
+		// timer that fires during this lookup sees the fresh lastUse and
+		// re-arms instead of killing. Only a proc the callback already chose
+		// to kill (stdin closing right now) is skipped for a fresh spawn.
+		if existing.markUsed() {
 			return existing, false, nil
 		}
-		// Reset on an already-fired AfterFunc re-arms it; Stop so the old
-		// callback does not fire again in 10m against the replacement.
-		existing.idleTimer.Stop()
 		slog.Info("persistent process idle-expired during lookup, respawning",
 			"chat_id", key.ChatID, "thread_id", key.ThreadID)
 	}
@@ -443,6 +509,9 @@ func (m *Manager) spawnPersistent(ctx context.Context, req AgentRequest) (*persi
 	// it there to keep a CLI-initiated turn alive.
 	proc.dispatch.Lock()
 	proc.idleTimer = time.AfterFunc(idleTimeout, func() {
+		if !proc.idleFire(time.Now()) {
+			return
+		}
 		slog.Info("persistent process idle timeout", "chat_id", key.ChatID, "thread_id", key.ThreadID)
 		proc.kill()
 		// Compare-and-delete: getOrSpawn may already have replaced this
