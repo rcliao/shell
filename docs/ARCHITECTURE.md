@@ -42,7 +42,7 @@ Telegram Bot ↔ Claude Code CLI bridge. One Claude Code session per Telegram ch
 | **process** | `internal/process/` | Claude CLI subprocess lifecycle. Agent interface, session management, streaming |
 | **mcp** | `internal/mcp/` | MCP stdio server exposing `shell_pm`, `shell_tunnel`, `shell_relay` as native Claude tools |
 | **rpc** | `internal/rpc/` | HTTP-over-Unix-socket RPC server for skill scripts and MCP server |
-| **discord** | `internal/discord/` | Discord gateway bot: inbound turns (auth via linked Telegram ids, group addressing, attachments, streaming edits, 2,000-char chunking, status reactions, text commands, reaction feedback) and the daemon `outbound` surface. Discord ids ↔ internal (chat, thread) ids (`address.go`) |
+| **discord** | `internal/discord/` | Discord gateway bot: inbound turns (auth via linked Telegram ids, group addressing, attachments (all of a message's downloaded in parallel, archived in order), streaming edits, 2,000-char chunking, status reactions, text commands, reaction feedback) and the daemon `outbound` surface. Discord ids ↔ internal (chat, thread) ids (`address.go`) |
 | **progress** | `internal/progress/` | Per-agent progress voice for the placeholder while a turn runs (`progress-phrases.json`), shared by Telegram and Discord |
 | **telegram** | `internal/telegram/` | Bot wrapper, handlers, policy-based auth, pairing, rate limiting, allowlist, photo/PDF download, MarkdownV2 formatting |
 | **store** | `internal/store/` | SQLite persistence: sessions, messages, message_map, schedules, tasks |
