@@ -141,6 +141,20 @@ func (b *Bot) SendTextButtons(chatID, threadID int64, text string, buttons []bri
 	if b.dedup != nil && b.dedup(chatID, threadID, text) {
 		return nil
 	}
+	return b.sendText(chatID, threadID, text, buttons)
+}
+
+// SendReply delivers the answer to a message and reports whether it landed.
+//
+// It skips the outbound dedup on purpose. Dedup is for proactive sends, and it
+// records a text BEFORE sending it — so a retry of a reply whose first send
+// failed would be judged a duplicate, return nil, and the caller would believe
+// an undelivered reply had arrived.
+func (b *Bot) SendReply(chatID, threadID int64, text string) error {
+	return b.sendText(chatID, threadID, text, nil)
+}
+
+func (b *Bot) sendText(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
 	ctx := context.Background()
 	chunks := splitMessage(text, maxMessageLength)
 	var lastErr error

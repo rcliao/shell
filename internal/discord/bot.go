@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -107,6 +108,7 @@ func NewBot(token string, opts Options) (*Bot, error) {
 		discordgo.IntentsGuildMessageReactions |
 		discordgo.IntentsDirectMessageReactions
 	s.StateEnabled = true
+	s.Client = restClient()
 
 	b := newBot(sessionAPI{s}, opts)
 	b.session = s
@@ -294,6 +296,42 @@ func (b *Bot) sendChunks(channelID, text string, buttons []bridge.LinkButton) ([
 
 func (b *Bot) SendText(chatID, threadID int64, text string) {
 	_ = b.SendTextButtons(chatID, threadID, text, nil)
+}
+
+// SendReply delivers the answer to a message and reports whether it landed.
+// It skips the outbound dedup, which records a text before sending it and
+// would therefore swallow a retry of a reply whose first send failed.
+func (b *Bot) SendReply(chatID, threadID int64, text string) error {
+	ch, terr := b.target(chatID, threadID)
+	if terr != nil {
+		return terr
+	}
+	ids, err := b.sendChunks(ch, text, nil)
+	if len(ids) > 0 {
+		// Partly delivered. Reporting failure would make the caller re-send
+		// every chunk, repeating the ones the person already has.
+		return nil
+	}
+	return err
+}
+
+// restClient is discordgo's default REST client (20s timeout) with HTTP/2
+// health pings.
+//
+// Without them a connection that died in a network blip stays in the pool:
+// Go keeps handing every request to it, each one waits the full timeout, and
+// the bot cannot post anything until the process restarts. Observed
+// 2026-11-09: five minutes of "awaiting headers" timeouts on every send while
+// a fresh connection from the same host answered in 0.1s. With pings, a
+// connection that stops answering is closed within about 25s and the next
+// request dials a new one.
+func restClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.HTTP2 = &http.HTTP2Config{
+		SendPingTimeout: 15 * time.Second, // ping a connection idle this long
+		PingTimeout:     10 * time.Second, // close it if the ping goes unanswered
+	}
+	return &http.Client{Timeout: 20 * time.Second, Transport: tr}
 }
 
 func (b *Bot) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {

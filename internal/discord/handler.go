@@ -61,6 +61,10 @@ type Handler struct {
 	choices   bool // answer buttons from ```choices blocks (experiment)
 	selfID    string
 	http      *http.Client
+	// editRetry and sendRetry are the waits between delivery attempts of a
+	// finished reply; nil means the package defaults. Tests shorten them.
+	editRetry []time.Duration
+	sendRetry []time.Duration
 
 	locksMu sync.Mutex
 	locks   map[Conv]*sync.Mutex
@@ -300,18 +304,18 @@ func (h *Handler) runTurn(ctx context.Context, w where, m *discordgo.Message, ms
 	if h.choices {
 		shown, choices = extractChoices(response)
 	}
-	body, embeds := extractCards(shown)
-	if len([]rune(fenceTables(body))) <= maxMessageLen && len(embeds) <= maxEmbedsPerMessage {
-		h.editFinal(w.channelID, placeholder.ID, fenceTables(body), embeds)
-		if id, err := strconv.Atoi(placeholder.ID); err == nil {
-			h.bot.remember(id, w.channelID)
-			botIDs = []int{id}
+	botIDs, err = h.deliverReply(w.channelID, placeholder.ID, shown)
+	if err != nil {
+		// Every attempt failed: the answer was written and nobody can see it.
+		// Hand the turn back to the queue rather than recording it answered —
+		// the replay gets one more try, and its sink retries the send too.
+		slog.Error("discord: reply not delivered — turn stays pending for replay",
+			"error", err, "chat_id", chat, "thread_id", thread, "chars", len(response))
+		status("❌")
+		if aerr := h.bridge.AbandonPendingTurn(chat, msgID); aerr != nil {
+			slog.Warn("discord: abandon pending turn", "error", aerr)
 		}
-	} else {
-		if err := h.api.Delete(w.channelID, placeholder.ID); err != nil {
-			slog.Warn("discord: delete placeholder before chunked reply", "error", err)
-		}
-		botIDs, _ = h.bot.sendChunks(w.channelID, shown, nil)
+		return
 	}
 	if len(botIDs) > 0 {
 		h.addComponents(w.channelID, botIDs[len(botIDs)-1], h.finalComponents(choices))
@@ -621,27 +625,101 @@ func (h *Handler) reply(channelID, text string) {
 	}
 }
 
+// Waits between attempts to deliver a finished reply. The edit gets a short
+// run because a new message is the fallback; the new message gets about two
+// minutes, long enough for a dead connection to be detected and replaced (see
+// restClient). Observed 2026-11-09: a final edit timed out once, was only
+// logged, and the turn was recorded answered while the person saw a
+// placeholder.
+var (
+	editRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+	sendRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
+)
+
+// retry runs try, then again after each delay while it fails.
+func retry(what string, delays []time.Duration, try func() error) error {
+	err := try()
+	for i := 0; err != nil && i < len(delays); i++ {
+		slog.Warn("discord: "+what+" failed, retrying", "try", i+1, "wait", delays[i], "error", err)
+		time.Sleep(delays[i])
+		err = try()
+	}
+	return err
+}
+
+// deliverReply puts a finished reply in front of the person and returns the
+// ids of the messages that hold it, or an error when no attempt landed.
+//
+// A reply that fits one message replaces the placeholder. If that edit keeps
+// failing, the reply goes out as a new message instead. A longer reply
+// replaces the placeholder with chunks; those are retried only while none has
+// landed, because re-sending after a partial send would repeat the chunks the
+// person already has.
+func (h *Handler) deliverReply(channelID, placeholderID, shown string) ([]int, error) {
+	editDelays, sendDelays := editRetryDelays, sendRetryDelays
+	if h.editRetry != nil {
+		editDelays = h.editRetry
+	}
+	if h.sendRetry != nil {
+		sendDelays = h.sendRetry
+	}
+	body, embeds := extractCards(shown)
+	if len([]rune(fenceTables(body))) <= maxMessageLen && len(embeds) <= maxEmbedsPerMessage {
+		err := retry("final edit", editDelays, func() error {
+			return h.editFinal(channelID, placeholderID, fenceTables(body), embeds)
+		})
+		if err == nil {
+			id, aerr := strconv.Atoi(placeholderID)
+			if aerr != nil {
+				return nil, nil
+			}
+			h.bot.remember(id, channelID)
+			return []int{id}, nil
+		}
+		slog.Warn("discord: placeholder cannot be edited; posting the reply as a new message", "error", err)
+	}
+	if err := h.api.Delete(channelID, placeholderID); err != nil {
+		slog.Warn("discord: delete placeholder before reply", "error", err)
+	}
+	var ids []int
+	err := retry("reply send", sendDelays, func() error {
+		var err error
+		ids, err = h.bot.sendChunks(channelID, shown, nil)
+		if len(ids) > 0 {
+			return nil // partly delivered: keep what landed rather than repeat it
+		}
+		if err == nil {
+			err = errors.New("no message sent")
+		}
+		return err
+	})
+	return ids, err
+}
+
 // editFinal writes the finished reply into the placeholder, with any cards
 // as embeds under it.
-func (h *Handler) editFinal(channelID, messageID, text string, embeds []*discordgo.MessageEmbed) {
+func (h *Handler) editFinal(channelID, messageID, text string, embeds []*discordgo.MessageEmbed) error {
 	if len(embeds) == 0 {
-		h.editText(channelID, messageID, text)
-		return
+		return h.editText(channelID, messageID, text)
 	}
 	content, _ := h.bot.mentions.Render(truncateRunes(text, maxMessageLen))
 	if _, err := h.api.Edit(&discordgo.MessageEdit{ID: messageID, Channel: channelID, Content: &content,
 		Embeds: &embeds, AllowedMentions: noPings()}); err != nil {
 		slog.Warn("discord: final edit with cards failed", "error", err, "message", messageID)
+		return err
 	}
+	return nil
 }
 
-func (h *Handler) editText(channelID, messageID, text string) {
+func (h *Handler) editText(channelID, messageID, text string) error {
 	// Edits never notify on Discord, so a reply's "@name" shows as a mention
 	// without pinging — the person is already in the conversation.
 	content, _ := h.bot.mentions.Render(truncateRunes(text, maxMessageLen))
 	if _, err := h.api.Edit(&discordgo.MessageEdit{ID: messageID, Channel: channelID, Content: &content, AllowedMentions: noPings()}); err != nil {
 		slog.Warn("discord: edit failed", "error", err, "message", messageID)
+		return err
 	}
+	return nil
 }
 
 // downloadAttachments fetches images, PDFs and text files for the turn. Images

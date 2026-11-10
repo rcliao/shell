@@ -117,19 +117,54 @@ func (q *queueTurnLedger) Abandon(chatID int64, msgID int) error {
 // the handler created, but a replay has no placeholder — the process that made
 // it is gone. So a replayed answer arrives as one fresh message, which is
 // exactly what the old boot replay did.
+//
+// Finish must report a send that did not land. It used to call a
+// fire-and-forget send and return nil, so a replay whose reply failed to post
+// was marked done and the answer was gone with nothing to show for it
+// (observed 2026-11-09: two replayed replies written, both sends timed out,
+// both tasks "done"). A replay is also the LAST attempt, so failing the task is
+// not enough on its own — Finish retries the send first, because re-running a
+// whole inference to recover from a network blip would be the wrong cost.
 type telegramSink struct {
-	send   func(chatID, threadID int64, text string)
+	send   func(chatID, threadID int64, text string) error
 	chatID int64
 	thread int64
+	// retryDelays are the waits before each re-send; nil means
+	// replyRetryDelays. Tests shorten them.
+	retryDelays []time.Duration
 }
+
+// replyRetryDelays spans about two minutes: long enough to outlast a dropped
+// connection being detected and replaced, short enough that the reply is still
+// worth having when it lands.
+var replyRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
 
 func (t *telegramSink) Update(context.Context, string) error { return nil }
 
-func (t *telegramSink) Finish(_ context.Context, final string) error {
+func (t *telegramSink) Finish(ctx context.Context, final string) error {
 	if final == "" {
 		return nil
 	}
-	t.send(t.chatID, t.thread, final)
+	delays := t.retryDelays
+	if delays == nil {
+		delays = replyRetryDelays
+	}
+	err := t.send(t.chatID, t.thread, final)
+	for i := 0; err != nil && i < len(delays); i++ {
+		slog.Warn("replay: reply not delivered, retrying",
+			"chat_id", t.chatID, "thread_id", t.thread, "try", i+1, "wait", delays[i], "error", err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("reply not delivered: %w (gave up: %v)", err, ctx.Err())
+		case <-time.After(delays[i]):
+		}
+		err = t.send(t.chatID, t.thread, final)
+	}
+	if err != nil {
+		slog.Error("replay: reply LOST — every send failed",
+			"chat_id", t.chatID, "thread_id", t.thread, "tries", len(delays)+1, "chars", len(final), "error", err)
+		return fmt.Errorf("reply not delivered after %d tries: %w", len(delays)+1, err)
+	}
 	return nil
 }
 
@@ -141,8 +176,9 @@ func (t *telegramSink) Fail(_ context.Context, cause error) {
 }
 
 // wireTelegramQueue makes Telegram a producer of message.turn and registers the
-// sink that renders a replayed reply.
-func wireTelegramQueue(sched *scheduler.Scheduler, send func(chatID, threadID int64, text string)) {
+// sink that renders a replayed reply. send must report failure and must not
+// dedup (see outbound.SendReply).
+func wireTelegramQueue(sched *scheduler.Scheduler, send func(chatID, threadID int64, text string) error) {
 	sched.RegisterTransport(telegramTransportName, func(m scheduler.MessageTurn) (scheduler.Sink, error) {
 		return &telegramSink{send: send, chatID: m.ChatID, thread: m.ThreadID}, nil
 	})
