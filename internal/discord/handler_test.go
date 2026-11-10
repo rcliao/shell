@@ -39,6 +39,10 @@ type fakeAPI struct {
 	reacts       []string // "+emoji" / "-emoji"
 	created      []string // channels made by CreateGuildChannel
 	deleted      []string // channels removed by DeleteChannel
+	// Optional failure injection: return an error to fail that call. n is
+	// the number of messages sent before this one.
+	editErr func(content string) error
+	sendErr func(n int, m *discordgo.MessageSend) error
 }
 
 type sent struct {
@@ -59,6 +63,11 @@ func (f *fakeAPI) Send(ch string, m *discordgo.MessageSend) (*discordgo.Message,
 	if f.failFiles && len(m.Files) > 0 {
 		return nil, errors.New("upload rejected")
 	}
+	if f.sendErr != nil {
+		if err := f.sendErr(len(f.sends), m); err != nil {
+			return nil, err
+		}
+	}
 	f.nextID++
 	id := strconv.FormatInt(f.nextID, 10)
 	var pings []string
@@ -71,6 +80,11 @@ func (f *fakeAPI) Send(ch string, m *discordgo.MessageSend) (*discordgo.Message,
 func (f *fakeAPI) Edit(m *discordgo.MessageEdit) (*discordgo.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.editErr != nil && m.Content != nil {
+		if err := f.editErr(*m.Content); err != nil {
+			return nil, err
+		}
+	}
 	if m.Content != nil {
 		f.edits[m.ID] = *m.Content
 	}

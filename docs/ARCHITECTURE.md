@@ -274,6 +274,17 @@ Inbound: `discord.Handler` runs turns through `bridge.HandleMessageStreamingEven
 handler, sharing the pending-turn ledger and message map (Discord message ids are global snowflakes and fit
 `int`). Bot-authored Discord messages are ignored (v1 loop guard).
 
+Reply delivery: a reply is only recorded answered once it has landed.
+- Live Discord turn: the final edit of the placeholder is retried (2s, 5s, 10s). If it still fails, the reply
+  goes out as a new message (retried 5s, 15s, 30s, 60s). If that fails too, the turn is abandoned back to the
+  queue for its one replay instead of being completed.
+- Replayed turn: `telegramSink.Finish` sends through `outbound.SendReply` with the same 5s–60s retries and
+  returns the error, so an undelivered replay ends `failed`, not `done`.
+- Dedup: `SendReply` skips the outbound dedup. Dedup records a text before sending it, so it would judge a
+  retry of a failed reply a duplicate and report it delivered.
+- Dead connections: the Discord REST client (`restClient`) sends HTTP/2 health pings, so a connection that died
+  in a network blip is replaced within about 25s rather than timing out every send until restart.
+
 ## Browser handoffs
 
 Design: `docs/DESIGN-BROWSER-HANDOFF.md`. Lets an agent hand its browser tab to

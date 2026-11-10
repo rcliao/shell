@@ -39,6 +39,10 @@ type outbound interface {
 	// doc links). SendTextButtons returns an error unlike SendText because
 	// its callers report whether a linked delivery landed.
 	SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error
+	// SendReply delivers the answer to a message: no dedup, error returned.
+	// A reply whose send failed must be retryable, and dedup would judge the
+	// retry a duplicate and report it delivered.
+	SendReply(chatID, threadID int64, text string) error
 	SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error)
 	EditMessageButtons(chatID int64, messageID int, text string, buttons []bridge.LinkButton) error
 	PinMessage(chatID int64, messageID int, silent bool) error
@@ -99,6 +103,12 @@ func (headlessOutbound) EditMessage(chatID int64, messageID int, text string) er
 func (headlessOutbound) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
 	slog.Info("headless: outbound text dropped (no transport attached)",
 		"chat_id", chatID, "thread_id", threadID, "chars", len(text), "buttons", len(buttons))
+	return errNoTransport
+}
+
+func (headlessOutbound) SendReply(chatID, threadID int64, text string) error {
+	slog.Info("headless: reply dropped (no transport attached)",
+		"chat_id", chatID, "thread_id", threadID, "chars", len(text))
 	return errNoTransport
 }
 
@@ -226,6 +236,9 @@ func (r routedOutbound) EditMessage(chatID int64, messageID int, text string) er
 }
 func (r routedOutbound) SendTextButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) error {
 	return r.pick(chatID, threadID).SendTextButtons(chatID, threadID, text, buttons)
+}
+func (r routedOutbound) SendReply(chatID, threadID int64, text string) error {
+	return r.pick(chatID, threadID).SendReply(chatID, threadID, text)
 }
 func (r routedOutbound) SendMessageIDButtons(chatID, threadID int64, text string, buttons []bridge.LinkButton) (int, error) {
 	return r.pick(chatID, threadID).SendMessageIDButtons(chatID, threadID, text, buttons)

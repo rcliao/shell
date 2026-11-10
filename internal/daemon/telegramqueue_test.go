@@ -42,9 +42,10 @@ func TestInterruptedTelegramTurnIsReplayedThroughTheSink(t *testing.T) {
 
 	var sent []string
 	var sentChat, sentThread int64
-	wireTelegramQueue(sched, func(c, th int64, text string) {
+	wireTelegramQueue(sched, func(c, th int64, text string) error {
 		sentChat, sentThread = c, th
 		sent = append(sent, text)
+		return nil
 	})
 
 	var sawText string

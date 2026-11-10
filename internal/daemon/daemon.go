@@ -1050,7 +1050,7 @@ func New(cfg config.Config) (*Daemon, error) {
 			// anyway.
 			if cfg.Scheduler.TelegramQueueIntake && bot != nil {
 				br.SetTurnLedger(&queueTurnLedger{store: st, owner: owner})
-				wireTelegramQueue(sched, bot.SendText)
+				wireTelegramQueue(sched, bot.SendReply)
 				slog.Info("telegram intake: durable queue", "owner", owner)
 			} else if cfg.Scheduler.TelegramQueueIntake {
 				slog.Info("telegram intake: queue requested but no telegram; keeping ledger")
